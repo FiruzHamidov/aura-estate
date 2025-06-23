@@ -2,30 +2,23 @@
 
 namespace App\Providers;
 
-use App\Services\SiteSettingsService;
-use App\Services\ComponentSettingsService;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
 {
-    public function register()
+    /**
+     * Register any application services.
+     */
+    public function register(): void
     {
-        $this->app->singleton(SiteSettingsService::class, function ($app) {
-            return new SiteSettingsService();
-        });
-
-        $this->app->singleton(ComponentSettingsService::class, function ($app) {
-            return new ComponentSettingsService();
-        });
+        //
     }
 
-    public function boot()
+    /**
+     * Bootstrap any application services.
+     */
+    public function boot(): void
     {
-        // This method is now empty
-    }
-
-    public static function isComponentEnabled($componentName)
-    {
-        return app(ComponentSettingsService::class)->isEnabled($componentName);
+        //
     }
 }

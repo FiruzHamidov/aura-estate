@@ -2,44 +2,20 @@
 
 namespace App\Models;
 
-use Filament\Models\Contracts\FilamentUser;
-use Filament\Models\Contracts\HasDefaultTenant;
-use Filament\Models\Contracts\HasTenants;
-use Filament\Panel;
-use Illuminate\Database\Eloquent\Casts\Attribute;
-use Illuminate\Database\Eloquent\Collection;
+// use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
-use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
-use JoelButcher\Socialstream\HasConnectedAccounts;
-use JoelButcher\Socialstream\SetsProfilePhotoFromUrl;
-use Laravel\Fortify\TwoFactorAuthenticatable;
-use Laravel\Jetstream\HasProfilePhoto;
-use Laravel\Jetstream\HasTeams;
-use Laravel\Sanctum\HasApiTokens;
-use Spatie\Permission\Traits\HasRoles;
 
-class User extends Authenticatable implements HasDefaultTenant, HasTenants, FilamentUser
+class User extends Authenticatable
 {
-    use HasApiTokens;
-    use HasConnectedAccounts;
-    use HasRoles;
-    use HasFactory;
-    use HasProfilePhoto {
-        HasProfilePhoto::profilePhotoUrl as getPhotoUrl;
-    }
-    use Notifiable;
-    use SetsProfilePhotoFromUrl;
-    use TwoFactorAuthenticatable;
-    use HasTeams;
+    /** @use HasFactory<\Database\Factories\UserFactory> */
+    use HasFactory, Notifiable;
 
     /**
      * The attributes that are mass assignable.
      *
-     * @var array<int, string>
+     * @var list<string>
      */
     protected $fillable = [
         'name',
@@ -48,24 +24,13 @@ class User extends Authenticatable implements HasDefaultTenant, HasTenants, Fila
     ];
 
     /**
-     * The attributes that should be hidden for arrays.
+     * The attributes that should be hidden for serialization.
      *
-     * @var array<int, string>
+     * @var list<string>
      */
     protected $hidden = [
         'password',
         'remember_token',
-        'two_factor_recovery_codes',
-        'two_factor_secret',
-    ];
-
-    /**
-     * The accessors to append to the model's array form.
-     *
-     * @var array<int, string>
-     */
-    protected $appends = [
-        'profile_photo_url',
     ];
 
     /**
@@ -77,98 +42,7 @@ class User extends Authenticatable implements HasDefaultTenant, HasTenants, Fila
     {
         return [
             'email_verified_at' => 'datetime',
+            'password' => 'hashed',
         ];
-    }
-
-    /**
-     * Get the URL to the user's profile photo.
-     */
-    public function profilePhotoUrl(): Attribute
-    {
-        return filter_var($this->profile_photo_path, FILTER_VALIDATE_URL)
-            ? Attribute::get(fn () => $this->profile_photo_path)
-            : $this->getPhotoUrl();
-    }
-
-    /**
-     * @return array<Model> | Collection
-     */
-    public function getTenants(Panel $panel): array|Collection
-    {
-        return $this->teams;
-    }
-
-    public function canAccessTenant(Model $tenant): bool
-    {
-        return $this->teams()->whereKey($tenant)->exists();
-    }
-
-    public function canAccessPanel(Panel $panel): bool
-    {
-        $panelId = $panel->getId();
-        return $this->canAccessPanelById($panelId);
-    }
-
-    private function canAccessPanelById(string $panelId): bool
-    {
-        $allowedRoles = config("filament-shield.panels.$panelId", []);
-	return $this->hasAnyRole($allowedRoles);
-    }
-    public function canAccessFilament(): bool
-    {
-        $currentPanel = $this->getCurrentPanel();
-       return $this->canAccessPanelById($currentPanel);
-    }
-    private function getCurrentPanel(): string
-    {
-        // This is a placeholder. You need to implement a way to determine the current panel.
-        // It could be based on the current URL, a request parameter, or any other method
-        // that fits your application's structure.
-        return 'default';
-    }
-
-    public function getDefaultTenant(Panel $panel): ?Model
-    {
-        return $this->latestTeam;
-    }
-
-    public function latestTeam(): BelongsTo
-    {
-        return $this->belongsTo(Team::class, 'current_team_id');
-    }
-
-    public function savedSearches()
-    {
-        return $this->hasMany(SavedSearch::class);
-    }
-
-    public function reviews()
-    {
-        return $this->hasMany(Review::class);
-    }
-
-    public function properties()
-    {
-        return $this->hasMany(Property::class);
-    }
-
-    public function appointments()
-    {
-        return $this->hasMany(Appointment::class);
-    }
-
-    public function averageRating()
-    {
-        return $this->reviews()->avg('rating');
-    }
-
-    public function priceAlerts()
-    {
-        return $this->hasMany(PriceAlert::class);
-    }
-
-    public function team()
-    {
-        return $this->currentTeam();
     }
 }
