@@ -35,7 +35,7 @@ class AuthController extends Controller
 
         $user = User::where('phone', $request->phone)->first();
 
-        if (!$user || $user->auth_method !== 'password') {
+        if (!$user) {
             return response()->json(['message' => 'Метод авторизации — не пароль'], 403);
         }
 
