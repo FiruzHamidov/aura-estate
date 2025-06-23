@@ -121,17 +121,22 @@ class PropertyController extends Controller
             'is_mortgage_available' => 'boolean',
             'is_from_developer' => 'boolean',
             'landmark' => 'nullable|string',
+            'photos.*' => 'nullable|image|max:10240'  // ДОБАВЛЕНО: фото
         ]);
 
         $validated['created_by'] = auth()->id();
-
-        if (auth()->user()->hasRole('client')) {
-            $validated['moderation_status'] = 'pending';
-        } else {
-            $validated['moderation_status'] = 'approved';
-        }
+        $validated['moderation_status'] = auth()->user()->hasRole('client') ? 'pending' : 'approved';
 
         $property = Property::create($validated);
+
+        // Сохраняем фотографии
+        if ($request->hasFile('photos')) {
+            foreach ($request->file('photos') as $photo) {
+                $path = $photo->store('properties', 'public');
+                $property->photos()->create(['path' => $path]);
+            }
+        }
+
         return response()->json($property, 201);
     }
 

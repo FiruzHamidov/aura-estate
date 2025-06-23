@@ -34,7 +34,7 @@ Route::middleware('auth:sanctum')->group(function () {
 
 });
 
-Route::middleware(['auth:sanctum', 'role:admin'])->group(function () {
+Route::middleware(['auth:sanctum'])->group(function () {
     Route::apiResource('property-types', PropertyTypeController::class);
     Route::apiResource('property-statuses', PropertyStatusController::class);
     Route::apiResource('locations', LocationController::class);
