@@ -56,7 +56,7 @@ class AuthController extends Controller
 
         $user = User::where('phone', $request->phone)->first();
 
-        if (!$user || $user->auth_method !== 'sms') {
+        if (!$user) {
             return response()->json(['message' => 'Пользователь не найден или не настроен для SMS входа'], 404);
         }
 
