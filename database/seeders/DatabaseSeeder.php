@@ -16,10 +16,10 @@ class DatabaseSeeder extends Seeder
             LocationSeeder::class,
             UserSeeder::class,
             PropertySeeder::class,
-            // и далее любые другие сидеры:
-            // ApplicationTypeSeeder::class,
-            // RenovationServiceSeeder::class,
-            // и т.д.
+            LocationSeeder::class,
+            BuildingTypeSeeder::class,
+            ParkingTypeSeeder::class,
+            HeatingTypeSeeder::class,
         ]);
     }
 }

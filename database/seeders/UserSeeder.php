@@ -31,7 +31,7 @@ class UserSeeder extends Seeder
         $agentRole = Role::where('slug', 'agent')->first();
 
         User::updateOrCreate(
-            ['phone' => '918555582'],
+            ['phone' => '938080888'],
             [
                 'name' => 'Agent User',
                 'email' => 'agent@example.com',
