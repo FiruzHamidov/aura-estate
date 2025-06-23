@@ -5,17 +5,15 @@ namespace App\Http\Controllers;
 use App\Models\User;
 use App\Services\SmsAuthService;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
 
 class AuthController extends Controller
 {
-    // Логин по паролю
-    public function login(Request $request)
+    // Проверка метода авторизации
+    public function checkMethod(Request $request)
     {
         $request->validate([
             'phone' => 'required|string',
-            'password' => 'nullable|string',
         ]);
 
         $user = User::where('phone', $request->phone)->first();
@@ -24,17 +22,29 @@ class AuthController extends Controller
             return response()->json(['message' => 'Пользователь не найден'], 404);
         }
 
-        if ($user->auth_method === 'password') {
-            if (!$request->password || !Hash::check($request->password, $user->password)) {
-                return response()->json(['message' => 'Неверный пароль'], 401);
-            }
+        return response()->json(['method' => $user->auth_method]);
+    }
 
-            // создаем токен Sanctum
-            $token = $user->createToken('api-token')->plainTextToken;
-            return response()->json(['token' => $token]);
+    // Стандартный логин по паролю
+    public function login(Request $request)
+    {
+        $request->validate([
+            'phone' => 'required|string',
+            'password' => 'required|string',
+        ]);
+
+        $user = User::where('phone', $request->phone)->first();
+
+        if (!$user || $user->auth_method !== 'password') {
+            return response()->json(['message' => 'Метод авторизации — не пароль'], 403);
         }
 
-        return response()->json(['message' => 'У пользователя включена авторизация через SMS'], 403);
+        if (!Hash::check($request->password, $user->password)) {
+            return response()->json(['message' => 'Неверный пароль'], 401);
+        }
+
+        $token = $user->createToken('api-token')->plainTextToken;
+        return response()->json(['token' => $token]);
     }
 
     // Отправка кода на SMS
@@ -54,13 +64,11 @@ class AuthController extends Controller
             $smsAuthService->sendVerificationCode($request->phone);
             return response()->json(['message' => 'Код отправлен']);
         } catch (\RuntimeException $e) {
-            return response()->json([
-                'message' => $e->getMessage()
-            ], 401);
+            return response()->json(['message' => $e->getMessage()], 500);
         }
     }
 
-    // Проверка кода
+    // Проверка кода из SMS
     public function verifySmsCode(Request $request, SmsAuthService $smsAuthService)
     {
         $request->validate([
