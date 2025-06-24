@@ -25,28 +25,6 @@ class AuthController extends Controller
         return response()->json(['method' => $user->auth_method]);
     }
 
-    // Стандартный логин по паролю
-    public function login(Request $request)
-    {
-        $request->validate([
-            'phone' => 'required|string',
-            'password' => 'required|string',
-        ]);
-
-        $user = User::where('phone', $request->phone)->first();
-
-        if (!$user) {
-            return response()->json(['message' => 'Метод авторизации — не пароль'], 403);
-        }
-
-        if (!Hash::check($request->password, $user->password)) {
-            return response()->json(['message' => 'Неверный пароль'], 401);
-        }
-
-        $token = $user->createToken('api-token')->plainTextToken;
-        return response()->json(['token' => $token]);
-    }
-
     // Отправка кода на SMS
     public function requestSmsCode(Request $request, SmsAuthService $smsAuthService)
     {
@@ -84,9 +62,37 @@ class AuthController extends Controller
 
         if ($smsAuthService->verifyCode($request->phone, $request->code)) {
             $token = $user->createToken('api-token')->plainTextToken;
-            return response()->json(['token' => $token]);
+            return response()->json([
+                'token' => $token,
+                'user' => $user
+            ]);
         }
 
         return response()->json(['message' => 'Неверный код'], 401);
+    }
+
+    // Стандартный логин по паролю
+    public function login(Request $request)
+    {
+        $request->validate([
+            'phone' => 'required|string',
+            'password' => 'required|string',
+        ]);
+
+        $user = User::where('phone', $request->phone)->first();
+
+        if (!$user) {
+            return response()->json(['message' => 'Метод авторизации — не пароль'], 403);
+        }
+
+        if (!Hash::check($request->password, $user->password)) {
+            return response()->json(['message' => 'Неверный пароль'], 401);
+        }
+
+        $token = $user->createToken('api-token')->plainTextToken;
+        return response()->json([
+            'token' => $token,
+            'user' => $user
+        ]);
     }
 }

@@ -60,5 +60,6 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('parking-types', ParkingTypeController::class)->except(['index']);
     Route::apiResource('heating-types', HeatingTypeController::class)->except(['index']);
     Route::apiResource('repair-types', RepairTypeController::class)->except(['index']);
+    Route::apiResource('user', UserController::class)->except(['index']);
 
 });
