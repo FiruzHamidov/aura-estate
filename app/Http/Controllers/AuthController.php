@@ -54,7 +54,7 @@ class AuthController extends Controller
             'code' => 'required|string'
         ]);
 
-        $user = User::where('phone', $request->phone)->first();
+        $user = User::where('phone', $request->phone)->with('role')->first();
 
         if (!$user) {
             return response()->json(['message' => 'Пользователь не найден'], 404);
@@ -79,7 +79,7 @@ class AuthController extends Controller
             'password' => 'required|string',
         ]);
 
-        $user = User::where('phone', $request->phone)->first();
+        $user = User::where('phone', $request->phone)->with('role')->first();
 
         if (!$user) {
             return response()->json(['message' => 'Метод авторизации — не пароль'], 403);
