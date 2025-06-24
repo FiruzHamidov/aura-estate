@@ -10,9 +10,8 @@ class PropertyController extends Controller
     public function index(Request $request)
     {
         $user = auth()->user();
-        $query = Property::with(['type', 'status', 'location', 'photos', 'creator']);
+        $query = Property::with(['type', 'status', 'location', 'repairType', 'photos', 'creator']);
 
-        // Ролевая логика фильтрации
         if (!$user) {
             $query->where('moderation_status', 'approved');
         } elseif ($user->hasRole('client')) {
@@ -24,13 +23,9 @@ class PropertyController extends Controller
                     ->orWhere('created_by', $user->id);
             });
         }
-        // admin видит всё без ограничений
 
-        // Фильтры из фронта:
         if ($request->filled('propertyType')) {
-            $query->whereHas('type', function ($q) use ($request) {
-                $q->where('name', $request->propertyType);
-            });
+            $query->whereHas('type', fn($q) => $q->where('name', $request->propertyType));
         }
 
         if ($request->filled('apartmentType')) {
@@ -38,15 +33,11 @@ class PropertyController extends Controller
         }
 
         if ($request->filled('city')) {
-            $query->whereHas('location', function ($q) use ($request) {
-                $q->where('city', $request->city);
-            });
+            $query->whereHas('location', fn($q) => $q->where('city', $request->city));
         }
 
         if ($request->filled('district')) {
-            $query->whereHas('location', function ($q) use ($request) {
-                $q->where('district', $request->district);
-            });
+            $query->whereHas('location', fn($q) => $q->where('district', $request->district));
         }
 
         if ($request->filled('priceFrom')) {
@@ -61,41 +52,11 @@ class PropertyController extends Controller
             $query->where('currency', $request->currency);
         }
 
-        if ($request->filled('areaFrom')) {
-            $query->where('total_area', '>=', (float)$request->areaFrom);
-        }
-
-        if ($request->filled('areaTo') && $request->areaTo != 0) {
-            $query->where('total_area', '<=', (float)$request->areaTo);
-        }
-
-        if ($request->filled('floorFrom')) {
-            $query->where('floor', '>=', (int)$request->floorFrom);
-        }
-
-        if ($request->filled('floorTo') && $request->floorTo != '-') {
-            $query->where('floor', '<=', (int)$request->floorTo);
-        }
-
-        if ($request->filled('repairType')) {
-            $query->where('repair_type', $request->repairType);
-        }
-
-        if ($request->filled('mortgageOption')) {
-            if ($request->mortgageOption === 'mortgage') {
-                $query->where('is_mortgage_available', true);
-            }
-            if ($request->mortgageOption === 'developer') {
-                $query->where('is_from_developer', true);
-            }
-        }
-
         if ($request->filled('landmark')) {
             $query->where('landmark', 'LIKE', '%' . $request->landmark . '%');
         }
 
-        $properties = $query->paginate(20);
-        return response()->json($properties);
+        return response()->json($query->paginate(20));
     }
 
     public function store(Request $request)
@@ -106,6 +67,7 @@ class PropertyController extends Controller
             'type_id' => 'required|exists:property_types,id',
             'status_id' => 'required|exists:property_statuses,id',
             'location_id' => 'nullable|exists:locations,id',
+            'repair_type_id' => 'nullable|exists:repair_types,id',
             'price' => 'required|numeric',
             'currency' => 'required|in:TJS,USD',
             'total_area' => 'nullable|numeric',
@@ -115,13 +77,14 @@ class PropertyController extends Controller
             'year_built' => 'nullable|integer',
             'condition' => 'nullable|string',
             'apartment_type' => 'nullable|string',
-            'repair_type' => 'nullable|string',
             'has_garden' => 'boolean',
             'has_parking' => 'boolean',
             'is_mortgage_available' => 'boolean',
             'is_from_developer' => 'boolean',
             'landmark' => 'nullable|string',
-            'photos.*' => 'nullable|image|max:10240'  // ДОБАВЛЕНО: фото
+            'latitude' => 'nullable|numeric|between:-90,90',
+            'longitude' => 'nullable|numeric|between:-180,180',
+            'photos.*' => 'nullable|image|max:10240',
         ]);
 
         $validated['created_by'] = auth()->id();
@@ -129,7 +92,6 @@ class PropertyController extends Controller
 
         $property = Property::create($validated);
 
-        // Сохраняем фотографии
         if ($request->hasFile('photos')) {
             foreach ($request->file('photos') as $photo) {
                 $path = $photo->store('properties', 'public');
@@ -137,7 +99,7 @@ class PropertyController extends Controller
             }
         }
 
-        return response()->json($property, 201);
+        return response()->json($property->load(['photos']));
     }
 
     public function show(Property $property)
@@ -152,7 +114,7 @@ class PropertyController extends Controller
             return response()->json(['message' => 'Объект недоступен'], 403);
         }
 
-        return response()->json($property->load(['type', 'status', 'location', 'photos', 'creator']));
+        return response()->json($property->load(['type', 'status', 'location', 'repairType', 'photos', 'creator']));
     }
 
     public function update(Request $request, Property $property)
@@ -167,6 +129,7 @@ class PropertyController extends Controller
             'type_id' => 'sometimes|exists:property_types,id',
             'status_id' => 'sometimes|exists:property_statuses,id',
             'location_id' => 'nullable|exists:locations,id',
+            'repair_type_id' => 'nullable|exists:repair_types,id',
             'price' => 'sometimes|numeric',
             'currency' => 'sometimes|in:TJS,USD',
             'total_area' => 'nullable|numeric',
@@ -176,16 +139,30 @@ class PropertyController extends Controller
             'year_built' => 'nullable|integer',
             'condition' => 'nullable|string',
             'apartment_type' => 'nullable|string',
-            'repair_type' => 'nullable|string',
             'has_garden' => 'boolean',
             'has_parking' => 'boolean',
             'is_mortgage_available' => 'boolean',
             'is_from_developer' => 'boolean',
             'landmark' => 'nullable|string',
+            'latitude' => 'nullable|numeric|between:-90,90',
+            'longitude' => 'nullable|numeric|between:-180,180',
+            'photos.*' => 'nullable|image|max:10240',
         ]);
 
         $property->update($validated);
-        return response()->json($property);
+
+        if ($request->hasFile('photos')) {
+            foreach ($property->photos as $oldPhoto) {
+                \Storage::disk('public')->delete($oldPhoto->path);
+                $oldPhoto->delete();
+            }
+            foreach ($request->file('photos') as $photo) {
+                $path = $photo->store('properties', 'public');
+                $property->photos()->create(['path' => $path]);
+            }
+        }
+
+        return response()->json($property->load(['photos']));
     }
 
     public function destroy(Property $property)

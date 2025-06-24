@@ -5,9 +5,6 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration {
-    /**
-     * Run the migrations.
-     */
     public function up(): void
     {
         Schema::create('properties', function (Blueprint $table) {
@@ -17,6 +14,7 @@ return new class extends Migration {
             $table->unsignedBigInteger('type_id');
             $table->unsignedBigInteger('status_id');
             $table->unsignedBigInteger('location_id')->nullable();
+            $table->unsignedBigInteger('repair_type_id')->nullable(); // <-- заменили
             $table->decimal('price', 15, 2);
             $table->enum('currency', ['TJS', 'USD'])->default('TJS');
             $table->float('total_area')->nullable();
@@ -24,23 +22,27 @@ return new class extends Migration {
             $table->integer('floor')->nullable();
             $table->integer('total_floors')->nullable();
             $table->year('year_built')->nullable();
-            $table->string('condition')->nullable(); // новостройка, требует ремонта и т.д.
+            $table->string('condition')->nullable();
             $table->boolean('has_garden')->default(false);
             $table->boolean('has_parking')->default(false);
-            $table->string('apartment_type')->nullable(); // Студия, 1-комн, 2-комн и т.д.
-            $table->string('repair_type')->nullable(); // Евроремонт, Капремонт и т.д.
+            $table->string('apartment_type')->nullable();
             $table->boolean('is_mortgage_available')->default(false);
             $table->boolean('is_from_developer')->default(false);
             $table->enum('moderation_status', ['pending', 'approved', 'rejected', 'draft', 'deleted'])->default('pending');
             $table->string('landmark')->nullable();
+            $table->decimal('latitude', 10, 8)->nullable();
+            $table->decimal('longitude', 11, 8)->nullable();
             $table->foreignId('created_by')->constrained('users')->cascadeOnDelete();
+
+            $table->foreign('type_id')->references('id')->on('property_types');
+            $table->foreign('status_id')->references('id')->on('property_statuses');
+            $table->foreign('location_id')->references('id')->on('locations');
+            $table->foreign('repair_type_id')->references('id')->on('repair_types');
+
             $table->timestamps();
         });
     }
 
-    /**
-     * Reverse the migrations.
-     */
     public function down(): void
     {
         Schema::dropIfExists('properties');

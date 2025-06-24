@@ -20,6 +20,7 @@ class DatabaseSeeder extends Seeder
             BuildingTypeSeeder::class,
             ParkingTypeSeeder::class,
             HeatingTypeSeeder::class,
+            RepairTypeSeeder::class,
         ]);
     }
 }
