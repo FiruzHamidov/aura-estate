@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\RepairTypeController;
 use App\Models\RepairType;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\AuthController;
@@ -34,7 +35,7 @@ Route::get('/locations', [LocationController::class, 'index']);
 Route::get('/building-types', [BuildingTypeController::class, 'index']);
 Route::get('/parking-types', [ParkingTypeController::class, 'index']);
 Route::get('/heating-types', [HeatingTypeController::class, 'index']);
-Route::get('/repair-types', [RepairType::class, 'index']);
+Route::get('/repair-types', [RepairTypeController::class, 'index']);
 
 // --- ЗАЩИЩЕННЫЕ МАРШРУТЫ ---
 
@@ -57,6 +58,6 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('building-types', BuildingTypeController::class)->except(['index']);
     Route::apiResource('parking-types', ParkingTypeController::class)->except(['index']);
     Route::apiResource('heating-types', HeatingTypeController::class)->except(['index']);
-    Route::apiResource('repair-types', RepairType::class)->except(['index']);
+    Route::apiResource('repair-types', RepairTypeController::class)->except(['index']);
 
 });
