@@ -15,12 +15,12 @@ class DatabaseSeeder extends Seeder
             PropertyStatusSeeder::class,
             LocationSeeder::class,
             UserSeeder::class,
-            PropertySeeder::class,
             LocationSeeder::class,
             BuildingTypeSeeder::class,
             ParkingTypeSeeder::class,
             HeatingTypeSeeder::class,
             RepairTypeSeeder::class,
+            PropertySeeder::class,
         ]);
     }
 }
