@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\FavoriteController;
 use App\Http\Controllers\RepairTypeController;
 use App\Models\RepairType;
 use Illuminate\Support\Facades\Route;
@@ -61,5 +62,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('heating-types', HeatingTypeController::class)->except(['index']);
     Route::apiResource('repair-types', RepairTypeController::class)->except(['index']);
     Route::apiResource('user', UserController::class)->except(['index']);
+
+    Route::get('/favorites', [FavoriteController::class, 'index']);
+    Route::post('/favorites', [FavoriteController::class, 'store']);
+    Route::delete('/favorites/{property_id}', [FavoriteController::class, 'destroy']);
 
 });

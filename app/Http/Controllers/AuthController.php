@@ -61,7 +61,13 @@ class AuthController extends Controller
         }
 
         if ($smsAuthService->verifyCode($request->phone, $request->code)) {
-            $token = $user->createToken('api-token')->plainTextToken;
+
+            $token = $user->createToken(
+                'api-token',
+                ['*'],
+                now()->addHours(24)
+            )->plainTextToken;
+
             return response()->json([
                 'token' => $token,
                 'user' => $user
@@ -89,7 +95,12 @@ class AuthController extends Controller
             return response()->json(['message' => 'Неверный пароль'], 401);
         }
 
-        $token = $user->createToken('api-token')->plainTextToken;
+        $token = $user->createToken(
+            'api-token',
+            ['*'],
+            now()->addHours(24)
+        )->plainTextToken;
+
         return response()->json([
             'token' => $token,
             'user' => $user
