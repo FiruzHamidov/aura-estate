@@ -36,6 +36,8 @@ Route::get('/building-types', [BuildingTypeController::class, 'index']);
 Route::get('/parking-types', [ParkingTypeController::class, 'index']);
 Route::get('/heating-types', [HeatingTypeController::class, 'index']);
 Route::get('/repair-types', [RepairTypeController::class, 'index']);
+Route::get('/properties/{property}', [PropertyController::class, 'show']);
+
 
 // --- ЗАЩИЩЕННЫЕ МАРШРУТЫ ---
 
@@ -47,7 +49,6 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // Полный CRUD для объектов недвижимости
     Route::post('/properties', [PropertyController::class, 'store']);
-    Route::get('/properties/{property}', [PropertyController::class, 'show']);
     Route::put('/properties/{property}', [PropertyController::class, 'update']);
     Route::delete('/properties/{property}', [PropertyController::class, 'destroy']);
 
