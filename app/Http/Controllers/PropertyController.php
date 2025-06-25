@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Property;
 use Illuminate\Http\Request;
+use Intervention\Image\Facades\Image;
 
 class PropertyController extends Controller
 {
@@ -15,16 +16,14 @@ class PropertyController extends Controller
         if (!$user) {
             $query->where('moderation_status', 'approved');
         } elseif ($user->hasRole('client')) {
-            $query->where('created_by', $user->id)
-                ->where('moderation_status', '!=', 'deleted');
+            $query->where('created_by', $user->id)->where('moderation_status', '!=', 'deleted');
         } elseif ($user->hasRole('agent')) {
             $query->where(function ($q) use ($user) {
-                $q->where('moderation_status', 'pending')
-                    ->orWhere('created_by', $user->id);
+                $q->where('moderation_status', 'pending')->orWhere('created_by', $user->id);
             });
         }
 
-        // Фильтры (дополняем новыми полями)
+        // Фильтры
         if ($request->filled('propertyType')) {
             $query->whereHas('type', fn($q) => $q->where('name', $request->propertyType));
         }
@@ -96,10 +95,19 @@ class PropertyController extends Controller
 
         $property = Property::create($validated);
 
+        // Обработка фото с сжатием
         if ($request->hasFile('photos')) {
             foreach ($request->file('photos') as $photo) {
-                $path = $photo->store('properties', 'public');
-                $property->photos()->create(['path' => $path]);
+                $image = Image::make($photo)
+                    ->resize(1600, 1200, function ($constraint) {
+                        $constraint->aspectRatio();
+                        $constraint->upsize();
+                    })
+                    ->encode('jpg', 80); // качество 80%
+
+                $filename = 'properties/' . uniqid() . '.jpg';
+                \Storage::disk('public')->put($filename, $image);
+                $property->photos()->create(['path' => $filename]);
             }
         }
 
@@ -165,8 +173,16 @@ class PropertyController extends Controller
                 $oldPhoto->delete();
             }
             foreach ($request->file('photos') as $photo) {
-                $path = $photo->store('properties', 'public');
-                $property->photos()->create(['path' => $path]);
+                $image = Image::make($photo)
+                    ->resize(1600, 1200, function ($constraint) {
+                        $constraint->aspectRatio();
+                        $constraint->upsize();
+                    })
+                    ->encode('jpg', 80);
+
+                $filename = 'properties/' . uniqid() . '.jpg';
+                \Storage::disk('public')->put($filename, $image);
+                $property->photos()->create(['path' => $filename]);
             }
         }
 
