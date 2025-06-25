@@ -93,7 +93,7 @@ class PropertyController extends Controller
 
                 $filename = 'properties/' . uniqid() . '.jpg';
                 \Storage::disk('public')->put($filename, $binary);
-                $property->photos()->create(['path' => $filename]);
+                $property->photos()->create(['file_path' => $filename]);
             }
         }
 
@@ -171,7 +171,7 @@ class PropertyController extends Controller
 
                 $filename = 'properties/' . uniqid() . '.jpg';
                 \Storage::disk('public')->put($filename, $binary);
-                $property->photos()->create(['path' => $filename]);
+                $property->photos()->create(['file_path' => $filename]);
             }
         }
 
