@@ -2,7 +2,6 @@
 
 use App\Http\Controllers\FavoriteController;
 use App\Http\Controllers\RepairTypeController;
-use App\Models\RepairType;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\UserController;

@@ -14,9 +14,12 @@ return new class extends Migration {
             $table->unsignedBigInteger('type_id');
             $table->unsignedBigInteger('status_id');
             $table->unsignedBigInteger('location_id')->nullable();
-            $table->unsignedBigInteger('repair_type_id')->nullable(); // <-- заменили
+            $table->unsignedBigInteger('repair_type_id')->nullable();
             $table->decimal('price', 15, 2);
             $table->enum('currency', ['TJS', 'USD'])->default('TJS');
+            $table->enum('offer_type', ['rent', 'sale'])->default('sale');
+            $table->tinyInteger('rooms')->nullable();
+            $table->string('youtube_link')->nullable();
             $table->float('total_area')->nullable();
             $table->float('living_area')->nullable();
             $table->integer('floor')->nullable();
@@ -32,7 +35,9 @@ return new class extends Migration {
             $table->string('landmark')->nullable();
             $table->decimal('latitude', 10, 8)->nullable();
             $table->decimal('longitude', 11, 8)->nullable();
+
             $table->foreignId('created_by')->constrained('users')->cascadeOnDelete();
+            $table->foreignId('agent_id')->nullable()->constrained('users')->nullOnDelete();
 
             $table->foreign('type_id')->references('id')->on('property_types');
             $table->foreign('status_id')->references('id')->on('property_statuses');

@@ -24,34 +24,34 @@ class PropertyController extends Controller
             });
         }
 
+        // Фильтры (дополняем новыми полями)
         if ($request->filled('propertyType')) {
             $query->whereHas('type', fn($q) => $q->where('name', $request->propertyType));
         }
-
         if ($request->filled('apartmentType')) {
             $query->where('apartment_type', $request->apartmentType);
         }
-
+        if ($request->filled('offerType')) {
+            $query->where('offer_type', $request->offerType);
+        }
+        if ($request->filled('rooms')) {
+            $query->where('rooms', $request->rooms);
+        }
         if ($request->filled('city')) {
             $query->whereHas('location', fn($q) => $q->where('city', $request->city));
         }
-
         if ($request->filled('district')) {
             $query->whereHas('location', fn($q) => $q->where('district', $request->district));
         }
-
         if ($request->filled('priceFrom')) {
             $query->where('price', '>=', (float)$request->priceFrom);
         }
-
         if ($request->filled('priceTo') && $request->priceTo != 0) {
             $query->where('price', '<=', (float)$request->priceTo);
         }
-
         if ($request->filled('currency')) {
             $query->where('currency', $request->currency);
         }
-
         if ($request->filled('landmark')) {
             $query->where('landmark', 'LIKE', '%' . $request->landmark . '%');
         }
@@ -70,6 +70,9 @@ class PropertyController extends Controller
             'repair_type_id' => 'nullable|exists:repair_types,id',
             'price' => 'required|numeric',
             'currency' => 'required|in:TJS,USD',
+            'offer_type' => 'required|in:rent,sale',
+            'rooms' => 'nullable|integer|min:1|max:10',
+            'youtube_link' => 'nullable|url',
             'total_area' => 'nullable|numeric',
             'living_area' => 'nullable|numeric',
             'floor' => 'nullable|integer',
@@ -85,6 +88,7 @@ class PropertyController extends Controller
             'latitude' => 'nullable|numeric|between:-90,90',
             'longitude' => 'nullable|numeric|between:-180,180',
             'photos.*' => 'nullable|image|max:10240',
+            'agent_id' => 'nullable|exists:users,id',
         ]);
 
         $validated['created_by'] = auth()->id();
@@ -132,6 +136,9 @@ class PropertyController extends Controller
             'repair_type_id' => 'nullable|exists:repair_types,id',
             'price' => 'sometimes|numeric',
             'currency' => 'sometimes|in:TJS,USD',
+            'offer_type' => 'sometimes|in:rent,sale',
+            'rooms' => 'nullable|integer|min:1|max:10',
+            'youtube_link' => 'nullable|url',
             'total_area' => 'nullable|numeric',
             'living_area' => 'nullable|numeric',
             'floor' => 'nullable|integer',
@@ -147,6 +154,7 @@ class PropertyController extends Controller
             'latitude' => 'nullable|numeric|between:-90,90',
             'longitude' => 'nullable|numeric|between:-180,180',
             'photos.*' => 'nullable|image|max:10240',
+            'agent_id' => 'nullable|exists:users,id',
         ]);
 
         $property->update($validated);

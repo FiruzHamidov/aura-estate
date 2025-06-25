@@ -15,9 +15,12 @@ class Property extends Model
         'type_id',
         'status_id',
         'location_id',
-        'repair_type_id', // заменено
+        'repair_type_id',
         'price',
         'currency',
+        'offer_type',
+        'rooms',
+        'youtube_link',
         'total_area',
         'living_area',
         'floor',
@@ -29,64 +32,49 @@ class Property extends Model
         'has_parking',
         'is_mortgage_available',
         'is_from_developer',
-        'landmark',
         'moderation_status',
+        'landmark',
         'latitude',
         'longitude',
         'created_by',
+        'agent_id',
     ];
 
-    /**
-     * Связь с типом недвижимости
-     */
     public function type()
     {
-        return $this->belongsTo(PropertyType::class, 'type_id');
+        return $this->belongsTo(PropertyType::class);
     }
 
-    /**
-     * Связь со статусом недвижимости
-     */
     public function status()
     {
-        return $this->belongsTo(PropertyStatus::class, 'status_id');
+        return $this->belongsTo(PropertyStatus::class);
     }
 
-    /**
-     * Связь с локацией
-     */
     public function location()
     {
-        return $this->belongsTo(Location::class, 'location_id');
+        return $this->belongsTo(Location::class);
     }
 
-    /**
-     * Связь с типом ремонта
-     */
     public function repairType()
     {
-        return $this->belongsTo(RepairType::class, 'repair_type_id');
+        return $this->belongsTo(RepairType::class);
     }
 
-    /**
-     * Связь с фото
-     */
     public function photos()
     {
         return $this->hasMany(PropertyPhoto::class);
     }
 
-    /**
-     * Связь с создателем объекта
-     */
     public function creator()
     {
         return $this->belongsTo(User::class, 'created_by');
     }
 
-    /**
-     * Валютный символ для отображения
-     */
+    public function agent()
+    {
+        return $this->belongsTo(User::class, 'agent_id');
+    }
+
     public function getCurrencySymbolAttribute(): string
     {
         return match ($this->currency) {
