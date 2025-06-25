@@ -4,10 +4,18 @@ namespace App\Http\Controllers;
 
 use App\Models\Property;
 use Illuminate\Http\Request;
-use Intervention\Image\Facades\Image;
+use Intervention\Image\ImageManager; // новая версия Intervention 3.x
+use Intervention\Image\Drivers\Gd\Driver;
 
 class PropertyController extends Controller
 {
+    protected ImageManager $imageManager;
+
+    public function __construct()
+    {
+        $this->imageManager = new ImageManager(new Driver());
+    }
+
     public function index(Request $request)
     {
         $user = auth()->user();
@@ -23,7 +31,6 @@ class PropertyController extends Controller
             });
         }
 
-        // Фильтры
         if ($request->filled('propertyType')) {
             $query->whereHas('type', fn($q) => $q->where('name', $request->propertyType));
         }
@@ -95,18 +102,17 @@ class PropertyController extends Controller
 
         $property = Property::create($validated);
 
-        // Обработка фото с сжатием
         if ($request->hasFile('photos')) {
             foreach ($request->file('photos') as $photo) {
-                $image = Image::make($photo)
+                $image = $this->imageManager->read($photo)
                     ->resize(1600, 1200, function ($constraint) {
                         $constraint->aspectRatio();
                         $constraint->upsize();
                     })
-                    ->encode('jpg', 80); // качество 80%
+                    ->encode('jpg', 80);
 
                 $filename = 'properties/' . uniqid() . '.jpg';
-                \Storage::disk('public')->put($filename, $image);
+                \Storage::disk('public')->put($filename, (string) $image);
                 $property->photos()->create(['path' => $filename]);
             }
         }
@@ -173,7 +179,7 @@ class PropertyController extends Controller
                 $oldPhoto->delete();
             }
             foreach ($request->file('photos') as $photo) {
-                $image = Image::make($photo)
+                $image = $this->imageManager->read($photo)
                     ->resize(1600, 1200, function ($constraint) {
                         $constraint->aspectRatio();
                         $constraint->upsize();
@@ -181,7 +187,7 @@ class PropertyController extends Controller
                     ->encode('jpg', 80);
 
                 $filename = 'properties/' . uniqid() . '.jpg';
-                \Storage::disk('public')->put($filename, $image);
+                \Storage::disk('public')->put($filename, (string) $image);
                 $property->photos()->create(['path' => $filename]);
             }
         }
