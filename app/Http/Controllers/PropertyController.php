@@ -62,7 +62,7 @@ class PropertyController extends Controller
     public function store(Request $request)
     {
         $validated = $request->validate([
-            'title' => 'required|string',
+            'title' => 'nullable|string',
             'description' => 'nullable|string',
             'type_id' => 'required|exists:property_types,id',
             'status_id' => 'required|exists:property_statuses,id',
