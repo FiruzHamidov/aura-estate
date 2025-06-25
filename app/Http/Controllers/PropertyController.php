@@ -4,8 +4,9 @@ namespace App\Http\Controllers;
 
 use App\Models\Property;
 use Illuminate\Http\Request;
-use Intervention\Image\ImageManager; // новая версия Intervention 3.x
+use Intervention\Image\ImageManager;
 use Intervention\Image\Drivers\Gd\Driver;
+use Intervention\Image\Encoders\JpegEncoder;
 
 class PropertyController extends Controller
 {
@@ -31,35 +32,12 @@ class PropertyController extends Controller
             });
         }
 
-        if ($request->filled('propertyType')) {
-            $query->whereHas('type', fn($q) => $q->where('name', $request->propertyType));
-        }
-        if ($request->filled('apartmentType')) {
-            $query->where('apartment_type', $request->apartmentType);
-        }
-        if ($request->filled('offerType')) {
-            $query->where('offer_type', $request->offerType);
-        }
-        if ($request->filled('rooms')) {
-            $query->where('rooms', $request->rooms);
-        }
-        if ($request->filled('city')) {
-            $query->whereHas('location', fn($q) => $q->where('city', $request->city));
-        }
-        if ($request->filled('district')) {
-            $query->whereHas('location', fn($q) => $q->where('district', $request->district));
-        }
+        // Пример фильтрации (можно дополнить)
         if ($request->filled('priceFrom')) {
             $query->where('price', '>=', (float)$request->priceFrom);
         }
-        if ($request->filled('priceTo') && $request->priceTo != 0) {
+        if ($request->filled('priceTo')) {
             $query->where('price', '<=', (float)$request->priceTo);
-        }
-        if ($request->filled('currency')) {
-            $query->where('currency', $request->currency);
-        }
-        if ($request->filled('landmark')) {
-            $query->where('landmark', 'LIKE', '%' . $request->landmark . '%');
         }
 
         return response()->json($query->paginate(20));
@@ -108,11 +86,13 @@ class PropertyController extends Controller
                     ->resize(1600, 1200, function ($constraint) {
                         $constraint->aspectRatio();
                         $constraint->upsize();
-                    })
-                    ->encode('jpg', 80);
+                    });
+
+                $jpeg = new JpegEncoder(80);
+                $binary = $image->encode($jpeg);
 
                 $filename = 'properties/' . uniqid() . '.jpg';
-                \Storage::disk('public')->put($filename, (string) $image);
+                \Storage::disk('public')->put($filename, $binary);
                 $property->photos()->create(['path' => $filename]);
             }
         }
@@ -178,16 +158,19 @@ class PropertyController extends Controller
                 \Storage::disk('public')->delete($oldPhoto->path);
                 $oldPhoto->delete();
             }
+
             foreach ($request->file('photos') as $photo) {
                 $image = $this->imageManager->read($photo)
                     ->resize(1600, 1200, function ($constraint) {
                         $constraint->aspectRatio();
                         $constraint->upsize();
-                    })
-                    ->encode('jpg', 80);
+                    });
+
+                $jpeg = new JpegEncoder(80);
+                $binary = $image->encode($jpeg);
 
                 $filename = 'properties/' . uniqid() . '.jpg';
-                \Storage::disk('public')->put($filename, (string) $image);
+                \Storage::disk('public')->put($filename, $binary);
                 $property->photos()->create(['path' => $filename]);
             }
         }
