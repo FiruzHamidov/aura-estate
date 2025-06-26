@@ -28,7 +28,7 @@ class PropertyController extends Controller
             $query->where('created_by', $user->id)->where('moderation_status', '!=', 'deleted');
         } elseif ($user->hasRole('agent')) {
             $query->where(function ($q) use ($user) {
-                $q->where('moderation_status', 'pending')->orWhere('created_by', $user->id);
+                $q->here('created_by', $user->id);
             });
         }
 
