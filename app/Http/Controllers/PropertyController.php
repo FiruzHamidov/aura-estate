@@ -123,7 +123,7 @@ class PropertyController extends Controller
         }
 
         $validated = $request->validate([
-            'title' => 'sometimes|string',
+            'title' => 'nullable|string',
             'description' => 'nullable|string',
             'type_id' => 'sometimes|exists:property_types,id',
             'status_id' => 'sometimes|exists:property_statuses,id',
