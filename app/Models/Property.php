@@ -38,6 +38,7 @@ class Property extends Model
         'longitude',
         'created_by',
         'agent_id',
+        'owner_phone'
     ];
 
     public function type()

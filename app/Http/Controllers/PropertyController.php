@@ -73,6 +73,7 @@ class PropertyController extends Controller
             'longitude' => 'nullable|numeric|between:-180,180',
             'photos.*' => 'nullable|image|max:10240',
             'agent_id' => 'nullable|exists:users,id',
+            'owner_phone' => 'nullable|string|max:30',
         ]);
 
         $validated['created_by'] = auth()->id();
@@ -149,6 +150,7 @@ class PropertyController extends Controller
             'longitude' => 'nullable|numeric|between:-180,180',
             'photos.*' => 'nullable|image|max:10240',
             'agent_id' => 'nullable|exists:users,id',
+            'owner_phone' => 'nullable|string|max:30',
         ]);
 
         $property->update($validated);
