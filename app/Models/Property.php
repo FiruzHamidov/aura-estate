@@ -38,6 +38,8 @@ class Property extends Model
         'longitude',
         'created_by',
         'agent_id',
+        'district',
+        'address',
         'owner_phone'
     ];
 

@@ -48,6 +48,8 @@ class PropertyController extends Controller
         $validated = $request->validate([
             'title' => 'nullable|string',
             'description' => 'nullable|string',
+            'district' => 'nullable|string',
+            'address' => 'nullable|string',
             'type_id' => 'required|exists:property_types,id',
             'status_id' => 'required|exists:property_statuses,id',
             'location_id' => 'nullable|exists:locations,id',
