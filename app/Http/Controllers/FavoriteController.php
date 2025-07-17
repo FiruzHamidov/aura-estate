@@ -12,7 +12,7 @@ class FavoriteController extends Controller
     public function index()
     {
         $favorites = Favorite::where('user_id', auth()->id())
-            ->with('property')
+            ->with('property.photos') // Загрузка property и его photos
             ->get();
 
         return response()->json($favorites);
