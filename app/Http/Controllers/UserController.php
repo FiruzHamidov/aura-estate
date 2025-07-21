@@ -62,9 +62,41 @@ class UserController extends Controller
             $data['password'] = Hash::make($request->password);
         }
 
+        if ($request->hasFile('photo')) {
+            $file = $request->file('photo');
+            $filename = 'users/' . uniqid() . '.' . $file->getClientOriginalExtension();
+            $path = \Storage::disk('public')->put($filename, file_get_contents($file));
+            $data['photo'] = $filename;
+        }
+
         $user->update($data);
 
         return response()->json($user);
+    }
+
+    public function updatePhoto(Request $request, User $user)
+    {
+        $request->validate([
+            'photo' => 'required|image|max:2048'
+        ]);
+
+        if ($request->hasFile('photo')) {
+            $file = $request->file('photo');
+            $filename = 'users/' . uniqid() . '.' . $file->getClientOriginalExtension();
+            \Storage::disk('public')->put($filename, file_get_contents($file));
+            $user->update(['photo' => $filename]);
+        }
+
+        return response()->json(['message' => 'Photo updated', 'photo' => $user->photo]);
+    }
+
+    public function agents()
+    {
+        $agents = User::with('role')->whereHas('role', function ($q) {
+            $q->where('name', 'agent');
+        })->get();
+
+        return response()->json($agents);
     }
 
     // Удаление пользователя
