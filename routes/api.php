@@ -38,7 +38,7 @@ Route::get('/heating-types', [HeatingTypeController::class, 'index']);
 Route::get('/repair-types', [RepairTypeController::class, 'index']);
 Route::get('/properties/{property}', [PropertyController::class, 'show']);
 
-Route::get('/users/agents', [UserController::class, 'agents']);
+Route::get('/user/agents', [UserController::class, 'agents']);
 
 
 
@@ -64,7 +64,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('heating-types', HeatingTypeController::class)->except(['index']);
     Route::apiResource('repair-types', RepairTypeController::class)->except(['index']);
     Route::apiResource('user', UserController::class);
-    Route::post('/users/{user}/photo', [UserController::class, 'updatePhoto']);
+    Route::post('/user/{user}/photo', [UserController::class, 'updatePhoto']);
+    Route::delete('/user/photo', [UserController::class, 'deleteMyPhoto']);
 
     Route::get('/favorites', [FavoriteController::class, 'index']);
     Route::post('/favorites', [FavoriteController::class, 'store']);

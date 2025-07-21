@@ -90,6 +90,19 @@ class UserController extends Controller
         return response()->json(['message' => 'Photo updated', 'photo' => $user->photo]);
     }
 
+    public function deleteMyPhoto()
+    {
+        $user = Auth::user();
+
+        if ($user->photo && \Storage::disk('public')->exists($user->photo)) {
+            \Storage::disk('public')->delete($user->photo);
+        }
+
+        $user->update(['photo' => null]);
+
+        return response()->json(['message' => 'Your photo has been deleted']);
+    }
+
     public function agents()
     {
         $agents = User::with('role')->whereHas('role', function ($q) {
