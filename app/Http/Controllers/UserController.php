@@ -93,7 +93,7 @@ class UserController extends Controller
     public function agents()
     {
         $agents = User::with('role')->whereHas('role', function ($q) {
-            $q->where('name', 'agent');
+            $q->where('slug', 'agent');
         })->get();
 
         return response()->json($agents);
