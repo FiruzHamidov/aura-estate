@@ -7,5 +7,6 @@ return [
     'login' => 'AuraTj',                                    // your login in OsonSMS platform
     'pass_salt_hash' => '4c119321c7580ac4e46f23540467c765',                  // your hash code in OsonSMS platform
     'sender_name' => 'aura.tj',                                 // the name of your SMS sender
-    'server_url' => 'https://api.osonsms.com'                   // OsonSMS api server URL
+//    'server_url' => 'https://api.osonsms.com'                   // OsonSMS api server URL
+    'server_url' => 'http://82.196.1.18'                   // OsonSMS api server URL
 ];
