@@ -28,16 +28,50 @@ class PropertyController extends Controller
             $query->where('created_by', $user->id)->where('moderation_status', '!=', 'deleted');
         } elseif ($user->hasRole('agent')) {
             $query->where(function ($q) use ($user) {
-                $q->here('created_by', $user->id);
+                $q->where('created_by', $user->id);
             });
         }
 
-        // Пример фильтрации (можно дополнить)
-        if ($request->filled('priceFrom')) {
-            $query->where('price', '>=', (float)$request->priceFrom);
+        // LIKE-поиск
+        foreach (['title', 'description', 'district', 'address', 'landmark', 'condition', 'apartment_type', 'owner_phone'] as $field) {
+            if ($request->filled($field)) {
+                $query->where($field, 'like', '%' . $request->input($field) . '%');
+            }
         }
-        if ($request->filled('priceTo')) {
-            $query->where('price', '<=', (float)$request->priceTo);
+
+        // Равенство
+        foreach ([
+                     'type_id', 'status_id', 'location_id', 'repair_type_id',
+                     'currency', 'offer_type',
+                     'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
+                     'latitude', 'longitude', 'agent_id'
+                 ] as $field) {
+            if ($request->filled($field)) {
+                $query->where($field, $request->input($field));
+            }
+        }
+
+        // Диапазоны
+        $rangeFilters = [
+            'price' => 'price',
+            'rooms' => 'rooms',
+            'total_area' => 'total_area',
+            'living_area' => 'living_area',
+            'floor' => 'floor',
+            'total_floors' => 'total_floors',
+            'year_built' => 'year_built',
+        ];
+
+        foreach ($rangeFilters as $param => $column) {
+            $from = $request->input($param . 'From');
+            $to = $request->input($param . 'To');
+
+            if ($from !== null) {
+                $query->where($column, '>=', $from);
+            }
+            if ($to !== null) {
+                $query->where($column, '<=', $to);
+            }
         }
 
         return response()->json($query->paginate(20));
