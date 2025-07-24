@@ -40,7 +40,8 @@ class Property extends Model
         'agent_id',
         'district',
         'address',
-        'owner_phone'
+        'owner_phone',
+        'listing_type'
     ];
 
     public function type()

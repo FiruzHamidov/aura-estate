@@ -44,7 +44,7 @@ class PropertyController extends Controller
                      'type_id', 'status_id', 'location_id', 'repair_type_id',
                      'currency', 'offer_type',
                      'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
-                     'latitude', 'longitude', 'agent_id'
+                     'latitude', 'longitude', 'agent_id', 'listing_type'
                  ] as $field) {
             if ($request->filled($field)) {
                 $query->where($field, $request->input($field));
@@ -110,10 +110,12 @@ class PropertyController extends Controller
             'photos.*' => 'nullable|image|max:10240',
             'agent_id' => 'nullable|exists:users,id',
             'owner_phone' => 'nullable|string|max:30',
+            'listing_type' => 'sometimes|in:regular,vip,urgent',
         ]);
 
         $validated['created_by'] = auth()->id();
         $validated['moderation_status'] = auth()->user()->hasRole('client') ? 'pending' : 'approved';
+        $validated['listing_type'] = $request->input('listing_type', 'regular');
 
         $property = Property::create($validated);
 
@@ -187,6 +189,7 @@ class PropertyController extends Controller
             'photos.*' => 'required|image|max:10240',
             'agent_id' => 'nullable|exists:users,id',
             'owner_phone' => 'required|string|max:30',
+            'listing_type' => 'sometimes|in:regular,vip,urgent',
         ]);
 
         $property->update($validated);
