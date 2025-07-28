@@ -37,8 +37,8 @@ Route::get('/parking-types', [ParkingTypeController::class, 'index']);
 Route::get('/heating-types', [HeatingTypeController::class, 'index']);
 Route::get('/repair-types', [RepairTypeController::class, 'index']);
 Route::get('/properties/{property}', [PropertyController::class, 'show']);
-Route::get('/user/{user}', [UserController::class, 'show']);
 Route::get('/user/agents', [UserController::class, 'agents']);
+Route::get('/user/{user}', [UserController::class, 'show']);
 
 
 
