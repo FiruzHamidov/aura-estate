@@ -20,13 +20,15 @@ class PropertyController extends Controller
     public function index(Request $request)
     {
         $user = auth()->user();
+
+//        return $user;
         $query = Property::with(['type', 'status', 'location', 'repairType', 'photos', 'creator']);
 
         if (!$user) {
             $query->where('moderation_status', 'approved');
         } elseif ($user->hasRole('client')) {
             $query->where('created_by', $user->id)->where('moderation_status', '!=', 'deleted');
-        } elseif ($user->hasRole('agent')) {
+        } elseif ($user->hasRole('agent') || $user->hasRole('admin')) {
             $query->where(function ($q) use ($user) {
                 $q->where('created_by', $user->id);
             });
