@@ -45,6 +45,7 @@ Route::get('/user/{user}', [UserController::class, 'show']);
 // --- ЗАЩИЩЕННЫЕ МАРШРУТЫ ---
 
 Route::middleware('auth:sanctum')->group(function () {
+    Route::get('/my-properties', [PropertyController::class, 'index']);
 
     // Профиль пользователя
     Route::get('/user/profile', [UserController::class, 'profile']);
