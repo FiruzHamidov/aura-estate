@@ -18,6 +18,8 @@ class Booking extends Model
         'end_time',
         'note',
         'status',
+        'client_name',
+        'client_phone'
     ];
 
     public function property()
