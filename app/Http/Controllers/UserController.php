@@ -21,6 +21,7 @@ class UserController extends Controller
         $request->validate([
             'name' => 'required|string',
             'description' => 'sometimes|string',
+            'birthday' => 'nullable',
             'phone' => 'required|string|unique:users,phone',
             'email' => 'nullable|email|unique:users,email',
             'role_id' => 'required|exists:roles,id',
@@ -51,6 +52,7 @@ class UserController extends Controller
         $request->validate([
             'name' => 'sometimes|string',
             'description' => 'sometimes|string',
+            'birthday' => 'nullable',
             'phone' => 'sometimes|string|unique:users,phone,' . $user->id,
             'email' => 'sometimes|email|unique:users,email,' . $user->id,
             'role_id' => 'sometimes|exists:roles,id',
