@@ -29,7 +29,7 @@ class UserController extends Controller
             'password' => 'nullable|min:6|required_if:auth_method,password'
         ]);
 
-        $data = $request->only(['name', 'phone', 'email', 'role_id', 'auth_method', 'status']);
+        $data = $request->only(['name', 'phone', 'email', 'role_id', 'auth_method', 'status', 'birthday']);
 
         if ($request->auth_method === 'password') {
             $data['password'] = Hash::make($request->password);
@@ -60,7 +60,7 @@ class UserController extends Controller
             'password' => 'nullable|min:6|required_if:auth_method,password'
         ]);
 
-        $data = $request->only(['name', 'phone', 'email', 'role_id', 'auth_method', 'status', 'description']);
+        $data = $request->only(['name', 'phone', 'email', 'role_id', 'auth_method', 'status', 'description', 'birthday']);
 
         if ($request->filled('password')) {
             $data['password'] = Hash::make($request->password);
