@@ -87,4 +87,9 @@ class Property extends Model
             default => $this->currency,
         };
     }
+
+    public function bookings()
+    {
+        return $this->hasMany(Booking::class);
+    }
 }

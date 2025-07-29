@@ -32,5 +32,13 @@ class User extends Authenticatable
         return $this->role && $this->role->slug === $slug;
     }
 
+    public function agentBookings()
+    {
+        return $this->hasMany(Booking::class, 'agent_id');
+    }
 
+    public function clientBookings()
+    {
+        return $this->hasMany(Booking::class, 'client_id');
+    }
 }
