@@ -28,4 +28,10 @@ class BookingController extends Controller
         $booking = Booking::create($validated);
         return response()->json($booking, 201);
     }
+
+    public function show($id)
+    {
+        $booking = Booking::with(['property', 'agent', 'client'])->findOrFail($id);
+        return response()->json($booking);
+    }
 }
