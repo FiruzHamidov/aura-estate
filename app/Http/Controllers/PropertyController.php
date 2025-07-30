@@ -81,39 +81,7 @@ class PropertyController extends Controller
 
     public function store(Request $request)
     {
-        $validated = $request->validate([
-            'title' => 'nullable|string',
-            'description' => 'nullable|string',
-            'district' => 'nullable|string',
-            'address' => 'nullable|string',
-            'type_id' => 'required|exists:property_types,id',
-            'status_id' => 'required|exists:property_statuses,id',
-            'location_id' => 'nullable|exists:locations,id',
-            'repair_type_id' => 'nullable|exists:repair_types,id',
-            'price' => 'required|numeric',
-            'currency' => 'required|in:TJS,USD',
-            'offer_type' => 'required|in:rent,sale',
-            'rooms' => 'nullable|integer|min:1|max:10',
-            'youtube_link' => 'nullable|url',
-            'total_area' => 'nullable|numeric',
-            'living_area' => 'nullable|numeric',
-            'floor' => 'nullable|integer',
-            'total_floors' => 'nullable|integer',
-            'year_built' => 'nullable|integer',
-            'condition' => 'nullable|string',
-            'apartment_type' => 'nullable|string',
-            'has_garden' => 'boolean',
-            'has_parking' => 'boolean',
-            'is_mortgage_available' => 'boolean',
-            'is_from_developer' => 'boolean',
-            'landmark' => 'nullable|string',
-            'latitude' => 'nullable|numeric|between:-90,90',
-            'longitude' => 'nullable|numeric|between:-180,180',
-            'photos.*' => 'nullable|image|max:10240',
-            'agent_id' => 'nullable|exists:users,id',
-            'owner_phone' => 'nullable|string|max:30',
-            'listing_type' => 'sometimes|in:regular,vip,urgent',
-        ]);
+        $validated = $this->validateProperty($request);
 
         $validated['created_by'] = auth()->id();
         $validated['moderation_status'] = auth()->user()->hasRole('client') ? 'pending' : 'approved';
@@ -162,37 +130,7 @@ class PropertyController extends Controller
             return response()->json(['message' => 'Доступ запрещён'], 403);
         }
 
-        $validated = $request->validate([
-            'title' => 'nullable|string',
-            'description' => 'nullable|string',
-            'type_id' => 'sometimes|exists:property_types,id',
-            'status_id' => 'sometimes|exists:property_statuses,id',
-            'location_id' => 'nullable|exists:locations,id',
-            'repair_type_id' => 'nullable|exists:repair_types,id',
-            'price' => 'required|numeric',
-            'currency' => 'sometimes|in:TJS,USD',
-            'offer_type' => 'sometimes|in:rent,sale',
-            'rooms' => 'nullable|integer|min:1|max:10',
-            'youtube_link' => 'nullable|url',
-            'total_area' => 'required|numeric',
-            'living_area' => 'nullable|numeric',
-            'floor' => 'required|integer',
-            'total_floors' => 'required|integer',
-            'year_built' => 'nullable|integer',
-            'condition' => 'nullable|string',
-            'apartment_type' => 'nullable|string',
-            'has_garden' => 'boolean',
-            'has_parking' => 'boolean',
-            'is_mortgage_available' => 'boolean',
-            'is_from_developer' => 'boolean',
-            'landmark' => 'nullable|string',
-            'latitude' => 'nullable|numeric|between:-90,90',
-            'longitude' => 'nullable|numeric|between:-180,180',
-            'photos.*' => 'required|image|max:10240',
-            'agent_id' => 'nullable|exists:users,id',
-            'owner_phone' => 'required|string|max:30',
-            'listing_type' => 'sometimes|in:regular,vip,urgent',
-        ]);
+        $validated = $this->validateProperty($request);
 
         $property->update($validated);
 
@@ -229,5 +167,47 @@ class PropertyController extends Controller
 
         $property->update(['moderation_status' => 'deleted']);
         return response()->json(['message' => 'Объект помечен как удалён']);
+    }
+
+    /**
+     * @param Request $request
+     * @return array
+     */
+    public function validateProperty(Request $request)
+    {
+        $validated = $request->validate([
+            'title' => 'nullable|string',
+            'description' => 'nullable|string',
+            'district' => 'nullable|string',
+            'address' => 'nullable|string',
+            'type_id' => 'required|exists:property_types,id',
+            'status_id' => 'required|exists:property_statuses,id',
+            'location_id' => 'nullable|exists:locations,id',
+            'repair_type_id' => 'nullable|exists:repair_types,id',
+            'price' => 'required|numeric',
+            'currency' => 'required|in:TJS,USD',
+            'offer_type' => 'required|in:rent,sale',
+            'rooms' => 'nullable|integer|min:1|max:10',
+            'youtube_link' => 'nullable|url',
+            'total_area' => 'nullable|numeric',
+            'living_area' => 'nullable|numeric',
+            'floor' => 'nullable|integer',
+            'total_floors' => 'nullable|integer',
+            'year_built' => 'nullable|integer',
+            'condition' => 'nullable|string',
+            'apartment_type' => 'nullable|string',
+            'has_garden' => 'boolean',
+            'has_parking' => 'boolean',
+            'is_mortgage_available' => 'boolean',
+            'is_from_developer' => 'boolean',
+            'landmark' => 'nullable|string',
+            'latitude' => 'nullable|numeric|between:-90,90',
+            'longitude' => 'nullable|numeric|between:-180,180',
+            'photos.*' => 'nullable|image|max:10240',
+            'agent_id' => 'nullable|exists:users,id',
+            'owner_phone' => 'nullable|string|max:30',
+            'listing_type' => 'sometimes|in:regular,vip,urgent',
+        ]);
+        return $validated;
     }
 }
