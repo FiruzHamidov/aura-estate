@@ -56,6 +56,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/properties', [PropertyController::class, 'store']);
     Route::put('/properties/{property}', [PropertyController::class, 'update']);
     Route::delete('/properties/{property}', [PropertyController::class, 'destroy']);
+    Route::patch('/properties/{property}/moderation-listing', [PropertyController::class, 'updateModerationAndListingType']);
 
     // Полный CRUD для справочников (если тебе нужно управление ими в админке)
     Route::apiResource('property-types', PropertyTypeController::class)->except(['index']);
@@ -76,5 +77,6 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/bookings', [BookingController::class, 'index']);
     Route::post('/bookings', [BookingController::class, 'store']);
     Route::get('/bookings/{id}', [BookingController::class, 'show']);
+
 
 });

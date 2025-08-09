@@ -169,6 +169,27 @@ class PropertyController extends Controller
         return response()->json(['message' => 'Объект помечен как удалён']);
     }
 
+    public function updateModerationAndListingType(Request $request, Property $property)
+    {
+        $user = auth()->user();
+
+        if (!$user || (!$user->hasRole('admin') && !$user->hasRole('agent'))) {
+            return response()->json(['message' => 'Доступ запрещён'], 403);
+        }
+
+        $validated = $request->validate([
+            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted',
+            'listing_type' => 'sometimes|in:regular,vip,urgent',
+        ]);
+
+        $property->update($validated);
+
+        return response()->json([
+            'message' => 'Обновлено успешно',
+            'data' => $property->only(['id', 'moderation_status', 'listing_type']),
+        ]);
+    }
+
     /**
      * @param Request $request
      * @return array
