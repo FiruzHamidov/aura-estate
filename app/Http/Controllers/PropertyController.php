@@ -21,39 +21,56 @@ class PropertyController extends Controller
     {
         $user = auth()->user();
 
-//        return $user;
-        $query = Property::with(['type', 'status', 'location', 'repairType', 'photos', 'creator']);
+        $query = Property::with(['type','status','location','repairType','photos','creator']);
 
+        // --- Ролевые ограничения ---
         if (!$user) {
+            // Гость видит только одобренные
             $query->where('moderation_status', 'approved');
         } elseif ($user->hasRole('client')) {
-            $query->where('created_by', $user->id)->where('moderation_status', '!=', 'deleted');
+            $query->where('created_by', $user->id)
+                ->where('moderation_status', '!=', 'deleted');
         } elseif ($user->hasRole('agent') || $user->hasRole('admin')) {
-            $query->where(function ($q) use ($user) {
-                $q->where('created_by', $user->id);
-            });
+            $query->where('created_by', $user->id)
+                ->where('moderation_status', '!=', 'deleted');
         }
 
-        // LIKE-поиск
-        foreach (['title', 'description', 'district', 'address', 'landmark', 'condition', 'apartment_type', 'owner_phone'] as $field) {
-            if ($request->filled($field)) {
-                $query->where($field, 'like', '%' . $request->input($field) . '%');
+        // --- Фильтр по статусу (для авторизованных) ---
+        // Принимаем либо один статус, либо CSV: "pending,approved"
+        // Доступные статусы для фронта: pending, approved, rejected, draft (deleted скрыт)
+        $available = ['pending','approved','rejected','draft'];
+        if ($user && $request->filled('moderation_status')) {
+            $statuses = collect(explode(',', $request->input('moderation_status')))
+                ->map(fn($s) => trim($s))
+                ->filter(fn($s) => in_array($s, $available, true))
+                ->values()
+                ->all();
+
+            if (!empty($statuses)) {
+                $query->whereIn('moderation_status', $statuses);
             }
         }
 
-        // Равенство
+        // --- LIKE-поиск ---
+        foreach (['title','description','district','address','landmark','condition','apartment_type','owner_phone'] as $field) {
+            if ($request->filled($field)) {
+                $query->where($field, 'like', '%'.$request->input($field).'%');
+            }
+        }
+
+        // --- Равенство ---
         foreach ([
-                     'type_id', 'status_id', 'location_id', 'repair_type_id',
-                     'currency', 'offer_type',
-                     'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
-                     'latitude', 'longitude', 'agent_id', 'listing_type'
+                     'type_id','status_id','location_id','repair_type_id',
+                     'currency','offer_type',
+                     'has_garden','has_parking','is_mortgage_available','is_from_developer',
+                     'latitude','longitude','agent_id','listing_type'
                  ] as $field) {
             if ($request->filled($field)) {
                 $query->where($field, $request->input($field));
             }
         }
 
-        // Диапазоны
+        // --- Диапазоны ---
         $rangeFilters = [
             'price' => 'price',
             'rooms' => 'rooms',
@@ -63,20 +80,15 @@ class PropertyController extends Controller
             'total_floors' => 'total_floors',
             'year_built' => 'year_built',
         ];
-
         foreach ($rangeFilters as $param => $column) {
-            $from = $request->input($param . 'From');
-            $to = $request->input($param . 'To');
-
-            if ($from !== null) {
-                $query->where($column, '>=', $from);
-            }
-            if ($to !== null) {
-                $query->where($column, '<=', $to);
-            }
+            $from = $request->input($param.'From');
+            $to   = $request->input($param.'To');
+            if ($from !== null) $query->where($column, '>=', $from);
+            if ($to   !== null) $query->where($column, '<=', $to);
         }
 
-        return response()->json($query->paginate(20));
+        $perPage = (int)($request->input('per_page', 20));
+        return response()->json($query->paginate($perPage));
     }
 
     public function store(Request $request)
