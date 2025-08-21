@@ -34,10 +34,8 @@ class PropertyController extends Controller
                 ->where('moderation_status', '!=', 'deleted');
         }
 
-        // --- Фильтр по статусу (для авторизованных) ---
-        // Принимаем либо один статус, либо CSV: "pending,approved"
-        // Доступные статусы для фронта: pending, approved, rejected, draft (deleted скрыт)
         $available = ['pending','approved','rejected','draft', 'deleted'];
+
         if ($request->filled('moderation_status')) {
             $statuses = collect(explode(',', $request->input('moderation_status')))
                 ->map(fn($s) => trim($s))
