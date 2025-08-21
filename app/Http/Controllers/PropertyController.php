@@ -110,19 +110,67 @@ class PropertyController extends Controller
         if ($request->hasFile('photos')) {
             foreach ($request->file('photos') as $photo) {
                 $image = $this->imageManager->read($photo)
-                    ->resize(1600, 1200, function ($constraint) {
-                        $constraint->aspectRatio();
-                        $constraint->upsize();
-                    });
+                    ->cover(1600, 1200); // сохраняем пропорции, без растяжения
 
+                // читаем PNG-лого
+                $watermark = $this->imageManager->read(public_path('watermark/logo.png'))
+                    ->scale((int) round($image->width() * 0.14)); // ~14% ширины фото
+
+                // накладываем справа снизу
+                $image->place($watermark, 'bottom-right', 36, 28);
+
+                // сохраняем
                 $jpeg = new JpegEncoder(80);
                 $binary = $image->encode($jpeg);
 
-                $filename = 'properties/' . uniqid() . '.jpg';
+                $filename = 'properties/' . uniqid('', true) . '.jpg';
                 \Storage::disk('public')->put($filename, $binary);
                 $property->photos()->create(['file_path' => $filename]);
             }
         }
+
+        return response()->json($property->load(['photos']));
+    }
+
+    public function update(Request $request, Property $property)
+    {
+        if (auth()->user()->hasRole('client') && $property->created_by !== auth()->id()) {
+            return response()->json(['message' => 'Доступ запрещён'], 403);
+        }
+
+        $validated = $this->validateProperty($request);
+
+        $property->update($validated);
+
+        if ($request->hasFile('photos')) {
+            // удалить старые фото
+            foreach ($property->photos as $oldPhoto) {
+                \Storage::disk('public')->delete($oldPhoto->file_path);
+                $oldPhoto->delete();
+            }
+
+            // добавить новые фото
+            foreach ($request->file('photos') as $photo) {
+                $image = $this->imageManager->read($photo)
+                    ->cover(1600, 1200); // сохраняем пропорции, без растягивания
+
+                // читаем PNG-лого
+                $watermark = $this->imageManager->read(public_path('watermark/logo.png'))
+                    ->scale((int) round($image->width() * 0.14)); // ~14% ширины фото
+
+                // накладываем справа снизу
+                $image->place($watermark, 'bottom-right', 36, 28);
+
+                // сохраняем
+                $jpeg = new JpegEncoder(80);
+                $binary = $image->encode($jpeg);
+
+                $filename = 'properties/' . uniqid('', true) . '.jpg';
+                \Storage::disk('public')->put($filename, $binary);
+                $property->photos()->create(['file_path' => $filename]);
+            }
+        }
+
 
         return response()->json($property->load(['photos']));
     }
@@ -142,40 +190,7 @@ class PropertyController extends Controller
         return response()->json($property->load(['type', 'status', 'location', 'repairType', 'photos', 'creator']));
     }
 
-    public function update(Request $request, Property $property)
-    {
-        if (auth()->user()->hasRole('client') && $property->created_by !== auth()->id()) {
-            return response()->json(['message' => 'Доступ запрещён'], 403);
-        }
 
-        $validated = $this->validateProperty($request);
-
-        $property->update($validated);
-
-        if ($request->hasFile('photos')) {
-            foreach ($property->photos as $oldPhoto) {
-                \Storage::disk('public')->delete($oldPhoto->path);
-                $oldPhoto->delete();
-            }
-
-            foreach ($request->file('photos') as $photo) {
-                $image = $this->imageManager->read($photo)
-                    ->resize(1600, 1200, function ($constraint) {
-                        $constraint->aspectRatio();
-                        $constraint->upsize();
-                    });
-
-                $jpeg = new JpegEncoder(80);
-                $binary = $image->encode($jpeg);
-
-                $filename = 'properties/' . uniqid() . '.jpg';
-                \Storage::disk('public')->put($filename, $binary);
-                $property->photos()->create(['file_path' => $filename]);
-            }
-        }
-
-        return response()->json($property->load(['photos']));
-    }
 
     public function destroy(Property $property)
     {
