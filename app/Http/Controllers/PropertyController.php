@@ -77,7 +77,6 @@ class PropertyController extends Controller
             }
         }
 
-        // --- Диапазоны ---
         foreach ([
                      'price' => 'price',
                      'rooms' => 'rooms',
@@ -110,10 +109,7 @@ class PropertyController extends Controller
         if ($request->hasFile('photos')) {
             foreach ($request->file('photos') as $photo) {
                 $image = $this->imageManager->read($photo)
-                    ->resize(1600, null, function ($constraint) {
-                        $constraint->aspectRatio();
-                        $constraint->upsize();
-                    });
+                    ->resizeDown();
 
                 // читаем PNG-лого
                 $watermark = $this->imageManager->read(public_path('watermark/logo.png'))
@@ -123,7 +119,7 @@ class PropertyController extends Controller
                 $image->place($watermark, 'bottom-right', 36, 28);
 
                 // сохраняем
-                $jpeg = new JpegEncoder(80);
+                $jpeg = new JpegEncoder(50);
                 $binary = $image->encode($jpeg);
 
                 $filename = 'properties/' . uniqid('', true) . '.jpg';
@@ -155,10 +151,7 @@ class PropertyController extends Controller
             // добавить новые фото
             foreach ($request->file('photos') as $photo) {
                 $image = $this->imageManager->read($photo)
-                    ->resize(1600, null, function ($constraint) {
-                        $constraint->aspectRatio();
-                        $constraint->upsize();
-                    });
+                    ->resizeDown();
 
                 // читаем PNG-лого
                 $watermark = $this->imageManager->read(public_path('watermark/logo.png'))
@@ -168,7 +161,7 @@ class PropertyController extends Controller
                 $image->place($watermark, 'bottom-right', 36, 28);
 
                 // сохраняем
-                $jpeg = new JpegEncoder(80);
+                $jpeg = new JpegEncoder(50);
                 $binary = $image->encode($jpeg);
 
                 $filename = 'properties/' . uniqid('', true) . '.jpg';
