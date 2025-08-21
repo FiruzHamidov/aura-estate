@@ -4,9 +4,9 @@ namespace App\Http\Controllers;
 
 use App\Models\Property;
 use Illuminate\Http\Request;
-use Intervention\Image\ImageManager;
 use Intervention\Image\Drivers\Gd\Driver;
 use Intervention\Image\Encoders\JpegEncoder;
+use Intervention\Image\ImageManager;
 
 class PropertyController extends Controller
 {
@@ -32,10 +32,17 @@ class PropertyController extends Controller
         } else if ($user->hasRole('agent') || $user->hasRole('admin')) {
             $query->where('created_by', $user->id)
                 ->where('moderation_status', '!=', 'deleted');
+        } elseif ($user->hasRole('admin')) {
+            // админ видит всё;
+            // если статус явно указан — применяем фильтр ниже
+            // если нет — по умолчанию скрываем deleted
+            $query->when(!$request->filled('moderation_status'), function ($q) {
+                $q->where('moderation_status', '!=', 'deleted');
+            });
         }
 
-        $available = ['pending','approved','rejected','draft', 'deleted'];
-
+        // --- Фильтр по статусам (работает только если админ или пользователь авторизован и статус в списке) ---
+        $available = ['pending', 'approved', 'rejected', 'draft', 'deleted'];
         if ($request->filled('moderation_status')) {
             $statuses = collect(explode(',', $request->input('moderation_status')))
                 ->map(fn($s) => trim($s))
@@ -44,7 +51,14 @@ class PropertyController extends Controller
                 ->all();
 
             if (!empty($statuses)) {
-                $query->whereIn('moderation_status', $statuses);
+                // админ → применяем напрямую
+                if ($user && $user->hasRole('admin')) {
+                    $query->whereIn('moderation_status', $statuses);
+                } // клиент / агент → применяем, но внутри их own-свойств
+                elseif ($user) {
+                    $query->whereIn('moderation_status', $statuses);
+                }
+                // гость мы уже отфильтровали выше
             }
         }
 
