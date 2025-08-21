@@ -110,7 +110,10 @@ class PropertyController extends Controller
         if ($request->hasFile('photos')) {
             foreach ($request->file('photos') as $photo) {
                 $image = $this->imageManager->read($photo)
-                    ->cover(1600, 1200); // сохраняем пропорции, без растяжения
+                    ->resize(1600, null, function ($constraint) {
+                        $constraint->aspectRatio();
+                        $constraint->upsize();
+                    });
 
                 // читаем PNG-лого
                 $watermark = $this->imageManager->read(public_path('watermark/logo.png'))
@@ -152,7 +155,10 @@ class PropertyController extends Controller
             // добавить новые фото
             foreach ($request->file('photos') as $photo) {
                 $image = $this->imageManager->read($photo)
-                    ->cover(1600, 1200); // сохраняем пропорции, без растягивания
+                    ->resize(1600, null, function ($constraint) {
+                        $constraint->aspectRatio();
+                        $constraint->upsize();
+                    });
 
                 // читаем PNG-лого
                 $watermark = $this->imageManager->read(public_path('watermark/logo.png'))
