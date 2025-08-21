@@ -94,7 +94,7 @@ class PropertyController extends Controller
         }
 
         $perPage = (int) $request->input('per_page', 20);
-        return response()->json($query->paginate($perPage));
+        return response()->json($query->latest()->paginate($perPage));
     }
 
     public function store(Request $request)
