@@ -20,54 +20,52 @@ class PropertyController extends Controller
     public function index(Request $request)
     {
         $user = auth()->user();
-
         $query = Property::with(['type','status','location','repairType','photos','creator']);
 
+        $hasStatusFilter = $request->filled('moderation_status');
+
         // --- Ролевые ограничения ---
-        if (!$user) {
+        if ($user && $user->hasRole('admin')) {
+            // Админ видит вообще всё: без ограничений created_by и без исключения deleted.
+            // Ничего не добавляем. Ниже применятся только явные фильтры из запроса.
+        } elseif (!$user) {
+            // Гость — только approved
             $query->where('moderation_status', 'approved');
-        } else if ($user->hasRole('client')) {
-            $query->where('created_by', $user->id)
-                ->where('moderation_status', '!=', 'deleted');
-        } else if ($user->hasRole('agent') || $user->hasRole('admin')) {
-            $query->where('created_by', $user->id)
-                ->where('moderation_status', '!=', 'deleted');
-        } elseif ($user->hasRole('admin')) {
-            // админ видит всё;
-            // если статус явно указан — применяем фильтр ниже
-            // если нет — по умолчанию скрываем deleted
-            $query->when(!$request->filled('moderation_status'), function ($q) {
-                $q->where('moderation_status', '!=', 'deleted');
-            });
-        }
-
-        // --- Фильтр по статусам (работает только если админ или пользователь авторизован и статус в списке) ---
-        $available = ['pending', 'approved', 'rejected', 'draft', 'deleted'];
-        if ($request->filled('moderation_status')) {
-            $statuses = collect(explode(',', $request->input('moderation_status')))
-                ->map(fn($s) => trim($s))
-                ->filter(fn($s) => in_array($s, $available, true))
-                ->values()
-                ->all();
-
-            if (!empty($statuses)) {
-                // админ → применяем напрямую
-                if ($user && $user->hasRole('admin')) {
-                    $query->whereIn('moderation_status', $statuses);
-                } // клиент / агент → применяем, но внутри их own-свойств
-                elseif ($user) {
-                    $query->whereIn('moderation_status', $statuses);
-                }
-                // гость мы уже отфильтровали выше
+        } elseif ($user->hasRole('agent')) {
+            // Агент — только свои; по умолчанию скрываем deleted
+            $query->where('created_by', $user->id);
+            if (!$hasStatusFilter) {
+                $query->where('moderation_status', '!=', 'deleted');
+            }
+        } elseif ($user->hasRole('client')) {
+            // Клиент — только свои; по умолчанию скрываем deleted
+            $query->where('created_by', $user->id);
+            if (!$hasStatusFilter) {
+                $query->where('moderation_status', '!=', 'deleted');
             }
         }
 
+        // --- Явный фильтр по статусам (для всех, включая админа) ---
+        if ($hasStatusFilter) {
+            $available = ['pending','approved','rejected','draft','deleted'];
+            $statuses = collect(explode(',', $request->input('moderation_status')))
+                ->map('trim')
+                ->filter(fn($s) => in_array($s, $available, true))
+                ->values()
+                ->all();
+            if (!empty($statuses)) {
+                $query->whereIn('moderation_status', $statuses);
+            }
+        }
+
+        // --- Поиск по тексту ---
         foreach (['title','description','district','address','landmark','condition','apartment_type','owner_phone'] as $field) {
             if ($request->filled($field)) {
                 $query->where($field, 'like', '%'.$request->input($field).'%');
             }
         }
 
+        // --- Точные поля ---
         foreach ([
                      'type_id','status_id','location_id','repair_type_id',
                      'currency','offer_type',
@@ -80,23 +78,22 @@ class PropertyController extends Controller
         }
 
         // --- Диапазоны ---
-        $rangeFilters = [
-            'price' => 'price',
-            'rooms' => 'rooms',
-            'total_area' => 'total_area',
-            'living_area' => 'living_area',
-            'floor' => 'floor',
-            'total_floors' => 'total_floors',
-            'year_built' => 'year_built',
-        ];
-        foreach ($rangeFilters as $param => $column) {
+        foreach ([
+                     'price' => 'price',
+                     'rooms' => 'rooms',
+                     'total_area' => 'total_area',
+                     'living_area' => 'living_area',
+                     'floor' => 'floor',
+                     'total_floors' => 'total_floors',
+                     'year_built' => 'year_built',
+                 ] as $param => $column) {
             $from = $request->input($param.'From');
             $to   = $request->input($param.'To');
             if ($from !== null) $query->where($column, '>=', $from);
             if ($to   !== null) $query->where($column, '<=', $to);
         }
 
-        $perPage = (int)($request->input('per_page', 20));
+        $perPage = (int) $request->input('per_page', 20);
         return response()->json($query->paginate($perPage));
     }
 
