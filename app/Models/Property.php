@@ -66,7 +66,7 @@ class Property extends Model
 
     public function photos()
     {
-        return $this->hasMany(PropertyPhoto::class);
+        return $this->hasMany(PropertyPhoto::class)->orderBy('position');
     }
 
     public function creator()

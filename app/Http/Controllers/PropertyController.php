@@ -25,12 +25,11 @@ class PropertyController extends Controller
 
         // --- Ролевые ограничения ---
         if (!$user) {
-            // Гость видит только одобренные
             $query->where('moderation_status', 'approved');
-        } elseif ($user->hasRole('client')) {
+        } else if ($user->hasRole('client')) {
             $query->where('created_by', $user->id)
                 ->where('moderation_status', '!=', 'deleted');
-        } elseif ($user->hasRole('agent') || $user->hasRole('admin')) {
+        } else if ($user->hasRole('agent') || $user->hasRole('admin')) {
             $query->where('created_by', $user->id)
                 ->where('moderation_status', '!=', 'deleted');
         }
@@ -39,7 +38,7 @@ class PropertyController extends Controller
         // Принимаем либо один статус, либо CSV: "pending,approved"
         // Доступные статусы для фронта: pending, approved, rejected, draft (deleted скрыт)
         $available = ['pending','approved','rejected','draft', 'deleted'];
-        if ($user && $request->filled('moderation_status')) {
+        if ($request->filled('moderation_status')) {
             $statuses = collect(explode(',', $request->input('moderation_status')))
                 ->map(fn($s) => trim($s))
                 ->filter(fn($s) => in_array($s, $available, true))
@@ -51,14 +50,12 @@ class PropertyController extends Controller
             }
         }
 
-        // --- LIKE-поиск ---
         foreach (['title','description','district','address','landmark','condition','apartment_type','owner_phone'] as $field) {
             if ($request->filled($field)) {
                 $query->where($field, 'like', '%'.$request->input($field).'%');
             }
         }
 
-        // --- Равенство ---
         foreach ([
                      'type_id','status_id','location_id','repair_type_id',
                      'currency','offer_type',

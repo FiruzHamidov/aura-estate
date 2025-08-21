@@ -46,6 +46,8 @@ Route::get('/user/{user}', [UserController::class, 'show']);
 // --- ЗАЩИЩЕННЫЕ МАРШРУТЫ ---
 
 Route::middleware('auth:sanctum')->group(function () {
+
+    Route::patch('/properties/{property}/photos/order', [PropertyController::class, 'reorderPhotos']);
     Route::get('/my-properties', [PropertyController::class, 'index']);
 
     // Профиль пользователя
