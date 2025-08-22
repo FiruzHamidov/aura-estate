@@ -70,7 +70,7 @@ class PropertyController extends Controller
                      'type_id','status_id','location_id','repair_type_id',
                      'currency','offer_type',
                      'has_garden','has_parking','is_mortgage_available','is_from_developer',
-                     'latitude','longitude','agent_id','listing_type'
+                     'latitude','longitude','agent_id','listing_type', 'created_by'
                  ] as $field) {
             if ($request->filled($field)) {
                 $query->where($field, $request->input($field));
