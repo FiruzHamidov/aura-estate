@@ -39,7 +39,7 @@ class PropertyController extends Controller
             }
         } elseif ($user->hasRole('client')) {
             // Клиент — только свои; по умолчанию скрываем deleted
-            $query->where('created_by', $user->id);
+//            $query->where('created_by', $user->id);
             if (!$hasStatusFilter) {
                 $query->where('moderation_status', '!=', 'deleted');
             }
@@ -231,6 +231,7 @@ class PropertyController extends Controller
         $validated = $request->validate([
             'title' => 'nullable|string',
             'description' => 'nullable|string',
+            'created_by' => 'nullable|string',
             'district' => 'nullable|string',
             'address' => 'nullable|string',
             'type_id' => 'required|exists:property_types,id',
