@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\BookingController;
+use App\Http\Controllers\ContractTypeController;
 use App\Http\Controllers\FavoriteController;
 use App\Http\Controllers\RepairTypeController;
 use Illuminate\Support\Facades\Route;
@@ -38,7 +39,7 @@ Route::get('/parking-types', [ParkingTypeController::class, 'index']);
 Route::get('/heating-types', [HeatingTypeController::class, 'index']);
 Route::get('/heating-types', [HeatingTypeController::class, 'index']);
 Route::get('/repair-types', [RepairTypeController::class, 'index']);
-Route::get('/contract-types', [RepairTypeController::class, 'index']);
+Route::get('/contract-types', [ContractTypeController::class, 'index']);
 Route::get('/properties/{property}', [PropertyController::class, 'show']);
 Route::get('/user/agents', [UserController::class, 'agents']);
 Route::get('/user/{user}', [UserController::class, 'show']);
