@@ -67,10 +67,10 @@ class PropertyController extends Controller
 
         // --- Точные поля ---
         foreach ([
-                     'type_id','status_id','location_id','repair_type_id',
-                     'currency','offer_type',
-                     'has_garden','has_parking','is_mortgage_available','is_from_developer',
-                     'latitude','longitude','agent_id','listing_type', 'created_by'
+                     'type_id', 'status_id', 'location_id', 'repair_type_id',
+                     'currency', 'offer_type',
+                     'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
+                     'latitude', 'longitude', 'agent_id', 'listing_type', 'created_by', 'contract_type_id'
                  ] as $field) {
             if ($request->filled($field)) {
                 $query->where($field, $request->input($field));
@@ -186,7 +186,7 @@ class PropertyController extends Controller
             return response()->json(['message' => 'Объект недоступен'], 403);
         }
 
-        return response()->json($property->load(['type', 'status', 'location', 'repairType', 'photos', 'creator']));
+        return response()->json($property->load(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'contractType']));
     }
 
 
@@ -234,6 +234,7 @@ class PropertyController extends Controller
             'created_by' => 'nullable|string',
             'district' => 'nullable|string',
             'address' => 'nullable|string',
+            'contract_type_id' => 'nullable|exists:contract_types,id',
             'type_id' => 'required|exists:property_types,id',
             'status_id' => 'required|exists:property_statuses,id',
             'location_id' => 'nullable|exists:locations,id',

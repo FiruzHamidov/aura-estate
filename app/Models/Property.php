@@ -41,7 +41,8 @@ class Property extends Model
         'district',
         'address',
         'owner_phone',
-        'listing_type'
+        'listing_type',
+        'contract_type_id'
     ];
 
     public function type()
@@ -91,5 +92,10 @@ class Property extends Model
     public function bookings()
     {
         return $this->hasMany(Booking::class);
+    }
+
+    public function contractType()
+    {
+        return $this->belongsTo(ContractType::class);
     }
 }

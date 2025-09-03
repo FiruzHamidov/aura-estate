@@ -36,7 +36,9 @@ Route::get('/locations', [LocationController::class, 'index']);
 Route::get('/building-types', [BuildingTypeController::class, 'index']);
 Route::get('/parking-types', [ParkingTypeController::class, 'index']);
 Route::get('/heating-types', [HeatingTypeController::class, 'index']);
+Route::get('/heating-types', [HeatingTypeController::class, 'index']);
 Route::get('/repair-types', [RepairTypeController::class, 'index']);
+Route::get('/contract-types', [RepairTypeController::class, 'index']);
 Route::get('/properties/{property}', [PropertyController::class, 'show']);
 Route::get('/user/agents', [UserController::class, 'agents']);
 Route::get('/user/{user}', [UserController::class, 'show']);
@@ -67,6 +69,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('building-types', BuildingTypeController::class)->except(['index']);
     Route::apiResource('parking-types', ParkingTypeController::class)->except(['index']);
     Route::apiResource('heating-types', HeatingTypeController::class)->except(['index']);
+    Route::apiResource('contract-types', ContractTypeController::class)->except(['index']);
     Route::apiResource('repair-types', RepairTypeController::class)->except(['index']);
     Route::apiResource('user', UserController::class)->except(['show']);
     Route::post('/user/{user}/photo', [UserController::class, 'updatePhoto']);
