@@ -112,8 +112,8 @@ class PropertyReportController extends Controller
     // --- 2) Эффективность менеджеров/агентов
     public function managerEfficiency(Request $request)
     {
-        $groupBy = $request->input('group_by', 'agent_id'); // 'agent_id' | 'created_by'
-        if (!in_array($groupBy, ['agent_id','created_by'], true)) $groupBy = 'agent_id';
+        $groupBy = $request->input('group_by', 'created_by'); // 'agent_id' | 'created_by'
+        if (!in_array($groupBy, ['agent_id','created_by'], true)) $groupBy = 'created_by';
 
         [$expr, $alias] = $this->priceExpr($request);
 
@@ -299,8 +299,8 @@ class PropertyReportController extends Controller
     public function agentsLeaderboard(Request $request)
     {
         $limit = (int)$request->input('limit', 10);
-        $groupBy = $request->input('group_by', 'agent_id'); // 'agent_id' | 'created_by'
-        if (!in_array($groupBy, ['agent_id','created_by'], true)) $groupBy = 'agent_id';
+        $groupBy = $request->input('group_by', 'created_by'); // 'agent_id' | 'created_by'
+        if (!in_array($groupBy, ['agent_id','created_by'], true)) $groupBy = 'created_by';
 
         [$expr, $alias] = $this->priceExpr($request);
 
