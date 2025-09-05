@@ -35,7 +35,7 @@ class PropertyReportController extends Controller
         $multiFields = [
             'type_id','status_id','location_id','repair_type_id',
             'currency','offer_type','listing_type','contract_type_id',
-            'created_by','agent_id','moderation_status','district'
+            'created_by','created_by','moderation_status','district'
         ];
         foreach ($multiFields as $f) {
             if ($request->has($f)) {
@@ -275,22 +275,22 @@ class PropertyReportController extends Controller
         [$q] = $this->applyCommonFilters($request, $base);
 
         $rows = (clone $q)
-            ->select('agent_id',
+            ->select('created_by',
                 DB::raw("SUM(CASE WHEN moderation_status IN ('sold','rented') THEN 1 ELSE 0 END) as closed"),
                 DB::raw('COUNT(*) as total'),
                 DB::raw('AVG(NULLIF(price,0)) as avg_price')
             )
-            ->groupBy('agent_id')
+            ->groupBy('created_by')
             ->orderByDesc('closed')
             ->limit($limit)
             ->get();
 
         // имена агентов
-        $ids = $rows->pluck('agent_id')->filter()->unique();
+        $ids = $rows->pluck('created_by')->filter()->unique();
         $users = User::whereIn('id', $ids)->get(['id','name'])->keyBy('id');
 
         $rows->transform(function($r) use ($users){
-            $r->agent_name = $users[$r->agent_id]->name ?? '—';
+            $r->agent_name = $users[$r->created_by]->name ?? '—';
             $r->avg_price = round((float)$r->avg_price, 2);
             return $r;
         });
