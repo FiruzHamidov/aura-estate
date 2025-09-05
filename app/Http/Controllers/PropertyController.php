@@ -26,57 +26,78 @@ class PropertyController extends Controller
 
         // --- Ролевые ограничения ---
         if ($user && $user->hasRole('admin')) {
-            // Админ видит вообще всё: без ограничений created_by и без исключения deleted.
-            // Ничего не добавляем. Ниже применятся только явные фильтры из запроса.
+            // без ограничений
         } elseif (!$user) {
-            // Гость — только approved
             $query->where('moderation_status', 'approved');
         } elseif ($user->hasRole('agent')) {
-            // Агент — только свои; по умолчанию скрываем deleted
             $query->where('created_by', $user->id);
             if (!$hasStatusFilter) {
                 $query->where('moderation_status', '!=', 'deleted');
             }
         } elseif ($user->hasRole('client')) {
-            // Клиент — только свои; по умолчанию скрываем deleted
-//            $query->where('created_by', $user->id);
             if (!$hasStatusFilter) {
                 $query->where('moderation_status', '!=', 'deleted');
             }
         }
 
-        // --- Явный фильтр по статусам (для всех, включая админа) ---
+        // helper: нормализует вход в массив (поддерживает a[]=1&a[]=2 и "1,2")
+        $toArray = function ($value) {
+            if ($value === null || $value === '') return [];
+            if (is_array($value)) return array_values(array_filter($value, fn($v) => $v !== '' && $v !== null));
+            return array_values(array_filter(array_map('trim', explode(',', $value)), fn($v) => $v !== ''));
+        };
+
+        // --- Статусы (мульти) ---
         if ($hasStatusFilter) {
-            $available = ['pending','approved','rejected','draft','deleted'];
-            $statuses = collect(explode(',', $request->input('moderation_status')))
-                ->map('trim')
-                ->filter(fn($s) => in_array($s, $available, true))
-                ->values()
-                ->all();
+            $available = ['pending','approved','rejected','draft','deleted','sold','rented'];
+            $statuses = array_values(array_intersect($toArray($request->input('moderation_status')), $available));
             if (!empty($statuses)) {
                 $query->whereIn('moderation_status', $statuses);
             }
         }
 
-        // --- Поиск по тексту ---
+        // --- Поиск по тексту (поддержим массив значений: ИЛИ между терминами) ---
         foreach (['title','description','district','address','landmark','condition','apartment_type','owner_phone'] as $field) {
-            if ($request->filled($field)) {
-                $query->where($field, 'like', '%'.$request->input($field).'%');
+            if ($request->has($field)) {
+                $terms = $toArray($request->input($field));
+                if (empty($terms)) {
+                    // одиночное значение-строка
+                    $val = $request->input($field);
+                    if ($val !== null && $val !== '') {
+                        $query->where($field, 'like', '%'.$val.'%');
+                    }
+                } else {
+                    $query->where(function($q) use ($field, $terms) {
+                        foreach ($terms as $t) {
+                            $q->orWhere($field, 'like', '%'.$t.'%');
+                        }
+                    });
+                }
             }
         }
 
-        // --- Точные поля ---
-        foreach ([
-                     'type_id', 'status_id', 'location_id', 'repair_type_id',
-                     'currency', 'offer_type',
-                     'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
-                     'latitude', 'longitude', 'agent_id', 'listing_type', 'created_by', 'contract_type_id'
-                 ] as $field) {
-            if ($request->filled($field)) {
-                $query->where($field, $request->input($field));
+        // --- Точные поля (поддержка мультиселекта через whereIn) ---
+        $exactFields = [
+            'type_id', 'status_id', 'location_id', 'repair_type_id',
+            'currency', 'offer_type',
+            'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
+            'latitude', 'longitude', 'agent_id', 'listing_type', 'created_by', 'contract_type_id'
+        ];
+        foreach ($exactFields as $field) {
+            if ($request->has($field)) {
+                $vals = $toArray($request->input($field));
+                if (empty($vals)) {
+                    $val = $request->input($field);
+                    if ($val !== null && $val !== '') {
+                        $query->where($field, $val);
+                    }
+                } else {
+                    $query->whereIn($field, $vals);
+                }
             }
         }
 
+        // --- Диапазоны ---
         foreach ([
                      'price' => 'price',
                      'rooms' => 'rooms',
@@ -88,8 +109,8 @@ class PropertyController extends Controller
                  ] as $param => $column) {
             $from = $request->input($param.'From');
             $to   = $request->input($param.'To');
-            if ($from !== null) $query->where($column, '>=', $from);
-            if ($to   !== null) $query->where($column, '<=', $to);
+            if ($from !== null && $from !== '') $query->where($column, '>=', $from);
+            if ($to   !== null && $to   !== '') $query->where($column, '<=', $to);
         }
 
         $perPage = (int) $request->input('per_page', 20);
