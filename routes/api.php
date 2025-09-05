@@ -3,6 +3,7 @@
 use App\Http\Controllers\BookingController;
 use App\Http\Controllers\ContractTypeController;
 use App\Http\Controllers\FavoriteController;
+use App\Http\Controllers\PropertyReportController;
 use App\Http\Controllers\RepairTypeController;
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\AuthController;
@@ -83,6 +84,21 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/bookings', [BookingController::class, 'index']);
     Route::post('/bookings', [BookingController::class, 'store']);
     Route::get('/bookings/{id}', [BookingController::class, 'show']);
+
+
+    // reports
+
+
+    Route::get('/reports/properties/summary',           [PropertyReportController::class, 'summary']);
+    Route::get('/reports/properties/manager-efficiency',[PropertyReportController::class, 'managerEfficiency']);
+    Route::get('/reports/properties/by-status',         [PropertyReportController::class, 'byStatus']);
+    Route::get('/reports/properties/by-type',           [PropertyReportController::class, 'byType']);
+    Route::get('/reports/properties/by-location',       [PropertyReportController::class, 'byLocation']);
+    Route::get('/reports/properties/time-series',       [PropertyReportController::class, 'timeSeries']);
+    Route::get('/reports/properties/price-buckets',     [PropertyReportController::class, 'priceBuckets']);
+    Route::get('/reports/properties/rooms-hist',        [PropertyReportController::class, 'roomsHistogram']);
+    Route::get('/reports/properties/agents-leaderboard',[PropertyReportController::class, 'agentsLeaderboard']);
+    Route::get('/reports/properties/conversion',        [PropertyReportController::class, 'conversionFunnel']);
 
 
 });
