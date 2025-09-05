@@ -35,7 +35,7 @@ class PropertyReportController extends Controller
         $multiFields = [
             'type_id','status_id','location_id','repair_type_id',
             'currency','offer_type','listing_type','contract_type_id',
-            'created_by','created_by','moderation_status','district'
+            'created_by','agent_id','moderation_status','district'
         ];
         foreach ($multiFields as $f) {
             if ($request->has($f)) {
@@ -63,21 +63,40 @@ class PropertyReportController extends Controller
         return [$query, $dateField];
     }
 
-    // --- 2.1 Сводка
+    private function priceExpr(Request $request): array
+    {
+        $metric = $request->input('price_metric', 'sum'); // sum|avg
+        if (!in_array($metric, ['sum','avg'], true)) $metric = 'sum';
+
+        $expr = $metric === 'sum'
+            ? "SUM(COALESCE(price,0))"
+            : "AVG(NULLIF(price,0))";
+
+        $alias = $metric === 'sum' ? 'sum_price' : 'avg_price';
+        return [$expr, $alias, $metric];
+    }
+
+    // --- 1) Сводка
     public function summary(Request $request)
     {
         $base = Property::query();
         [$q] = $this->applyCommonFilters($request, $base);
 
         $total = (clone $q)->count();
+
         $byStatus = (clone $q)->select('moderation_status', DB::raw('COUNT(*) as cnt'))
             ->groupBy('moderation_status')->get();
 
         $byOffer = (clone $q)->select('offer_type', DB::raw('COUNT(*) as cnt'))
             ->groupBy('offer_type')->get();
 
+        // Средние
         $avgPrice = (clone $q)->avg('price');
         $avgArea  = (clone $q)->avg('total_area');
+
+        // Суммы
+        $sumPrice = (clone $q)->sum('price');
+        $sumArea  = (clone $q)->sum('total_area');
 
         return response()->json([
             'total' => $total,
@@ -85,18 +104,21 @@ class PropertyReportController extends Controller
             'by_offer_type' => $byOffer,
             'avg_price' => round((float)$avgPrice, 2),
             'avg_total_area' => round((float)$avgArea, 2),
+            'sum_price' => round((float)$sumPrice, 2),
+            'sum_total_area' => round((float)$sumArea, 2),
         ]);
     }
 
-    // --- 2.2 Эффективность менеджеров/агентов
-    // Группировка по agent_id (или created_by, если agent_id не заполнен)
+    // --- 2) Эффективность менеджеров/агентов
     public function managerEfficiency(Request $request)
     {
         $groupBy = $request->input('group_by', 'agent_id'); // 'agent_id' | 'created_by'
         if (!in_array($groupBy, ['agent_id','created_by'], true)) $groupBy = 'agent_id';
 
+        [$expr, $alias] = $this->priceExpr($request);
+
         $base = Property::query();
-        [$q, $dateField] = $this->applyCommonFilters($request, $base);
+        [$q] = $this->applyCommonFilters($request, $base);
 
         $data = (clone $q)
             ->select([
@@ -104,7 +126,8 @@ class PropertyReportController extends Controller
                 DB::raw('COUNT(*) as total'),
                 DB::raw("SUM(CASE WHEN moderation_status = 'approved' THEN 1 ELSE 0 END) as approved"),
                 DB::raw("SUM(CASE WHEN moderation_status IN ('sold','rented') THEN 1 ELSE 0 END) as closed"),
-                DB::raw("AVG(NULLIF(price,0)) as avg_price")
+                DB::raw("$expr as $alias"),
+                DB::raw("SUM(COALESCE(total_area,0)) as sum_total_area"),
             ])
             ->groupBy($groupBy)
             ->get();
@@ -113,8 +136,7 @@ class PropertyReportController extends Controller
         $userIds = $data->pluck($groupBy)->filter()->unique()->values();
         $users = User::whereIn('id', $userIds)->get(['id','name','email'])->keyBy('id');
 
-        // Пример метрики конверсии
-        $result = $data->map(function ($row) use ($users, $groupBy) {
+        $result = $data->map(function ($row) use ($users, $groupBy, $alias) {
             $total = (int)$row->total;
             $closed = (int)$row->closed;
             return [
@@ -125,14 +147,15 @@ class PropertyReportController extends Controller
                 'approved' => (int)$row->approved,
                 'closed' => $closed,
                 'close_rate' => $total ? round($closed / $total * 100, 2) : 0,
-                'avg_price' => round((float)$row->avg_price, 2),
+                $alias => round((float)$row->$alias, 2),
+                'sum_total_area' => round((float)$row->sum_total_area, 2),
             ];
         });
 
         return response()->json($result);
     }
 
-    // --- 2.3 Распределение по статусам
+    // --- 3) Распределение по статусам
     public function byStatus(Request $request)
     {
         $base = Property::query();
@@ -144,7 +167,7 @@ class PropertyReportController extends Controller
         return response()->json($rows);
     }
 
-    // --- 2.4 По типам
+    // --- 4) По типам
     public function byType(Request $request)
     {
         $base = Property::query()->with('type:id,name');
@@ -153,7 +176,6 @@ class PropertyReportController extends Controller
         $rows = (clone $q)->select('type_id', DB::raw('COUNT(*) as cnt'))
             ->groupBy('type_id')->orderByDesc('cnt')->get();
 
-        // Добавим названия типов
         $rows->transform(function($r){
             $r->type_name = optional($r->type)->name ?? null;
             unset($r->type);
@@ -163,7 +185,7 @@ class PropertyReportController extends Controller
         return response()->json($rows);
     }
 
-    // --- 2.5 По локациям
+    // --- 5) По локациям
     public function byLocation(Request $request)
     {
         $base = Property::query()->with('location:id,name');
@@ -181,11 +203,13 @@ class PropertyReportController extends Controller
         return response()->json($rows);
     }
 
-    // --- 2.6 Тайм-серия (день/неделя/месяц)
+    // --- 6) Тайм-серия (день/неделя/месяц)
     public function timeSeries(Request $request)
     {
         $interval = $request->input('interval', 'day'); // day|week|month
         if (!in_array($interval, ['day','week','month'], true)) $interval = 'day';
+
+        [$expr, $alias] = $this->priceExpr($request);
 
         $base = Property::query();
         [$q, $dateField] = $this->applyCommonFilters($request, $base);
@@ -200,19 +224,25 @@ class PropertyReportController extends Controller
             ->select(
                 DB::raw("DATE_FORMAT($dateField, '$format') as bucket"),
                 DB::raw("COUNT(*) as total"),
-                DB::raw("SUM(CASE WHEN moderation_status IN ('sold','rented') THEN 1 ELSE 0 END) as closed")
+                DB::raw("SUM(CASE WHEN moderation_status IN ('sold','rented') THEN 1 ELSE 0 END) as closed"),
+                DB::raw("$expr as $alias")
             )
             ->groupBy('bucket')
             ->orderBy('bucket')
             ->get();
 
+        // округлим метрику
+        $rows->transform(function($r) use ($alias) {
+            $r->$alias = round((float)$r->$alias, 2);
+            return $r;
+        });
+
         return response()->json($rows);
     }
 
-    // --- 2.7 Вёдра цен
+    // --- 7) Вёдра цен
     public function priceBuckets(Request $request)
     {
-        // по умолчанию 8 «корзин»
         $buckets = max(1, (int)$request->input('buckets', 8));
 
         $base = Property::query()->whereNotNull('price')->where('price','>',0);
@@ -231,7 +261,6 @@ class PropertyReportController extends Controller
         $edges = [];
         for ($i=0;$i<=$buckets;$i++) $edges[] = $min + $size * $i;
 
-        // Считаем «на лету»
         $result = [];
         for ($i=0;$i<$buckets;$i++) {
             $from = $edges[$i];
@@ -251,7 +280,7 @@ class PropertyReportController extends Controller
         ]);
     }
 
-    // --- 2.8 Гистограмма по комнатам
+    // --- 8) Гистограмма по комнатам
     public function roomsHistogram(Request $request)
     {
         $base = Property::query()->whereNotNull('rooms');
@@ -266,39 +295,44 @@ class PropertyReportController extends Controller
         return response()->json($rows);
     }
 
-    // --- 2.9 Лидерборд агентов (по закрытым сделкам)
+    // --- 9) Лидерборд агентов (по закрытым сделкам)
     public function agentsLeaderboard(Request $request)
     {
         $limit = (int)$request->input('limit', 10);
+        $groupBy = $request->input('group_by', 'agent_id'); // 'agent_id' | 'created_by'
+        if (!in_array($groupBy, ['agent_id','created_by'], true)) $groupBy = 'agent_id';
+
+        [$expr, $alias] = $this->priceExpr($request);
 
         $base = Property::query();
         [$q] = $this->applyCommonFilters($request, $base);
 
         $rows = (clone $q)
-            ->select('created_by',
+            ->select($groupBy,
                 DB::raw("SUM(CASE WHEN moderation_status IN ('sold','rented') THEN 1 ELSE 0 END) as closed"),
                 DB::raw('COUNT(*) as total'),
-                DB::raw('AVG(NULLIF(price,0)) as avg_price')
+                DB::raw("$expr as $alias")
             )
-            ->groupBy('created_by')
+            ->groupBy($groupBy)
             ->orderByDesc('closed')
             ->limit($limit)
             ->get();
 
         // имена агентов
-        $ids = $rows->pluck('created_by')->filter()->unique();
+        $ids = $rows->pluck($groupBy)->filter()->unique();
         $users = User::whereIn('id', $ids)->get(['id','name'])->keyBy('id');
 
-        $rows->transform(function($r) use ($users){
-            $r->agent_name = $users[$r->created_by]->name ?? '—';
-            $r->avg_price = round((float)$r->avg_price, 2);
+        $rows->transform(function($r) use ($users, $groupBy) {
+            $r->agent_name = $users[$r->$groupBy]->name ?? '—';
+            $r->sum_price = isset($r->sum_price) ? round((float)$r->sum_price, 2) : null;
+            $r->avg_price = isset($r->avg_price) ? round((float)$r->avg_price, 2) : null;
             return $r;
         });
 
         return response()->json($rows);
     }
 
-    // --- 2.10 Воронка конверсии (сколько объектов на каждом этапе)
+    // --- 10) Воронка конверсии
     public function conversionFunnel(Request $request)
     {
         $base = Property::query();
