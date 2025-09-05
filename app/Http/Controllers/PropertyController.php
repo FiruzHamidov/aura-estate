@@ -231,7 +231,7 @@ class PropertyController extends Controller
         }
 
         $validated = $request->validate([
-            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted',
+            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,sold,rented',
             'listing_type' => 'sometimes|in:regular,vip,urgent',
         ]);
 
@@ -255,7 +255,7 @@ class PropertyController extends Controller
             'created_by' => 'nullable|string',
             'district' => 'nullable|string',
             'address' => 'nullable|string',
-            'moderation_status' => 'nullable|string',
+            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,sold,rented',
             'contract_type_id' => 'nullable|exists:contract_types,id',
             'type_id' => 'required|exists:property_types,id',
             'status_id' => 'required|exists:property_statuses,id',
