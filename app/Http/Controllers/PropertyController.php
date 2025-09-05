@@ -234,6 +234,7 @@ class PropertyController extends Controller
             'created_by' => 'nullable|string',
             'district' => 'nullable|string',
             'address' => 'nullable|string',
+            'moderation_status' => 'nullable|string',
             'contract_type_id' => 'nullable|exists:contract_types,id',
             'type_id' => 'required|exists:property_types,id',
             'status_id' => 'required|exists:property_statuses,id',
