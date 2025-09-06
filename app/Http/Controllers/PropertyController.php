@@ -292,10 +292,10 @@ class PropertyController extends Controller
             'year_built' => 'nullable|integer|min:1900|max:' . date('Y'),
             'condition' => 'nullable|string',
             'apartment_type' => 'nullable|string',
-            'has_garden' => 'boolean',
-            'has_parking' => 'boolean',
-            'is_mortgage_available' => 'boolean',
-            'is_from_developer' => 'boolean',
+            'has_garden' => 'sometimes|boolean',
+            'has_parking' => 'sometimes|boolean',
+            'is_mortgage_available' => 'sometimes|boolean',
+            'is_from_developer' => 'sometimes|boolean',
             'landmark' => 'nullable|string',
             'latitude' => 'nullable|numeric|between:-90,90',
             'longitude' => 'nullable|numeric|between:-180,180',
@@ -304,18 +304,18 @@ class PropertyController extends Controller
             'listing_type' => 'sometimes|in:regular,vip,urgent',
 
             // Photos (optional on update)
-            'photos' => [$isUpdate ? 'sometimes' : 'nullable','array','max:40'],
-            'photos.*' => ['file','mimes:jpg,jpeg,png,webp','max:8192'],
-            'photo_positions' => ['nullable','array'],
-            'photo_positions.*' => ['integer','min:0'],
+            'photos' => [$isUpdate ? 'sometimes' : 'nullable', 'array', 'max:40'],
+            'photos.*' => ['file', 'mimes:jpg,jpeg,png,webp', 'max:8192'],
+            'photo_positions' => ['nullable', 'array'],
+            'photo_positions.*' => ['integer', 'min:0'],
 
             // Reorder existing
-            'photo_order' => ['sometimes','array'],
-            'photo_order.*' => ['integer','exists:property_photos,id'],
+            'photo_order' => ['sometimes', 'array'],
+            'photo_order.*' => ['integer', 'exists:property_photos,id'],
 
             // Delete list
-            'delete_photo_ids' => ['sometimes','array'],
-            'delete_photo_ids.*' => ['integer','exists:property_photos,id'],
+            'delete_photo_ids' => ['sometimes', 'array'],
+            'delete_photo_ids.*' => ['integer', 'exists:property_photos,id'],
         ]);
         return $validated;
     }
