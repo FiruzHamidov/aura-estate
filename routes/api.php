@@ -76,7 +76,7 @@ Route::apiResource('units.photos', DeveloperUnitPhotoController::class)->only(['
 
 Route::middleware('auth:sanctum')->group(callback: function () {
 
-    Route::patch('/properties/{property}/photos/order', [PropertyController::class, 'reorderPhotos']);
+    Route::put('/properties/{property}/photos/order', [PropertyController::class, 'reorderPhotos']);
     Route::get('/my-properties', [PropertyController::class, 'index']);
 
     // Профиль пользователя
@@ -92,7 +92,7 @@ Route::middleware('auth:sanctum')->group(callback: function () {
     Route::post('properties/{property}/photos', [PropertyPhotoController::class, 'store']);
     Route::delete('properties/{property}/photos/{photo}', [PropertyPhotoController::class, 'destroy'])
         ->whereNumber('photo');
-    Route::patch('properties/{property}/photos/reorder', [PropertyPhotoController::class, 'reorder']);
+    Route::put('properties/{property}/photos/reorder', [PropertyPhotoController::class, 'reorder']);
 
     // Полный CRUD для справочников (если тебе нужно управление ими в админке)
     Route::apiResource('property-types', PropertyTypeController::class)->except(['index']);
