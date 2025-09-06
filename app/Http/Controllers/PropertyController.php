@@ -127,29 +127,11 @@ class PropertyController extends Controller
 
         $property = Property::create($validated);
 
-        if ($request->hasFile('photos')) {
-            foreach ($request->file('photos') as $photo) {
-                $image = $this->imageManager->read($photo)
-                    ->scaleDown(1600, null);
+        // Accept initial photos with explicit order coming from the client
+        // photos[] => files, photo_positions[] => integers aligned by index
+        $this->storePhotosFromRequest($request, $property);
 
-                // читаем PNG-лого
-                $watermark = $this->imageManager->read(public_path('watermark/logo.png'))
-                    ->scale((int) round($image->width() * 0.14)); // ~14% ширины фото
-
-                // накладываем справа снизу
-                $image->place($watermark, 'bottom-right', 36, 28);
-
-                // сохраняем
-                $jpeg = new JpegEncoder(50);
-                $binary = $image->encode($jpeg);
-
-                $filename = 'properties/' . uniqid('', true) . '.jpg';
-                \Storage::disk('public')->put($filename, $binary);
-                $property->photos()->create(['file_path' => $filename]);
-            }
-        }
-
-        return response()->json($property->load(['photos']));
+        return response()->json($property->load('photos'));
     }
 
     public function update(Request $request, Property $property)
@@ -158,41 +140,78 @@ class PropertyController extends Controller
             return response()->json(['message' => 'Доступ запрещён'], 403);
         }
 
-        $validated = $this->validateProperty($request);
-
+        $validated = $this->validateProperty($request, isUpdate: true);
         $property->update($validated);
 
-        if ($request->hasFile('photos')) {
-            // удалить старые фото
-            foreach ($property->photos as $oldPhoto) {
-                \Storage::disk('public')->delete($oldPhoto->file_path);
-                $oldPhoto->delete();
-            }
+        // Optional: allow adding more photos on update
+        $this->storePhotosFromRequest($request, $property, append: true);
 
-            // добавить новые фото
-            foreach ($request->file('photos') as $photo) {
-                $image = $this->imageManager->read($photo)
-                    ->scaleDown(1600, null);
+        // Optional: reorder via `photo_order` = [photoId1, photoId2, ...]
+        if ($request->filled('photo_order') && is_array($request->photo_order)) {
+            $this->applyOrder($property, $request->photo_order);
+        }
 
-                // читаем PNG-лого
-                $watermark = $this->imageManager->read(public_path('watermark/logo.png'))
-                    ->scale((int) round($image->width() * 0.14)); // ~14% ширины фото
+        return response()->json($property->load('photos'));
+    }
 
-                // накладываем справа снизу
-                $image->place($watermark, 'bottom-right', 36, 28);
-
-                // сохраняем
-                $jpeg = new JpegEncoder(50);
-                $binary = $image->encode($jpeg);
-
-                $filename = 'properties/' . uniqid('', true) . '.jpg';
-                \Storage::disk('public')->put($filename, $binary);
-                $property->photos()->create(['file_path' => $filename]);
+    private function storePhotosFromRequest(Request $request, Property $property, bool $append = false): void
+    {
+        // Delete selected photos if requested
+        if ($request->filled('delete_photo_ids')) {
+            foreach ($property->photos()->whereIn('id', $request->delete_photo_ids)->get() as $old) {
+                \Storage::disk('public')->delete($old->file_path);
+                $old->delete();
             }
         }
 
+        if (!$request->hasFile('photos')) {
+            return;
+        }
 
-        return response()->json($property->load(['photos']));
+        // Determine base position (append to the end)
+        $basePos = $append ? (int) ($property->photos()->max('position') ?? -1) + 1 : 0;
+
+        $files = $request->file('photos');
+        $positions = $request->input('photo_positions', []); // optional parallel array
+
+        foreach (array_values($files) as $i => $photo) {
+            $image = app('image')->read($photo)->scaleDown(1600, null);
+            $watermark = app('image')->read(public_path('watermark/logo.png'))
+                ->scale((int) round($image->width() * 0.14));
+            $image->place($watermark, 'bottom-right', 36, 28);
+
+            $binary = $image->encode(new JpegEncoder(50));
+            $filename = 'properties/' . uniqid('', true) . '.jpg';
+            \Storage::disk('public')->put($filename, $binary);
+
+            $position = $positions[$i] ?? ($basePos + $i);
+
+            $property->photos()->create([
+                'file_path' => $filename,
+                'position' => $position,
+            ]);
+        }
+
+        // Normalize positions to be 0..N-1 with no gaps
+        $this->normalizePositions($property);
+    }
+
+    private function applyOrder(Property $property, array $orderedIds): void
+    {
+        foreach ($orderedIds as $pos => $id) {
+            $property->photos()->whereKey($id)->update(['position' => $pos]);
+        }
+        $this->normalizePositions($property);
+    }
+
+    private function normalizePositions(Property $property): void
+    {
+        $photos = $property->photos()->orderBy('position')->orderBy('id')->get();
+        foreach ($photos as $idx => $p) {
+            if ((int)$p->position !== $idx) {
+                $p->update(['position' => $idx]);
+            }
+        }
     }
 
     public function show(Property $property)
@@ -247,7 +266,7 @@ class PropertyController extends Controller
      * @param Request $request
      * @return array
      */
-    public function validateProperty(Request $request)
+    public function validateProperty(Request $request,  bool $isUpdate = false)
     {
         $validated = $request->validate([
             'title' => 'nullable|string',
@@ -270,7 +289,7 @@ class PropertyController extends Controller
             'living_area' => 'nullable|numeric',
             'floor' => 'nullable|integer',
             'total_floors' => 'nullable|integer',
-            'year_built' => 'nullable|integer',
+            'year_built' => 'nullable|integer|min:1900|max:' . date('Y'),
             'condition' => 'nullable|string',
             'apartment_type' => 'nullable|string',
             'has_garden' => 'boolean',
@@ -280,10 +299,23 @@ class PropertyController extends Controller
             'landmark' => 'nullable|string',
             'latitude' => 'nullable|numeric|between:-90,90',
             'longitude' => 'nullable|numeric|between:-180,180',
-            'photos.*' => 'nullable|image|max:10240',
             'agent_id' => 'nullable|exists:users,id',
             'owner_phone' => 'nullable|string|max:30',
             'listing_type' => 'sometimes|in:regular,vip,urgent',
+
+            // Photos (optional on update)
+            'photos' => [$isUpdate ? 'sometimes' : 'nullable','array','max:40'],
+            'photos.*' => ['file','mimes:jpg,jpeg,png,webp','max:8192'],
+            'photo_positions' => ['nullable','array'],
+            'photo_positions.*' => ['integer','min:0'],
+
+            // Reorder existing
+            'photo_order' => ['sometimes','array'],
+            'photo_order.*' => ['integer','exists:property_photos,id'],
+
+            // Delete list
+            'delete_photo_ids' => ['sometimes','array'],
+            'delete_photo_ids.*' => ['integer','exists:property_photos,id'],
         ]);
         return $validated;
     }

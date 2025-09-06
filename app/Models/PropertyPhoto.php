@@ -10,7 +10,7 @@ class PropertyPhoto extends Model
     /** @use HasFactory<\Database\Factories\PropertyPhotoFactory> */
     use HasFactory;
 
-    protected $fillable = ['property_id', 'file_path', 'type'];
+    protected $fillable = ['property_id', 'file_path', 'type', 'position'];
 
     public function property()
     {

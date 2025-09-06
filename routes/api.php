@@ -1,8 +1,18 @@
 <?php
 
 use App\Http\Controllers\BookingController;
+use App\Http\Controllers\ConstructionStageController;
 use App\Http\Controllers\ContractTypeController;
+use App\Http\Controllers\DeveloperController;
+use App\Http\Controllers\DeveloperUnitController;
+use App\Http\Controllers\DeveloperUnitPhotoController;
 use App\Http\Controllers\FavoriteController;
+use App\Http\Controllers\FeatureController;
+use App\Http\Controllers\MaterialController;
+use App\Http\Controllers\NewBuildingBlockController;
+use App\Http\Controllers\NewBuildingController;
+use App\Http\Controllers\NewBuildingPhotoController;
+use App\Http\Controllers\PropertyPhotoController;
 use App\Http\Controllers\PropertyReportController;
 use App\Http\Controllers\RepairTypeController;
 use Illuminate\Support\Facades\Route;
@@ -45,11 +55,26 @@ Route::get('/properties/{property}', [PropertyController::class, 'show']);
 Route::get('/user/agents', [UserController::class, 'agents']);
 Route::get('/user/{user}', [UserController::class, 'show']);
 
+// Новостройки и связанные роуты
+
+Route::apiResource('developers', DeveloperController::class)->only(['index','show']);
+Route::apiResource('construction-stages', ConstructionStageController::class)->only(['index','show']);
+Route::apiResource('materials', MaterialController::class)->only(['index','show']);
+Route::apiResource('features', FeatureController::class)->only(['index','show']);
+
+Route::apiResource('new-buildings', NewBuildingController::class)->only(['index','show']);
+Route::apiResource('new-buildings.blocks', NewBuildingBlockController::class)->only(['index','show'])->shallow();
+Route::apiResource('new-buildings.units', DeveloperUnitController::class)->only(['index','show'])->shallow();
+
+// Фотки — index доступен публично
+Route::apiResource('new-buildings.photos', NewBuildingPhotoController::class)->only(['index'])->shallow();
+Route::apiResource('units.photos', DeveloperUnitPhotoController::class)->only(['index'])->shallow();
+
 
 
 // --- ЗАЩИЩЕННЫЕ МАРШРУТЫ ---
 
-Route::middleware('auth:sanctum')->group(function () {
+Route::middleware('auth:sanctum')->group(callback: function () {
 
     Route::patch('/properties/{property}/photos/order', [PropertyController::class, 'reorderPhotos']);
     Route::get('/my-properties', [PropertyController::class, 'index']);
@@ -63,6 +88,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('/properties/{property}', [PropertyController::class, 'update']);
     Route::delete('/properties/{property}', [PropertyController::class, 'destroy']);
     Route::patch('/properties/{property}/moderation-listing', [PropertyController::class, 'updateModerationAndListingType']);
+
+    Route::post('properties/{property}/photos', [PropertyPhotoController::class, 'store']);
+    Route::delete('properties/{property}/photos/{photo}', [PropertyPhotoController::class, 'destroy'])
+        ->whereNumber('photo');
+    Route::patch('properties/{property}/photos/reorder', [PropertyPhotoController::class, 'reorder']);
 
     // Полный CRUD для справочников (если тебе нужно управление ими в админке)
     Route::apiResource('property-types', PropertyTypeController::class)->except(['index']);
@@ -87,8 +117,6 @@ Route::middleware('auth:sanctum')->group(function () {
 
 
     // reports
-
-
     Route::get('/reports/properties/summary',           [PropertyReportController::class, 'summary']);
     Route::get('/reports/properties/manager-efficiency',[PropertyReportController::class, 'managerEfficiency']);
     Route::get('/reports/properties/by-status',         [PropertyReportController::class, 'byStatus']);
@@ -100,5 +128,21 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/reports/properties/agents-leaderboard',[PropertyReportController::class, 'agentsLeaderboard']);
     Route::get('/reports/properties/conversion',        [PropertyReportController::class, 'conversionFunnel']);
 
+    // Новостройки для админа
 
+    Route::apiResource('developers', DeveloperController::class)->except(['index','show']);
+    Route::apiResource('construction-stages', ConstructionStageController::class)->except(['index','show']);
+    Route::apiResource('materials', MaterialController::class)->except(['index','show']);
+    Route::apiResource('features', FeatureController::class)->except(['index','show']);
+
+    Route::apiResource('new-buildings', NewBuildingController::class)->except(['index','show']);
+    Route::apiResource('new-buildings.blocks', NewBuildingBlockController::class)->except(['index','show'])->shallow();
+    Route::apiResource('new-buildings.units', DeveloperUnitController::class)->except(['index','show'])->shallow();
+
+    Route::apiResource('new-buildings.photos', NewBuildingPhotoController::class)->only(['store','destroy'])->shallow();
+    Route::apiResource('units.photos', DeveloperUnitPhotoController::class)->only(['store','destroy'])->shallow();
+
+    // attach/detach фич
+    Route::post('new-buildings/{new_building}/features/{feature}', [NewBuildingController::class, 'attachFeature']);
+    Route::delete('new-buildings/{new_building}/features/{feature}', [NewBuildingController::class, 'detachFeature']);
 });

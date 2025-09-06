@@ -21,6 +21,11 @@ class DatabaseSeeder extends Seeder
             HeatingTypeSeeder::class,
             RepairTypeSeeder::class,
             PropertySeeder::class,
+            ConstructionStageSeeder::class,
+            MaterialSeeder::class,
+            FeatureSeeder::class,
+            DeveloperSeeder::class,
+            DemoNewBuildingSeeder::class,
         ]);
     }
 }
