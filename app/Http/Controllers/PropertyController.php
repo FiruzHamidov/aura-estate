@@ -175,8 +175,8 @@ class PropertyController extends Controller
         $positions = $request->input('photo_positions', []); // optional parallel array
 
         foreach (array_values($files) as $i => $photo) {
-            $image = app('image')->read($photo)->scaleDown(1600, null);
-            $watermark = app('image')->read(public_path('watermark/logo.png'))
+            $image = $this->imageManager->read($photo)->scaleDown(1600, null);
+            $watermark = $this->imageManager->read(public_path('watermark/logo.png'))
                 ->scale((int) round($image->width() * 0.14));
             $image->place($watermark, 'bottom-right', 36, 28);
 
