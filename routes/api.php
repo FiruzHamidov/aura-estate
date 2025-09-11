@@ -76,7 +76,6 @@ Route::apiResource('units.photos', DeveloperUnitPhotoController::class)->only(['
 
 Route::middleware('auth:sanctum')->group(callback: function () {
 
-    Route::put('/properties/{property}/photos/order', [PropertyController::class, 'reorderPhotos']);
     Route::get('/my-properties', [PropertyController::class, 'index']);
 
     // Профиль пользователя

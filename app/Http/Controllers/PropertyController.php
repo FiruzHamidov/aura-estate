@@ -97,6 +97,10 @@ class PropertyController extends Controller
             }
         }
 
+        $aliases = [
+            'area' => 'total_area', // area* => total_area*
+        ];
+
         // --- Диапазоны ---
         foreach ([
                      'price' => 'price',
@@ -106,6 +110,7 @@ class PropertyController extends Controller
                      'floor' => 'floor',
                      'total_floors' => 'total_floors',
                      'year_built' => 'year_built',
+                     'area' => $aliases['area'],
                  ] as $param => $column) {
             $from = $request->input($param.'From');
             $to   = $request->input($param.'To');
