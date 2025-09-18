@@ -103,10 +103,10 @@ Route::middleware('auth:sanctum')->group(callback: function () {
     Route::apiResource('heating-types', HeatingTypeController::class)->except(['index']);
     Route::apiResource('contract-types', ContractTypeController::class)->except(['index']);
     Route::apiResource('repair-types', RepairTypeController::class)->except(['index']);
-    Route::apiResource('user', UserController::class)->except(['show']);
     Route::post('/user/{user}/photo', [UserController::class, 'updatePhoto']);
     Route::delete('/user/photo', [UserController::class, 'deleteMyPhoto']);
     Route::post('/user/update-password', [UserController::class, 'updatePassword']);
+    Route::apiResource('user', UserController::class)->except(['show']);
 
     Route::get('/favorites', [FavoriteController::class, 'index']);
     Route::post('/favorites', [FavoriteController::class, 'store']);

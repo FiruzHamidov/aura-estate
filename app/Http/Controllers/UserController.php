@@ -105,7 +105,7 @@ class UserController extends Controller
 
         $user->update(['photo' => null]);
 
-        return response()->json(['message' => 'Your photo has been deleted']);
+        return response()->json(['message' => 'Ваша фотография была удалена']);
     }
 
     public function agents()
