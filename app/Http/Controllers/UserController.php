@@ -122,4 +122,27 @@ class UserController extends Controller
         $user->delete();
         return response()->json(['message' => 'User deleted']);
     }
+
+    public function updatePassword(Request $request)
+    {
+        $user = Auth::user();
+
+        $request->validate([
+            'current_password' => 'required',
+            'new_password'     => 'required|string|min:6|confirmed',
+        ]);
+
+        // Проверка текущего пароля
+        if (!Hash::check($request->current_password, $user->password)) {
+            return response()->json([
+                'message' => 'Текущий пароль введён неверно'
+            ], 422);
+        }
+
+        // Обновление
+        $user->password = Hash::make($request->new_password);
+        $user->save();
+
+        return response()->json(['message' => 'Пароль успешно обновлён']);
+    }
 }
