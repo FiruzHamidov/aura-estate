@@ -25,6 +25,8 @@ use App\Http\Controllers\LocationController;
 use App\Http\Controllers\BuildingTypeController;
 use App\Http\Controllers\ParkingTypeController;
 use App\Http\Controllers\HeatingTypeController;
+use App\Http\Controllers\RoleController;
+
 
 // Тестовый маршрут на проверку API
 Route::get('/ping', function () {
