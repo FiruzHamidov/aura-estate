@@ -7,6 +7,8 @@ use Illuminate\Http\Request;
 use Intervention\Image\Drivers\Gd\Driver;
 use Intervention\Image\Encoders\JpegEncoder;
 use Intervention\Image\ImageManager;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\Cache;
 
 class PropertyController extends Controller
 {
@@ -17,14 +19,126 @@ class PropertyController extends Controller
         $this->imageManager = new ImageManager(new Driver());
     }
 
+    // ==== Список (как у тебя), но на общих методах ====
     public function index(Request $request)
     {
-        $user = auth()->user();
-        $query = Property::with(['type','status','location','repairType','photos','creator']);
+        $query = $this->baseQuery($request);
+        $this->applyFilters($query, $request);
+
+        $perPage = (int) $request->input('per_page', 20);
+        return response()->json($query->latest()->paginate($perPage));
+    }
+
+    // ==== Карта: bbox + zoom + кластеризация/точки ====
+    public function map(Request $request)
+    {
+        // bbox: south,west,north,east
+        $bboxRaw = $request->query('bbox', '');
+        $parts = array_map('trim', explode(',', $bboxRaw));
+        if (count($parts) !== 4) {
+            return response()->json(['error' => 'Invalid bbox. Expected south,west,north,east'], 400);
+        }
+        [$south, $west, $north, $east] = array_map('floatval', $parts);
+
+        // Нормализация (на случай перепутанных значений)
+        if ($south > $north) [$south, $north] = [$north, $south];
+        if ($west  > $east)  [$west,  $east]  = [$east,  $west];
+
+        $zoom = (int) $request->query('zoom', 12);
+        $zoom = max(1, min(22, $zoom));
+
+        // Ключ кэша: bbox округлим до сетки, чтобы лучше переиспользовать
+        $round = fn (float $n) => round($n * 400) / 400; // ~0.0025°
+        $bboxKey = implode(',', [$round($south), $round($west), $round($north), $round($east)]);
+        $filtersKey = md5(json_encode($request->except(['bbox', 'zoom'])));
+
+        $cacheKey = "map:{$bboxKey}:z{$zoom}:{$filtersKey}";
+        $ttl = now()->addSeconds(20);
+
+        return Cache::remember($cacheKey, $ttl, function () use ($request, $south, $west, $north, $east, $zoom) {
+            $query = $this->baseQuery($request);
+
+            // Ограничение по bbox (полям latitude/longitude)
+            $query->whereBetween('latitude',  [$south, $north])
+                ->whereBetween('longitude', [$west,  $east]);
+
+            // Применяем те же фильтры, что и в списке
+            $this->applyFilters($query, $request);
+
+            // Safety cap (не отдавать десятки тысяч)
+            $limit = 5000;
+
+            // Низкие зумы: грубая кластеризация "по сетке"
+            if ($zoom <= 11) {
+                $cell = 0.02; // шаг сетки ~2 км (подберите под город)
+                $rows = $query
+                    ->selectRaw("
+                        FLOOR(latitude  / {$cell}) as gx,
+                        FLOOR(longitude / {$cell}) as gy,
+                        COUNT(*) as cnt,
+                        AVG(latitude)  as lat_avg,
+                        AVG(longitude) as lng_avg
+                    ")
+                    ->groupBy('gx', 'gy')
+                    ->limit($limit)
+                    ->get();
+
+                $features = $rows->map(function ($r) {
+                    return [
+                        'type' => 'Feature',
+                        'geometry' => [
+                            'type' => 'Point',
+                            // ВНИМАНИЕ: проверь порядок в вашей карте. Для Yandex чаще [lat, lng]
+                            'coordinates' => [ (float)$r->lat_avg, (float)$r->lng_avg ],
+                        ],
+                        'property' => [
+                            'cluster' => true,
+                            'point_count' => (int)$r->cnt,
+                        ],
+                    ];
+                })->values();
+
+                return response()->json([
+                    'type' => 'FeatureCollection',
+                    'features' => $features,
+                ]);
+            }
+
+            // Высокие зумы: отдаём точки
+            $points = $query
+                ->select(['id','title','price','latitude','longitude'])
+                ->limit($limit)
+                ->get();
+
+            $features = $points->map(function ($p) {
+                return [
+                    'type' => 'Feature',
+                    'geometry' => [
+                        'type' => 'Point',
+                        'coordinates' => [ (float)$p->latitude, (float)$p->longitude ],
+                    ],
+                    'property' => [
+                        'id'    => (int)$p->id,
+                        'title' => (string)$p->title,
+                    ],
+                ];
+            })->values();
+
+            return response()->json([
+                'type' => 'FeatureCollection',
+                'features' => $features,
+            ]);
+        });
+    }
+
+    // ==== Общая база для index/map: роли, связи, базовые статусы ====
+    private function baseQuery(Request $request): Builder
+    {
+        $user  = auth()->user();
+        $query = Property::query()->with(['type','status','location','repairType','photos','creator']);
 
         $hasStatusFilter = $request->filled('moderation_status');
 
-        // --- Ролевые ограничения ---
         if ($user && $user->hasRole('admin')) {
             // без ограничений
         } elseif (!$user) {
@@ -40,28 +154,32 @@ class PropertyController extends Controller
             }
         }
 
-        // helper: нормализует вход в массив (поддерживает a[]=1&a[]=2 и "1,2")
+        return $query;
+    }
+
+    // ==== Единая фильтрация для списка и карты ====
+    private function applyFilters(Builder $query, Request $request): void
+    {
         $toArray = function ($value) {
             if ($value === null || $value === '') return [];
             if (is_array($value)) return array_values(array_filter($value, fn($v) => $v !== '' && $v !== null));
             return array_values(array_filter(array_map('trim', explode(',', $value)), fn($v) => $v !== ''));
         };
 
-        // --- Статусы (мульти) ---
-        if ($hasStatusFilter) {
+        // Статусы (мульти)
+        if ($request->filled('moderation_status')) {
             $available = ['pending','approved','rejected','draft','deleted','sold','rented'];
-            $statuses = array_values(array_intersect($toArray($request->input('moderation_status')), $available));
+            $statuses  = array_values(array_intersect($toArray($request->input('moderation_status')), $available));
             if (!empty($statuses)) {
                 $query->whereIn('moderation_status', $statuses);
             }
         }
 
-        // --- Поиск по тексту (поддержим массив значений: ИЛИ между терминами) ---
+        // Текстовые поля (like, поддержка массива термов: OR)
         foreach (['title','description','district','address','landmark','condition','apartment_type','owner_phone'] as $field) {
             if ($request->has($field)) {
                 $terms = $toArray($request->input($field));
                 if (empty($terms)) {
-                    // одиночное значение-строка
                     $val = $request->input($field);
                     if ($val !== null && $val !== '') {
                         $query->where($field, 'like', '%'.$val.'%');
@@ -76,12 +194,13 @@ class PropertyController extends Controller
             }
         }
 
-        // --- Точные поля (поддержка мультиселекта через whereIn) ---
+        // Точные поля (включая мультиселект через whereIn)
         $exactFields = [
             'type_id', 'status_id', 'location_id', 'repair_type_id',
             'currency', 'offer_type',
             'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
-            'latitude', 'longitude', 'agent_id', 'listing_type', 'created_by', 'contract_type_id'
+            'agent_id', 'listing_type', 'created_by', 'contract_type_id',
+            // при желании можно и lat/lng, но для карты они задаются bbox'ом
         ];
         foreach ($exactFields as $field) {
             if ($request->has($field)) {
@@ -97,29 +216,25 @@ class PropertyController extends Controller
             }
         }
 
-        $aliases = [
-            'area' => 'total_area', // area* => total_area*
-        ];
+        // Алиасы
+        $aliases = [ 'area' => 'total_area' ];
 
-        // --- Диапазоны ---
+        // Диапазоны
         foreach ([
-                     'price' => 'price',
-                     'rooms' => 'rooms',
-                     'total_area' => 'total_area',
-                     'living_area' => 'living_area',
-                     'floor' => 'floor',
+                     'price'        => 'price',
+                     'rooms'        => 'rooms',
+                     'total_area'   => 'total_area',
+                     'living_area'  => 'living_area',
+                     'floor'        => 'floor',
                      'total_floors' => 'total_floors',
-                     'year_built' => 'year_built',
-                     'area' => $aliases['area'],
+                     'year_built'   => 'year_built',
+                     'area'         => $aliases['area'],
                  ] as $param => $column) {
             $from = $request->input($param.'From');
             $to   = $request->input($param.'To');
             if ($from !== null && $from !== '') $query->where($column, '>=', $from);
             if ($to   !== null && $to   !== '') $query->where($column, '<=', $to);
         }
-
-        $perPage = (int) $request->input('per_page', 20);
-        return response()->json($query->latest()->paginate($perPage));
     }
 
     public function store(Request $request)

@@ -40,6 +40,7 @@ Route::post('/sms/verify', [AuthController::class, 'verifySmsCode']);
 
 // Получение списка объектов (публичный просмотр)
 Route::get('/properties', [PropertyController::class, 'index']);
+Route::get('/properties/map', [PropertyController::class, 'map']);
 
 // Публичные GET-запросы на справочники (чтобы фронт мог их спокойно получить)
 Route::get('/property-types', [PropertyTypeController::class, 'index']);
