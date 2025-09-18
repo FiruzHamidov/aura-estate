@@ -22,7 +22,7 @@ class UserController extends Controller
         $request->validate([
             'name' => 'required|string',
             'description' => 'sometimes|string',
-            'birthday' => 'nullable',
+            'birthday' => 'nullable|date',
             'phone' => 'required|string|unique:users,phone',
             'email' => 'nullable|email|unique:users,email',
             'role_id' => 'required|exists:roles,id',
@@ -53,7 +53,7 @@ class UserController extends Controller
         $request->validate([
             'name' => 'sometimes|string',
             'description' => 'sometimes|string',
-            'birthday' => 'nullable',
+            'birthday' => 'nullable|date',
             'phone' => 'sometimes|string|unique:users,phone,' . $user->id,
             'email' => 'sometimes|email|unique:users,email,' . $user->id,
             'role_id' => 'sometimes|exists:roles,id',
@@ -76,7 +76,7 @@ class UserController extends Controller
 
         $user->update($data);
 
-        return response()->json($user);
+        return response()->json($user->fresh(['role']));
     }
 
     public function updatePhoto(Request $request, User $user)
