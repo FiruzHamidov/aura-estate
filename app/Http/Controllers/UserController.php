@@ -2,9 +2,11 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Property;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 
 class UserController extends Controller
@@ -117,11 +119,79 @@ class UserController extends Controller
         return response()->json($agents);
     }
 
-    // Удаление пользователя
-    public function destroy(User $user)
+    // Удаление пользователя и перераспределения
+    public function destroy(Request $request, User $user)
     {
-        $user->delete();
-        return response()->json(['message' => 'User deleted']);
+        // Валидация входных параметров
+        $request->validate([
+            'distribute_to_agents' => 'nullable|boolean',
+            'agent_id' => 'nullable|integer|exists:users,id',
+        ]);
+
+        $distribute = (bool) $request->boolean('distribute_to_agents');
+        $agentId = $request->input('agent_id');
+
+        // Нормы: либо distribute_to_agents=true, либо agent_id обязателен
+        if (!$distribute && !$agentId) {
+            return response()->json([
+                'message' => 'Укажите distribute_to_agents=true для авто-распределения ИЛИ передайте agent_id.',
+            ], 422);
+        }
+
+        if ($agentId && (int)$agentId === (int)$user->id) {
+            return response()->json([
+                'message' => 'Нельзя передать объекты самому удаляемому пользователю.',
+            ], 422);
+        }
+
+        // Проверка, что целевой получатель — агент (если указан)
+        if ($agentId) {
+            $target = User::with('role')->find($agentId);
+            if (!$target || !$target->role || $target->role->slug !== 'agent') {
+                return response()->json([
+                    'message' => 'agent_id должен указывать на пользователя с ролью агент.',
+                ], 422);
+            }
+        }
+
+        DB::transaction(function () use ($user, $distribute, $agentId) {
+            // Блокируем набор properties пользователя на время операции
+            $props = Property::where('user_id', $user->id)
+                ->lockForUpdate()
+                ->get(['id', 'user_id']);
+
+            if ($props->isNotEmpty()) {
+                if ($distribute) {
+                    // Соберём список доступных агентов (кроме удаляемого)
+                    $agentIds = User::whereHas('role', fn($q) => $q->where('slug', 'agent'))
+                        ->where('id', '!=', $user->id)
+                        ->pluck('id')
+                        ->all();
+
+                    if (empty($agentIds)) {
+                        // Нет агентов — нельзя распределить
+                        throw new \RuntimeException('Нет доступных агентов для авто-распределения.');
+                    }
+
+                    // Равномерно распределяем (round-robin)
+                    $countAgents = count($agentIds);
+                    $i = 0;
+                    foreach ($props as $p) {
+                        $newAgentId = $agentIds[$i % $countAgents];
+                        Property::whereKey($p->id)->update(['user_id' => $newAgentId]);
+                        $i++;
+                    }
+                } else {
+                    // Передаём все объекты одному агенту
+                    Property::where('user_id', $user->id)->update(['user_id' => $agentId]);
+                }
+            }
+
+            // Удаляем пользователя
+            $user->delete();
+        });
+
+        return response()->json(['message' => 'Пользователь удалён и объекты перераспределены.']);
     }
 
     public function updatePassword(Request $request)
