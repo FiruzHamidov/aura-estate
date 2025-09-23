@@ -178,12 +178,12 @@ class UserController extends Controller
                     $i = 0;
                     foreach ($props as $p) {
                         $newAgentId = $agentIds[$i % $countAgents];
-                        Property::whereKey($p->id)->update(['user_id' => $newAgentId]);
+                        Property::whereKey($p->id)->update(['agent_id' => $newAgentId, 'created_by' => $newAgentId]);
                         $i++;
                     }
                 } else {
                     // Передаём все объекты одному агенту
-                    Property::where('user_id', $user->id)->update(['user_id' => $agentId]);
+                    Property::where('user_id', $user->id)->update(['agent_id' => $agentId, 'created_by' => $agentId]);
                 }
             }
 
