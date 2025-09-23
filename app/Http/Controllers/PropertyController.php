@@ -3,12 +3,12 @@
 namespace App\Http\Controllers;
 
 use App\Models\Property;
-use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Cache;
 use Intervention\Image\Drivers\Gd\Driver;
 use Intervention\Image\Encoders\JpegEncoder;
 use Intervention\Image\ImageManager;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\Cache;
 
 class PropertyController extends Controller
 {
@@ -168,42 +168,21 @@ class PropertyController extends Controller
 
         // Статусы (мульти)
         if ($request->filled('moderation_status')) {
-            $available = ['pending', 'approved', 'rejected', 'draft', 'deleted', 'sold', 'rented'];
-            $statuses = array_values(array_intersect($toArray($request->input('moderation_status')), $available));
+            $available = ['pending','approved','rejected','draft','deleted','sold','rented'];
+            $statuses  = array_values(array_intersect($toArray($request->input('moderation_status')), $available));
             if (!empty($statuses)) {
                 $query->whereIn('moderation_status', $statuses);
             }
         }
 
-        // --------- NEW: propertyTypes -> type_id (мультиселект) ----------
-        if ($request->has('propertyType')) {
-            $query->where('type_id', $request->input('propertyTypes'));
-        }
-
-        // --------- NEW: propertyTypes -> type_id (мультиселект) ----------
-        if ($request->has('propertyTypes')) {
-            $vals = $toArray($request->input('propertyTypes'));
-
-            // приведём к числам, отбросив мусор
-            $ids = array_values(array_filter(array_map(function ($v) {
-                // поддержка случаев типа ["1","2"] или "1,2"
-                if (is_numeric($v)) return (int)$v;
-                return null;
-            }, $vals), fn($v) => $v !== null));
-
-            if (!empty($ids)) {
-                $query->whereIn('type_id', $ids);
-            }
-        }
-
         // Текстовые поля (like, поддержка массива термов: OR)
-        foreach (['title', 'description', 'district', 'address', 'landmark', 'condition', 'apartment_type', 'owner_phone'] as $field) {
+        foreach (['title','description','district','address','landmark','condition','apartment_type','owner_phone'] as $field) {
             if ($request->has($field)) {
                 $terms = $toArray($request->input($field));
                 if (empty($terms)) {
                     $val = $request->input($field);
                     if ($val !== null && $val !== '') {
-                        $query->where($field, 'like', '%' . $val . '%');
+                        $query->where($field, 'like', '%'.$val.'%');
                     }
                 } else {
                     $query->where(function($q) use ($field, $terms) {
@@ -217,7 +196,7 @@ class PropertyController extends Controller
 
         // Точные поля (включая мультиселект через whereIn)
         $exactFields = [
-            'status_id', 'location_id', 'repair_type_id',
+            'type_id', 'status_id', 'location_id', 'repair_type_id',
             'currency', 'offer_type',
             'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
             'agent_id', 'listing_type', 'created_by', 'contract_type_id',
