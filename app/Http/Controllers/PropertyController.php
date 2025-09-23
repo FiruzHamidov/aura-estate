@@ -175,32 +175,25 @@ class PropertyController extends Controller
             }
         }
 
-        // --------- propertyType / propertyTypes -> type_id (single + multi) ----------
-        $typeIds = [];
-
-        // одиночный propertyType=3
+        // --------- NEW: propertyTypes -> type_id (мультиселект) ----------
         if ($request->has('propertyType')) {
-            $v = $request->input('propertyType');
-            if (is_numeric($v)) {
-                $typeIds[] = (int)$v;
-            }
+            $query->where('type_id', $request->input('propertyTypes'));
         }
 
-        // мульти propertyTypes=1,2 или propertyTypes[]=1&propertyTypes[]=2
+        // --------- NEW: propertyTypes -> type_id (мультиселект) ----------
         if ($request->has('propertyTypes')) {
             $vals = $toArray($request->input('propertyTypes'));
-            foreach ($vals as $v) {
-                if (is_numeric($v)) {
-                    $typeIds[] = (int)$v;
-                }
-            }
-        }
 
-        // уберём дубли и применим фильтр
-        $typeIds = array_values(array_unique($typeIds));
-        if (!empty($typeIds)) {
-            // если прислали ровно один id — можно и where, но whereIn тоже ок
-            $query->whereIn('type_id', $typeIds);
+            // приведём к числам, отбросив мусор
+            $ids = array_values(array_filter(array_map(function ($v) {
+                // поддержка случаев типа ["1","2"] или "1,2"
+                if (is_numeric($v)) return (int)$v;
+                return null;
+            }, $vals), fn($v) => $v !== null));
+
+            if (!empty($ids)) {
+                $query->whereIn('type_id', $ids);
+            }
         }
 
         // Текстовые поля (like, поддержка массива термов: OR)
