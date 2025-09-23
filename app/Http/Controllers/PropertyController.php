@@ -24,7 +24,7 @@ class PropertyController extends Controller
     {
         $query = $this->baseQuery($request);
         $this->applyFilters($query, $request);
-
+        $this->applySorts($query);
         $perPage = (int) $request->input('per_page', 20);
         return response()->json($query->latest()->paginate($perPage));
     }
@@ -438,5 +438,17 @@ class PropertyController extends Controller
             'delete_photo_ids.*' => ['integer', 'exists:property_photos,id'],
         ]);
         return $validated;
+    }
+
+    private function applySorts(Builder $query): void
+    {
+        $orderExpr = "CASE listing_type
+        WHEN 'urgent' THEN 1
+        WHEN 'vip'    THEN 2
+        WHEN 'regular'THEN 3
+        ELSE 4
+    END";
+
+        $query->orderByRaw($orderExpr)->latest(); // latest() = orderBy(created_at, 'desc')
     }
 }
