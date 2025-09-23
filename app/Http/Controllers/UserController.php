@@ -156,9 +156,9 @@ class UserController extends Controller
 
         DB::transaction(function () use ($user, $distribute, $agentId) {
             // Блокируем набор properties пользователя на время операции
-            $props = Property::where('user_id', $user->id)
+            $props = Property::where('created_by', $user->id)
                 ->lockForUpdate()
-                ->get(['id', 'user_id']);
+                ->get(['id', 'created_by']);
 
             if ($props->isNotEmpty()) {
                 if ($distribute) {
@@ -183,7 +183,7 @@ class UserController extends Controller
                     }
                 } else {
                     // Передаём все объекты одному агенту
-                    Property::where('user_id', $user->id)->update(['agent_id' => $agentId, 'created_by' => $agentId]);
+                    Property::where('created_by', $user->id)->update(['agent_id' => $agentId, 'created_by' => $agentId]);
                 }
             }
 
