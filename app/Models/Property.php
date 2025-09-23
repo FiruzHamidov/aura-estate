@@ -42,7 +42,8 @@ class Property extends Model
         'address',
         'owner_phone',
         'listing_type',
-        'contract_type_id'
+        'contract_type_id',
+        'views_count'
     ];
 
     public function type()

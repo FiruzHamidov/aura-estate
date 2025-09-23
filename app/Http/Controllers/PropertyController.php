@@ -451,4 +451,23 @@ class PropertyController extends Controller
 
         $query->orderByRaw($orderExpr)->latest(); // latest() = orderBy(created_at, 'desc')
     }
+
+    public function trackView(Request $request, Property $property)
+    {
+        // Ключ "видел" = по объекту + IP + UA + текущая дата
+        $fingerprint = sha1(
+            ($request->ip() ?? '0.0.0.0') . '|' .
+            (string) $request->userAgent() . '|' .
+            now()->format('Y-m-d')
+        );
+        $cacheKey = "prop:{$property->id}:viewed:{$fingerprint}";
+
+        // Инкрементим только если ещё не считали сегодня
+        if (!Cache::has($cacheKey)) {
+            $property->increment('views_count'); // атомарно
+            Cache::put($cacheKey, 1, now()->addDay());
+        }
+
+        return response()->noContent();
+    }
 }

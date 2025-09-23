@@ -73,6 +73,9 @@ Route::apiResource('new-buildings.units', DeveloperUnitController::class)->only(
 Route::apiResource('new-buildings.photos', NewBuildingPhotoController::class)->only(['index'])->shallow();
 Route::apiResource('units.photos', DeveloperUnitPhotoController::class)->only(['index'])->shallow();
 
+Route::post('/properties/{property}/view', [PropertyController::class, 'trackView'])
+    ->middleware('throttle:30,1'); // троттлинг от ботов
+
 
 
 // --- ЗАЩИЩЕННЫЕ МАРШРУТЫ ---
