@@ -43,7 +43,9 @@ class Property extends Model
         'owner_phone',
         'listing_type',
         'contract_type_id',
-        'views_count'
+        'views_count',
+        'owner_name',
+        'object_key'
     ];
 
     public function type()

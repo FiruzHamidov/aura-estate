@@ -3,12 +3,12 @@
 namespace App\Http\Controllers;
 
 use App\Models\Property;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Intervention\Image\Drivers\Gd\Driver;
 use Intervention\Image\Encoders\JpegEncoder;
 use Intervention\Image\ImageManager;
-use Illuminate\Database\Eloquent\Builder;
-use Illuminate\Support\Facades\Cache;
 
 class PropertyController extends Controller
 {
@@ -168,7 +168,7 @@ class PropertyController extends Controller
 
         // Статусы (мульти)
         if ($request->filled('moderation_status')) {
-            $available = ['pending','approved','rejected','draft','deleted','sold','rented'];
+            $available = ['pending','approved','rejected','draft','deleted','sold','rented', 'sold_by_owner'];
             $statuses  = array_values(array_intersect($toArray($request->input('moderation_status')), $available));
             if (!empty($statuses)) {
                 $query->whereIn('moderation_status', $statuses);
@@ -370,7 +370,7 @@ class PropertyController extends Controller
         }
 
         $validated = $request->validate([
-            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,sold,rented',
+            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,sold,rented,sold_by_owner',
             'listing_type' => 'sometimes|in:regular,vip,urgent',
         ]);
 
@@ -394,7 +394,7 @@ class PropertyController extends Controller
             'created_by' => 'nullable|string',
             'district' => 'nullable|string',
             'address' => 'nullable|string',
-            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,sold,rented',
+            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,sold,rented,sold_by_owner',
             'contract_type_id' => 'nullable|exists:contract_types,id',
             'type_id' => 'required|exists:property_types,id',
             'status_id' => 'required|exists:property_statuses,id',
@@ -422,6 +422,8 @@ class PropertyController extends Controller
             'agent_id' => 'nullable|exists:users,id',
             'owner_phone' => 'nullable|string|max:30',
             'listing_type' => 'sometimes|in:regular,vip,urgent',
+            'owner_name' => 'nullable|string|max:255',
+            'object_key' => 'nullable|string|max:255',
 
             // Photos (optional on update)
             'photos' => [$isUpdate ? 'sometimes' : 'nullable', 'array', 'max:40'],
@@ -445,7 +447,7 @@ class PropertyController extends Controller
         $orderExpr = "CASE listing_type
         WHEN 'urgent' THEN 1
         WHEN 'vip'    THEN 2
-        WHEN 'regular'THEN 3
+        WHEN 'regular' THEN 3
         ELSE 4
     END";
 
