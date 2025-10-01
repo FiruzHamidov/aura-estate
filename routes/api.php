@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\BookingController;
+use App\Http\Controllers\ChatController;
 use App\Http\Controllers\ConstructionStageController;
 use App\Http\Controllers\ContractTypeController;
 use App\Http\Controllers\DeveloperController;
@@ -76,7 +77,7 @@ Route::apiResource('units.photos', DeveloperUnitPhotoController::class)->only(['
 Route::post('/properties/{property}/view', [PropertyController::class, 'trackView'])
     ->middleware('throttle:30,1'); // троттлинг от ботов
 
-
+Route::get('/chat/history', [ChatController::class, 'history']);
 
 // --- ЗАЩИЩЕННЫЕ МАРШРУТЫ ---
 
@@ -123,6 +124,7 @@ Route::middleware('auth:sanctum')->group(callback: function () {
     Route::get('/bookings/{id}', [BookingController::class, 'show']);
 
 
+
     // reports
     Route::get('/reports/properties/summary',           [PropertyReportController::class, 'summary']);
     Route::get('/reports/properties/manager-efficiency',[PropertyReportController::class, 'managerEfficiency']);
@@ -152,4 +154,9 @@ Route::middleware('auth:sanctum')->group(callback: function () {
     // attach/detach фич
     Route::post('new-buildings/{new_building}/features/{feature}', [NewBuildingController::class, 'attachFeature']);
     Route::delete('new-buildings/{new_building}/features/{feature}', [NewBuildingController::class, 'detachFeature']);
+});
+
+Route::middleware(['api'])->group(function () {
+    Route::post('/chat', [ChatController::class, 'handle']);       // при желании ->middleware('auth:sanctum')
+    Route::post('/chat/feedback', [ChatController::class, 'feedback'])->middleware('auth:sanctum');
 });
