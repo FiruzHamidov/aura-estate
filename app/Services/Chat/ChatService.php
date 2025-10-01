@@ -66,6 +66,17 @@ class ChatService
             'reasoning'   => ['effort' => 'low'],
         ]);
 
+        if (!empty($res1['error'])) {
+            $msg = "Сервис ИИ сейчас недоступен. Попробуйте позже, пожалуйста.";
+            $this->storeMessage($session->id, 'assistant', $msg);
+            return [
+                'session_id' => $session->session_uuid,
+                'answer'     => $msg,
+                'items'      => [],
+                'locale'     => $locale,
+            ];
+        }
+
         $toolCalls     = $this->extractToolCalls($res1);
         $assistantText = $this->extractAssistantText($res1);
 
@@ -174,33 +185,62 @@ class ChatService
     private function openai(array $payload): array
     {
         try {
-            $resp = Http::withToken(env('OPENAI_API_KEY'))
-                ->baseUrl(env('OPENAI_BASE', 'https://api.openai.com'))
+            $base = env('OPENAI_BASE', 'https://api.openai.com');
+            $url  = rtrim($base, '/') . '/v1/responses';
+
+            // без ключей/PII
+            $safeHeaders = [
+                'X-Relay-Key' => env('RELAY_SHARED_KEY') ? '***set***' : '***empty***',
+            ];
+            $payloadPreview = mb_substr(json_encode($payload, JSON_UNESCAPED_UNICODE), 0, 2000);
+
+            \Log::info('[OpenAI][REQ]', [
+                'url'     => $url,
+                'headers' => $safeHeaders,
+                'payload_preview' => $payloadPreview,
+            ]);
+
+            $start = microtime(true);
+
+            $resp = Http::withHeaders([
+                'X-Relay-Key' => env('RELAY_SHARED_KEY'),
+            ])
+                ->baseUrl($base)       // важно: без /v1
                 ->timeout(60)
                 ->post('/v1/responses', $payload);
 
-            $status = $resp->status();
-            $body   = $resp->body(); // сырой JSON
+            $ms = (int) ((microtime(true) - $start) * 1000);
 
-            // всегда логируем сырое тело (для отладки)
-            \Log::info('[OpenAI] status='.$status.' body='.$body);
+            $status   = $resp->status();
+            $headers  = $resp->headers(); // массив заголовков ответа
+            $body     = $resp->body();
 
-            // если ошибка статуса — вернём структуру с error и raw
+            // урежем тело, чтобы не превращать лог в простыню
+            $bodyPreview = mb_substr($body ?? '', 0, 3000);
+
+            \Log::info('[OpenAI][RESP]', [
+                'status'  => $status,
+                'ms'      => $ms,
+                'headers' => $headers,
+                'body_preview' => $bodyPreview,
+            ]);
+
             if ($status < 200 || $status >= 300) {
                 return [
                     'error' => [
                         'status'  => $status,
                         'message' => optional(json_decode($body, true))['error']['message'] ?? 'Unknown error',
                     ],
-                    'raw' => $body,
+                    'raw' => $bodyPreview,
                 ];
             }
 
-            // успешный JSON
-            return json_decode($body, true) ?? ['raw' => $body];
+            return json_decode($body, true) ?? ['raw' => $bodyPreview];
 
         } catch (\Throwable $e) {
-            \Log::error('[OpenAI][EXCEPTION] '.$e->getMessage());
+            \Log::error('[OpenAI][EXCEPTION] '.$e->getMessage(), [
+                'trace' => $e->getTraceAsString(),
+            ]);
             return [
                 'error' => [
                     'status'  => 0,
