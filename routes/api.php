@@ -1,6 +1,8 @@
 <?php
 
+use App\Http\Controllers\AuthController;
 use App\Http\Controllers\BookingController;
+use App\Http\Controllers\BuildingTypeController;
 use App\Http\Controllers\ChatController;
 use App\Http\Controllers\ConstructionStageController;
 use App\Http\Controllers\ContractTypeController;
@@ -9,24 +11,22 @@ use App\Http\Controllers\DeveloperUnitController;
 use App\Http\Controllers\DeveloperUnitPhotoController;
 use App\Http\Controllers\FavoriteController;
 use App\Http\Controllers\FeatureController;
+use App\Http\Controllers\HeatingTypeController;
+use App\Http\Controllers\LocationController;
 use App\Http\Controllers\MaterialController;
 use App\Http\Controllers\NewBuildingBlockController;
 use App\Http\Controllers\NewBuildingController;
 use App\Http\Controllers\NewBuildingPhotoController;
+use App\Http\Controllers\ParkingTypeController;
+use App\Http\Controllers\PropertyController;
 use App\Http\Controllers\PropertyPhotoController;
 use App\Http\Controllers\PropertyReportController;
-use App\Http\Controllers\RepairTypeController;
-use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\AuthController;
-use App\Http\Controllers\UserController;
-use App\Http\Controllers\PropertyController;
-use App\Http\Controllers\PropertyTypeController;
 use App\Http\Controllers\PropertyStatusController;
-use App\Http\Controllers\LocationController;
-use App\Http\Controllers\BuildingTypeController;
-use App\Http\Controllers\ParkingTypeController;
-use App\Http\Controllers\HeatingTypeController;
+use App\Http\Controllers\PropertyTypeController;
+use App\Http\Controllers\RepairTypeController;
 use App\Http\Controllers\RoleController;
+use App\Http\Controllers\UserController;
+use Illuminate\Support\Facades\Route;
 
 
 // Тестовый маршрут на проверку API
@@ -61,14 +61,14 @@ Route::get('/user/{user}', [UserController::class, 'show']);
 
 // Новостройки и связанные роуты
 
-Route::apiResource('developers', DeveloperController::class)->only(['index','show']);
-Route::apiResource('construction-stages', ConstructionStageController::class)->only(['index','show']);
-Route::apiResource('materials', MaterialController::class)->only(['index','show']);
-Route::apiResource('features', FeatureController::class)->only(['index','show']);
+Route::apiResource('developers', DeveloperController::class)->only(['index', 'show']);
+Route::apiResource('construction-stages', ConstructionStageController::class)->only(['index', 'show']);
+Route::apiResource('materials', MaterialController::class)->only(['index', 'show']);
+Route::apiResource('features', FeatureController::class)->only(['index', 'show']);
 
-Route::apiResource('new-buildings', NewBuildingController::class)->only(['index','show']);
-Route::apiResource('new-buildings.blocks', NewBuildingBlockController::class)->only(['index','show'])->shallow();
-Route::apiResource('new-buildings.units', DeveloperUnitController::class)->only(['index','show'])->shallow();
+Route::apiResource('new-buildings', NewBuildingController::class)->only(['index', 'show']);
+Route::apiResource('new-buildings.blocks', NewBuildingBlockController::class)->only(['index', 'show'])->shallow();
+Route::apiResource('new-buildings.units', DeveloperUnitController::class)->only(['index', 'show'])->shallow();
 
 // Фотки — index доступен публично
 Route::apiResource('new-buildings.photos', NewBuildingPhotoController::class)->only(['index'])->shallow();
@@ -124,32 +124,36 @@ Route::middleware('auth:sanctum')->group(callback: function () {
     Route::get('/bookings/{id}', [BookingController::class, 'show']);
 
 
-
     // reports
-    Route::get('/reports/properties/summary',           [PropertyReportController::class, 'summary']);
-    Route::get('/reports/properties/manager-efficiency',[PropertyReportController::class, 'managerEfficiency']);
-    Route::get('/reports/properties/by-status',         [PropertyReportController::class, 'byStatus']);
-    Route::get('/reports/properties/by-type',           [PropertyReportController::class, 'byType']);
-    Route::get('/reports/properties/by-location',       [PropertyReportController::class, 'byLocation']);
-    Route::get('/reports/properties/time-series',       [PropertyReportController::class, 'timeSeries']);
-    Route::get('/reports/properties/price-buckets',     [PropertyReportController::class, 'priceBuckets']);
-    Route::get('/reports/properties/rooms-hist',        [PropertyReportController::class, 'roomsHistogram']);
-    Route::get('/reports/properties/agents-leaderboard',[PropertyReportController::class, 'agentsLeaderboard']);
-    Route::get('/reports/properties/conversion',        [PropertyReportController::class, 'conversionFunnel']);
+    Route::get('/reports/properties/summary', [PropertyReportController::class, 'summary']);
+    Route::get('/reports/properties/manager-efficiency', [PropertyReportController::class, 'managerEfficiency']);
+    Route::get('/reports/properties/by-status', [PropertyReportController::class, 'byStatus']);
+    Route::get('/reports/properties/by-type', [PropertyReportController::class, 'byType']);
+    Route::get('/reports/properties/by-location', [PropertyReportController::class, 'byLocation']);
+    Route::get('/reports/properties/time-series', [PropertyReportController::class, 'timeSeries']);
+    Route::get('/reports/properties/price-buckets', [PropertyReportController::class, 'priceBuckets']);
+    Route::get('/reports/properties/rooms-hist', [PropertyReportController::class, 'roomsHistogram']);
+    Route::get('/reports/properties/agents-leaderboard', [PropertyReportController::class, 'agentsLeaderboard']);
+    Route::get('/reports/properties/conversion', [PropertyReportController::class, 'conversionFunnel']);
 
     // Новостройки для админа
 
-    Route::apiResource('developers', DeveloperController::class)->except(['index','show']);
-    Route::apiResource('construction-stages', ConstructionStageController::class)->except(['index','show']);
-    Route::apiResource('materials', MaterialController::class)->except(['index','show']);
-    Route::apiResource('features', FeatureController::class)->except(['index','show']);
+    Route::apiResource('developers', DeveloperController::class)->except(['index', 'show']);
+    Route::apiResource('construction-stages', ConstructionStageController::class)->except(['index', 'show']);
+    Route::apiResource('materials', MaterialController::class)->except(['index', 'show']);
+    Route::apiResource('features', FeatureController::class)->except(['index', 'show']);
 
-    Route::apiResource('new-buildings', NewBuildingController::class)->except(['index','show']);
-    Route::apiResource('new-buildings.blocks', NewBuildingBlockController::class)->except(['index','show'])->shallow();
-    Route::apiResource('new-buildings.units', DeveloperUnitController::class)->except(['index','show'])->shallow();
+    Route::apiResource('new-buildings', NewBuildingController::class)->except(['index', 'show']);
+    Route::apiResource('new-buildings.blocks', NewBuildingBlockController::class)->except(['index', 'show'])->shallow();
+    Route::apiResource('new-buildings.units', DeveloperUnitController::class)->except(['index', 'show'])->shallow();
 
-    Route::apiResource('new-buildings.photos', NewBuildingPhotoController::class)->only(['store','destroy'])->shallow();
-    Route::apiResource('units.photos', DeveloperUnitPhotoController::class)->only(['store','destroy'])->shallow();
+
+    Route::post('/new-buildings/{new_building}/photos', [NewBuildingPhotoController::class, 'store']);
+    Route::delete('/new-building-photos/{photo}', [NewBuildingPhotoController::class, 'destroy']);
+    Route::post('/new-building-photos/{photo}/cover', [NewBuildingPhotoController::class, 'setCover']);
+    Route::post('/new-buildings/{new_building}/photos/reorder', [NewBuildingPhotoController::class, 'reorder']);
+
+    Route::apiResource('units.photos', DeveloperUnitPhotoController::class)->only(['store', 'destroy'])->shallow();
 
     // attach/detach фич
     Route::post('new-buildings/{new_building}/features/{feature}', [NewBuildingController::class, 'attachFeature']);
