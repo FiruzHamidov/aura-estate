@@ -37,4 +37,13 @@ class NewBuilding extends Model
     {
         return $this->belongsToMany(Feature::class, 'feature_new_building')->withTimestamps();
     }
+
+    public function previewUnits()
+    {
+        return $this->hasMany(DeveloperUnit::class)
+            ->where('is_available', true)
+            ->where('moderation_status', 'approved')
+            ->orderBy('price_per_sqm')
+            ->limit(3);
+    }
 }
