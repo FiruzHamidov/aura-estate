@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AuthController;
+use App\Http\Controllers\B24AuthController;
 use App\Http\Controllers\BookingController;
 use App\Http\Controllers\BuildingTypeController;
 use App\Http\Controllers\ChatController;
@@ -25,6 +26,7 @@ use App\Http\Controllers\PropertyStatusController;
 use App\Http\Controllers\PropertyTypeController;
 use App\Http\Controllers\RepairTypeController;
 use App\Http\Controllers\RoleController;
+use App\Http\Controllers\SelectionController;
 use App\Http\Controllers\UserController;
 use Illuminate\Support\Facades\Route;
 
@@ -157,9 +159,40 @@ Route::middleware('auth:sanctum')->group(callback: function () {
     // attach/detach фич
     Route::post('new-buildings/{new_building}/features/{feature}', [NewBuildingController::class, 'attachFeature']);
     Route::delete('new-buildings/{new_building}/features/{feature}', [NewBuildingController::class, 'detachFeature']);
+
+    // b24
+    Route::get('/selections', [SelectionController::class, 'index']);
+    Route::post('/selections', [SelectionController::class, 'store']);
+    Route::get('/selections/{id}', [SelectionController::class, 'show']);
+
+    // Показы (ваши уже есть)
+    Route::get('/bookings', [BookingController::class, 'index']);
+    Route::post('/bookings', [BookingController::class, 'store']);
+    Route::get('/bookings/{id}', [BookingController::class, 'show']);
 });
 
 Route::middleware(['api'])->group(function () {
     Route::post('/chat', [ChatController::class, 'handle']);       // при желании ->middleware('auth:sanctum')
     Route::post('/chat/feedback', [ChatController::class, 'feedback'])->middleware('auth:sanctum');
+});
+
+
+//b24
+
+// Публичный просмотр лендинга по hash (если нужен JSON-эндпоинт)
+Route::get('/selections/public/{hash}', [SelectionController::class, 'publicShow']);
+
+// --- Bitrix24 (JWT) ---
+Route::post('/b24/token', [B24AuthController::class,'issue']);
+
+Route::middleware('b24.jwt')->group(function(){
+    Route::get('/properties', [PropertyController::class,'index']);
+
+    // Подборки из виджета Bitrix
+    Route::post('/selections', [SelectionController::class,'store']);
+    Route::post('/selections/{id}/events', [SelectionController::class,'event']);
+
+    // Показы из виджета Bitrix
+    Route::post('/showings', [BookingController::class,'store']); // используем ваш BookingController как unified
+    // Если нужен отдельный фидбек — можно завести BookingController@feedback позже
 });

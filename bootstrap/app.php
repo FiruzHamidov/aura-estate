@@ -1,10 +1,14 @@
 <?php
 
+use App\Http\Middleware\B24Jwt;
 use App\Http\Middleware\DetectClientLocale;
+use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Auth\AuthenticationException;
+use Illuminate\Http\Middleware\HandleCors;
+
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -14,11 +18,19 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        $middleware->append(DetectClientLocale::class);
+        // Enable CORS globally for API routes (configured via config/cors.php)
+        $middleware->group('api', [
+            HandleCors::class,
+            B24Jwt::class,           // ← ваш JWT middleware
+            DetectClientLocale::class,
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions) {
         $exceptions->render(function (AuthenticationException $e, $request) {
             return response()->json(['message' => 'Unauthenticated.'], 401);
         });
+    })
+    ->withSchedule(function (Schedule $schedule) {
+        $schedule->command('b24:sync:properties')->everyTenMinutes();
     })
     ->create();

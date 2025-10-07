@@ -4,12 +4,30 @@ namespace App\Http\Controllers;
 
 use App\Models\Booking;
 use Illuminate\Http\Request;
+use App\Services\Bitrix24Client;
+use Illuminate\Support\Arr;
+use Illuminate\Support\Carbon;
 
 class BookingController extends Controller
 {
     public function index()
     {
-        return Booking::with(['property', 'agent', 'client'])->get();
+        $q = Booking::query()->with(['property', 'agent', 'client']);
+
+        if (request()->filled('from')) {
+            $q->where('start_time', '>=', request()->input('from'));
+        }
+        if (request()->filled('to')) {
+            $q->where('end_time', '<=', request()->input('to'));
+        }
+        if (request()->filled('agent_id')) {
+            $q->where('agent_id', request()->integer('agent_id'));
+        }
+        if (request()->filled('property_id')) {
+            $q->where('property_id', request()->integer('property_id'));
+        }
+
+        return $q->orderBy('start_time')->get();
     }
 
     public function store(Request $request)
@@ -23,10 +41,68 @@ class BookingController extends Controller
             'note' => 'nullable|string',
             'client_name' => 'nullable|string',
             'client_phone' => 'nullable|string',
+            'deal_id' => 'nullable|integer',
+            'contact_id' => 'nullable|integer',
+            'place' => 'nullable|string',
+            'sync_to_b24' => 'sometimes|boolean',
         ]);
 
         $booking = Booking::create($validated);
-        return response()->json($booking, 201);
+
+        // Ensure relations are available for subject/description
+        $booking->load(['property', 'agent', 'client']);
+
+        $bitrixResult = null;
+        if ($request->boolean('sync_to_b24')) {
+            try {
+                /** @var Bitrix24Client $b24 */
+                $b24 = app(Bitrix24Client::class); // throws if not bound
+
+                // Build CRM activity for a meeting (type=2)
+                $start = Carbon::parse($validated['start_time'])->toIso8601String();
+                $end   = Carbon::parse($validated['end_time'])->toIso8601String();
+
+                $subject = 'Показ объекта';
+                if ($booking->relationLoaded('property') && $booking->property) {
+                    $subject .= ': ' . $booking->property->title;
+                }
+
+                $description = collect([
+                    'Объект ID: ' . $booking->property_id,
+                    $booking->note ? 'Заметка: ' . $booking->note : null,
+                    $booking->client_name ? 'Клиент: ' . $booking->client_name : null,
+                    $booking->client_phone ? 'Телефон: ' . $booking->client_phone : null,
+                    $validated['place'] ?? null ? 'Место: ' . $validated['place'] : null,
+                ])->filter()->implode("\n");
+
+                $fields = [
+                    'TYPE_ID' => 2, // Meeting
+                    'SUBJECT' => $subject,
+                    'DESCRIPTION' => $description,
+                    'START_TIME' => $start,
+                    'END_TIME' => $end,
+                    'OWNER_TYPE_ID' => 2, // Deal
+                    'OWNER_ID' => Arr::get($validated, 'deal_id'),
+                    'COMMUNICATIONS' => array_values(array_filter([
+                        Arr::get($validated, 'contact_id') ? ['ENTITY_ID' => (int) $validated['contact_id'], 'ENTITY_TYPE_ID' => 3] : null, // 3 = Contact
+                    ])),
+                    'LOCATION' => $validated['place'] ?? null,
+                    'RESPONSIBLE_ID' => $validated['agent_id'] ?? null,
+                ];
+
+                // Remove nulls
+                $fields = array_filter($fields, fn ($v) => $v !== null && $v !== '');
+
+                $bitrixResult = $b24->activityAdd(['fields' => $fields]);
+            } catch (\Throwable $e) {
+                $bitrixResult = ['error' => $e->getMessage()];
+            }
+        }
+
+        return response()->json([
+            'booking' => $booking,
+            'bitrix' => $bitrixResult,
+        ], 201);
     }
 
     public function show($id)
