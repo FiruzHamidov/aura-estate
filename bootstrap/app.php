@@ -21,8 +21,11 @@ return Application::configure(basePath: dirname(__DIR__))
         // Enable CORS globally for API routes (configured via config/cors.php)
         $middleware->group('api', [
             HandleCors::class,
-            B24Jwt::class,           // ← ваш JWT middleware
             DetectClientLocale::class,
+        ]);
+
+        $middleware->alias([
+            'b24.jwt' => B24Jwt::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions) {

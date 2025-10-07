@@ -186,7 +186,6 @@ Route::get('/selections/public/{hash}', [SelectionController::class, 'publicShow
 Route::post('/b24/token', [B24AuthController::class,'issue']);
 
 Route::middleware('b24.jwt')->group(function(){
-    Route::get('/properties', [PropertyController::class,'index']);
 
     // Подборки из виджета Bitrix
     Route::post('/selections', [SelectionController::class,'store']);
