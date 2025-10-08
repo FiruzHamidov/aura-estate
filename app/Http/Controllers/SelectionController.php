@@ -65,17 +65,30 @@ class SelectionController extends Controller
         $b24res = null;
         if ($request->boolean('sync_to_b24') && !empty($selection->deal_id)) {
             try {
-                $comment = "Отправлена подборка (".count($selection->property_ids)."):\n".$selection->selection_url;
+                $comment = "Создана подборка (".count($selection->property_ids)."):\n".$selection->selection_url;
+                // Проверим, что сделка видна Bitrix-ом
+                $exists = $b24->dealGet((int)$selection->deal_id);
+                if (isset($exists['error']) || empty($exists['result'])) {
+                    return response()->json([
+                        'selection' => $selection,
+                        'bitrix' => [
+                            'error' => 'DEAL_NOT_FOUND_OR_NO_ACCESS',
+                            'debug' => $exists,
+                        ],
+                    ], 201);
+                }
+
                 $b24res = $b24->timelineCommentAdd([
-                    'fields' => [
-                        'ENTITY_TYPE' => 'deal',
-                        'ENTITY_ID'   => (int) $selection->deal_id,
-                        'COMMENT'     => $comment,
-                    ],
+                    'ENTITY_TYPE' => 'deal',
+                    'ENTITY_ID'   => (int) $selection->deal_id,
+                    'COMMENT'     => $comment,
                 ]);
-                $selection->status = 'sent';
-                $selection->sent_at = now();
-                $selection->save();
+
+                if (empty($b24res['error'])) {
+                    $selection->status = 'sent';
+                    $selection->sent_at = now();
+                    $selection->save();
+                }
             } catch (\Throwable $e) {
                 $b24res = ['error' => $e->getMessage()];
             }
@@ -132,20 +145,6 @@ class SelectionController extends Controller
                     'requested_showing' => 'Клиент запросил показ из подборки',
                     default => 'Событие по подборке',
                 };
-
-                // Проверим, что сделка видна Bitrix-ом
-                $exists = $b24->request('crm.deal.get', ['id' => (int)$selection->deal_id]);
-
-                if (empty($exists) || isset($exists['error'])) {
-                    // Сразу сохранить читаемую ошибку в ответ
-                    return response()->json([
-                        'selection' => $selection,
-                        'bitrix' => [
-                            'error' => 'DEAL_NOT_FOUND_OR_NO_ACCESS',
-                            'debug' => $exists,
-                        ],
-                    ], 201);
-                }
 
                 $b24->timelineCommentAdd([
                     'fields' => [
