@@ -45,7 +45,7 @@ class SelectionController extends Controller
 
         // Генерация уникального hash и URL (подставьте свой домен/роут)
         $hash = Str::lower(Str::random(32));
-        $url  = URL::to('/s/'.$hash);
+        $url  = 'https://aura.tj/s/'.$hash;
 
         $selection = new Selection();
         $selection->created_by     = Auth::id();

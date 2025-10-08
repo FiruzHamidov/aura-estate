@@ -176,7 +176,6 @@ Route::middleware(['api'])->group(function () {
     Route::post('/chat/feedback', [ChatController::class, 'feedback'])->middleware('auth:sanctum');
 });
 
-
 //b24
 
 // Публичный просмотр лендинга по hash (если нужен JSON-эндпоинт)
