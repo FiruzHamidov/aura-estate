@@ -29,6 +29,8 @@ class PropertyController extends Controller
         return response()->json($query->latest()->paginate($perPage));
     }
 
+
+
     // ==== Карта: bbox + zoom + кластеризация/точки ====
     public function map(Request $request)
     {

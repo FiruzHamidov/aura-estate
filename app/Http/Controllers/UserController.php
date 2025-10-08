@@ -44,9 +44,29 @@ class UserController extends Controller
     }
 
     // Просмотр конкретного пользователя
-    public function show(User $user)
+    public function show(User $user): \Illuminate\Http\JsonResponse
     {
-        return response()->json($user->load('role'));
+        $user->load('role');
+
+        // A) Только сырые колонки таблицы users:
+        // return response()->json($user->attributesToArray());
+
+        // B) Сырые + отношения, но без hidden:
+        // return response()->json($user->makeHidden([])->toArray());
+
+        // C) Жёстко сформированный ответ (обходит любую «магическую» сериализацию):
+        return response()->json([
+            'id'         => $user->id,
+            'name'       => $user->name,
+            'phone'      => $user->phone,
+            'email'      => $user->email,
+            'status'     => $user->status,
+            'birthday'   => $user->birthday,
+            'photo'      => $user->photo,
+            'role_id'    => $user->role_id,
+            'auth_method'=> $user->auth_method,
+            'role'       => optional($user->role)->only(['id','name','slug']),
+        ]);
     }
 
     // Обновление пользователя
