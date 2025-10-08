@@ -132,6 +132,21 @@ class SelectionController extends Controller
                     'requested_showing' => 'Клиент запросил показ из подборки',
                     default => 'Событие по подборке',
                 };
+
+                // Проверим, что сделка видна Bitrix-ом
+                $exists = $b24->request('crm.deal.get', ['id' => (int)$selection->deal_id]);
+
+                if (empty($exists) || isset($exists['error'])) {
+                    // Сразу сохранить читаемую ошибку в ответ
+                    return response()->json([
+                        'selection' => $selection,
+                        'bitrix' => [
+                            'error' => 'DEAL_NOT_FOUND_OR_NO_ACCESS',
+                            'debug' => $exists,
+                        ],
+                    ], 201);
+                }
+
                 $b24->timelineCommentAdd([
                     'fields' => [
                         'ENTITY_TYPE' => 'deal',
