@@ -657,7 +657,7 @@ class PropertyController extends Controller
                     'created_at' => $p->created_at,
                     'score' => round($score, 1),
                     'links' => [
-                        'view' => url("/apartment/{$p->id}"),
+                        'view' => url("https://aura.tj/apartment/{$p->id}"),
                     ],
                     'signals' => [
                         'phone_match' => $phoneMatch,
