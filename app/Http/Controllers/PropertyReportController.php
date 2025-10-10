@@ -295,7 +295,7 @@ class PropertyReportController extends Controller
         return response()->json($rows);
     }
 
-    // --- 9) Лидерборд агентов (по закрытым сделкам)
+// --- 9) Лидерборд агентов (детализация по закрытиям)
     public function agentsLeaderboard(Request $request)
     {
         $limit = (int)$request->input('limit', 10);
@@ -308,13 +308,21 @@ class PropertyReportController extends Controller
         [$q] = $this->applyCommonFilters($request, $base);
 
         $rows = (clone $q)
-            ->select($groupBy,
+            ->select(
+                $groupBy,
+                DB::raw("SUM(CASE WHEN moderation_status = 'sold' THEN 1 ELSE 0 END) as sold_count"),
+                DB::raw("SUM(CASE WHEN moderation_status = 'rented' THEN 1 ELSE 0 END) as rented_count"),
+                DB::raw("SUM(CASE WHEN moderation_status = 'sold_by_owner' THEN 1 ELSE 0 END) as sold_by_owner_count"),
+                // Закрыто (без sold_by_owner) — если нужно, можно оставить
                 DB::raw("SUM(CASE WHEN moderation_status IN ('sold','rented') THEN 1 ELSE 0 END) as closed"),
                 DB::raw('COUNT(*) as total'),
                 DB::raw("$expr as $alias")
             )
             ->groupBy($groupBy)
-            ->orderByDesc('closed')
+            // сортируем по сумме всех закрытий, включая sold_by_owner
+            ->orderByDesc(DB::raw("(SUM(CASE WHEN moderation_status = 'sold' THEN 1 ELSE 0 END) +
+                                SUM(CASE WHEN moderation_status = 'rented' THEN 1 ELSE 0 END) +
+                                SUM(CASE WHEN moderation_status = 'sold_by_owner' THEN 1 ELSE 0 END))"))
             ->limit($limit)
             ->get();
 
