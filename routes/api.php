@@ -136,6 +136,8 @@ Route::middleware('auth:sanctum')->group(callback: function () {
     Route::get('/reports/properties/rooms-hist', [PropertyReportController::class, 'roomsHistogram']);
     Route::get('/reports/properties/agents-leaderboard', [PropertyReportController::class, 'agentsLeaderboard']);
     Route::get('/reports/properties/conversion', [PropertyReportController::class, 'conversionFunnel']);
+    Route::get('/reports/missing-phone/agents-by-status', [PropertyReportController::class, 'missingPhoneAgentsByStatus']);
+    Route::get('/reports/missing-phone/list', [PropertyReportController::class, 'missingPhoneList']);
 
     // Новостройки для админа
 

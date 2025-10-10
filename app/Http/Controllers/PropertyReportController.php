@@ -22,20 +22,20 @@ class PropertyReportController extends Controller
     {
         // Диапазон дат и поле даты
         $dateField = $request->input('date_field', 'created_at'); // created_at | updated_at
-        if (!in_array($dateField, ['created_at','updated_at'], true)) {
+        if (!in_array($dateField, ['created_at', 'updated_at'], true)) {
             $dateField = 'created_at';
         }
 
         $dateFrom = $request->input('date_from'); // '2025-01-01'
-        $dateTo   = $request->input('date_to');   // '2025-01-31'
+        $dateTo = $request->input('date_to');   // '2025-01-31'
         if ($dateFrom) $query->whereDate($dateField, '>=', $dateFrom);
-        if ($dateTo)   $query->whereDate($dateField, '<=', $dateTo);
+        if ($dateTo) $query->whereDate($dateField, '<=', $dateTo);
 
         // Мультиселекты
         $multiFields = [
-            'type_id','status_id','location_id','repair_type_id',
-            'currency','offer_type','listing_type','contract_type_id',
-            'created_by','agent_id','moderation_status','district'
+            'type_id', 'status_id', 'location_id', 'repair_type_id',
+            'currency', 'offer_type', 'listing_type', 'contract_type_id',
+            'created_by', 'agent_id', 'moderation_status', 'district'
         ];
         foreach ($multiFields as $f) {
             if ($request->has($f)) {
@@ -54,10 +54,10 @@ class PropertyReportController extends Controller
                      'total_floors' => 'total_floors',
                      'year_built' => 'year_built',
                  ] as $param => $col) {
-            $from = $request->input($param.'From');
-            $to   = $request->input($param.'To');
+            $from = $request->input($param . 'From');
+            $to = $request->input($param . 'To');
             if ($from !== null && $from !== '') $query->where($col, '>=', $from);
-            if ($to   !== null && $to   !== '') $query->where($col, '<=', $to);
+            if ($to !== null && $to !== '') $query->where($col, '<=', $to);
         }
 
         return [$query, $dateField];
@@ -66,7 +66,7 @@ class PropertyReportController extends Controller
     private function priceExpr(Request $request): array
     {
         $metric = $request->input('price_metric', 'sum'); // sum|avg
-        if (!in_array($metric, ['sum','avg'], true)) $metric = 'sum';
+        if (!in_array($metric, ['sum', 'avg'], true)) $metric = 'sum';
 
         $expr = $metric === 'sum'
             ? "SUM(COALESCE(price,0))"
@@ -92,11 +92,11 @@ class PropertyReportController extends Controller
 
         // Средние
         $avgPrice = (clone $q)->avg('price');
-        $avgArea  = (clone $q)->avg('total_area');
+        $avgArea = (clone $q)->avg('total_area');
 
         // Суммы
         $sumPrice = (clone $q)->sum('price');
-        $sumArea  = (clone $q)->sum('total_area');
+        $sumArea = (clone $q)->sum('total_area');
 
         return response()->json([
             'total' => $total,
@@ -113,7 +113,7 @@ class PropertyReportController extends Controller
     public function managerEfficiency(Request $request)
     {
         $groupBy = $request->input('group_by', 'created_by'); // 'agent_id' | 'created_by'
-        if (!in_array($groupBy, ['agent_id','created_by'], true)) $groupBy = 'created_by';
+        if (!in_array($groupBy, ['agent_id', 'created_by'], true)) $groupBy = 'created_by';
 
         [$expr, $alias] = $this->priceExpr($request);
 
@@ -134,7 +134,7 @@ class PropertyReportController extends Controller
 
         // Подтянем имена пользователей
         $userIds = $data->pluck($groupBy)->filter()->unique()->values();
-        $users = User::whereIn('id', $userIds)->get(['id','name','email'])->keyBy('id');
+        $users = User::whereIn('id', $userIds)->get(['id', 'name', 'email'])->keyBy('id');
 
         $result = $data->map(function ($row) use ($users, $groupBy, $alias) {
             $total = (int)$row->total;
@@ -176,7 +176,7 @@ class PropertyReportController extends Controller
         $rows = (clone $q)->select('type_id', DB::raw('COUNT(*) as cnt'))
             ->groupBy('type_id')->orderByDesc('cnt')->get();
 
-        $rows->transform(function($r){
+        $rows->transform(function ($r) {
             $r->type_name = optional($r->type)->name ?? null;
             unset($r->type);
             return $r;
@@ -194,7 +194,7 @@ class PropertyReportController extends Controller
         $rows = (clone $q)->select('location_id', DB::raw('COUNT(*) as cnt'))
             ->groupBy('location_id')->orderByDesc('cnt')->get();
 
-        $rows->transform(function($r){
+        $rows->transform(function ($r) {
             $r->location_name = optional($r->location)->name ?? null;
             unset($r->location);
             return $r;
@@ -207,7 +207,7 @@ class PropertyReportController extends Controller
     public function timeSeries(Request $request)
     {
         $interval = $request->input('interval', 'day'); // day|week|month
-        if (!in_array($interval, ['day','week','month'], true)) $interval = 'day';
+        if (!in_array($interval, ['day', 'week', 'month'], true)) $interval = 'day';
 
         [$expr, $alias] = $this->priceExpr($request);
 
@@ -216,7 +216,7 @@ class PropertyReportController extends Controller
 
         $format = match ($interval) {
             'month' => '%Y-%m',
-            'week'  => '%x-W%v',
+            'week' => '%x-W%v',
             default => '%Y-%m-%d',
         };
 
@@ -232,7 +232,7 @@ class PropertyReportController extends Controller
             ->get();
 
         // округлим метрику
-        $rows->transform(function($r) use ($alias) {
+        $rows->transform(function ($r) use ($alias) {
             $r->$alias = round((float)$r->$alias, 2);
             return $r;
         });
@@ -245,7 +245,7 @@ class PropertyReportController extends Controller
     {
         $buckets = max(1, (int)$request->input('buckets', 8));
 
-        $base = Property::query()->whereNotNull('price')->where('price','>',0);
+        $base = Property::query()->whereNotNull('price')->where('price', '>', 0);
         [$q] = $this->applyCommonFilters($request, $base);
 
         $min = (clone $q)->min('price');
@@ -259,23 +259,23 @@ class PropertyReportController extends Controller
 
         $size = ($max - $min) / $buckets;
         $edges = [];
-        for ($i=0;$i<=$buckets;$i++) $edges[] = $min + $size * $i;
+        for ($i = 0; $i <= $buckets; $i++) $edges[] = $min + $size * $i;
 
         $result = [];
-        for ($i=0;$i<$buckets;$i++) {
+        for ($i = 0; $i < $buckets; $i++) {
             $from = $edges[$i];
-            $to   = $edges[$i+1] - ($i+1 == $buckets ? 0 : 0.000001);
+            $to = $edges[$i + 1] - ($i + 1 == $buckets ? 0 : 0.000001);
             $cnt = (clone $q)->whereBetween('price', [$from, $to])->count();
             $result[] = [
-                'bucket' => $i+1,
-                'from' => round($from,2),
-                'to'   => round($edges[$i+1],2),
-                'count'=> $cnt,
+                'bucket' => $i + 1,
+                'from' => round($from, 2),
+                'to' => round($edges[$i + 1], 2),
+                'count' => $cnt,
             ];
         }
 
         return response()->json([
-            'range' => [round($min,2), round($max,2)],
+            'range' => [round($min, 2), round($max, 2)],
             'buckets' => $result,
         ]);
     }
@@ -300,7 +300,7 @@ class PropertyReportController extends Controller
     {
         $limit = (int)$request->input('limit', 10);
         $groupBy = $request->input('group_by', 'created_by'); // 'agent_id' | 'created_by'
-        if (!in_array($groupBy, ['agent_id','created_by'], true)) $groupBy = 'created_by';
+        if (!in_array($groupBy, ['agent_id', 'created_by'], true)) $groupBy = 'created_by';
 
         [$expr, $alias] = $this->priceExpr($request);
 
@@ -328,9 +328,9 @@ class PropertyReportController extends Controller
 
         // имена агентов
         $ids = $rows->pluck($groupBy)->filter()->unique();
-        $users = User::whereIn('id', $ids)->get(['id','name'])->keyBy('id');
+        $users = User::whereIn('id', $ids)->get(['id', 'name'])->keyBy('id');
 
-        $rows->transform(function($r) use ($users, $groupBy) {
+        $rows->transform(function ($r) use ($users, $groupBy) {
             $r->agent_name = $users[$r->$groupBy]->name ?? '—';
             $r->sum_price = isset($r->sum_price) ? round((float)$r->sum_price, 2) : null;
             $r->avg_price = isset($r->avg_price) ? round((float)$r->avg_price, 2) : null;
@@ -356,5 +356,134 @@ class PropertyReportController extends Controller
         )->first();
 
         return response()->json($funnel);
+    }
+
+    private function phoneIsNullExpr(): string
+    {
+        // Считаем телефон "отсутствует", если все кандидаты пусты/NULL.
+
+        // NULLIF(TRIM(col), '') превращает '' в NULL, COALESCE выберет первый НЕ-NULL.
+        $candidates = [
+            "NULLIF(TRIM(properties.owner_name), '')",
+            "NULLIF(TRIM(properties.owner_phone), '')",
+            // Если хотите учитывать телефон создателя, раскомментируйте строку ниже
+            // "NULLIF(TRIM(users.phone), '')",
+        ];
+
+        $coalesce = 'COALESCE(' . implode(',', $candidates) . ')';
+        // нет телефона => COALESCE(...) IS NULL
+        return "$coalesce IS NULL";
+    }
+
+    public function missingPhoneList(Request $request)
+    {
+        $base = Property::query()
+            ->select([
+                'properties.id',
+                'properties.title',
+                'properties.address',
+                'properties.moderation_status',
+                'properties.created_by',
+                'properties.agent_id',
+                'properties.created_at',
+                'properties.updated_at',
+                'properties.price',
+                'properties.currency',
+                'properties.owner_name',
+                'properties.owner_phone',
+            ]);
+
+        [$q] = $this->applyCommonFilters($request, $base);
+
+        $phoneMissing = $this->phoneIsNullExpr();
+
+        $perPage = max(1, (int)$request->input('per_page', 50));
+
+        $rows = (clone $q)
+            ->whereRaw($phoneMissing)
+            ->orderByDesc('properties.created_at')
+            ->paginate($perPage);
+
+        $userIds = collect($rows->items())->pluck('created_by')->filter()->unique()->values();
+        $users = User::whereIn('id', $userIds)->get(['id','name'])->keyBy('id');
+
+        $data = collect($rows->items())->map(function ($p) use ($users) {
+            return [
+                'id'                => (int)$p->id,
+                'title'             => $p->title,
+                'address'           => $p->address,
+                'moderation_status' => $p->moderation_status,
+                'created_by'        => (int)$p->created_by,
+                'created_by_name'   => $users[$p->created_by]->name ?? '—',
+                'agent_id'          => $p->agent_id ? (int)$p->agent_id : null,
+                'created_at'        => $p->created_at,
+                'updated_at'        => $p->updated_at,
+                'price'             => $p->price,
+                'currency'          => $p->currency,
+                'owner_name'        => $p->owner_name,
+                'owner_phone'       => $p->owner_phone,
+            ];
+        });
+
+        return response()->json([
+            'data'         => $data,
+            'current_page' => $rows->currentPage(),
+            'last_page'    => $rows->lastPage(),
+            'per_page'     => $rows->perPage(),
+            'total'        => $rows->total(),
+        ]);
+    }
+
+    public function missingPhoneAgentsByStatus(Request $request)
+    {
+        $base = Property::query();
+        [$q] = $this->applyCommonFilters($request, $base);
+
+        $phoneMissing = $this->phoneIsNullExpr();
+
+        $rows = (clone $q)
+            ->select([
+                'properties.created_by',
+                'properties.moderation_status',
+                DB::raw('COUNT(*) as missing_phone_cnt'),
+            ])
+            ->whereRaw($phoneMissing)
+            ->groupBy('properties.created_by', 'properties.moderation_status')
+            ->orderByDesc('missing_phone_cnt')
+            ->get();
+
+        // Общие количества по "ведру" (агент+статус), чтобы посчитать долю
+        $totals = (clone $q)
+            ->select([
+                'properties.created_by',
+                'properties.moderation_status',
+                DB::raw('COUNT(*) as total_cnt'),
+            ])
+            ->groupBy('properties.created_by', 'properties.moderation_status')
+            ->get()
+            ->keyBy(function ($r) {
+                return $r->created_by . '|' . $r->moderation_status;
+            });
+
+        $userIds = $rows->pluck('created_by')->filter()->unique()->values();
+        $users = User::whereIn('id', $userIds)->get(['id','name','email'])->keyBy('id');
+
+        $result = $rows->map(function ($r) use ($users, $totals) {
+            $key = $r->created_by . '|' . $r->moderation_status;
+            $total = (int)($totals[$key]->total_cnt ?? 0);
+            $missing = (int)$r->missing_phone_cnt;
+
+            return [
+                'agent_id'           => (int)$r->created_by,
+                'agent_name'         => $users[$r->created_by]->name ?? '—',
+                'agent_email'        => $users[$r->created_by]->email ?? null,
+                'moderation_status'  => $r->moderation_status,
+                'missing_phone'      => $missing,
+                'bucket_total'       => $total,
+                'missing_share_pct'  => $total ? round($missing / $total * 100, 2) : 0,
+            ];
+        });
+
+        return response()->json($result);
     }
 }
