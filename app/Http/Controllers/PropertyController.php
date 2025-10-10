@@ -29,6 +29,31 @@ class PropertyController extends Controller
         return response()->json($query->latest()->paginate($perPage));
     }
 
+    // ==== Общая база для index/map: роли, связи, базовые статусы ====
+    private function baseQuery(Request $request): Builder
+    {
+        $user = auth()->user();
+        $query = Property::query()->with(['type', 'status', 'location', 'repairType', 'photos', 'creator']);
+
+        $hasStatusFilter = $request->filled('moderation_status');
+
+        if ($user && $user->hasRole('admin')) {
+            // без ограничений
+        } elseif (!$user) {
+            $query->where('moderation_status', 'approved');
+        } elseif ($user->hasRole('agent')) {
+            $query->where('created_by', $user->id);
+            if (!$hasStatusFilter) {
+                $query->where('moderation_status', '!=', 'deleted');
+            }
+        } elseif ($user->hasRole('client')) {
+            if (!$hasStatusFilter) {
+                $query->where('moderation_status', '!=', 'deleted');
+            }
+        }
+
+        return $query;
+    }
 
     // ==== Карта: bbox + zoom + кластеризация/точки ====
     public function map(Request $request)
@@ -132,32 +157,6 @@ class PropertyController extends Controller
         });
     }
 
-    // ==== Общая база для index/map: роли, связи, базовые статусы ====
-    private function baseQuery(Request $request): Builder
-    {
-        $user = auth()->user();
-        $query = Property::query()->with(['type', 'status', 'location', 'repairType', 'photos', 'creator']);
-
-        $hasStatusFilter = $request->filled('moderation_status');
-
-        if ($user && $user->hasRole('admin')) {
-            // без ограничений
-        } elseif (!$user) {
-            $query->where('moderation_status', 'approved');
-        } elseif ($user->hasRole('agent')) {
-            $query->where('created_by', $user->id);
-            if (!$hasStatusFilter) {
-                $query->where('moderation_status', '!=', 'deleted');
-            }
-        } elseif ($user->hasRole('client')) {
-            if (!$hasStatusFilter) {
-                $query->where('moderation_status', '!=', 'deleted');
-            }
-        }
-
-        return $query;
-    }
-
     // ==== Единая фильтрация для списка и карты ====
     private function applyFilters(Builder $query, Request $request): void
     {
@@ -173,6 +172,58 @@ class PropertyController extends Controller
             $statuses = array_values(array_intersect($toArray($request->input('moderation_status')), $available));
             if (!empty($statuses)) {
                 $query->whereIn('moderation_status', $statuses);
+            }
+        }
+
+        // ---- districts (мультиселект) с похожестью ≥ 0.7 ----
+        if ($request->has('districts')) {
+            $selected = $toArray($request->input('districts'));
+            $selected = array_values(array_filter($selected, fn($v) => $v !== ''));
+
+            if (!empty($selected)) {
+                // 1) Грубая выборка кандидатов по LIKE (по первым 3 символам каждого значения)
+                $coarse = Property::query()->select(['id', 'district']);
+
+                $coarse->where(function ($q) use ($selected) {
+                    foreach ($selected as $d) {
+                        $needle = mb_strtolower(trim($d), 'UTF-8');
+                        if ($needle === '') continue;
+                        $prefix = mb_substr($needle, 0, 3, 'UTF-8'); // берём первые 3 символа
+                        if ($prefix !== '') {
+                            $q->orWhereRaw('LOWER(district) LIKE ?', ['%'.$prefix.'%']);
+                        }
+                    }
+                });
+
+                // можно сузить по другим фильтрам, если уже заданы (город, тип и т.п.)
+                // но просто применим базовые ограничения ролей:
+                // (важно: НЕ копируем все applyFilters, чтобы не задвоить; достаточно чернового ограничения)
+                // Либо оставьте как есть.
+
+                $candidates = $coarse->limit(5000)->get(); // safety cap
+
+                // 2) Тонкая фильтрация (Jaccard по 3-граммам), порог 0.7
+                $THRESHOLD = 0.70;
+                $ids = [];
+
+                foreach ($candidates as $row) {
+                    $cand = (string)($row->district ?? '');
+                    foreach ($selected as $needle) {
+                        if ($this->jaccard($cand, (string)$needle, 3) >= $THRESHOLD) {
+                            $ids[] = (int)$row->id;
+                            break;
+                        }
+                    }
+                }
+
+                // если нет совпадений — заведомо пустой результат
+                if (empty($ids)) {
+                    $query->whereRaw('1 = 0');
+                    return;
+                }
+
+                // Применяем к основному запросу, чтобы пагинация и сортировки работали как обычно
+                $query->whereIn('id', array_values(array_unique($ids)));
             }
         }
 
@@ -681,5 +732,48 @@ class PropertyController extends Controller
 
         // Вернём коллекцию
         return collect($result);
+    }
+
+    /** Подготовка строки: нижний регистр, схлопнуть пробелы */
+    private function norm(string $s): string
+    {
+        $s = mb_strtolower($s, 'UTF-8');
+        $s = preg_replace('/\s+/u', ' ', trim($s));
+        return $s ?? '';
+    }
+
+    /** 3-граммы для мультибайта */
+    private function ngrams(string $s, int $n = 3): array
+    {
+        $len = mb_strlen($s, 'UTF-8');
+        if ($len === 0) return [];
+        if ($len < $n) return [$s]; // короткие строки целиком
+
+        $grams = [];
+        for ($i = 0; $i <= $len - $n; $i++) {
+            $grams[] = mb_substr($s, $i, $n, 'UTF-8');
+        }
+        return $grams;
+    }
+
+    /** Jaccard-похожесть по n-граммам (0..1) */
+    private function jaccard(string $a, string $b, int $n = 3): float
+    {
+        $a = $this->norm($a);
+        $b = $this->norm($b);
+        if ($a === '' || $b === '') return 0.0;
+
+        $A = array_unique($this->ngrams($a, $n));
+        $B = array_unique($this->ngrams($b, $n));
+
+        if (empty($A) && empty($B)) return 1.0;
+        if (empty($A) || empty($B)) return 0.0;
+
+        $Ai = array_fill_keys($A, true);
+        $inter = 0;
+        foreach ($B as $g) if (isset($Ai[$g])) $inter++;
+
+        $union = count($A) + count($B) - $inter;
+        return $union > 0 ? $inter / $union : 0.0;
     }
 }
