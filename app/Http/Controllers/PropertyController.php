@@ -24,7 +24,7 @@ class PropertyController extends Controller
     {
         $query = $this->baseQuery($request);
         $this->applyFilters($query, $request);
-        $this->applySorts($query);
+        $this->applySorts($query, $request->input('sort'), $request->input('dir'));
         $perPage = (int)$request->input('per_page', 20);
         return response()->json($query->latest()->paginate($perPage));
     }
@@ -462,16 +462,22 @@ class PropertyController extends Controller
         return $validated;
     }
 
-    private function applySorts(Builder $query): void
+    public function applySorts(Builder $query, ?string $sort = 'listing_type', ?string $dir = 'desc'): void
     {
-        $orderExpr = "CASE listing_type
-        WHEN 'urgent' THEN 1
-        WHEN 'vip'    THEN 2
-        WHEN 'regular' THEN 3
-        ELSE 4
-    END";
+        if ($sort === 'none') {
+            return; // не сортировать вообще
+        }
 
-        $query->orderByRaw($orderExpr)->latest(); // latest() = orderBy(created_at, 'desc')
+        if ($sort === 'listing_type') {
+            $orderExpr = "CASE listing_type
+            WHEN 'urgent' THEN 1
+            WHEN 'vip' THEN 2
+            WHEN 'regular' THEN 3
+            ELSE 4 END";
+            $query->orderByRaw($orderExpr);
+        } else {
+            $query->orderBy($sort ?? 'created_at', $dir ?? 'desc');
+        }
     }
 
     public function trackView(Request $request, Property $property)
