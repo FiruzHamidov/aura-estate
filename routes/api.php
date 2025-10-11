@@ -147,9 +147,15 @@ Route::middleware('auth:sanctum')->group(callback: function () {
     Route::apiResource('features', FeatureController::class)->except(['index', 'show']);
 
     Route::apiResource('new-buildings', NewBuildingController::class)->except(['index', 'show']);
-    Route::apiResource('new-buildings.blocks', NewBuildingBlockController::class)->except(['index', 'show'])->shallow();
-    Route::apiResource('new-buildings.units', DeveloperUnitController::class)->except(['index', 'show'])->shallow();
+    Route::scopeBindings()->group(function () {
+        Route::apiResource('new-buildings.blocks', NewBuildingBlockController::class)
+            ->except(['index','show']); // здесь будут create/update/destroy для админки
 
+        Route::apiResource('new-buildings.units', DeveloperUnitController::class)
+            ->except(['index','show']);
+
+
+    });
 
     Route::post('/new-buildings/{new_building}/photos', [NewBuildingPhotoController::class, 'store']);
     Route::delete('/new-building-photos/{photo}', [NewBuildingPhotoController::class, 'destroy']);
