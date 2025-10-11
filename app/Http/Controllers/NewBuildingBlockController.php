@@ -25,9 +25,9 @@ class NewBuildingBlockController extends Controller
         return $new_building_block;
     }
 
-    public function update(UpdateNewBuildingBlockRequest $request, NewBuildingBlock $new_building_block)
+    public function update(UpdateNewBuildingBlockRequest $request, NewBuildingBlock $block)
     {
-        $new_building_block->update($request->validated());
+        $block->update($request->validated());
         return $new_building_block;
     }
 
