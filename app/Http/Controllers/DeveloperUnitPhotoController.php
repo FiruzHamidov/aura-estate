@@ -52,7 +52,7 @@ class DeveloperUnitPhotoController extends Controller
             } else {
                 $this->normalizePositions($unit);
             }
-            return $unit->photos()->orderBy('position')->get();
+            return $unit->photos()->orderBy('sort_order')->get();
         }
 
         // 3) Базовая позиция (добавляем в конец)
@@ -80,11 +80,11 @@ class DeveloperUnitPhotoController extends Controller
             $filename = 'units/' . uniqid('', true) . '.jpg';
             Storage::disk('public')->put($filename, $binary);
 
-            $position = $positions[$i] ?? ($basePos + $i);
+            $sort_order = $positions[$i] ?? ($basePos + $i);
 
             $unit->photos()->create([
                 'file_path'  => $filename,
-                'sort_order' => $position,
+                'sort_order' => $sort_order,
             ]);
         }
 
@@ -93,7 +93,7 @@ class DeveloperUnitPhotoController extends Controller
 
         // 6) Кавер: если явно попросили или если кавера ещё нет — ставим первым
         if ($setCover || !$unit->photos()->where('is_cover', true)->exists()) {
-            $first = $unit->photos()->orderBy('position')->first();
+            $first = $unit->photos()->orderBy('sort_order')->first();
             if ($first) {
                 $unit->photos()->update(['is_cover' => false]);
                 $first->is_cover = true;
@@ -101,7 +101,7 @@ class DeveloperUnitPhotoController extends Controller
             }
         }
 
-        return response()->json($unit->photos()->orderBy('position')->get(), 201);
+        return response()->json($unit->photos()->orderBy('sort_order')->get(), 201);
     }
 
     // DELETE /api/new-buildings/{new_building}/units/{unit}/photos/{photo}
@@ -124,7 +124,7 @@ class DeveloperUnitPhotoController extends Controller
     {
         $positions = (array)$request->input('photo_positions', []);
         $this->applyPositionsFromRequest($unit, $positions);
-        return $unit->photos()->orderBy('position')->get();
+        return $unit->photos()->orderBy('sort_order')->get();
     }
 
     // POST /api/new-buildings/{new_building}/units/{unit}/photos/{photo}/cover
@@ -136,7 +136,7 @@ class DeveloperUnitPhotoController extends Controller
         $unit->photos()->update(['is_cover' => false]);
         $photo->is_cover = true;
         $photo->save();
-        return $unit->photos()->orderBy('position')->get();
+        return $unit->photos()->orderBy('sort_order')->get();
     }
 
     // ===== Helpers =====
@@ -161,7 +161,7 @@ class DeveloperUnitPhotoController extends Controller
             }
         } else {
             foreach ($photoPositions as $id => $pos) {
-                $unit->photos()->where('id', $row['id'] ?? null)->update(['sort_order' => (int)($row['position'] ?? 0)]);
+                $unit->photos()->where('id', $id)->update(['sort_order' => (int)$pos]);
             }
         }
         $this->normalizePositions($unit);
