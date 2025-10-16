@@ -19,7 +19,10 @@ class StoreNewBuildingBlockRequest extends FormRequest
     public function rules(): array
     {
         return [
-            //
+            'name' => ['required', 'string', 'max:255'],
+            'floors_from' => ['required', 'integer', 'min:1'],
+            'floors_to'   => ['required', 'integer', 'min:1'],
+            'completion_at' => ['nullable', 'date'],
         ];
     }
 }
