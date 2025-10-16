@@ -26,8 +26,13 @@ class DeveloperUnitController extends Controller
         return response()->json($unit->load('block'), 201);
     }
 
-    public function show(DeveloperUnit $unit)
+    public function show(NewBuilding $new_building, DeveloperUnit $unit)
     {
+        // опционально: убедиться, что юнит принадлежит зданию
+        if ($unit->new_building_id !== $new_building->id) {
+            abort(404);
+        }
+
         return $unit->load(['block','photos','newBuilding']);
     }
 
