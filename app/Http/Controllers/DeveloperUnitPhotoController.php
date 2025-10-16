@@ -57,7 +57,9 @@ class DeveloperUnitPhotoController extends Controller
 
         // 3) Базовая позиция (добавляем в конец)
         $append = (bool)$request->boolean('append', true);
-        $basePos = $append ? (int)($unit->photos()->max('position') ?? -1) + 1 : 0;
+        $basePos = $append ? (int)($unit->photos()->max('sort_order') ?? -1) + 1 : 0;
+
+
 
         $files     = $request->file('photos');
         $positions = (array)$request->input('photo_positions', []); // опциональный параллельный массив
@@ -81,9 +83,8 @@ class DeveloperUnitPhotoController extends Controller
             $position = $positions[$i] ?? ($basePos + $i);
 
             $unit->photos()->create([
-                'file_path' => $filename,
-                'position'  => $position,
-                // cover выставим ниже централизованно
+                'file_path'  => $filename,
+                'sort_order' => $position,
             ]);
         }
 
