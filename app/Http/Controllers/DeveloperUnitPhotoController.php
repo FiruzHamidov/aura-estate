@@ -33,75 +33,38 @@ class DeveloperUnitPhotoController extends Controller
     // Поддерживает reorder через photo_positions[] (параллельный массив)
     public function store(Request $request, NewBuilding $new_building, DeveloperUnit $unit)
     {
-        // 1) Удаление выбранных фото
-        if ($request->filled('delete_photo_ids')) {
-            $ids = (array)$request->input('delete_photo_ids');
-            $oldPhotos = $unit->photos()->whereIn('id', $ids)->get();
-            foreach ($oldPhotos as $old) {
-                if (!empty($old->file_path)) {
-                    Storage::disk('public')->delete($old->file_path);
-                }
-                $old->delete();
-            }
-        }
+        $files = $request->file('photo');
 
-        // 2) Если нет файлов — только нормализация/реордер
-        if (!$request->hasFile('photos')) {
-            if ($request->filled('photo_positions')) {
-                $this->applyPositionsFromRequest($unit, $request->input('photo_positions', []));
-            } else {
-                $this->normalizePositions($unit);
-            }
-            return $unit->photos()->orderBy('sort_order')->get();
-        }
+        // Если пришёл один файл — оборачиваем в массив
+        $files = is_array($files) ? $files : [$files];
 
-        // 3) Базовая позиция (добавляем в конец)
-        $append = (bool)$request->boolean('append', true);
-        $basePos = $append ? (int)($unit->photos()->max('sort_order') ?? -1) + 1 : 0;
+        $savedPhotos = [];
 
+        foreach ($files as $photo) {
+            if (!$photo) continue;
 
-
-        $files     = $request->file('photos');
-        $positions = (array)$request->input('photo_positions', []); // опциональный параллельный массив
-        $setCover  = $request->boolean('set_cover', false); // если true — первое загруженное станет cover (если ещё нет cover)
-
-        foreach (array_values($files) as $i => $photo) {
-            // 4) Обработка изображения: масштаб до ширины 1600, водяной знак, JPEG 50
-            $image = $this->imageManager->read($photo)->scaleDown(1600, null);
+            // 1) Масштабирование и водяной знак
+            $img = $this->imageManager->read($photo)->scaleDown(1600, null);
 
             $wmPath = public_path('watermark/logo.png');
             if (is_file($wmPath)) {
-                $watermark = $this->imageManager->read($wmPath)
-                    ->scale((int)round($image->width() * 0.14));
-                $image->place($watermark, 'bottom-right', 36, 28);
+                $wm = $this->imageManager->read($wmPath)
+                    ->scale((int)round($img->width() * 0.14));
+                $img->place($wm, 'bottom-right', 36, 28);
             }
 
-            $binary   = $image->encode(new JpegEncoder(50));
+            // 2) Перекодируем в JPEG с качеством 50
+            $binary   = $img->encode(new JpegEncoder(50));
             $filename = 'units/' . uniqid('', true) . '.jpg';
             Storage::disk('public')->put($filename, $binary);
 
-            $sort_order = $positions[$i] ?? ($basePos + $i);
-
+            // 3) Создаём запись в БД
             $unit->photos()->create([
-                'file_path'  => $filename,
-                'sort_order' => $sort_order,
+                'path' => $filename,
             ]);
         }
 
-        // 5) Нормализуем позиции 0..N-1 без пропусков
-        $this->normalizePositions($unit);
-
-        // 6) Кавер: если явно попросили или если кавера ещё нет — ставим первым
-        if ($setCover || !$unit->photos()->where('is_cover', true)->exists()) {
-            $first = $unit->photos()->orderBy('sort_order')->first();
-            if ($first) {
-                $unit->photos()->update(['is_cover' => false]);
-                $first->is_cover = true;
-                $first->save();
-            }
-        }
-
-        return response()->json($unit->photos()->orderBy('sort_order')->get(), 201);
+        return response()->json($savedPhotos, 201);
     }
 
     // DELETE /api/new-buildings/{new_building}/units/{unit}/photos/{photo}
@@ -111,8 +74,8 @@ class DeveloperUnitPhotoController extends Controller
         if ($photo->developer_unit_id !== $unit->id) {
             abort(404);
         }
-        if (!empty($photo->file_path)) {
-            Storage::disk('public')->delete($photo->file_path);
+        if (!empty($photo->path)) {
+            Storage::disk('public')->delete($photo->path);
         }
         $photo->delete();
         $this->normalizePositions($unit);
