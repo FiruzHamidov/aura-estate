@@ -24,7 +24,7 @@ class DeveloperUnitPhotoController extends Controller
     public function index(NewBuilding $new_building, DeveloperUnit $unit)
     {
         // thanks to scopeBindings(), {unit} уже принадлежит {new_building} или 404
-        return $unit->photos()->orderBy('position')->get();
+        return $unit->photos()->orderBy('sort_order')->get();
     }
 
     // POST /api/new-buildings/{new_building}/units/{unit}/photos
@@ -142,10 +142,10 @@ class DeveloperUnitPhotoController extends Controller
 
     private function normalizePositions(DeveloperUnit $unit): void
     {
-        $photos = $unit->photos()->orderBy('position')->get(['id','position']);
+        $photos = $unit->photos()->orderBy('sort_order')->get(['id','sort_order']);
         foreach ($photos as $i => $p) {
-            if ((int)$p->position !== $i) {
-                $p->position = $i;
+            if ((int)$p->sort_order !== $i) {
+                $p->sort_order = $i;
                 $p->save();
             }
         }
@@ -156,11 +156,11 @@ class DeveloperUnitPhotoController extends Controller
         // ожидается массив вида [['id'=>X,'position'=>Y], ...] или ассоц [id => position]
         if (isset($photoPositions[0]) && is_array($photoPositions[0]) && array_key_exists('id', $photoPositions[0])) {
             foreach ($photoPositions as $row) {
-                $unit->photos()->where('id', $row['id'] ?? null)->update(['position' => (int)($row['position'] ?? 0)]);
+                $unit->photos()->where('id', $row['id'] ?? null)->update(['sort_order' => (int)($row['position'] ?? 0)]);
             }
         } else {
             foreach ($photoPositions as $id => $pos) {
-                $unit->photos()->where('id', $id)->update(['position' => (int)$pos]);
+                $unit->photos()->where('id', $row['id'] ?? null)->update(['sort_order' => (int)($row['position'] ?? 0)]);
             }
         }
         $this->normalizePositions($unit);
