@@ -22,6 +22,7 @@ class Property extends Model
         'rooms',
         'youtube_link',
         'total_area',
+        'land_size',
         'living_area',
         'floor',
         'total_floors',

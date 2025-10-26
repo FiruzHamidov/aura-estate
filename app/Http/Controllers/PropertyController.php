@@ -168,7 +168,7 @@ class PropertyController extends Controller
 
         // Статусы (мульти)
         if ($request->filled('moderation_status')) {
-            $available = ['pending', 'approved', 'rejected', 'draft', 'deleted', 'sold', 'rented', 'sold_by_owner'];
+            $available = ['pending', 'approved', 'rejected', 'draft', 'deleted', 'sold', 'rented', 'sold_by_owner', 'denied'];
             $statuses = array_values(array_intersect($toArray($request->input('moderation_status')), $available));
             if (!empty($statuses)) {
                 $query->whereIn('moderation_status', $statuses);
@@ -441,7 +441,7 @@ class PropertyController extends Controller
         }
 
         $validated = $request->validate([
-            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,sold,rented,sold_by_owner',
+            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,sold,rented,sold_by_owner,denied',
             'listing_type' => 'sometimes|in:regular,vip,urgent',
         ]);
 
@@ -465,7 +465,7 @@ class PropertyController extends Controller
             'created_by' => 'nullable|string',
             'district' => 'nullable|string',
             'address' => 'nullable|string',
-            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,sold,rented,sold_by_owner',
+            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,sold,rented,sold_by_owner','denied',
             'contract_type_id' => 'nullable|exists:contract_types,id',
             'type_id' => 'required|exists:property_types,id',
             'status_id' => 'required|exists:property_statuses,id',
@@ -477,6 +477,7 @@ class PropertyController extends Controller
             'rooms' => 'nullable|integer|min:1|max:10',
             'youtube_link' => 'nullable|url',
             'total_area' => 'nullable|numeric',
+            'land_size' => 'sometimes|nullable|integer|min:0|max:65535',
             'living_area' => 'nullable|numeric',
             'floor' => 'nullable|integer',
             'total_floors' => 'nullable|integer',
