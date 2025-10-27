@@ -474,7 +474,7 @@ class PropertyReportController extends Controller
                 DB::raw('COUNT(*) as missing_phone_cnt'),
             ])
             ->whereRaw($phoneMissing)
-            ->groupBy('properties.created_by', 'properties.moderation_status')
+            ->groupBy('properties.created_by')
             ->orderByDesc('missing_phone_cnt')
             ->get();
 
@@ -485,7 +485,7 @@ class PropertyReportController extends Controller
                 'properties.moderation_status',
                 DB::raw('COUNT(*) as total_cnt'),
             ])
-            ->groupBy('properties.created_by', 'properties.moderation_status')
+            ->groupBy('properties.created_by')
             ->get()
             ->keyBy(function ($r) {
                 return $r->created_by . '|' . $r->moderation_status;
