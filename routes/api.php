@@ -97,6 +97,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/bookings',      [BookingController::class, 'index']);
     Route::post('/bookings',     [BookingController::class, 'store']);
     Route::get('/bookings/{id}', [BookingController::class, 'show']);
+    Route::get('/bookings/agents-report', [BookingController::class, 'agentsReport']);
 
     // Отчёты
     Route::get('/reports/properties/summary',            [PropertyReportController::class, 'summary']);

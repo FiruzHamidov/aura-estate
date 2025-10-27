@@ -7,6 +7,7 @@ use Illuminate\Http\Request;
 use App\Services\Bitrix24Client;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 
 class BookingController extends Controller
 {
@@ -109,5 +110,69 @@ class BookingController extends Controller
     {
         $booking = Booking::with(['property', 'agent', 'client'])->findOrFail($id);
         return response()->json($booking);
+    }
+
+    use Illuminate\Support\Facades\DB;
+    use App\Models\User;
+
+// ...
+
+    public function agentsReport(Request $request)
+    {
+        $from = $request->input('from'); // expected YYYY-MM-DD or ISO
+        $to   = $request->input('to');   // expected YYYY-MM-DD or ISO
+
+        $q = Booking::query();
+
+        // date filters (apply on start_time)
+        if ($from) {
+            $q->where('start_time', '>=', $from);
+        }
+        if ($to) {
+            // include end of day if date-only provided
+            $q->where('start_time', '<=', $to);
+        }
+
+        if ($request->filled('agent_id')) {
+            $q->where('agent_id', $request->integer('agent_id'));
+        }
+        if ($request->filled('property_id')) {
+            $q->where('property_id', $request->integer('property_id'));
+        }
+
+        // Aggregation
+        $rows = (clone $q)
+            ->select([
+                'agent_id',
+                DB::raw('COUNT(*) as shows_count'),
+                // total duration in minutes, handle possible NULL end_time
+                DB::raw("SUM(TIMESTAMPDIFF(MINUTE, start_time, COALESCE(end_time, start_time))) as total_minutes"),
+                DB::raw('COUNT(DISTINCT client_id) as unique_clients'),
+                DB::raw('COUNT(DISTINCT property_id) as unique_properties'),
+                DB::raw('MIN(start_time) as first_show'),
+                DB::raw('MAX(start_time) as last_show'),
+            ])
+            ->groupBy('agent_id')
+            ->orderByDesc('shows_count')
+            ->get();
+
+        // attach agent names (preserve order)
+        $agentIds = $rows->pluck('agent_id')->filter()->unique()->values()->all();
+        $users = User::whereIn('id', $agentIds)->get(['id', 'name'])->keyBy('id');
+
+        $result = $rows->map(function ($r) use ($users) {
+            return [
+                'agent_id' => (int)$r->agent_id,
+                'agent_name' => $users[$r->agent_id]->name ?? '—',
+                'shows_count' => (int)$r->shows_count,
+                'total_minutes' => (int)$r->total_minutes,
+                'unique_clients' => (int)$r->unique_clients,
+                'unique_properties' => (int)$r->unique_properties,
+                'first_show' => $r->first_show ? (string)$r->first_show : null,
+                'last_show' => $r->last_show ? (string)$r->last_show : null,
+            ];
+        });
+
+        return response()->json($result);
     }
 }
