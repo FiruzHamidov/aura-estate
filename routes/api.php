@@ -112,6 +112,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/reports/properties/conversion',         [PropertyReportController::class, 'conversionFunnel']);
     Route::get('/reports/missing-phone/agents-by-status',[PropertyReportController::class, 'missingPhoneAgentsByStatus']);
     Route::get('/reports/missing-phone/list',            [PropertyReportController::class, 'missingPhoneList']);
+    Route::get('/reports/agents/{agent}/properties', [PropertyReportController::class, 'agentPropertiesReport']);
 
     // Новостройки (админ) + полностью ВЛОЖЕННЫЕ blocks/units c CRUD
     Route::apiResource('new-buildings', NewBuildingController::class)->except(['index','show']);

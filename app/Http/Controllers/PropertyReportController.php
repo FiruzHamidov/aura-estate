@@ -511,4 +511,105 @@ class PropertyReportController extends Controller
 
         return response()->json($result);
     }
+
+    /**
+     * Return properties for a given agent with show counts and moderation status breakdown.
+     *
+     * Optional query params:
+     *  - from (YYYY-MM-DD or ISO)
+     *  - to   (YYYY-MM-DD or ISO)
+     *
+     * Response:
+     *{
+     *  agent_id,
+     *  agent_name,
+     *  summary: { total_properties, total_shows, by_status: {...} },
+     *  properties: [ { id, title, moderation_status, price, currency, shows_count, first_show, last_show }, ... ]
+     *}
+     */
+    public function agentPropertiesReport(Request $request, $agentId)
+    {
+        try {
+            $from = $request->input('from');
+            $to   = $request->input('to');
+
+            // 1) get properties for this agent (include created_by as well to be safe)
+            $propsQ = \App\Models\Property::query()
+                ->where(function ($q) use ($agentId) {
+                    $q->where('agent_id', $agentId)->orWhere('created_by', $agentId);
+                })
+                ->select(['id','title','price','currency','moderation_status','created_at']);
+
+            // optional property filters (if you want to support them via query)
+            if ($request->filled('type_id')) {
+                $typeIds = array_map('intval', explode(',', (string)$request->input('type_id')));
+                $propsQ->whereIn('type_id', $typeIds);
+            }
+            if ($request->filled('location_id')) {
+                $locIds = array_map('intval', explode(',', (string)$request->input('location_id')));
+                $propsQ->whereIn('location_id', $locIds);
+            }
+
+            $properties = $propsQ->get();
+            $propertyIds = $properties->pluck('id')->values()->all();
+
+            // 2) aggregate bookings by property (single query)
+            $bookingsQ = \App\Models\Booking::query()
+                ->select([
+                    'property_id',
+                    DB::raw('COUNT(*) as shows_count'),
+                    DB::raw('MIN(start_time) as first_show'),
+                    DB::raw('MAX(start_time) as last_show'),
+                ])
+                ->whereIn('property_id', $propertyIds)
+                ->groupBy('property_id');
+
+            if ($from) {
+                $bookingsQ->where('start_time', '>=', $from);
+            }
+            if ($to) {
+                $bookingsQ->where('start_time', '<=', $to);
+            }
+
+            $bookings = $bookingsQ->get()->keyBy('property_id');
+
+            // 3) build output list
+            $propsOut = $properties->map(function ($p) use ($bookings) {
+                $b = $bookings->get($p->id);
+                return [
+                    'id' => (int)$p->id,
+                    'title' => $p->title,
+                    'price' => $p->price,
+                    'currency' => $p->currency,
+                    'moderation_status' => $p->moderation_status,
+                    'created_at' => $p->created_at ? (string)$p->created_at : null,
+                    'shows_count' => $b ? (int)$b->shows_count : 0,
+                    'first_show' => $b && $b->first_show ? (string)$b->first_show : null,
+                    'last_show' => $b && $b->last_show ? (string)$b->last_show : null,
+                ];
+            })->values();
+
+            // 4) summary totals and by-status breakdown
+            $totalProps = $properties->count();
+            $totalShows = (int)$propsOut->sum('shows_count');
+            $byStatus = $properties->groupBy('moderation_status')->map(fn($g) => $g->count())->toArray();
+
+            $agent = User::find($agentId);
+            $agentName = $agent ? $agent->name : '—';
+
+            return response()->json([
+                'agent_id' => (int)$agentId,
+                'agent_name' => $agentName,
+                'summary' => [
+                    'total_properties' => $totalProps,
+                    'total_shows' => $totalShows,
+                    'by_status' => $byStatus,
+                ],
+                'properties' => $propsOut,
+            ]);
+        } catch (\Throwable $e) {
+            \Log::error('agentPropertiesReport error: ' . $e->getMessage(), ['exception' => $e]);
+            return response()->json(['error' => 'Internal server error'], 500);
+        }
+    }
 }
