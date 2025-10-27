@@ -313,16 +313,16 @@ class PropertyReportController extends Controller
                 DB::raw("SUM(CASE WHEN moderation_status = 'sold' THEN 1 ELSE 0 END) as sold_count"),
                 DB::raw("SUM(CASE WHEN moderation_status = 'rented' THEN 1 ELSE 0 END) as rented_count"),
                 DB::raw("SUM(CASE WHEN moderation_status = 'sold_by_owner' THEN 1 ELSE 0 END) as sold_by_owner_count"),
-                // Закрыто (без sold_by_owner) — если нужно, можно оставить
                 DB::raw("SUM(CASE WHEN moderation_status IN ('sold','rented') THEN 1 ELSE 0 END) as closed"),
                 DB::raw('COUNT(*) as total'),
                 DB::raw("$expr as $alias")
             )
             ->groupBy($groupBy)
-            // сортируем по сумме всех закрытий, включая sold_by_owner
-            ->orderByDesc(DB::raw("(SUM(CASE WHEN moderation_status = 'sold' THEN 1 ELSE 0 END) +
-                                SUM(CASE WHEN moderation_status = 'rented' THEN 1 ELSE 0 END) +
-                                SUM(CASE WHEN moderation_status = 'sold_by_owner' THEN 1 ELSE 0 END))"))
+            // Сортировка: сначала по sold_count, затем rented_count, затем sold_by_owner_count, затем total
+            ->orderByDesc('sold_count')
+            ->orderByDesc('rented_count')
+            ->orderByDesc('sold_by_owner_count')
+            ->orderByDesc('total')
             ->limit($limit)
             ->get();
 
@@ -351,8 +351,10 @@ class PropertyReportController extends Controller
             DB::raw("SUM(CASE WHEN moderation_status = 'pending' THEN 1 ELSE 0 END) as pending"),
             DB::raw("SUM(CASE WHEN moderation_status = 'approved' THEN 1 ELSE 0 END) as approved"),
             DB::raw("SUM(CASE WHEN moderation_status = 'rejected' THEN 1 ELSE 0 END) as rejected"),
+            DB::raw("SUM(CASE WHEN moderation_status = 'sold' THEN 1 ELSE 0 END) as sold"),
+            DB::raw("SUM(CASE WHEN moderation_status = 'rented' THEN 1 ELSE 0 END) as rented"),
             DB::raw("SUM(CASE WHEN moderation_status = 'sold_by_owner' THEN 1 ELSE 0 END) as sold_by_owner"),
-            DB::raw("SUM(CASE WHEN moderation_status IN ('sold','rented') THEN 1 ELSE 0 END) as closed")
+            DB::raw("SUM(CASE WHEN moderation_status IN ('sold','rented','sold_by_owner') THEN 1 ELSE 0 END) as closed")
         )->first();
 
         return response()->json($funnel);
