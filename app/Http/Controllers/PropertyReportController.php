@@ -354,7 +354,7 @@ class PropertyReportController extends Controller
 
         $rows = (clone $q)
             ->select(
-                $groupBy,
+//                $groupBy,
                 DB::raw("SUM(CASE WHEN moderation_status = 'draft' THEN 1 ELSE 0 END) as draft"),
                 DB::raw("SUM(CASE WHEN moderation_status = 'pending' THEN 1 ELSE 0 END) as pending"),
                 DB::raw("SUM(CASE WHEN moderation_status = 'approved' THEN 1 ELSE 0 END) as approved"),
