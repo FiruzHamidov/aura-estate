@@ -346,18 +346,41 @@ class PropertyReportController extends Controller
         $base = Property::query();
         [$q] = $this->applyCommonFilters($request, $base);
 
-        $funnel = (clone $q)->select(
-            DB::raw("SUM(CASE WHEN moderation_status = 'draft' THEN 1 ELSE 0 END) as draft"),
-            DB::raw("SUM(CASE WHEN moderation_status = 'pending' THEN 1 ELSE 0 END) as pending"),
-            DB::raw("SUM(CASE WHEN moderation_status = 'approved' THEN 1 ELSE 0 END) as approved"),
-            DB::raw("SUM(CASE WHEN moderation_status = 'rejected' THEN 1 ELSE 0 END) as rejected"),
-            DB::raw("SUM(CASE WHEN moderation_status = 'sold' THEN 1 ELSE 0 END) as sold"),
-            DB::raw("SUM(CASE WHEN moderation_status = 'rented' THEN 1 ELSE 0 END) as rented"),
-            DB::raw("SUM(CASE WHEN moderation_status = 'sold_by_owner' THEN 1 ELSE 0 END) as sold_by_owner"),
-            DB::raw("SUM(CASE WHEN moderation_status IN ('sold','rented','sold_by_owner') THEN 1 ELSE 0 END) as closed")
-        )->first();
+        // группируем по агенту (или created_by — если так у вас хранится автор)
+        $groupBy = $request->input('group_by', 'created_by');
+        if (!in_array($groupBy, ['agent_id', 'created_by'], true)) {
+            $groupBy = 'created_by';
+        }
 
-        return response()->json($funnel);
+        $rows = (clone $q)
+            ->select(
+                $groupBy,
+                DB::raw("SUM(CASE WHEN moderation_status = 'draft' THEN 1 ELSE 0 END) as draft"),
+                DB::raw("SUM(CASE WHEN moderation_status = 'pending' THEN 1 ELSE 0 END) as pending"),
+                DB::raw("SUM(CASE WHEN moderation_status = 'approved' THEN 1 ELSE 0 END) as approved"),
+                DB::raw("SUM(CASE WHEN moderation_status = 'rejected' THEN 1 ELSE 0 END) as rejected"),
+                DB::raw("SUM(CASE WHEN moderation_status = 'sold' THEN 1 ELSE 0 END) as sold"),
+                DB::raw("SUM(CASE WHEN moderation_status = 'rented' THEN 1 ELSE 0 END) as rented"),
+                DB::raw("SUM(CASE WHEN moderation_status = 'sold_by_owner' THEN 1 ELSE 0 END) as sold_by_owner"),
+                DB::raw("SUM(CASE WHEN moderation_status IN ('sold','rented','sold_by_owner') THEN 1 ELSE 0 END) as closed"),
+                DB::raw("COUNT(*) as total")
+            )
+            ->groupBy($groupBy)
+            ->orderByDesc('sold')
+            ->orderByDesc('rented')
+            ->orderByDesc('closed')
+            ->get();
+
+        // Подтягиваем имена агентов
+        $ids = $rows->pluck($groupBy)->filter()->unique();
+        $users = User::whereIn('id', $ids)->get(['id', 'name'])->keyBy('id');
+
+        $rows->transform(function ($r) use ($users, $groupBy) {
+            $r->agent_name = $users[$r->$groupBy]->name ?? '—';
+            return $r;
+        });
+
+        return response()->json($rows);
     }
 
     private function phoneIsNullExpr(): string
