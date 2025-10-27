@@ -119,60 +119,81 @@ class BookingController extends Controller
 
     public function agentsReport(Request $request)
     {
-        $from = $request->input('from'); // expected YYYY-MM-DD or ISO
-        $to   = $request->input('to');   // expected YYYY-MM-DD or ISO
+        try {
+            $from = $request->input('from'); // expected YYYY-MM-DD or ISO
+            $to   = $request->input('to');   // expected YYYY-MM-DD or ISO
 
-        $q = Booking::query();
+            $q = Booking::query();
 
-        // date filters (apply on start_time)
-        if ($from) {
-            $q->where('start_time', '>=', $from);
+            // date filters (apply on start_time)
+            if ($from) {
+                $q->where('start_time', '>=', $from);
+            }
+            if ($to) {
+                $q->where('start_time', '<=', $to);
+            }
+
+            if ($request->filled('agent_id')) {
+                $q->where('agent_id', $request->integer('agent_id'));
+            }
+            if ($request->filled('property_id')) {
+                $q->where('property_id', $request->integer('property_id'));
+            }
+
+            // detect DB driver to pick correct minutes expression
+            $driver = null;
+            try {
+                $driver = DB::getPdo()->getAttribute(\PDO::ATTR_DRIVER_NAME);
+            } catch (\Throwable $e) {
+                \Log::warning('agentsReport: could not detect DB driver: ' . $e->getMessage());
+            }
+
+            if (in_array($driver, ['pgsql', 'postgres', 'postgresql'], true)) {
+                // Postgres: use EXTRACT(EPOCH FROM interval)/60 and floor to minutes
+                $minutesExpr = "SUM(FLOOR(EXTRACT(EPOCH FROM (COALESCE(end_time, start_time) - start_time)) / 60)) as total_minutes";
+            } else {
+                // MySQL / MariaDB
+                $minutesExpr = "SUM(TIMESTAMPDIFF(MINUTE, start_time, COALESCE(end_time, start_time))) as total_minutes";
+            }
+
+            // Aggregation
+            $rows = (clone $q)
+                ->select([
+                    'agent_id',
+                    DB::raw('COUNT(*) as shows_count'),
+                    DB::raw($minutesExpr),
+                    DB::raw('COUNT(DISTINCT client_id) as unique_clients'),
+                    DB::raw('COUNT(DISTINCT property_id) as unique_properties'),
+                    DB::raw('MIN(start_time) as first_show'),
+                    DB::raw('MAX(start_time) as last_show'),
+                ])
+                ->groupBy('agent_id')
+                ->orderByDesc('shows_count')
+                ->get();
+
+            // attach agent names (preserve order)
+            $agentIds = $rows->pluck('agent_id')->filter()->unique()->values()->all();
+
+            // use fully-qualified model to avoid missing import issues
+            $users = \App\Models\User::whereIn('id', $agentIds)->get(['id', 'name'])->keyBy('id');
+
+            $result = $rows->map(function ($r) use ($users) {
+                return [
+                    'agent_id' => (int)$r->agent_id,
+                    'agent_name' => $users[$r->agent_id]->name ?? '—',
+                    'shows_count' => (int)$r->shows_count,
+                    'total_minutes' => isset($r->total_minutes) ? (int)$r->total_minutes : 0,
+                    'unique_clients' => (int)$r->unique_clients,
+                    'unique_properties' => (int)$r->unique_properties,
+                    'first_show' => $r->first_show ? (string)$r->first_show : null,
+                    'last_show' => $r->last_show ? (string)$r->last_show : null,
+                ];
+            });
+
+            return response()->json($result);
+        } catch (\Throwable $e) {
+            \Log::error('agentsReport error: ' . $e->getMessage(), ['exception' => $e]);
+            return response()->json(['error' => 'Internal server error'], 500);
         }
-        if ($to) {
-            // include end of day if date-only provided
-            $q->where('start_time', '<=', $to);
-        }
-
-        if ($request->filled('agent_id')) {
-            $q->where('agent_id', $request->integer('agent_id'));
-        }
-        if ($request->filled('property_id')) {
-            $q->where('property_id', $request->integer('property_id'));
-        }
-
-        // Aggregation
-        $rows = (clone $q)
-            ->select([
-                'agent_id',
-                DB::raw('COUNT(*) as shows_count'),
-                // total duration in minutes, handle possible NULL end_time
-                DB::raw("SUM(TIMESTAMPDIFF(MINUTE, start_time, COALESCE(end_time, start_time))) as total_minutes"),
-                DB::raw('COUNT(DISTINCT client_id) as unique_clients'),
-                DB::raw('COUNT(DISTINCT property_id) as unique_properties'),
-                DB::raw('MIN(start_time) as first_show'),
-                DB::raw('MAX(start_time) as last_show'),
-            ])
-            ->groupBy('agent_id')
-            ->orderByDesc('shows_count')
-            ->get();
-
-        // attach agent names (preserve order)
-        $agentIds = $rows->pluck('agent_id')->filter()->unique()->values()->all();
-        $users = User::whereIn('id', $agentIds)->get(['id', 'name'])->keyBy('id');
-
-        $result = $rows->map(function ($r) use ($users) {
-            return [
-                'agent_id' => (int)$r->agent_id,
-                'agent_name' => $users[$r->agent_id]->name ?? '—',
-                'shows_count' => (int)$r->shows_count,
-                'total_minutes' => (int)$r->total_minutes,
-                'unique_clients' => (int)$r->unique_clients,
-                'unique_properties' => (int)$r->unique_properties,
-                'first_show' => $r->first_show ? (string)$r->first_show : null,
-                'last_show' => $r->last_show ? (string)$r->last_show : null,
-            ];
-        });
-
-        return response()->json($result);
     }
 }
