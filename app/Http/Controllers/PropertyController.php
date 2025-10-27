@@ -408,19 +408,10 @@ class PropertyController extends Controller
 
     public function show(Property $property)
     {
-        $user = auth()->user();
-
-        if (!$user && $property->moderation_status !== 'approved') {
-            return response()->json(['message' => 'Объект недоступен'], 403);
-        }
-
-        if ($user && $user->hasRole('client') && $property->created_by !== $user->id) {
-            return response()->json(['message' => 'Объект недоступен'], 403);
-        }
+//        $user = auth()->user();
 
         return response()->json($property->load(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'contractType']));
     }
-
 
     public function destroy(Property $property)
     {
