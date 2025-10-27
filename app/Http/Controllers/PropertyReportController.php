@@ -365,7 +365,7 @@ class PropertyReportController extends Controller
                 DB::raw("SUM(CASE WHEN moderation_status IN ('sold','rented','sold_by_owner') THEN 1 ELSE 0 END) as closed"),
                 DB::raw("COUNT(*) as total")
             )
-            ->groupBy($groupBy)
+//            ->groupBy($groupBy)
             ->orderByDesc('sold')
             ->orderByDesc('rented')
             ->orderByDesc('closed')
