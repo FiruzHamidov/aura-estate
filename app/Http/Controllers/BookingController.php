@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Booking;
+use App\Models\User;
 use Illuminate\Http\Request;
 use App\Services\Bitrix24Client;
 use Illuminate\Support\Arr;
@@ -112,11 +113,6 @@ class BookingController extends Controller
         return response()->json($booking);
     }
 
-    use Illuminate\Support\Facades\DB;
-    use App\Models\User;
-
-// ...
-
     public function agentsReport(Request $request)
     {
         try {
@@ -174,8 +170,7 @@ class BookingController extends Controller
             // attach agent names (preserve order)
             $agentIds = $rows->pluck('agent_id')->filter()->unique()->values()->all();
 
-            // use fully-qualified model to avoid missing import issues
-            $users = \App\Models\User::whereIn('id', $agentIds)->get(['id', 'name'])->keyBy('id');
+            $users = User::whereIn('id', $agentIds)->get(['id', 'name'])->keyBy('id');
 
             $result = $rows->map(function ($r) use ($users) {
                 return [
