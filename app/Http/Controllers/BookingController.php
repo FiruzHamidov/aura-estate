@@ -49,6 +49,13 @@ class BookingController extends Controller
             'sync_to_b24' => 'sometimes|boolean',
         ]);
 
+        // приводим входные строки в UTC, предполагая, что пользователь вводит время в Asia/Dushanbe
+        $start = Carbon::parse($validated['start_time'], 'Asia/Dushanbe')->setTimezone('UTC');
+        $end   = Carbon::parse($validated['end_time'], 'Asia/Dushanbe')->setTimezone('UTC');
+
+        $validated['start_time'] = $start->toDateTimeString();
+        $validated['end_time']   = $end->toDateTimeString();
+
         $booking = Booking::create($validated);
 
         // Ensure relations are available for subject/description
@@ -59,10 +66,6 @@ class BookingController extends Controller
             try {
                 /** @var Bitrix24Client $b24 */
                 $b24 = app(Bitrix24Client::class); // throws if not bound
-
-                // Build CRM activity for a meeting (type=2)
-                $start = Carbon::parse($validated['start_time'])->toIso8601String();
-                $end   = Carbon::parse($validated['end_time'])->toIso8601String();
 
                 $subject = 'Показ объекта';
                 if ($booking->relationLoaded('property') && $booking->property) {
@@ -110,6 +113,14 @@ class BookingController extends Controller
     public function show($id)
     {
         $booking = Booking::with(['property', 'agent', 'client'])->findOrFail($id);
+
+        if ($booking->start_time) {
+            $booking->start_time = $booking->start_time->setTimezone('Asia/Dushanbe')->toDateTimeString();
+        }
+        if ($booking->end_time) {
+            $booking->end_time = $booking->end_time->setTimezone('Asia/Dushanbe')->toDateTimeString();
+        }
+
         return response()->json($booking);
     }
 
