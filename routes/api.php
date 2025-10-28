@@ -162,6 +162,6 @@ Route::get('/selections/public/{hash}', [SelectionController::class, 'publicShow
 Route::post('/b24/token', [B24AuthController::class,'issue']);
 Route::middleware('b24.jwt')->group(function(){
     Route::post('/selections',            [SelectionController::class,'store']);
-    Route::post('/selections/{id}/events',[SelectionController::class,'event']);
     Route::post('/showings',              [BookingController::class,'store']);
 });
+    Route::post('/selections/{id}/events',[SelectionController::class,'event']);
