@@ -171,6 +171,7 @@ class SelectionController extends Controller
             abort(410, 'Selection expired');
         }
         return [
+            'id'        => $sel->id,
             'title'        => $sel->title,
             'property_ids' => $sel->property_ids,
             'note'         => $sel->note,
