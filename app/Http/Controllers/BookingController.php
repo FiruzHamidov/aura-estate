@@ -12,24 +12,73 @@ use Illuminate\Support\Facades\DB;
 
 class BookingController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
         $q = Booking::query()->with(['property', 'agent', 'client']);
 
-        if (request()->filled('from')) {
-            $q->where('start_time', '>=', request()->input('from'));
+        $inputTz = 'Asia/Dushanbe';
+        $dbTz = 'UTC';
+
+        // Helper: convert input date/time (string) in inputTz to DB timezone string
+        $toDbTz = function (?string $value, string $defaultBoundary = null) use ($inputTz, $dbTz) {
+            if (empty($value)) {
+                return null;
+            }
+
+            // If user passed only date (YYYY-MM-DD) and defaultBoundary specified ('start'|'end'),
+            // append time part to cover day bounds.
+            if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $value) && $defaultBoundary) {
+                $value .= $defaultBoundary === 'start' ? ' 00:00:00' : ' 23:59:59';
+            }
+
+            // Carbon::parse is flexible: will accept ISO with TZ if provided, else treat as local ($inputTz)
+            try {
+                $c = Carbon::parse($value, $inputTz)->setTimezone($dbTz);
+                return $c->toDateTimeString();
+            } catch (\Throwable $e) {
+                // if parse fails, return null so filter won't be applied
+                \Log::warning('Failed to parse date filter: ' . $value . ' — ' . $e->getMessage());
+                return null;
+            }
+        };
+
+        // from / to: convert to UTC for DB comparison
+        $fromRaw = $request->input('from');
+        $toRaw = $request->input('to');
+
+        $fromDb = $toDbTz($fromRaw, $fromRaw && preg_match('/^\d{4}-\d{2}-\d{2}$/', $fromRaw) ? 'start' : 'start');
+        $toDb   = $toDbTz($toRaw,   $toRaw   && preg_match('/^\d{4}-\d{2}-\d{2}$/', $toRaw)   ? 'end'   : 'end');
+
+        if ($fromDb) {
+            $q->where('start_time', '>=', $fromDb);
         }
-        if (request()->filled('to')) {
-            $q->where('end_time', '<=', request()->input('to'));
-        }
-        if (request()->filled('agent_id')) {
-            $q->where('agent_id', request()->integer('agent_id'));
-        }
-        if (request()->filled('property_id')) {
-            $q->where('property_id', request()->integer('property_id'));
+        if ($toDb) {
+            $q->where('end_time', '<=', $toDb);
         }
 
-        return $q->orderBy('start_time')->get();
+        if ($request->filled('agent_id')) {
+            $q->where('agent_id', $request->integer('agent_id'));
+        }
+        if ($request->filled('property_id')) {
+            $q->where('property_id', $request->integer('property_id'));
+        }
+
+        $bookings = $q->orderBy('start_time')->get();
+
+        // Convert times to output timezone for response
+        $outputTz = $inputTz; // Asia/Dushanbe
+        $bookings->transform(function ($b) use ($outputTz) {
+            // protect against nulls or string values
+            if ($b->start_time) {
+                $b->start_time = Carbon::parse($b->start_time, 'UTC')->setTimezone($outputTz)->toDateTimeString();
+            }
+            if ($b->end_time) {
+                $b->end_time = Carbon::parse($b->end_time, 'UTC')->setTimezone($outputTz)->toDateTimeString();
+            }
+            return $b;
+        });
+
+        return $bookings;
     }
 
     public function store(Request $request)
@@ -49,12 +98,17 @@ class BookingController extends Controller
             'sync_to_b24' => 'sometimes|boolean',
         ]);
 
-        // приводим входные строки в UTC, предполагая, что пользователь вводит время в Asia/Dushanbe
-        $start = Carbon::parse($validated['start_time'], 'Asia/Dushanbe')->setTimezone('UTC');
-        $end   = Carbon::parse($validated['end_time'], 'Asia/Dushanbe')->setTimezone('UTC');
+        // ---------- timezone handling ----------
+        // Предполагаем что пользователь вводит время в Asia/Dushanbe (+05:00).
+        // Конвертируем в UTC перед сохранением в БД.
+        $inputTz = 'Asia/Dushanbe'; // можно вынести в конфиг, если нужно
 
-        $validated['start_time'] = $start->toDateTimeString();
-        $validated['end_time']   = $end->toDateTimeString();
+        $startCarbon = Carbon::parse($validated['start_time'], $inputTz)->setTimezone('UTC');
+        $endCarbon   = Carbon::parse($validated['end_time'], $inputTz)->setTimezone('UTC');
+
+        // Сохраняем в формате, который БД корректно принимает
+        $validated['start_time'] = $startCarbon->toDateTimeString(); // "Y-m-d H:i:s" (UTC)
+        $validated['end_time']   = $endCarbon->toDateTimeString();
 
         $booking = Booking::create($validated);
 
@@ -77,15 +131,16 @@ class BookingController extends Controller
                     $booking->note ? 'Заметка: ' . $booking->note : null,
                     $booking->client_name ? 'Клиент: ' . $booking->client_name : null,
                     $booking->client_phone ? 'Телефон: ' . $booking->client_phone : null,
-                    $validated['place'] ?? null ? 'Место: ' . $validated['place'] : null,
+                    ($validated['place'] ?? null) ? 'Место: ' . $validated['place'] : null,
                 ])->filter()->implode("\n");
 
+                // Bitrix обычно ожидает строки ISO; используем UTC ISO строки
                 $fields = [
                     'TYPE_ID' => 2, // Meeting
                     'SUBJECT' => $subject,
                     'DESCRIPTION' => $description,
-                    'START_TIME' => $start,
-                    'END_TIME' => $end,
+                    'START_TIME' => $startCarbon->toIso8601String(),
+                    'END_TIME' => $endCarbon->toIso8601String(),
                     'OWNER_TYPE_ID' => 2, // Deal
                     'OWNER_ID' => Arr::get($validated, 'deal_id'),
                     'COMMUNICATIONS' => array_values(array_filter([
@@ -95,8 +150,8 @@ class BookingController extends Controller
                     'RESPONSIBLE_ID' => $validated['agent_id'] ?? null,
                 ];
 
-                // Remove nulls
-                $fields = array_filter($fields, fn ($v) => $v !== null && $v !== '');
+                // Remove nulls and empty strings
+                $fields = array_filter($fields, fn($v) => $v !== null && $v !== '');
 
                 $bitrixResult = $b24->activityAdd(['fields' => $fields]);
             } catch (\Throwable $e) {
@@ -114,11 +169,19 @@ class BookingController extends Controller
     {
         $booking = Booking::with(['property', 'agent', 'client'])->findOrFail($id);
 
+        // Если в модели даты хранятся как строки, будем парсить их в Carbon перед сетом временной зоны.
+        $outputTz = 'Asia/Dushanbe';
+
         if ($booking->start_time) {
-            $booking->start_time = $booking->start_time->setTimezone('Asia/Dushanbe')->toDateTimeString();
+            // использование Carbon::parse защищает от случаев, когда start_time — строка
+            $booking->start_time = Carbon::parse($booking->start_time, 'UTC')
+                ->setTimezone($outputTz)
+                ->toDateTimeString(); // или ->toIso8601String()
         }
         if ($booking->end_time) {
-            $booking->end_time = $booking->end_time->setTimezone('Asia/Dushanbe')->toDateTimeString();
+            $booking->end_time = Carbon::parse($booking->end_time, 'UTC')
+                ->setTimezone($outputTz)
+                ->toDateTimeString();
         }
 
         return response()->json($booking);
