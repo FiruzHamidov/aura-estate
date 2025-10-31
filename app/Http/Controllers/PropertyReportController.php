@@ -36,7 +36,7 @@ class PropertyReportController extends Controller
         $multiFields = [
             'type_id', 'status_id', 'location_id', 'repair_type_id',
             'currency', 'offer_type', 'listing_type', 'contract_type_id',
-            'created_by', 'agent_id', 'moderation_status', 'district'
+            'created_by', 'agent_id', 'moderation_status', 'district', 'created_by'
         ];
         foreach ($multiFields as $f) {
             if ($request->has($f)) {

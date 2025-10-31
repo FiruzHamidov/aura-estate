@@ -136,7 +136,7 @@ class BookingController extends Controller
 
                 // Bitrix обычно ожидает строки ISO; используем UTC ISO строки
                 $fields = [
-                    'TYPE_ID' => 2, // Meeting
+                    'TYPE_ID' => 2,
                     'SUBJECT' => $subject,
                     'DESCRIPTION' => $description,
                     'START_TIME' => $startCarbon->toIso8601String(),
