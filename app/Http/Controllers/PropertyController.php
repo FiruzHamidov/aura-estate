@@ -768,4 +768,80 @@ class PropertyController extends Controller
         $union = count($A) + count($B) - $inter;
         return $union > 0 ? $inter / $union : 0.0;
     }
+
+    public function similar(Property $property, Request $request)
+    {
+        $limit = (int) $request->input('limit', 6);
+        $priceTolerance = (float) $request->input('price_tolerance', 0.2); // 20%
+        $radiusKm = (float) $request->input('radius_km', 5); // 5 km by default
+        $useRadius = $request->boolean('use_radius', true);
+
+        $query = Property::query();
+
+        // всегда исключаем текущий объект
+        $query->where('id', '!=', $property->id);
+
+        // совпадающий тип — даёт приоритет
+        if ($property->type_id) {
+            $query->where('type_id', $property->type_id);
+        }
+
+        // совпадающая локация (город / район) — если есть
+        if ($property->location_id) {
+            $query->where('location_id', $property->location_id);
+        } elseif (!empty($property->district)) {
+            $query->where('district', $property->district);
+        }
+
+        // совпадающий тип предложения (продажа/аренда)
+        if (!empty($property->offer_type)) {
+            $query->where('offer_type', $property->offer_type);
+        }
+
+        // комнаты — если указаны
+        if (!empty($property->rooms)) {
+            // ищем либо ровно такое значение, либо +-1 комнату
+            $query->whereBetween('rooms', [max(0, $property->rooms - 1), $property->rooms + 1]);
+        }
+
+        // ценовой диапазон
+        if (!empty($property->price) && is_numeric($property->price)) {
+            $minPrice = $property->price * (1 - $priceTolerance);
+            $maxPrice = $property->price * (1 + $priceTolerance);
+            $query->whereBetween('price', [$minPrice, $maxPrice]);
+        }
+
+        // поиск по радиусу — если есть координаты и включена опция
+        if ($useRadius && $property->latitude && $property->longitude) {
+            $lat = (float)$property->latitude;
+            $lng = (float)$property->longitude;
+            // Хаверсин: расстояние в км
+            $haversine = "(6371 * acos(
+            cos(radians(?)) * cos(radians(latitude)) * cos(radians(longitude) - radians(?))
+            + sin(radians(?)) * sin(radians(latitude))
+        ))";
+
+            // присоединяем расстояние как поле и фильтруем по radius
+            // используем selectRaw чтобы включить всё необходимое
+            $query->select(['properties.*'])
+                ->selectRaw("$haversine AS distance", [$lat, $lng, $lat])
+                ->whereRaw("$haversine <= ?", [$lat, $lng, $lat, $radiusKm])
+                ->orderBy('distance', 'asc');
+        } else {
+            // если расстояние не используется - сортируем по дате и релевантности
+            $query->orderBy('created_at', 'desc');
+        }
+
+        // Добавим дополнительные нестрогие критерии (например, same repair type) как опция
+        if ($property->repair_type_id) {
+            $query->orWhere('repair_type_id', $property->repair_type_id);
+        }
+
+        // eager load
+        $result = $query->with(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'contractType'])
+            ->limit($limit)
+            ->get();
+
+        return response()->json($result);
+    }
 }

@@ -22,6 +22,7 @@ Route::post('/sms/verify',  [AuthController::class, 'verifySmsCode']);
 Route::get('/properties',      [PropertyController::class, 'index']);
 Route::get('/properties/map',  [PropertyController::class, 'map']);
 Route::get('/properties/{property}', [PropertyController::class, 'show']);
+Route::get('/properties/{property}/similar', [PropertyController::class, 'similar']);
 Route::post('/properties/{property}/view', [PropertyController::class, 'trackView'])->middleware('throttle:30,1');
 
 Route::get('/property-types',    [PropertyTypeController::class, 'index']);
