@@ -507,20 +507,47 @@ class PropertyController extends Controller
 
     public function applySorts(Builder $query, ?string $sort = 'listing_type', ?string $dir = 'desc'): void
     {
+        // Если явно указано 'none' — не применяем сортировку
         if ($sort === 'none') {
-            return; // не сортировать вообще
+            return;
         }
 
+        // Нормализуем направление
+        $dir = strtolower($dir ?? 'desc') === 'asc' ? 'asc' : 'desc';
+
+        // Специальный порядок для listing_type (urgent -> vip -> regular -> others)
         if ($sort === 'listing_type') {
             $orderExpr = "CASE listing_type
             WHEN 'urgent' THEN 1
             WHEN 'vip' THEN 2
             WHEN 'regular' THEN 3
             ELSE 4 END";
-            $query->orderByRaw($orderExpr);
-        } else {
-            $query->orderBy($sort ?? 'created_at', $dir ?? 'desc');
+            // Сначала по listing_type согласно CASE, затем по дате (чтобы детерминировать порядок)
+            $query->orderByRaw($orderExpr)->orderBy('created_at', $dir);
+            return;
         }
+
+        // Разрешённые поля сортировки — whitelist для защиты от произвольных колонок
+        $allowed = [
+            'created_at' => 'created_at', // можно также принимать alias 'date'
+            'date' => 'created_at',
+            'price' => 'price',
+            'total_area' => 'total_area',
+            'area' => 'total_area',
+            'rooms' => 'rooms',
+            'views_count' => 'views_count',
+            'id' => 'id',
+        ];
+
+        // Если передали что-то вроде 'price' или 'total_area' — применим
+        if (isset($allowed[$sort])) {
+            $col = $allowed[$sort];
+            $query->orderBy($col, $dir);
+            return;
+        }
+
+        // По умолчанию — сортируем по созданию (дата)
+        $query->orderBy('created_at', $dir);
     }
 
     public function trackView(Request $request, Property $property)
