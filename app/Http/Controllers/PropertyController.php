@@ -871,4 +871,17 @@ class PropertyController extends Controller
 
         return response()->json($result);
     }
+    /**
+     * Return audit logs for a property (paginated).
+     * GET /api/properties/{property}/logs
+     */
+    public function logs(Request $request, Property $property)
+    {
+        $perPage = (int) $request->input('per_page', 50);
+
+        // eager load user for each log (if available)
+        $logs = $property->logs()->with('user')->paginate($perPage);
+
+        return response()->json($logs);
+    }
 }

@@ -1,15 +1,35 @@
 <?php
 
-use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\{
-    AuthController, B24AuthController, BookingController, BuildingTypeController, ChatController,
-    ConstructionStageController, ContractTypeController, DeveloperController, DeveloperUnitController,
-    DeveloperUnitPhotoController, FavoriteController, FeatureController, HeatingTypeController,
-    LocationController, MaterialController, NewBuildingBlockController, NewBuildingController,
-    NewBuildingPhotoController, ParkingTypeController, PropertyController, PropertyPhotoController,
-    PropertyReportController, PropertyStatusController, PropertyTypeController, RepairTypeController,
-    RoleController, SelectionController, UserController
+use App\Http\Controllers\{AuthController,
+    B24AuthController,
+    BookingController,
+    BuildingTypeController,
+    ChatController,
+    ConstructionStageController,
+    ContractTypeController,
+    DeveloperController,
+    DeveloperUnitController,
+    DeveloperUnitPhotoController,
+    FavoriteController,
+    FeatureController,
+    HeatingTypeController,
+    LocationController,
+    MaterialController,
+    NewBuildingBlockController,
+    NewBuildingController,
+    NewBuildingPhotoController,
+    ParkingTypeController,
+    PropertyController,
+    PropertyPhotoController,
+    PropertyReportController,
+    PropertyStatusController,
+    PropertyTypeController,
+    RepairTypeController,
+    RoleController,
+    SelectionController,
+    UserController
 };
+use Illuminate\Support\Facades\Route;
 
 // --- ПИНГ ---
 Route::get('/ping', fn() => response()->json(['message' => 'API works']));
@@ -66,8 +86,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/logout',       [AuthController::class, 'logout']);
 
     // Properties CRUD + photos
-    Route::post('/properties',                [PropertyController::class, 'store']);
-    Route::put('/properties/{property}',      [PropertyController::class, 'update']);
+    Route::post('/properties', [PropertyController::class, 'store']);
+    Route::get('/properties/{property}/logs', [PropertyController::class, 'logs']);
+    Route::put('/properties/{property}', [PropertyController::class, 'update']);
     Route::delete('/properties/{property}',   [PropertyController::class, 'destroy']);
     Route::patch('/properties/{property}/moderation-listing', [PropertyController::class, 'updateModerationAndListingType']);
     Route::post('properties/{property}/photos',               [PropertyPhotoController::class, 'store']);

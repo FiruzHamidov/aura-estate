@@ -102,4 +102,9 @@ class Property extends Model
     {
         return $this->belongsTo(ContractType::class);
     }
+
+    public function logs()
+    {
+        return $this->hasMany(PropertyLog::class)->latest();
+    }
 }
