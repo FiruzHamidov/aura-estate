@@ -879,7 +879,6 @@ class PropertyController extends Controller
     {
         $perPage = (int) $request->input('per_page', 50);
 
-        // eager load user for each log (if available)
         $logs = $property->logs()->with('user')->paginate($perPage);
 
         return response()->json($logs);
