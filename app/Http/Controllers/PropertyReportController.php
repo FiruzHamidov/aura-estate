@@ -521,7 +521,21 @@ class PropertyReportController extends Controller
 
             // Build base properties query (we'll refine below)
             $propsQ = Property::query()
-                ->select(['id','title','price','currency','moderation_status','created_at','agent_id','created_by']);
+                ->select([
+                    'id','title','price','currency','moderation_status','created_at','agent_id','created_by',
+                    // fields required to generate title on the frontend
+                    'type_id',
+                    'apartment_type',
+                    'rooms',
+                    'total_area',
+                    'living_area',
+                    'land_size',
+                    'floor',
+                    'total_floors',
+                ])
+                ->with(['type' => function ($q) {
+                    $q->select(['id','slug']);
+                }]);
 
             // Optional property filters
             if ($request->filled('type_id')) {
@@ -571,6 +585,19 @@ class PropertyReportController extends Controller
                         'shows_count' => $b ? (int)$b->shows_count : 0,
                         'first_show' => $b && $b->first_show ? (string)$b->first_show : null,
                         'last_show' => $b && $b->last_show ? (string)$b->last_show : null,
+
+                        // fields for frontend title generation
+                        'type' => [
+                            'id' => $p->type->id ?? null,
+                            'slug' => $p->type->slug ?? null,
+                        ],
+                        'apartment_type' => $p->apartment_type ?? null,
+                        'rooms' => $p->rooms !== null ? (int)$p->rooms : null,
+                        'total_area' => $p->total_area !== null ? (float)$p->total_area : null,
+                        'living_area' => $p->living_area !== null ? (float)$p->living_area : null,
+                        'land_size' => $p->land_size !== null ? (float)$p->land_size : null,
+                        'floor' => $p->floor !== null ? (int)$p->floor : null,
+                        'total_floors' => $p->total_floors !== null ? (int)$p->total_floors : null,
                     ];
                 })->values();
 
@@ -651,6 +678,19 @@ class PropertyReportController extends Controller
                         'shows_count' => $b ? (int)$b->shows_count : 0,
                         'first_show' => $b && $b->first_show ? (string)$b->first_show : null,
                         'last_show' => $b && $b->last_show ? (string)$b->last_show : null,
+
+                        // fields for frontend title generation
+                        'type' => [
+                            'id' => $p->type->id ?? null,
+                            'slug' => $p->type->slug ?? null,
+                        ],
+                        'apartment_type' => $p->apartment_type ?? null,
+                        'rooms' => $p->rooms !== null ? (int)$p->rooms : null,
+                        'total_area' => $p->total_area !== null ? (float)$p->total_area : null,
+                        'living_area' => $p->living_area !== null ? (float)$p->living_area : null,
+                        'land_size' => $p->land_size !== null ? (float)$p->land_size : null,
+                        'floor' => $p->floor !== null ? (int)$p->floor : null,
+                        'total_floors' => $p->total_floors !== null ? (int)$p->total_floors : null,
                     ];
                 })->values();
 
