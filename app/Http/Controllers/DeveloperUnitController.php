@@ -36,14 +36,24 @@ class DeveloperUnitController extends Controller
         return $unit->load(['block','photos','newBuilding']);
     }
 
-    public function update(UpdateDeveloperUnitRequest $request, DeveloperUnit $unit)
+    public function update(UpdateDeveloperUnitRequest $request, NewBuilding $new_building, DeveloperUnit $unit)
     {
+        // ensure the unit belongs to the requested building
+        if ($unit->new_building_id !== $new_building->id) {
+            abort(404);
+        }
+
         $unit->update($request->validated());
         return $unit->load('block');
     }
 
-    public function destroy(DeveloperUnit $unit)
+    public function destroy(NewBuilding $new_building, DeveloperUnit $unit)
     {
+        // ensure the unit belongs to the requested building
+        if ($unit->new_building_id !== $new_building->id) {
+            abort(404);
+        }
+
         $unit->delete();
         return response()->noContent();
     }
