@@ -104,6 +104,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('heating-types',     HeatingTypeController::class)->except(['index']);
     Route::apiResource('contract-types',    ContractTypeController::class)->except(['index']);
     Route::apiResource('repair-types',      RepairTypeController::class)->except(['index']);
+    Route::apiResource('developers', DeveloperController::class)->except(['index', 'show']);
+
     Route::apiResource('roles',             RoleController::class);
     Route::post('/user/{user}/photo',       [UserController::class, 'updatePhoto']);
     Route::delete('/user/photo',            [UserController::class, 'deleteMyPhoto']);
