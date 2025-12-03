@@ -26,6 +26,7 @@ class NewBuilding extends Model
     ];
 
     public function developer(): BelongsTo { return $this->belongsTo(Developer::class); }
+    public function location(): BelongsTo { return $this->belongsTo(Location::class); }
     public function stage(): BelongsTo { return $this->belongsTo(ConstructionStage::class, 'construction_stage_id'); }
     public function material(): BelongsTo { return $this->belongsTo(Material::class); }
 

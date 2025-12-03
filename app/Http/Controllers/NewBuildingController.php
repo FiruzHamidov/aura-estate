@@ -13,7 +13,7 @@ class NewBuildingController extends Controller
     public function index(Request $req)
     {
         $q = NewBuilding::query()
-            ->with(['developer', 'previewUnits', 'stage'])
+            ->with(['developer', 'previewUnits', 'stage','location'])
             ->when($req->developer_id, fn($qq) => $qq->where('developer_id', $req->developer_id))
             ->when($req->stage_id, fn($qq) => $qq->where('construction_stage_id', $req->stage_id))
             ->when($req->material_id, fn($qq) => $qq->where('material_id', $req->material_id))
