@@ -38,7 +38,7 @@ class NewBuildingController extends Controller
     public function show(NewBuilding $new_building)
     {
         // грузим связи
-        $new_building->load(['developer','stage','material','features','blocks','units','photos']);
+        $new_building->load(['developer','stage','material','features','blocks','units','photos', 'location']);
 
         // считаем агрегаты по доступным и одобренным юнитам
         $unitsQ = $new_building->units()
