@@ -19,13 +19,13 @@ class NewBuildingBlockController extends Controller
     public function store(StoreNewBuildingBlockRequest $request, NewBuilding $new_building)
     {
         $block = $new_building->blocks()->create($request->validated());
-        return response()->json($block->load(/* связи если нужно */), 201);
+        return response()->json($block, 201);
     }
 
     // GET /new-buildings/{new_building}/blocks/{block}
     public function show(NewBuilding $new_building, NewBuildingBlock $block)
     {
-        return $block->load(/* связи если нужно */);
+        return $block;
     }
 
     // PUT/PATCH /new-buildings/{new_building}/blocks/{block}
