@@ -9,7 +9,7 @@ class Developer extends Model
 {
     protected $fillable = [
         'name','phone','under_construction_count','built_count',
-        'founded_year','total_projects','logo_path','website','facebook','instagram','telegram','moderation_status'
+        'founded_year','total_projects','logo_path','website','facebook','instagram','telegram','moderation_status','description'
     ];
 
     public function newBuildings(): HasMany

@@ -63,6 +63,7 @@ class DeveloperController extends Controller
             // логотип как строковый путь, но можно принять файл:
             'logo_path'                => ['nullable', 'string', 'max:255'],
             'logo'                     => ['nullable', 'file', 'mimes:jpg,jpeg,png,webp,svg', 'max:5120'],
+            'description' => ['nullable', 'string'],
         ]);
 
         // загрузка файла логотипа, если пришел
@@ -112,6 +113,7 @@ class DeveloperController extends Controller
             'telegram'                 => ['nullable', 'string', 'max:255'],
             'logo_path'                => ['nullable', 'string', 'max:255'],
             'logo'                     => ['nullable', 'file', 'mimes:jpg,jpeg,png,webp,svg', 'max:5120'],
+            'description' => ['nullable', 'string'],
         ]);
 
         // если грузим новый логотип — удалим старый (по желанию)
