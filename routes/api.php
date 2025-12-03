@@ -107,6 +107,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('developers', DeveloperController::class)->except(['index', 'show']);
     Route::apiResource('features',   FeatureController::class)->except(['index', 'show']);
     Route::apiResource('materials',  MaterialController::class)->except(['index', 'show']);
+    Route::apiResource('construction-stages', ConstructionStageController::class)->except(['index', 'show']);
 
 
 
