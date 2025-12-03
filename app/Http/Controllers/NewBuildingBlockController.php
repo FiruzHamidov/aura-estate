@@ -20,15 +20,15 @@ class NewBuildingBlockController extends Controller
         return response()->json($block, 201);
     }
 
-    public function show(NewBuildingBlock $new_building_block)
+    public function show(NewBuildingBlock $block)
     {
-        return $new_building_block;
+        return $block;
     }
 
-    public function update(UpdateNewBuildingBlockRequest $request, NewBuildingBlock $block)
+    public function update(UpdateNewBuildingBlockRequest $request, NewBuilding $new_building, NewBuildingBlock $block)
     {
         $block->update($request->validated());
-        return $new_building_block;
+        return $block->refresh();
     }
 
     public function destroy(NewBuildingBlock $new_building_block)
