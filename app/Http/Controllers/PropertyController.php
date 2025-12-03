@@ -308,7 +308,7 @@ class PropertyController extends Controller
         }
 
         $validated['created_by'] = auth()->id();
-        $validated['moderation_status'] = auth()->user()->hasRole('client') ? 'pending' : 'approved';
+//        $validated['moderation_status'] = auth()->user()->hasRole('client') ? 'pending' : 'approved';
         $validated['listing_type'] = $request->input('listing_type', 'regular');
 
         $property = Property::create($validated);
