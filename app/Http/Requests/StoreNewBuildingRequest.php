@@ -27,6 +27,7 @@ class StoreNewBuildingRequest extends FormRequest
             'moderation_status' => ['nullable','in:pending,approved,rejected,draft,deleted'],
             'features' => ['array'],
             'features.*' => ['integer','exists:features,id'],
+            'district' => ['nullable', 'string', 'max:255'],
         ];
     }
 }

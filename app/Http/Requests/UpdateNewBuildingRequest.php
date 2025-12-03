@@ -41,6 +41,7 @@ class UpdateNewBuildingRequest extends FormRequest
             'moderation_status' => ['sometimes','nullable','in:pending,approved,rejected,draft,deleted'],
             'features' => ['sometimes','array'],
             'features.*' => ['integer','exists:features,id'],
+            'district' => ['sometimes','nullable','string','max:255'],
         ];
     }
 }

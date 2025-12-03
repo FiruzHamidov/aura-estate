@@ -13,7 +13,7 @@ class NewBuilding extends Model
         'title','description','developer_id','construction_stage_id','material_id',
         'location_id','installment_available','heating','has_terrace',
         'floors_range','completion_at','address','latitude','longitude',
-        'moderation_status','created_by',
+        'moderation_status','created_by', 'district',
     ];
 
     protected $casts = [
