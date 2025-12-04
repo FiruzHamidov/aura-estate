@@ -143,6 +143,7 @@ class PropertyReportController extends Controller
             return [
                 'id' => $row->$groupBy,
                 'name' => $users[$row->$groupBy]->name ?? '—',
+                'agent_id' => $users[$row->$groupBy]->id ?? '—',
                 'email' => $users[$row->$groupBy]->email ?? null,
                 'total' => $total,
                 'approved' => (int)$row->approved,
@@ -321,8 +322,6 @@ class PropertyReportController extends Controller
             ->groupBy($groupBy)
             // Сортировка: сначала по sold_count, затем rented_count, затем sold_by_owner_count, затем total
             ->orderByDesc('sold_count')
-            ->orderByDesc('rented_count')
-            ->orderByDesc('sold_by_owner_count')
             ->orderByDesc('total')
             ->limit($limit)
             ->get();
@@ -333,6 +332,7 @@ class PropertyReportController extends Controller
 
         $rows->transform(function ($r) use ($users, $groupBy) {
             $r->agent_name = $users[$r->$groupBy]->name ?? '—';
+            $r->agent_id = $users[$r->$groupBy]->id ?? '—';
             $r->sum_price = isset($r->sum_price) ? round((float)$r->sum_price, 2) : null;
             $r->avg_price = isset($r->avg_price) ? round((float)$r->avg_price, 2) : null;
             return $r;
