@@ -287,6 +287,29 @@ class PropertyController extends Controller
             if ($from !== null && $from !== '') $query->where($column, '>=', $from);
             if ($to !== null && $to !== '') $query->where($column, '<=', $to);
         }
+
+        // Диапазон по датам (date_from, date_to) — фильтрация по created_at.
+        // Формат ожидается YYYY-MM-DD или любой распознаваемый Carbon формát.
+        if ($request->has('date_from') || $request->has('date_to')) {
+            $from = $request->input('date_from');
+            $to = $request->input('date_to');
+
+            try {
+                if (!empty($from)) {
+                    $query->whereDate('created_at', '>=', \Carbon\Carbon::parse($from)->toDateString());
+                }
+            } catch (\Exception $e) {
+                // При желании логировать ошибку или игнорировать неверный формат
+            }
+
+            try {
+                if (!empty($to)) {
+                    $query->whereDate('created_at', '<=', \Carbon\Carbon::parse($to)->toDateString());
+                }
+            } catch (\Exception $e) {
+                // При желании логировать ошибку или игнорировать неверный формат
+            }
+        }
     }
 
     public function store(Request $request)
