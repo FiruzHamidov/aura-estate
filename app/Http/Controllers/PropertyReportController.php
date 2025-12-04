@@ -141,6 +141,8 @@ class PropertyReportController extends Controller
         $result = $data->map(function ($row) use ($users, $groupBy, $alias) {
             $total = (int)$row->total;
             $closed = (int)$row->closed;
+            $rented = (int)$row->rented;
+            $sold = (int)$row->sold;
             return [
                 'id' => $row->$groupBy,
                 'name' => $users[$row->$groupBy]->name ?? '—',
@@ -148,7 +150,8 @@ class PropertyReportController extends Controller
                 'email' => $users[$row->$groupBy]->email ?? null,
                 'total' => $total,
                 'approved' => (int)$row->approved,
-                'closed' => $closed,
+                'rented' => $rented,
+                'sold' => $sold,
                 'close_rate' => $total ? round($closed / $total * 100, 2) : 0,
                 $alias => round((float)$row->$alias, 2),
                 'sum_total_area' => round((float)$row->sum_total_area, 2),
