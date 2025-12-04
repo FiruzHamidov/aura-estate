@@ -140,7 +140,6 @@ class PropertyReportController extends Controller
 
         $result = $data->map(function ($row) use ($users, $groupBy, $alias) {
             $total = (int)$row->total;
-            $closed = (int)$row->closed;
             $rented = (int)$row->rented;
             $sold = (int)$row->sold;
             return [
