@@ -151,7 +151,7 @@ class PropertyReportController extends Controller
                 'approved' => (int)$row->approved,
                 'rented' => $rented,
                 'sold' => $sold,
-                'close_rate' => $total ? round($closed / $total * 100, 2) : 0,
+                'close_rate' => $total ? round(($sold+$rented) / $total * 100, 2) : 0,
                 $alias => round((float)$row->$alias, 2),
                 'sum_total_area' => round((float)$row->sum_total_area, 2),
             ];
