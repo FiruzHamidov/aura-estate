@@ -608,6 +608,19 @@ class PropertyReportController extends Controller
                 $totalShows = (int)$propsOut->sum('shows_count');
                 $byStatus = $properties->groupBy('moderation_status')->map(fn($g) => $g->count())->toArray();
 
+                // contract types mapping (id => label)
+                $contractNames = [
+                    1 => 'Контракт: Альтернативный',
+                    2 => 'Контракт: Эксклюзив',
+                    3 => 'Контракт: Без договора',
+                ];
+
+                // counts of properties per contract type for this agent (single-agent mode)
+                $contractCounts = [];
+                foreach ($contractNames as $ctId => $ctName) {
+                    $contractCounts[$ctId] = (int)$properties->where('contract_type_id', $ctId)->count();
+                }
+
                 $agent = User::find($agentId);
                 $agentName = $agent ? $agent->name : '—';
 
@@ -618,6 +631,13 @@ class PropertyReportController extends Controller
                         'total_properties' => $totalProps,
                         'total_shows' => $totalShows,
                         'by_status' => $byStatus,
+                        'contracts' => array_map(function($id, $count) use ($contractNames) {
+                            return [
+                                'id' => (int)$id,
+                                'name' => $contractNames[$id] ?? (string)$id,
+                                'count' => (int)$count,
+                            ];
+                        }, array_keys($contractCounts), $contractCounts),
                     ],
                     'properties' => $propsOut,
                 ]);
@@ -701,6 +721,19 @@ class PropertyReportController extends Controller
                 $totalShows = (int)$propsOut->sum('shows_count');
                 $byStatus = $propsForAgent->groupBy('moderation_status')->map(fn($g) => $g->count())->toArray();
 
+                // contract types mapping (id => label)
+                $contractNames = [
+                    1 => 'Контракт: Альтернативный',
+                    2 => 'Контракт: Эксклюзив',
+                    3 => 'Контракт: Без договора',
+                ];
+
+                // counts of properties per contract type for this agent (aggregated mode)
+                $contractCounts = [];
+                foreach ($contractNames as $ctId => $ctName) {
+                    $contractCounts[$ctId] = (int)$propsForAgent->where('contract_type_id', $ctId)->count();
+                }
+
                 $agentName = $users[$agentKey]->name ?? '—';
 
                 $result->push([
@@ -710,6 +743,13 @@ class PropertyReportController extends Controller
                         'total_properties' => $totalProps,
                         'total_shows' => $totalShows,
                         'by_status' => $byStatus,
+                        'contracts' => array_map(function($id, $count) use ($contractNames) {
+                            return [
+                                'id' => (int)$id,
+                                'name' => $contractNames[$id] ?? (string)$id,
+                                'count' => (int)$count,
+                            ];
+                        }, array_keys($contractCounts), $contractCounts),
                     ],
                     'properties' => $propsOut,
                 ]);
