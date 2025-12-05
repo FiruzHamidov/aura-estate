@@ -187,6 +187,57 @@ class BookingController extends Controller
         return response()->json($booking);
     }
 
+    public function update(Request $request, $id)
+    {
+        $booking = Booking::findOrFail($id);
+
+        $validated = $request->validate([
+            'start_time' => 'sometimes|date',
+            'end_time' => 'sometimes|date|after:start_time',
+            'note' => 'nullable|string',
+            'agent_id' => 'sometimes|exists:users,id',
+            'client_name' => 'nullable|string',
+            'client_phone' => 'nullable|string',
+        ]);
+
+        $authUser = $request->user();
+        $userRole = $authUser->role->slug ?? null;
+
+        // permission: only admin or the booking's agent can update
+        if (!($authUser && $userRole === 'admin') && $booking->agent_id !== ($authUser->id ?? null)) {
+            return response()->json(['error' => 'Forbidden'], 403);
+        }
+
+        // timezone: convert start/end from Asia/Dushanbe to UTC if provided
+        $inputTz = 'Asia/Dushanbe';
+        if (isset($validated['start_time'])) {
+            $booking->start_time = Carbon::parse($validated['start_time'], $inputTz)->setTimezone('UTC')->toDateTimeString();
+        }
+        if (isset($validated['end_time'])) {
+            $booking->end_time = Carbon::parse($validated['end_time'], $inputTz)->setTimezone('UTC')->toDateTimeString();
+        }
+
+        if (array_key_exists('note', $validated)) $booking->note = $validated['note'];
+        if (array_key_exists('client_name', $validated)) $booking->client_name = $validated['client_name'];
+        if (array_key_exists('client_phone', $validated)) $booking->client_phone = $validated['client_phone'];
+        if (array_key_exists('agent_id', $validated) && $userRole === 'admin') $booking->agent_id = $validated['agent_id'];
+
+        $booking->save();
+
+        $booking->load(['property', 'agent', 'client']);
+
+        // convert times back to Asia/Dushanbe for response
+        $outputTz = 'Asia/Dushanbe';
+        if ($booking->start_time) {
+            $booking->start_time = Carbon::parse($booking->start_time, 'UTC')->setTimezone($outputTz)->toDateTimeString();
+        }
+        if ($booking->end_time) {
+            $booking->end_time = Carbon::parse($booking->end_time, 'UTC')->setTimezone($outputTz)->toDateTimeString();
+        }
+
+        return response()->json($booking);
+    }
+
     public function agentsReport(Request $request)
     {
         try {
