@@ -535,6 +535,7 @@ class PropertyReportController extends Controller
                     'land_size',
                     'floor',
                     'total_floors',
+                    'contract_type_id'
                 ])
                 ->with(['type' => function ($q) {
                     $q->select(['id','slug']);
