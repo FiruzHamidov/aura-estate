@@ -43,8 +43,8 @@ class BookingController extends Controller
         };
 
         // from / to: convert to UTC for DB comparison
-        $fromRaw = $request->input('from');
-        $toRaw = $request->input('to');
+        $fromRaw = $request->input('from') ?? $request->input('date_from');
+        $toRaw   = $request->input('to')   ?? $request->input('date_to');
 
         $fromDb = $toDbTz($fromRaw, $fromRaw && preg_match('/^\d{4}-\d{2}-\d{2}$/', $fromRaw) ? 'start' : 'start');
         $toDb   = $toDbTz($toRaw,   $toRaw   && preg_match('/^\d{4}-\d{2}-\d{2}$/', $toRaw)   ? 'end'   : 'end');
