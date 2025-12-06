@@ -125,6 +125,7 @@ Route::middleware('auth:sanctum')->group(function () {
     // Показы
     Route::get('/bookings',      [BookingController::class, 'index']);
     Route::post('/bookings',     [BookingController::class, 'store']);
+    Route::put('/bookings',     [BookingController::class, 'update']);
     Route::get('/bookings/agents-report', [BookingController::class, 'agentsReport']);
     Route::get('/bookings/{id}', [BookingController::class, 'show'])->whereNumber('id');
 
