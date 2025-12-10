@@ -51,11 +51,28 @@ class Property extends Model
         'developer_id',
         'is_full_apartment',
         'is_for_aura',
+        'parking_type_id',
+        'heating_type_id'
     ];
 
     public function type()
     {
         return $this->belongsTo(PropertyType::class);
+    }
+
+    public function buildingType()
+    {
+        return $this->belongsTo(BuildingType::class, 'status_id');
+    }
+
+    public function parking()
+    {
+        return $this->belongsTo(ParkingType::class);
+    }
+
+    public function heating()
+    {
+        return $this->belongsTo(HeatingType::class);
     }
 
     public function status()

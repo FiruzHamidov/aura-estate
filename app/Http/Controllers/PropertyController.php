@@ -33,7 +33,7 @@ class PropertyController extends Controller
     private function baseQuery(Request $request): Builder
     {
         $user = auth()->user();
-        $query = Property::query()->with(['type', 'status', 'location', 'repairType', 'photos', 'creator']);
+        $query = Property::query()->with(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'heating', 'parking']);
 
         $hasStatusFilter = $request->filled('moderation_status');
 
@@ -252,7 +252,8 @@ class PropertyController extends Controller
             'currency', 'offer_type',
             'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
             'agent_id', 'listing_type', 'created_by', 'contract_type_id',
-            'is_business_owner', 'is_full_apartment', 'is_for_aura', 'developer_id'
+            'is_business_owner', 'is_full_apartment', 'is_for_aura', 'developer_id',
+            'heating_type_id', 'parking_type_id'
             // при желании можно и lat/lng, но для карты они задаются bbox'ом
         ];
         foreach ($exactFields as $field) {
@@ -434,7 +435,7 @@ class PropertyController extends Controller
     {
 //        $user = auth()->user();
 
-        return response()->json($property->load(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'contractType','developer']));
+        return response()->json($property->load(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'contractType','developer', 'heating', 'parking', 'buildingType']));
     }
 
     public function destroy(Property $property)
@@ -527,6 +528,8 @@ class PropertyController extends Controller
             'delete_photo_ids.*' => ['integer', 'exists:property_photos,id'],
 
             'developer_id' => 'nullable|exists:developers,id',
+            'heating_type_id' => 'nullable|exists:heating_types,id',
+            'parking_type_id' => 'nullable|exists:parking_types,id',
             'is_business_owner' => 'sometimes|boolean',
             'is_full_apartment' => 'sometimes|boolean',
             'is_for_aura' => 'sometimes|boolean', // если поле есть в БД и модели
