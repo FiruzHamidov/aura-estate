@@ -52,7 +52,8 @@ class Property extends Model
         'is_full_apartment',
         'is_for_aura',
         'parking_type_id',
-        'heating_type_id'
+        'heating_type_id',
+        'rejection_comment'
     ];
 
     public function type()

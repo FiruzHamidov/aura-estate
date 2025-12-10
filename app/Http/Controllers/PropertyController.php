@@ -572,6 +572,7 @@ class PropertyController extends Controller
             'listing_type' => 'sometimes|in:regular,vip,urgent',
             'owner_name' => 'nullable|string|max:255',
             'object_key' => 'nullable|string|max:255',
+            'rejection_comment' => 'nullable|string',
 
             // Photos (optional on update)
             'photos' => [$isUpdate ? 'sometimes' : 'nullable', 'array', 'max:40'],
