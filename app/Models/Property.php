@@ -46,7 +46,11 @@ class Property extends Model
         'contract_type_id',
         'views_count',
         'owner_name',
-        'object_key'
+        'object_key',
+        'is_business_owner',
+        'developer_id',
+        'is_full_apartment',
+        'is_for_aura',
     ];
 
     public function type()
@@ -106,5 +110,10 @@ class Property extends Model
     public function logs()
     {
         return $this->hasMany(PropertyLog::class)->latest();
+    }
+
+    public function developer()
+    {
+        return $this->belongsTo(Developer::class);
     }
 }

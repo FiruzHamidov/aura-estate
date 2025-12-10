@@ -252,6 +252,7 @@ class PropertyController extends Controller
             'currency', 'offer_type',
             'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
             'agent_id', 'listing_type', 'created_by', 'contract_type_id',
+            'is_business_owner', 'is_full_apartment', 'is_for_aura', 'developer_id'
             // при желании можно и lat/lng, но для карты они задаются bbox'ом
         ];
         foreach ($exactFields as $field) {
@@ -433,7 +434,7 @@ class PropertyController extends Controller
     {
 //        $user = auth()->user();
 
-        return response()->json($property->load(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'contractType']));
+        return response()->json($property->load(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'contractType','developer']));
     }
 
     public function destroy(Property $property)
@@ -524,6 +525,11 @@ class PropertyController extends Controller
             // Delete list
             'delete_photo_ids' => ['sometimes', 'array'],
             'delete_photo_ids.*' => ['integer', 'exists:property_photos,id'],
+
+            'developer_id' => 'nullable|exists:developers,id',
+            'is_business_owner' => 'sometimes|boolean',
+            'is_full_apartment' => 'sometimes|boolean',
+            'is_for_aura' => 'sometimes|boolean', // если поле есть в БД и модели
         ]);
         return $validated;
     }
@@ -841,6 +847,10 @@ class PropertyController extends Controller
             $query->where('location_id', $property->location_id);
         } elseif (!empty($property->district)) {
             $query->where('district', $property->district);
+        }
+
+        if ($property->developer_id) {
+            $query->where('developer_id', $property->developer_id);
         }
 
         // совпадающий тип предложения (продажа/аренда)
