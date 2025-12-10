@@ -376,22 +376,39 @@ class PropertyController extends Controller
         if ($force) {
             $dups = $this->findDuplicateCandidates($validated);
 
-            // Формируем читабельный комментарий: ограничим до 10 записей
             $dupCount = $dups->count();
             if ($dupCount > 0) {
                 $items = $dups->take(10)->map(function ($d) {
                     $title = isset($d['title']) && $d['title'] !== '' ? $d['title'] : '—без названия—';
-                    $score = isset($d['score']) ? (string)$d['score'] : (isset($d['score']) ? (string)$d['score'] : 'n/a');
-                    return "[ID {$d['id']}] {$title} (score: {$score})";
+                    $score = isset($d['score']) ? (string)$d['score'] : 'n/a';
+                    $id = $d['id'] ?? '';
+                    $url = 'https://aura.tj/apartment/' . $id;
+
+                    $titleEsc = e($title);
+                    $urlEsc = e($url);
+
+                    return [
+                        'text' => "[ID {$id}] {$title} (score: {$score})",
+                        'html' => "<a href=\"{$urlEsc}\" target=\"_blank\" rel=\"noopener noreferrer\">[ID {$id}] {$titleEsc}</a> (score: {$score})"
+                    ];
                 })->toArray();
 
-                $list = implode('; ', $items);
+                $textItems = array_map(fn($x) => $x['text'], $items);
+                $htmlItems = array_map(fn($x) => $x['html'], $items);
+
+                $listText = implode('; ', $textItems);
+                $listHtml = '<ul><li>' . implode('</li><li>', $htmlItems) . '</li></ul>';
+
                 if ($dupCount > 10) {
-                    $list .= "; ... и ещё " . ($dupCount - 10) . " штук.";
+                    $listText .= "; ... и ещё " . ($dupCount - 10) . " штук.";
+                    $listHtml .= "<p>... и ещё " . ($dupCount - 10) . " штук.</p>";
                 }
 
                 $validated['moderation_status'] = 'pending';
-                $validated['rejection_comment'] = 'Причина по которой статус автоматически изменен на /"На модерации/" Найдены возможные дубликаты ({$dupCount}): ' . $list;
+                // сохраняем HTML в поле rejection_comment — фронтенд будет рендерить как HTML
+                $validated['rejection_comment'] = "<p>Причина автоматически: Найдены возможные дубликаты ({$dupCount}):</p>" . $listHtml;
+                // можно дополнительно сохранить plain-text, если есть поле
+                // $validated['rejection_comment_text'] = "Найдены возможные дубликаты ({$dupCount}): " . $listText;
             }
         }
 
