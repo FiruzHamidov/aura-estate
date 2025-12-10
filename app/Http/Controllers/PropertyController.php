@@ -373,6 +373,28 @@ class PropertyController extends Controller
 //        $validated['moderation_status'] = auth()->user()->hasRole('client') ? 'pending' : 'approved';
         $validated['listing_type'] = $request->input('listing_type', 'regular');
 
+        if ($force) {
+            $dups = $this->findDuplicateCandidates($validated);
+
+            // Формируем читабельный комментарий: ограничим до 10 записей
+            $dupCount = $dups->count();
+            if ($dupCount > 0) {
+                $items = $dups->take(10)->map(function ($d) {
+                    $title = isset($d['title']) && $d['title'] !== '' ? $d['title'] : '—без названия—';
+                    $score = isset($d['score']) ? (string)$d['score'] : (isset($d['score']) ? (string)$d['score'] : 'n/a');
+                    return "[ID {$d['id']}] {$title} (score: {$score})";
+                })->toArray();
+
+                $list = implode('; ', $items);
+                if ($dupCount > 10) {
+                    $list .= "; ... и ещё " . ($dupCount - 10) . " штук.";
+                }
+
+                $validated['moderation_status'] = 'pending';
+                $validated['rejection_comment'] = 'Причина по которой статус автоматически изменен на /"На модерации/" Найдены возможные дубликаты ({$dupCount}): ' . $list;
+            }
+        }
+
         $property = Property::create($validated);
 
         $this->storePhotosFromRequest($request, $property);
@@ -395,6 +417,7 @@ class PropertyController extends Controller
         }
 
         $validated = $this->validateProperty($request, isUpdate: true);
+
         $property->update($validated);
 
         // Optional: allow adding more photos on update
