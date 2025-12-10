@@ -379,7 +379,7 @@ class PropertyController extends Controller
             $dupCount = $dups->count();
             if ($dupCount > 0) {
                 $items = $dups->take(10)->map(function ($d) {
-                    $title = isset($d['title']) && $d['title'] !== '' ? $d['title'] : '—без названия—';
+                    $title = isset($d['title']) && $d['title'] !== '' ? $d['title'] : "{$d['rooms']} ком ";
                     $score = isset($d['score']) ? (string)$d['score'] : 'n/a';
                     $id = $d['id'] ?? '';
                     $url = 'https://aura.tj/apartment/' . $id;
@@ -388,7 +388,7 @@ class PropertyController extends Controller
                     $urlEsc = e($url);
 
                     return [
-                        'text' => "[ID {$id}] {$title} (score: {$score})",
+                        'text' => "[ID {$id}] {$title} (Совпадения: {$score})",
                         'html' => "<a href=\"{$urlEsc}\" target=\"_blank\" rel=\"noopener noreferrer\">[ID {$id}] {$titleEsc}</a> (score: {$score})"
                     ];
                 })->toArray();
