@@ -388,7 +388,7 @@ class PropertyController extends Controller
                     $urlEsc = e($url);
 
                     return [
-                        'text' => "[ID {$id}] {$title} (Совпадения: {$score})",
+                        'text' => "[ID {$id}] {$title} (Совпадения: {$score}%)",
                         'html' => "<a href=\"{$urlEsc}\" target=\"_blank\" rel=\"noopener noreferrer\">[ID {$id}] {$titleEsc}</a> (score: {$score})"
                     ];
                 })->toArray();
