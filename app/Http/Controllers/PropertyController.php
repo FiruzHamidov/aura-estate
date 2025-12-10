@@ -258,6 +258,43 @@ class PropertyController extends Controller
         ];
         foreach ($exactFields as $field) {
             if ($request->has($field)) {
+                // normalize boolean-like params: support true/false (bool), 'true'/'false' (strings), and '1'/'0'
+                $booleanFields = [
+                    'has_garden','has_parking','is_mortgage_available','is_from_developer',
+                    'is_business_owner','is_full_apartment','is_for_aura'
+                ];
+
+                if (in_array($field, $booleanFields, true)) {
+                    $raw = $request->input($field);
+                    if ($raw === null || $raw === '') {
+                        continue; // nothing to apply
+                    }
+
+                    $vals = [];
+                    if (is_array($raw)) {
+                        foreach ($raw as $v) {
+                            if ($v === true || $v === 'true' || $v === '1' || $v === 1) $vals[] = '1';
+                            elseif ($v === false || $v === 'false' || $v === '0' || $v === 0) $vals[] = '0';
+                        }
+                    } else {
+                        $v = $raw;
+                        if ($v === true || $v === 'true' || $v === '1' || $v === 1) {
+                            $vals = ['1'];
+                        } elseif ($v === false || $v === 'false' || $v === '0' || $v === 0) {
+                            $vals = ['0'];
+                        } else {
+                            $vals = [$v];
+                        }
+                    }
+
+                    $vals = array_values(array_unique(array_filter($vals, fn($x) => $x !== '')));
+                    if (!empty($vals)) {
+                        $query->whereIn($field, $vals);
+                    }
+
+                    continue;
+                }
+
                 $vals = $toArray($request->input($field));
                 if (empty($vals)) {
                     $val = $request->input($field);
