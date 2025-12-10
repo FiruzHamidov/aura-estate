@@ -67,12 +67,12 @@ class Property extends Model
 
     public function parking()
     {
-        return $this->belongsTo(ParkingType::class);
+        return $this->belongsTo(ParkingType::class, 'parking_type_id');
     }
 
     public function heating()
     {
-        return $this->belongsTo(HeatingType::class);
+        return $this->belongsTo(HeatingType::class, 'heating_type_id');
     }
 
     public function status()
