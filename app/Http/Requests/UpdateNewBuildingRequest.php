@@ -39,6 +39,7 @@ class UpdateNewBuildingRequest extends FormRequest
             'latitude' => ['sometimes','nullable','numeric','between:-90,90'],
             'longitude' => ['sometimes','nullable','numeric','between:-180,180'],
             'moderation_status' => ['sometimes','nullable','in:pending,approved,rejected,draft,deleted'],
+            'ceiling_height' => ['nullable','numeric','min:0','max:10'],
             'features' => ['sometimes','array'],
             'features.*' => ['integer','exists:features,id'],
             'district' => ['sometimes','nullable','string','max:255'],
