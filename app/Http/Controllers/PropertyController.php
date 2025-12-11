@@ -536,6 +536,7 @@ class PropertyController extends Controller
         $validated = $request->validate([
             'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,sold,rented,sold_by_owner,denied',
             'listing_type' => 'sometimes|in:regular,vip,urgent',
+            'status_comment' => 'nullable|string',
         ]);
 
         $property->update($validated);
@@ -610,7 +611,8 @@ class PropertyController extends Controller
             'parking_type_id' => 'nullable|exists:parking_types,id',
             'is_business_owner' => 'sometimes|boolean',
             'is_full_apartment' => 'sometimes|boolean',
-            'is_for_aura' => 'sometimes|boolean', // если поле есть в БД и модели
+            'is_for_aura' => 'sometimes|boolean',
+            'status_comment' => 'nullable|string',
         ]);
         return $validated;
     }

@@ -53,7 +53,8 @@ class Property extends Model
         'is_for_aura',
         'parking_type_id',
         'heating_type_id',
-        'rejection_comment'
+        'rejection_comment',
+        'status_comment',
     ];
 
     public function type()
