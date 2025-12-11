@@ -9,7 +9,7 @@ class DeveloperUnit extends Model
 {
     protected $fillable = [
         'new_building_id','block_id','name','bedrooms','bathrooms','area',
-        'floor','price_per_sqm','total_price','description','is_available', 'moderation_status',
+        'floor','price_per_sqm','total_price','description','is_available', 'moderation_status', 'window_view',
     ];
 
     protected $casts = [
@@ -17,6 +17,7 @@ class DeveloperUnit extends Model
         'price_per_sqm' => 'decimal:2',
         'total_price' => 'decimal:2',
         'is_available' => 'boolean',
+        'window_view' => 'string',
     ];
 
     public function newBuilding(): BelongsTo { return $this->belongsTo(NewBuilding::class); }
