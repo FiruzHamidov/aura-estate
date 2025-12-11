@@ -10,12 +10,14 @@ return new class extends Migration
     {
         Schema::table('developer_units', function (Blueprint $table) {
             // добавляем moderation_status (ENUM) со значением по умолчанию 'pending'
-            $table->enum('moderation_status', [
-                'pending',
-                'available',
-                'sold',
-                'reserved',
-            ])->default('pending')->after('description');
+            Schema::table('developer_units', function (Blueprint $table) {
+                $table->enum('moderation_status', [
+                    'pending',
+                    'available',
+                    'sold',
+                    'reserved',
+                ])->default('pending')->change();
+            });
 
             // добавляем window_view (ENUM) — NULLable (можно сделать NOT NULL если требуется)
             $table->enum('window_view', [
