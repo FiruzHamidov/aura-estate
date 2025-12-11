@@ -100,7 +100,7 @@ class NewBuildingController extends Controller
         $data = $request->validated();
         $features = $data['features'] ?? null;
         unset($data['features']);
-
+        \Log::info('NB update validated', $data);
         $new_building->update($data);
         if (!is_null($features)) {
             $new_building->features()->sync($features);
