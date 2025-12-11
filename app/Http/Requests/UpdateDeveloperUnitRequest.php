@@ -38,26 +38,15 @@ class UpdateDeveloperUnitRequest extends FormRequest
             'total_price' => ['nullable','numeric','min:0'],
             'description' => ['nullable','string'],
             'is_available' => ['boolean'],
+
+            // moderation_status and window_view
+            'moderation_status' => ['nullable', Rule::in([
+                'pending','available','sold','reserved'
+            ])],
+
+            'window_view' => ['nullable', Rule::in([
+                'courtyard','street','park','mountains','city','panoramic'
+            ])],
         ];
-    }
-
-    /**
-     * Optionally sanitize / cast inputs before validation.
-     */
-    protected function prepareForValidation(): void
-    {
-        // Приводим булевые значения корректно (полезно если приходят "0"/"1" или "true"/"false")
-        if ($this->has('is_available')) {
-            $this->merge([
-                'is_available' => filter_var($this->input('is_available'), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE),
-            ]);
-        }
-
-        // Пример: если приходит пустая строка для числового поля — приводим к null
-        foreach (['price', 'area', 'floor', 'rooms'] as $field) {
-            if ($this->has($field) && $this->input($field) === '') {
-                $this->merge([$field => null]);
-            }
-        }
     }
 }
