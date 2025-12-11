@@ -14,6 +14,7 @@ class NewBuilding extends Model
         'location_id','installment_available','heating','has_terrace',
         'floors_range','completion_at','address','latitude','longitude',
         'moderation_status','created_by', 'district',
+        'ceiling_height',
     ];
 
     protected $casts = [
@@ -23,6 +24,7 @@ class NewBuilding extends Model
         'latitude' => 'decimal:8',
         'longitude' => 'decimal:8',
         'completion_at' => 'datetime',
+        'ceiling_height' => 'decimal:2',
     ];
 
     public function developer(): BelongsTo { return $this->belongsTo(Developer::class); }

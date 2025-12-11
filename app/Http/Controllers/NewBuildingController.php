@@ -17,7 +17,10 @@ class NewBuildingController extends Controller
             ->when($req->developer_id, fn($qq) => $qq->where('developer_id', $req->developer_id))
             ->when($req->stage_id, fn($qq) => $qq->where('construction_stage_id', $req->stage_id))
             ->when($req->material_id, fn($qq) => $qq->where('material_id', $req->material_id))
-            ->when($req->search, fn($qq) => $qq->where('title','like','%'.$req->search.'%'));
+            ->when($req->search, fn($qq) => $qq->where('title','like','%'.$req->search.'%'))
+            // optional filters for ceiling height
+            ->when($req->filled('ceiling_height_min'), fn($qq) => $qq->where('ceiling_height', '>=', (float)$req->ceiling_height_min))
+            ->when($req->filled('ceiling_height_max'), fn($qq) => $qq->where('ceiling_height', '<=', (float)$req->ceiling_height_max));
 
         return $q->paginate($req->get('per_page', 15));
     }
@@ -32,6 +35,12 @@ class NewBuildingController extends Controller
         if ($features) {
             $nb->features()->sync($features);
         }
+
+        // ensure ceiling_height is returned as float|null (not string)
+        if (!is_null($nb->ceiling_height)) {
+            $nb->ceiling_height = (float)$nb->ceiling_height;
+        }
+
         return response()->json($nb->load(['developer','stage','material','features']), 201);
     }
 
@@ -39,6 +48,11 @@ class NewBuildingController extends Controller
     {
         // грузим связи
         $new_building->load(['developer','stage','material','features','blocks','units','photos', 'location']);
+
+        // приводим ceiling_height к числу
+        if (!is_null($new_building->ceiling_height)) {
+            $new_building->ceiling_height = (float)$new_building->ceiling_height;
+        }
 
         // считаем агрегаты по доступным и одобренным юнитам
         $unitsQ = $new_building->units()
@@ -91,6 +105,12 @@ class NewBuildingController extends Controller
         if (!is_null($features)) {
             $new_building->features()->sync($features);
         }
+
+        // ensure ceiling_height is numeric in response
+        if (!is_null($new_building->ceiling_height)) {
+            $new_building->ceiling_height = (float)$new_building->ceiling_height;
+        }
+
         return $new_building->load(['developer','stage','material','features']);
     }
 
