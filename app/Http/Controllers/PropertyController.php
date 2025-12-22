@@ -539,6 +539,14 @@ class PropertyController extends Controller
             'status_comment' => 'nullable|string',
         ]);
 
+        if (
+            isset($validated['moderation_status']) &&
+            in_array($validated['moderation_status'], ['sold', 'rented', 'sold_by_owner'], true) &&
+            $property->sold_at === null
+        ) {
+            $validated['sold_at'] = now();
+        }
+
         $property->update($validated);
 
         return response()->json([
@@ -613,6 +621,7 @@ class PropertyController extends Controller
             'is_full_apartment' => 'sometimes|boolean',
             'is_for_aura' => 'sometimes|boolean',
             'status_comment' => 'nullable|string',
+            'sold_at' => 'nullable|date',
         ]);
         return $validated;
     }

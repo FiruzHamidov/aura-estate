@@ -18,25 +18,40 @@ class PropertyReportController extends Controller
         return array_values(array_filter(array_map('trim', explode(',', $value)), fn($v) => $v !== ''));
     }
 
-    // --- Базовый фильтр, общий для всех отчётов
+    /**
+     * Общие фильтры для отчётов.
+     * - Поддерживает date_field: created_at | updated_at | sold_at
+     * - Если выбран статус закрытия (sold/rented/sold_by_owner) и date_field не указан,
+     *   автоматически используется sold_at для корректной отчётности.
+     * - Поддерживает фильтрацию по agent_id.
+     */
     private function applyCommonFilters(Request $request, $query)
     {
         // Диапазон дат и поле даты
-        $dateField = $request->input('date_field', 'created_at'); // created_at | updated_at
-        if (!in_array($dateField, ['created_at', 'updated_at'], true)) {
+        // created_at | updated_at | sold_at
+        $dateField = $request->input('date_field', null);
+
+        // Если не указано поле даты и фильтруем по закрытым статусам — используем sold_at
+        if ($dateField === null) {
+            $statusVals = $this->toArray($request->input('moderation_status'));
+            $closed = ['sold', 'rented', 'sold_by_owner'];
+            $dateField = array_intersect($statusVals, $closed) ? 'sold_at' : 'created_at';
+        }
+
+        if (!in_array($dateField, ['created_at', 'updated_at', 'sold_at'], true)) {
             $dateField = 'created_at';
         }
 
         $dateFrom = $request->input('date_from'); // '2025-01-01'
-        $dateTo = $request->input('date_to');   // '2025-01-31'
+        $dateTo   = $request->input('date_to');   // '2025-01-31'
         if ($dateFrom) $query->whereDate($dateField, '>=', $dateFrom);
-        if ($dateTo) $query->whereDate($dateField, '<=', $dateTo);
+        if ($dateTo)   $query->whereDate($dateField, '<=', $dateTo);
 
-        // Мультиселекты
+        // Мультиселекты (включая agent_id для отчётов по агентам)
         $multiFields = [
             'type_id', 'status_id', 'location_id', 'repair_type_id',
             'currency', 'offer_type', 'listing_type', 'contract_type_id',
-            'created_by', 'agent_id', 'moderation_status', 'district', 'created_by'
+            'created_by', 'agent_id', 'created_by', 'moderation_status', 'district'
         ];
         foreach ($multiFields as $f) {
             if ($request->has($f)) {
@@ -128,6 +143,7 @@ class PropertyReportController extends Controller
                 DB::raw("SUM(CASE WHEN moderation_status = 'approved' THEN 1 ELSE 0 END) as approved"),
                 DB::raw("SUM(CASE WHEN moderation_status = 'sold' THEN 1 ELSE 0 END) as sold"),
                 DB::raw("SUM(CASE WHEN moderation_status = 'rented' THEN 1 ELSE 0 END) as rented"),
+                DB::raw("SUM(CASE WHEN moderation_status = 'sold_by_owner' THEN 1 ELSE 0 END) as sold_by_owner"),
                 DB::raw("$expr as $alias"),
                 DB::raw("SUM(COALESCE(total_area,0)) as sum_total_area"),
             ])
@@ -142,6 +158,7 @@ class PropertyReportController extends Controller
             $total = (int)$row->total;
             $rented = (int)$row->rented;
             $sold = (int)$row->sold;
+            $soldByOwner = (int)($row->sold_by_owner ?? 0);
             return [
                 'id' => $row->$groupBy,
                 'name' => $users[$row->$groupBy]->name ?? '—',
@@ -151,7 +168,8 @@ class PropertyReportController extends Controller
                 'approved' => (int)$row->approved,
                 'rented' => $rented,
                 'sold' => $sold,
-                'close_rate' => $total ? round(($sold+$rented) / $total * 100, 2) : 0,
+                'sold_by_owner' => $soldByOwner,
+                'close_rate' => $total ? round(($sold + $rented + $soldByOwner) / $total * 100, 2) : 0,
                 $alias => round((float)$row->$alias, 2),
                 'sum_total_area' => round((float)$row->sum_total_area, 2),
             ];
@@ -225,11 +243,12 @@ class PropertyReportController extends Controller
             default => '%Y-%m-%d',
         };
 
+        // closed теперь включает sold_by_owner, sold, rented; поле даты определяется автоматически через applyCommonFilters
         $rows = (clone $q)
             ->select(
                 DB::raw("DATE_FORMAT($dateField, '$format') as bucket"),
                 DB::raw("COUNT(*) as total"),
-                DB::raw("SUM(CASE WHEN moderation_status IN ('sold','rented') THEN 1 ELSE 0 END) as closed"),
+                DB::raw("SUM(CASE WHEN moderation_status IN ('sold','rented','sold_by_owner') THEN 1 ELSE 0 END) as closed"),
                 DB::raw("$expr as $alias")
             )
             ->groupBy('bucket')

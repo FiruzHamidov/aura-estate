@@ -55,6 +55,7 @@ class Property extends Model
         'heating_type_id',
         'rejection_comment',
         'status_comment',
+        'sold_at',
     ];
 
     public function type()
