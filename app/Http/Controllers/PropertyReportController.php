@@ -51,12 +51,20 @@ class PropertyReportController extends Controller
         $multiFields = [
             'type_id', 'status_id', 'location_id', 'repair_type_id',
             'currency', 'offer_type', 'listing_type', 'contract_type_id',
-            'created_by', 'agent_id', 'created_by', 'moderation_status', 'district'
+            'created_by', 'moderation_status', 'district'
         ];
         foreach ($multiFields as $f) {
             if ($request->has($f)) {
                 $vals = $this->toArray($request->input($f));
                 if (!empty($vals)) $query->whereIn($f, $vals);
+            }
+        }
+
+        // Фильтр по агенту: фронт передает agent_id, но фактически сравниваем с created_by
+        if ($request->filled('agent_id')) {
+            $agentIds = $this->toArray($request->input('agent_id'));
+            if (!empty($agentIds)) {
+                $query->whereIn('created_by', $agentIds);
             }
         }
 
