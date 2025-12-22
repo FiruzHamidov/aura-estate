@@ -541,8 +541,7 @@ class PropertyController extends Controller
 
         if (
             isset($validated['moderation_status']) &&
-            in_array($validated['moderation_status'], ['sold', 'rented', 'sold_by_owner'], true) &&
-            $property->sold_at === null
+            in_array($validated['moderation_status'], ['sold', 'rented', 'sold_by_owner'], true)
         ) {
             $validated['sold_at'] = now();
         }
