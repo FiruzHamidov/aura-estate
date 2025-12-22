@@ -593,9 +593,37 @@ class PropertyReportController extends Controller
                 if ($from) $bookingsQ->where('start_time', '>=', $from);
                 if ($to)   $bookingsQ->where('start_time', '<=', $to);
 
+                $bookings = $bookingsQ->get()->keyBy('property_id');
+
+                $propsOut = $properties->map(function ($p) use ($bookings) {
+                    $b = $bookings->get($p->id);
+                    return [
+                        'id' => (int)$p->id,
+                        'title' => $p->title,
+                        'price' => $p->price,
+                        'currency' => $p->currency,
+                        'moderation_status' => $p->moderation_status,
+                        'created_at' => $p->created_at ? (string)$p->created_at : null,
+                        'shows_count' => $b ? (int)$b->shows_count : 0,
+                        'first_show' => $b && $b->first_show ? (string)$b->first_show : null,
+                        'last_show' => $b && $b->last_show ? (string)$b->last_show : null,
+                        'type' => [
+                            'id' => $p->type->id ?? null,
+                            'slug' => $p->type->slug ?? null,
+                        ],
+                        'apartment_type' => $p->apartment_type ?? null,
+                        'rooms' => $p->rooms !== null ? (int)$p->rooms : null,
+                        'contract_type_id' => $p->contract_type_id !== null ? (int)$p->contract_type_id : null,
+                        'total_area' => $p->total_area !== null ? (float)$p->total_area : null,
+                        'living_area' => $p->living_area !== null ? (float)$p->living_area : null,
+                        'land_size' => $p->land_size !== null ? (float)$p->land_size : null,
+                        'floor' => $p->floor !== null ? (int)$p->floor : null,
+                        'total_floors' => $p->total_floors !== null ? (int)$p->total_floors : null,
+                    ];
+                })->values();
 
                 $totalProps = $properties->count();
-                $totalShows = (int)$propsOut->sum('shows_count');
+                $totalShows = (int)$bookings->sum('shows_count');
                 $byStatus = $properties->groupBy('moderation_status')->map(fn($g) => $g->count())->toArray();
 
                 // contract types mapping (id => label)
