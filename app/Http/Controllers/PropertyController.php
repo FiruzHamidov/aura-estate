@@ -357,7 +357,7 @@ class PropertyController extends Controller
             $soldTo   = $request->input('sold_at_to');
 
             // sold_at имеет смысл только для закрытых объявлений
-            $query->whereIn('moderation_status', ['sold', 'rented', 'sold_by_owner']);
+//            $query->whereIn('moderation_status', ['sold', 'rented', 'sold_by_owner']);
 
             try {
                 if (!empty($soldFrom)) {

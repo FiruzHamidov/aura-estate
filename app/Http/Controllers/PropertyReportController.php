@@ -51,7 +51,7 @@ class PropertyReportController extends Controller
         if ($dateTo)   $query->whereDate($dateField, '<=', $dateTo);
 
         if ($soldFrom || $soldTo) {
-            $query->whereIn('moderation_status', ['sold','rented','sold_by_owner']);
+//            $query->whereIn('moderation_status', ['sold','rented','sold_by_owner']);
 
             if ($soldFrom) $query->whereDate('sold_at', '>=', $soldFrom);
             if ($soldTo)   $query->whereDate('sold_at', '<=', $soldTo);
