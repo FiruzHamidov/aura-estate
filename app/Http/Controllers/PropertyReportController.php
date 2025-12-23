@@ -44,8 +44,24 @@ class PropertyReportController extends Controller
 
         $dateFrom = $request->input('date_from'); // '2025-01-01'
         $dateTo   = $request->input('date_to');   // '2025-01-31'
-        if ($dateFrom) $query->whereDate($dateField, '>=', $dateFrom);
-        if ($dateTo)   $query->whereDate($dateField, '<=', $dateTo);
+        if ($dateFrom || $dateTo) {
+            $query->where(function ($q) use ($dateFrom, $dateTo) {
+
+                // Закрытые — по sold_at
+                $q->where(function ($qq) use ($dateFrom, $dateTo) {
+                    $qq->whereIn('moderation_status', ['sold','rented','sold_by_owner']);
+                    if ($dateFrom) $qq->whereDate('sold_at', '>=', $dateFrom);
+                    if ($dateTo)   $qq->whereDate('sold_at', '<=', $dateTo);
+                });
+
+                // Остальные — по created_at
+                $q->orWhere(function ($qq) use ($dateFrom, $dateTo) {
+                    $qq->whereNotIn('moderation_status', ['sold','rented','sold_by_owner']);
+                    if ($dateFrom) $qq->whereDate('created_at', '>=', $dateFrom);
+                    if ($dateTo)   $qq->whereDate('created_at', '<=', $dateTo);
+                });
+            });
+        }
 
         // Мультиселекты (включая agent_id для отчётов по агентам)
         $multiFields = [
