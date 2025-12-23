@@ -349,6 +349,32 @@ class PropertyController extends Controller
                 // При желании логировать ошибку или игнорировать неверный формат
             }
         }
+
+        // Диапазон по датам продажи (sold_at_from, sold_at_to) — фильтрация по sold_at
+// Применяется только к закрытым статусам
+        if ($request->has('sold_at_from') || $request->has('sold_at_to')) {
+            $soldFrom = $request->input('sold_at_from');
+            $soldTo   = $request->input('sold_at_to');
+
+            // sold_at имеет смысл только для закрытых объявлений
+            $query->whereIn('moderation_status', ['sold', 'rented', 'sold_by_owner']);
+
+            try {
+                if (!empty($soldFrom)) {
+                    $query->whereDate('sold_at', '>=', \Carbon\Carbon::parse($soldFrom)->toDateString());
+                }
+            } catch (\Exception $e) {
+                // можно логировать при необходимости
+            }
+
+            try {
+                if (!empty($soldTo)) {
+                    $query->whereDate('sold_at', '<=', \Carbon\Carbon::parse($soldTo)->toDateString());
+                }
+            } catch (\Exception $e) {
+                // можно логировать при необходимости
+            }
+        }
     }
 
     public function store(Request $request)

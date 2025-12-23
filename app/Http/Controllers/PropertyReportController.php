@@ -44,23 +44,17 @@ class PropertyReportController extends Controller
 
         $dateFrom = $request->input('date_from'); // '2025-01-01'
         $dateTo   = $request->input('date_to');   // '2025-01-31'
-        if ($dateFrom || $dateTo) {
-            $query->where(function ($q) use ($dateFrom, $dateTo) {
 
-                // Закрытые — по sold_at
-                $q->where(function ($qq) use ($dateFrom, $dateTo) {
-                    $qq->whereIn('moderation_status', ['sold','rented','sold_by_owner']);
-                    if ($dateFrom) $qq->whereDate('sold_at', '>=', $dateFrom);
-                    if ($dateTo)   $qq->whereDate('sold_at', '<=', $dateTo);
-                });
+        $soldFrom = $request->input('sold_at_from');
+        $soldTo   = $request->input('sold_at_to');
+        if ($dateFrom) $query->whereDate($dateField, '>=', $dateFrom);
+        if ($dateTo)   $query->whereDate($dateField, '<=', $dateTo);
 
-                // Остальные — по created_at
-                $q->orWhere(function ($qq) use ($dateFrom, $dateTo) {
-                    $qq->whereNotIn('moderation_status', ['sold','rented','sold_by_owner']);
-                    if ($dateFrom) $qq->whereDate('created_at', '>=', $dateFrom);
-                    if ($dateTo)   $qq->whereDate('created_at', '<=', $dateTo);
-                });
-            });
+        if ($soldFrom || $soldTo) {
+            $query->whereIn('moderation_status', ['sold','rented','sold_by_owner']);
+
+            if ($soldFrom) $query->whereDate('sold_at', '>=', $soldFrom);
+            if ($soldTo)   $query->whereDate('sold_at', '<=', $soldTo);
         }
 
         // Мультиселекты (включая agent_id для отчётов по агентам)
