@@ -405,7 +405,10 @@ class PropertyController extends Controller
             $dupCount = $dups->count();
             if ($dupCount > 0) {
                 $items = $dups->take(10)->map(function ($d) {
-                    $title = isset($d['title']) && $d['title'] !== '' ? $d['title'] : "{$d['rooms']} ком ";
+                    $rooms = $d['rooms'] ?? null;
+                    $title = isset($d['title']) && $d['title'] !== ''
+                        ? $d['title']
+                        : ($rooms ? "{$rooms} ком" : 'Объект');
                     $score = isset($d['score']) ? (string)$d['score'] : 'n/a';
                     $id = $d['id'] ?? '';
                     $url = 'https://aura.tj/apartment/' . $id;
