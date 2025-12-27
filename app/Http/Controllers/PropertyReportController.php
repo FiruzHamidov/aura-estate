@@ -196,6 +196,7 @@ class PropertyReportController extends Controller
                 DB::raw("SUM(COALESCE(total_area,0)) as sum_total_area"),
             ])
             ->orderByDesc('sold')
+            ->orderByDesc('rented')
             ->orderByDesc('total')
             ->get();
 
