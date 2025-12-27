@@ -77,6 +77,34 @@ class NewBuildingController extends Controller
         $totalPriceRange   = $range($stats->min_total_price ?? null, $stats->max_total_price ?? null, ' c.');
         $pricePerSqmRange  = $range($stats->min_ppsqm ?? null, $stats->max_ppsqm ?? null, ' c./м²');
 
+        $roomsStats = $new_building->units()
+            ->where('is_available', true)
+            ->where('moderation_status', 'available')
+            ->selectRaw('
+        bedrooms,
+        MIN(area)        as min_area,
+        MIN(total_price) as min_total_price,
+        MAX(total_price) as max_total_price,
+        COUNT(*)         as offers_count
+    ')
+            ->groupBy('bedrooms')
+            ->orderBy('bedrooms')
+            ->get()
+            ->map(function ($row) {
+                return [
+                    'rooms' => (int) $row->bedrooms,
+                    'area_from' => $row->min_area ? (float) $row->min_area : null,
+                    'price' => $row->min_total_price && $row->max_total_price
+                        ? number_format($row->min_total_price, 0, '.', ' ')
+                        .' – '.
+                        number_format($row->max_total_price, 0, '.', ' ')
+                        .' c.'
+                        : null,
+                    'count' => (int) $row->offers_count,
+                ];
+            })
+            ->values();
+
         // Можно вернуть как мета-блок рядом с данными объекта
         return response()->json([
             'data' => $new_building,
@@ -92,6 +120,7 @@ class NewBuildingController extends Controller
                     'formatted' => $pricePerSqmRange, // например: "8 170 c. – 9 260 c./м²"
                 ],
             ],
+            'rooms_summary' => $roomsStats,
         ]);
     }
 
