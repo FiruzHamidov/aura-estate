@@ -113,13 +113,34 @@ class PropertyReportController extends Controller
     // --- 1) Сводка
     public function summary(Request $request)
     {
+        $soldStatuses = [
+            'sold',
+            'sold_by_owner',
+            'rented',
+        ];
+
         $base = Property::query();
         [$q] = $this->applyCommonFilters($request, $base);
 
+        $soldRequest = $request->except(['date_from', 'date_to']);
+
+        $soldRequest['sold_at_from'] = $request->input('date_from');
+        $soldRequest['sold_at_to']   = $request->input('date_to');
+
+        $soldBase = Property::query()
+            ->whereIn('moderation_status', $soldStatuses);
+
+        [$soldQ] = $this->applyCommonFilters(
+            new Request($soldRequest),
+            $soldBase
+        );
+
         $total = (clone $q)->count();
 
-        $byStatus = (clone $q)->select('moderation_status', DB::raw('COUNT(*) as cnt'))
-            ->groupBy('moderation_status')->get();
+        $byStatus = (clone $soldQ)
+            ->select('moderation_status', DB::raw('COUNT(*) as cnt'))
+            ->groupBy('moderation_status')
+            ->get();
 
         $byOffer = (clone $q)->select('offer_type', DB::raw('COUNT(*) as cnt'))
             ->groupBy('offer_type')->get();
