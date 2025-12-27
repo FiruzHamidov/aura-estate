@@ -177,54 +177,87 @@ class PropertyReportController extends Controller
     public function managerEfficiency(Request $request)
     {
         $groupBy = $request->input('group_by', 'created_by'); // 'agent_id' | 'created_by'
-        if (!in_array($groupBy, ['agent_id', 'created_by'], true)) $groupBy = 'created_by';
+        if (!in_array($groupBy, ['agent_id', 'created_by'], true)) {
+            $groupBy = 'created_by';
+        }
 
         [$expr, $alias] = $this->priceExpr($request);
 
+        $soldStatuses = ['sold', 'rented', 'sold_by_owner'];
+
+        // --- 1) Основной запрос (created_at)
         $base = Property::query();
         [$q] = $this->applyCommonFilters($request, $base);
 
-        $data = (clone $q)
+        $baseData = (clone $q)
+            ->whereNotIn('moderation_status', $soldStatuses)
             ->select([
                 $groupBy,
                 DB::raw('COUNT(*) as total'),
                 DB::raw("SUM(CASE WHEN moderation_status = 'approved' THEN 1 ELSE 0 END) as approved"),
-                DB::raw("SUM(CASE WHEN moderation_status = 'sold' THEN 1 ELSE 0 END) as sold"),
-                DB::raw("SUM(CASE WHEN moderation_status = 'rented' THEN 1 ELSE 0 END) as rented"),
-                DB::raw("SUM(CASE WHEN moderation_status = 'sold_by_owner' THEN 1 ELSE 0 END) as sold_by_owner"),
                 DB::raw("$expr as $alias"),
                 DB::raw("SUM(COALESCE(total_area,0)) as sum_total_area"),
             ])
             ->groupBy($groupBy)
-            ->orderByDesc('sold')
-            ->orderByDesc('rented')
-            ->orderByDesc('total')
-            ->get();
+            ->get()
+            ->keyBy($groupBy);
 
-        // Подтянем имена пользователей
-        $userIds = $data->pluck($groupBy)->filter()->unique()->values();
-        $users = User::whereIn('id', $userIds)->get(['id', 'name', 'email'])->keyBy('id');
+        // --- 2) Закрытые статусы (sold_at)
+        $soldRequest = $request->except(['date_from', 'date_to']);
+        $soldRequest['sold_at_from'] = $request->input('date_from');
+        $soldRequest['sold_at_to']   = $request->input('date_to');
 
-        $result = $data->map(function ($row) use ($users, $groupBy, $alias) {
-            $total = (int)$row->total;
-            $rented = (int)$row->rented;
-            $sold = (int)$row->sold;
-            $soldByOwner = (int)($row->sold_by_owner ?? 0);
+        $soldBase = Property::query()->whereIn('moderation_status', $soldStatuses);
+        [$soldQ] = $this->applyCommonFilters(new Request($soldRequest), $soldBase);
+
+        $soldData = (clone $soldQ)
+            ->select([
+                $groupBy,
+                DB::raw("SUM(CASE WHEN moderation_status = 'sold' THEN 1 ELSE 0 END) as sold"),
+                DB::raw("SUM(CASE WHEN moderation_status = 'rented' THEN 1 ELSE 0 END) as rented"),
+                DB::raw("SUM(CASE WHEN moderation_status = 'sold_by_owner' THEN 1 ELSE 0 END) as sold_by_owner"),
+            ])
+            ->groupBy($groupBy)
+            ->get()
+            ->keyBy($groupBy);
+
+        // --- 3) Объединяем в PHP
+        $allKeys = $baseData->keys()->merge($soldData->keys())->unique();
+
+        $userIds = $allKeys->filter()->values();
+        $users = User::whereIn('id', $userIds)->get(['id','name','email'])->keyBy('id');
+
+        $result = $allKeys->map(function ($key) use ($baseData, $soldData, $users, $groupBy, $alias) {
+            $baseRow = $baseData[$key] ?? null;
+            $soldRow = $soldData[$key] ?? null;
+
+            $total = (int)($baseRow->total ?? 0);
+            $approved = (int)($baseRow->approved ?? 0);
+
+            $sold = (int)($soldRow->sold ?? 0);
+            $rented = (int)($soldRow->rented ?? 0);
+            $soldByOwner = (int)($soldRow->sold_by_owner ?? 0);
+
+            $closed = $sold + $rented + $soldByOwner;
+
             return [
-                'id' => $row->$groupBy,
-                'name' => $users[$row->$groupBy]->name ?? '—',
-                'agent_id' => $users[$row->$groupBy]->id ?? '—',
-                'email' => $users[$row->$groupBy]->email ?? null,
+                'id' => $key,
+                'name' => $users[$key]->name ?? '—',
+                'agent_id' => $users[$key]->id ?? '—',
+                'email' => $users[$key]->email ?? null,
                 'total' => $total,
-                'approved' => (int)$row->approved,
-                'rented' => $rented,
+                'approved' => $approved,
                 'sold' => $sold,
+                'rented' => $rented,
                 'sold_by_owner' => $soldByOwner,
-                'close_rate' => $total ? round(($sold + $rented + $soldByOwner) / $total * 100, 2) : 0,
-                $alias => round((float)$row->$alias, 2),
-                'sum_total_area' => round((float)$row->sum_total_area, 2),
+                'closed' => $closed,
+                'close_rate' => $total ? round($closed / $total * 100, 2) : 0,
+                $alias => round((float)($baseRow->$alias ?? 0), 2),
+                'sum_total_area' => round((float)($baseRow->sum_total_area ?? 0), 2),
             ];
-        });
+        })
+        ->sortByDesc('closed')
+        ->values();
 
         return response()->json($result);
     }
