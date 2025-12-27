@@ -186,6 +186,7 @@ class PropertyReportController extends Controller
 
         $data = (clone $q)
             ->select([
+                $groupBy,
                 DB::raw('COUNT(*) as total'),
                 DB::raw("SUM(CASE WHEN moderation_status = 'approved' THEN 1 ELSE 0 END) as approved"),
                 DB::raw("SUM(CASE WHEN moderation_status = 'sold' THEN 1 ELSE 0 END) as sold"),
@@ -194,6 +195,7 @@ class PropertyReportController extends Controller
                 DB::raw("$expr as $alias"),
                 DB::raw("SUM(COALESCE(total_area,0)) as sum_total_area"),
             ])
+            ->groupBy($groupBy)
             ->orderByDesc('sold')
             ->orderByDesc('rented')
             ->orderByDesc('total')
