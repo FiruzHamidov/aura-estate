@@ -195,7 +195,8 @@ class PropertyReportController extends Controller
                 DB::raw("$expr as $alias"),
                 DB::raw("SUM(COALESCE(total_area,0)) as sum_total_area"),
             ])
-            ->groupBy($groupBy)
+            ->orderByDesc('sold_count')
+            ->orderByDesc('total')
             ->get();
 
         // Подтянем имена пользователей
