@@ -137,29 +137,17 @@ class PropertyReportController extends Controller
 
         $total = (clone $q)->count();
 
-        // --- byStatus: закрытые статусы по sold_at, остальные по created_at
-
-        $closedStatuses = $soldStatuses;
-
-        // Закрытые (sold_at)
-        $closedStats = (clone $soldQ)
+        // --- byStatus: все статусы по created_at (обычная воронка)
+        $byStatus = (clone $q)
             ->select('moderation_status', DB::raw('COUNT(*) as cnt'))
             ->groupBy('moderation_status')
-            ->get()
-            ->keyBy('moderation_status');
+            ->get();
 
-        // Остальные (created_at)
-        $otherStats = (clone $q)
-            ->whereNotIn('moderation_status', $closedStatuses)
+        // --- soldStatus: закрытые статусы по sold_at
+        $soldStatus = (clone $soldQ)
             ->select('moderation_status', DB::raw('COUNT(*) as cnt'))
             ->groupBy('moderation_status')
-            ->get()
-            ->keyBy('moderation_status');
-
-        // Объединяем
-        $byStatus = $closedStats
-            ->merge($otherStats)
-            ->values();
+            ->get();
 
         $byOffer = (clone $q)->select('offer_type', DB::raw('COUNT(*) as cnt'))
             ->groupBy('offer_type')->get();
@@ -175,6 +163,7 @@ class PropertyReportController extends Controller
         return response()->json([
             'total' => $total,
             'by_status' => $byStatus,
+            'sold_status' => $soldStatus,
             'by_offer_type' => $byOffer,
             'avg_price' => round((float)$avgPrice, 2),
             'avg_total_area' => round((float)$avgArea, 2),
