@@ -137,10 +137,29 @@ class PropertyReportController extends Controller
 
         $total = (clone $q)->count();
 
-        $byStatus = (clone $soldQ)
+        // --- byStatus: закрытые статусы по sold_at, остальные по created_at
+
+        $closedStatuses = $soldStatuses;
+
+        // Закрытые (sold_at)
+        $closedStats = (clone $soldQ)
             ->select('moderation_status', DB::raw('COUNT(*) as cnt'))
             ->groupBy('moderation_status')
-            ->get();
+            ->get()
+            ->keyBy('moderation_status');
+
+        // Остальные (created_at)
+        $otherStats = (clone $q)
+            ->whereNotIn('moderation_status', $closedStatuses)
+            ->select('moderation_status', DB::raw('COUNT(*) as cnt'))
+            ->groupBy('moderation_status')
+            ->get()
+            ->keyBy('moderation_status');
+
+        // Объединяем
+        $byStatus = $closedStats
+            ->merge($otherStats)
+            ->values();
 
         $byOffer = (clone $q)->select('offer_type', DB::raw('COUNT(*) as cnt'))
             ->groupBy('offer_type')->get();
