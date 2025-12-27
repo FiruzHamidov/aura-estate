@@ -137,8 +137,9 @@ class PropertyReportController extends Controller
 
         $total = (clone $q)->count();
 
-        // --- byStatus: все статусы по created_at (обычная воронка)
+        // --- byStatus: все НЕ закрытые статусы по created_at
         $byStatus = (clone $q)
+            ->whereNotIn('moderation_status', $soldStatuses)
             ->select('moderation_status', DB::raw('COUNT(*) as cnt'))
             ->groupBy('moderation_status')
             ->get();
