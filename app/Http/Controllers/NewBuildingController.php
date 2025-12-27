@@ -57,7 +57,7 @@ class NewBuildingController extends Controller
         // считаем агрегаты по доступным и одобренным юнитам
         $unitsQ = $new_building->units()
             ->where('is_available', true)
-            ->where('moderation_status', 'approved');
+            ->where('moderation_status', 'available');
 
         $stats = $unitsQ->selectRaw('
         MIN(total_price)   as min_total_price,
