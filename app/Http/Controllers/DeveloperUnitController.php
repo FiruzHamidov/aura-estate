@@ -14,7 +14,31 @@ class DeveloperUnitController extends Controller
     {
         return $new_building->units()
             ->with('block')
-            ->when($req->available, fn($q) => $q->where('is_available', (bool)$req->boolean('available')))
+
+            // фильтр по доступности
+            ->when(
+                $req->has('available'),
+                fn ($q) => $q->where('is_available', $req->boolean('available'))
+            )
+
+            // фильтр по блоку
+            ->when(
+                $req->filled('block_id'),
+                fn ($q) => $q->where('block_id', $req->integer('block_id'))
+            )
+
+            // комнаты ОТ
+            ->when(
+                $req->filled('rooms_from'),
+                fn ($q) => $q->where('bedrooms', '>=', $req->integer('rooms_from'))
+            )
+
+            // комнаты ДО
+            ->when(
+                $req->filled('rooms_to'),
+                fn ($q) => $q->where('bedrooms', '<=', $req->integer('rooms_to'))
+            )
+
             ->paginate($req->get('per_page', 15));
     }
 
