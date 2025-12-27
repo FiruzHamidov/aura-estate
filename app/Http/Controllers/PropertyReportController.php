@@ -186,7 +186,6 @@ class PropertyReportController extends Controller
 
         $data = (clone $q)
             ->select([
-                $groupBy,
                 DB::raw('COUNT(*) as total'),
                 DB::raw("SUM(CASE WHEN moderation_status = 'approved' THEN 1 ELSE 0 END) as approved"),
                 DB::raw("SUM(CASE WHEN moderation_status = 'sold' THEN 1 ELSE 0 END) as sold"),
