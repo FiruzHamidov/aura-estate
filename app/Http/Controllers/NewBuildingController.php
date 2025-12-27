@@ -81,29 +81,33 @@ class NewBuildingController extends Controller
             ->where('is_available', true)
             ->where('moderation_status', 'available')
             ->selectRaw('
+        block_id,
         bedrooms,
         MIN(area)        as min_area,
         MIN(total_price) as min_total_price,
         MAX(total_price) as max_total_price,
         COUNT(*)         as offers_count
     ')
-            ->groupBy('bedrooms')
+            ->groupBy('block_id', 'bedrooms')
+            ->orderBy('block_id')
             ->orderBy('bedrooms')
             ->get()
-            ->map(function ($row) {
-                return [
-                    'rooms' => (int) $row->bedrooms,
-                    'area_from' => $row->min_area ? (float) $row->min_area : null,
-                    'price' => $row->min_total_price && $row->max_total_price
-                        ? number_format($row->min_total_price, 0, '.', ' ')
-                        .' – '.
-                        number_format($row->max_total_price, 0, '.', ' ')
-                        .' c.'
-                        : null,
-                    'count' => (int) $row->offers_count,
-                ];
-            })
-            ->values();
+            ->groupBy('block_id') // 👈 ключевая часть
+            ->map(function ($blockRows) {
+                return $blockRows->map(function ($row) {
+                    return [
+                        'rooms' => (int) $row->bedrooms,
+                        'area_from' => $row->min_area ? (float) $row->min_area : null,
+                        'price' => $row->min_total_price && $row->max_total_price
+                            ? number_format($row->min_total_price, 0, '.', ' ')
+                            .' – '.
+                            number_format($row->max_total_price, 0, '.', ' ')
+                            .' c.'
+                            : null,
+                        'count' => (int) $row->offers_count,
+                    ];
+                })->values();
+            });
 
         // Можно вернуть как мета-блок рядом с данными объекта
         return response()->json([
