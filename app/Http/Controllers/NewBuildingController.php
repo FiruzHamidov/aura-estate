@@ -47,7 +47,7 @@ class NewBuildingController extends Controller
     public function show(NewBuilding $new_building)
     {
         // грузим связи
-        $new_building->load(['developer','stage','material','features','blocks','units','photos', 'location']);
+        $new_building->load(['developer','stage','material','features','blocks','units.photos','photos', 'location']);
 
         // приводим ceiling_height к числу
         if (!is_null($new_building->ceiling_height)) {
