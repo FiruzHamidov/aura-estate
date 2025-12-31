@@ -56,6 +56,17 @@ class Property extends Model
         'rejection_comment',
         'status_comment',
         'sold_at',
+        'actual_sale_price',
+        'actual_sale_currency',
+        'company_commission_amount',
+        'company_commission_currency',
+        'money_holder',
+        'money_received_at',
+        'contract_signed_at',
+        'deposit_amount',
+        'deposit_currency',
+        'deposit_received_at',
+        'deposit_taken_at',
     ];
 
     public function type()
@@ -147,5 +158,34 @@ class Property extends Model
                 'agent_paid_at'
             ])
             ->withTimestamps();
+    }
+
+    public function getActualSaleCurrencySymbolAttribute(): string
+    {
+        return match ($this->actual_sale_currency) {
+            'USD' => '$',
+            'TJS' => 'смн',
+            default => $this->actual_sale_currency,
+        };
+    }
+
+    public function getCompanyCommissionCurrencySymbolAttribute(): string
+    {
+        return match ($this->company_commission_currency) {
+            'USD' => '$',
+            'TJS' => 'смн',
+            default => $this->company_commission_currency,
+        };
+    }
+
+    public function scopeSold($query)
+    {
+        return $query->whereNotNull('sold_at')
+            ->whereIn('moderation_status', ['sold', 'rented', 'sold_by_owner']);
+    }
+
+    public function isDealClosed(): bool
+    {
+        return !is_null($this->sold_at);
     }
 }
