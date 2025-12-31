@@ -2,10 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\SavePropertyDealRequest;
 use App\Models\Property;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Intervention\Image\Drivers\Gd\Driver;
 use Intervention\Image\Encoders\JpegEncoder;
 use Intervention\Image\ImageManager;
@@ -554,7 +556,39 @@ class PropertyController extends Controller
         return response()->json(['message' => 'Объект помечен как удалён']);
     }
 
-    public function updateModerationAndListingType(Request $request, Property $property)
+//    public function updateModerationAndListingType(Request $request, Property $property)
+//    {
+//        $user = auth()->user();
+//
+//        if (!$user || (!$user->hasRole('admin') && !$user->hasRole('agent'))) {
+//            return response()->json(['message' => 'Доступ запрещён'], 403);
+//        }
+//
+//        $validated = $request->validate([
+//            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,sold,rented,sold_by_owner,denied',
+//            'listing_type' => 'sometimes|in:regular,vip,urgent',
+//            'status_comment' => 'nullable|string',
+//        ]);
+//
+//        if (
+//            isset($validated['moderation_status']) &&
+//            in_array($validated['moderation_status'], ['sold', 'rented', 'sold_by_owner'], true)
+//        ) {
+//            $validated['sold_at'] = now();
+//        }
+//
+//        $property->update($validated);
+//
+//        return response()->json([
+//            'message' => 'Обновлено успешно',
+//            'data' => $property->only(['id', 'moderation_status', 'listing_type']),
+//        ]);
+//    }
+
+    public function updateModerationAndListingType(
+        SavePropertyDealRequest $request,
+        Property                $property
+    )
     {
         $user = auth()->user();
 
@@ -562,24 +596,56 @@ class PropertyController extends Controller
             return response()->json(['message' => 'Доступ запрещён'], 403);
         }
 
-        $validated = $request->validate([
-            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,sold,rented,sold_by_owner,denied',
-            'listing_type' => 'sometimes|in:regular,vip,urgent',
-            'status_comment' => 'nullable|string',
-        ]);
+        DB::transaction(function () use ($request, $property) {
 
-        if (
-            isset($validated['moderation_status']) &&
-            in_array($validated['moderation_status'], ['sold', 'rented', 'sold_by_owner'], true)
-        ) {
-            $validated['sold_at'] = now();
-        }
+            // 1️⃣ Обновляем ОБЩИЕ поля (что у вас уже есть)
+            $property->update([
+                'moderation_status' => $request->moderation_status,
+                'listing_type' => $request->listing_type ?? $property->listing_type,
+                'status_comment' => $request->status_comment,
+            ]);
 
-        $property->update($validated);
+            // 2️⃣ ЕСЛИ выбран статус сделки — сохраняем сделку
+            if (in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'])) {
+
+                $property->update([
+                    'actual_sale_price' => $request->actual_sale_price,
+                    'actual_sale_currency' => $request->actual_sale_currency,
+
+                    'company_commission_amount' => $request->company_commission_amount,
+                    'company_commission_currency' => $request->company_commission_currency,
+
+                    'money_holder' => $request->money_holder,
+                    'money_received_at' => $request->money_received_at,
+                    'contract_signed_at' => $request->contract_signed_at,
+
+                    'deposit_amount' => $request->deposit_amount,
+                    'deposit_currency' => $request->deposit_currency,
+                    'deposit_received_at' => $request->deposit_received_at,
+                    'deposit_taken_at' => $request->deposit_taken_at,
+
+                    'sold_at' => now(),
+                ]);
+
+                // 3️⃣ Агенты (ТОЛЬКО если продано агентом)
+                if ($request->moderation_status === 'sold') {
+                    $property->saleAgents()->sync(
+                        collect($request->agents)->mapWithKeys(fn($agent) => [
+                            $agent['agent_id'] => [
+                                'role' => $agent['role'] ?? 'assistant',
+                                'agent_commission_amount' => $agent['commission_amount'] ?? null,
+                                'agent_commission_currency' => $agent['commission_currency'] ?? 'TJS',
+                                'agent_paid_at' => $agent['paid_at'] ?? null,
+                            ]
+                        ])->toArray()
+                    );
+                }
+            }
+        });
 
         return response()->json([
-            'message' => 'Обновлено успешно',
-            'data' => $property->only(['id', 'moderation_status', 'listing_type']),
+            'message' => 'Объявление и сделка успешно обновлены',
+            'data' => $property->fresh(['saleAgents']),
         ]);
     }
 
@@ -1024,6 +1090,7 @@ class PropertyController extends Controller
 
         return response()->json($result);
     }
+
     /**
      * Return audit logs for a property (paginated).
      * GET /api/properties/{property}/logs
@@ -1039,7 +1106,7 @@ class PropertyController extends Controller
 
     public function saveDeal(
         SavePropertyDealRequest $request,
-        Property $property
+        Property                $property
     ) {
         DB::transaction(function () use ($request, $property) {
 
