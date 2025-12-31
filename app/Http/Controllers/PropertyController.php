@@ -1036,4 +1036,51 @@ class PropertyController extends Controller
 
         return response()->json($logs);
     }
+
+    public function saveDeal(
+        SavePropertyDealRequest $request,
+        Property $property
+    ) {
+        DB::transaction(function () use ($request, $property) {
+
+            // 1️⃣ Обновляем сам объект
+            $property->update([
+                'actual_sale_price' => $request->actual_sale_price,
+                'actual_sale_currency' => $request->actual_sale_currency ?? 'TJS',
+
+                'company_commission_amount' => $request->company_commission_amount,
+                'company_commission_currency' => $request->company_commission_currency ?? 'TJS',
+
+                'money_holder' => $request->money_holder,
+                'money_received_at' => $request->money_received_at,
+                'contract_signed_at' => $request->contract_signed_at,
+
+                'deposit_amount' => $request->deposit_amount,
+                'deposit_currency' => $request->deposit_currency ?? 'TJS',
+                'deposit_received_at' => $request->deposit_received_at,
+                'deposit_taken_at' => $request->deposit_taken_at,
+
+                // если сделка оформлена — считаем проданным
+                'moderation_status' => 'sold',
+                'sold_at' => now(),
+            ]);
+
+            // 2️⃣ Агенты — очищаем и записываем заново
+            $property->saleAgents()->detach();
+
+            foreach ($request->agents as $agent) {
+                $property->saleAgents()->attach($agent['agent_id'], [
+                    'role' => $agent['role'] ?? 'assistant',
+                    'agent_commission_amount' => $agent['commission_amount'] ?? null,
+                    'agent_commission_currency' => $agent['commission_currency'] ?? 'TJS',
+                    'agent_paid_at' => $agent['paid_at'] ?? null,
+                ]);
+            }
+        });
+
+        return response()->json([
+            'message' => 'Сделка успешно сохранена',
+            'property_id' => $property->id,
+        ]);
+    }
 }

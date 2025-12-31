@@ -109,8 +109,6 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('materials',  MaterialController::class)->except(['index', 'show']);
     Route::apiResource('construction-stages', ConstructionStageController::class)->except(['index', 'show']);
 
-
-
     Route::apiResource('roles',             RoleController::class);
     Route::post('/user/{user}/photo',       [UserController::class, 'updatePhoto']);
     Route::delete('/user/photo',            [UserController::class, 'deleteMyPhoto']);
@@ -144,6 +142,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/reports/missing-phone/list',            [PropertyReportController::class, 'missingPhoneList']);
     // детализированный (по одному агенту) — уже есть
     Route::get('/reports/agents/{agent}/properties', [PropertyReportController::class, 'agentPropertiesReport']);
+
+    Route::post(
+        '/properties/{property}/deal',
+        [PropertyController::class, 'saveDeal']
+    )->middleware('auth:sanctum');
 
 // агрегированный — новый (без параметра agent)
     Route::get('/reports/agents/properties', [PropertyReportController::class, 'agentPropertiesReport']);

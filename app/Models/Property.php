@@ -136,4 +136,16 @@ class Property extends Model
     {
         return $this->belongsTo(Developer::class);
     }
+
+    public function saleAgents()
+    {
+        return $this->belongsToMany(User::class, 'property_agent_sales', 'property_id', 'agent_id')
+            ->withPivot([
+                'role',
+                'agent_commission_amount',
+                'agent_commission_currency',
+                'agent_paid_at'
+            ])
+            ->withTimestamps();
+    }
 }

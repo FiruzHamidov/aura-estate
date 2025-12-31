@@ -41,4 +41,15 @@ class User extends Authenticatable
     {
         return $this->hasMany(Booking::class, 'client_id');
     }
+
+    public function soldProperties()
+    {
+        return $this->belongsToMany(Property::class, 'property_agent_sales', 'agent_id', 'property_id')
+            ->withPivot([
+                'role',
+                'agent_commission_amount',
+                'agent_commission_currency',
+                'agent_paid_at'
+            ]);
+    }
 }
