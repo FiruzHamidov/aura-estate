@@ -598,45 +598,68 @@ class PropertyController extends Controller
 
         DB::transaction(function () use ($request, $property) {
 
-            // 1️⃣ Обновляем ОБЩИЕ поля (что у вас уже есть)
+            // 1️⃣ Общие поля (всегда можно менять)
             $property->update([
                 'moderation_status' => $request->moderation_status,
-                'listing_type' => $request->listing_type ?? $property->listing_type,
-                'status_comment' => $request->status_comment,
+                'listing_type'      => $request->listing_type ?? $property->listing_type,
+                'status_comment'    => $request->status_comment,
             ]);
 
-            // 2️⃣ ЕСЛИ выбран статус сделки — сохраняем сделку
-            if (in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'])) {
-
+            /**
+             * =========================
+             * 🟡 ЭТАП: ЗАЛОГ (deposit)
+             * =========================
+             */
+            if ($request->moderation_status === 'deposit') {
                 $property->update([
-                    'actual_sale_price' => $request->actual_sale_price,
-                    'actual_sale_currency' => $request->actual_sale_currency,
+                    'buyer_full_name' => $request->buyer_full_name,
+                    'buyer_phone'     => $request->buyer_phone,
 
-                    'company_commission_amount' => $request->company_commission_amount,
-                    'company_commission_currency' => $request->company_commission_currency,
+                    'deposit_amount'       => $request->deposit_amount,
+                    'deposit_currency'     => $request->deposit_currency,
+                    'deposit_received_at'  => $request->deposit_received_at,
+                    'deposit_taken_at'     => $request->deposit_taken_at,
 
                     'money_holder' => $request->money_holder,
-                    'money_received_at' => $request->money_received_at,
-                    'contract_signed_at' => $request->contract_signed_at,
 
-                    'deposit_amount' => $request->deposit_amount,
-                    'deposit_currency' => $request->deposit_currency,
-                    'deposit_received_at' => $request->deposit_received_at,
-                    'deposit_taken_at' => $request->deposit_taken_at,
+                    'company_expected_income'           => $request->company_expected_income,
+                    'company_expected_income_currency'  => $request->company_expected_income_currency,
+
+                    'planned_contract_signed_at' => $request->planned_contract_signed_at,
+                ]);
+            }
+
+            /**
+             * =========================
+             * 🟢 ЭТАП: ФИНАЛ СДЕЛКИ
+             * =========================
+             */
+            if (in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true)) {
+
+                $property->update([
+                    'actual_sale_price'    => $request->actual_sale_price,
+                    'actual_sale_currency' => $request->actual_sale_currency,
+
+                    'company_commission_amount'   => $request->company_commission_amount,
+                    'company_commission_currency' => $request->company_commission_currency,
+
+                    'money_holder'        => $request->money_holder,
+                    'money_received_at'   => $request->money_received_at,
+                    'contract_signed_at'  => $request->contract_signed_at,
 
                     'sold_at' => now(),
                 ]);
 
-                // 3️⃣ Агенты (ТОЛЬКО если продано агентом)
-                if ($request->moderation_status === 'sold') {
+                // 3️⃣ Агенты — ТОЛЬКО если продано агентом
+                if ($request->moderation_status === 'sold' && $request->filled('agents')) {
                     $property->saleAgents()->sync(
-                        collect($request->agents)->mapWithKeys(fn($agent) => [
+                        collect($request->agents)->mapWithKeys(fn ($agent) => [
                             $agent['agent_id'] => [
                                 'role' => $agent['role'] ?? 'assistant',
                                 'agent_commission_amount' => $agent['commission_amount'] ?? null,
                                 'agent_commission_currency' => $agent['commission_currency'] ?? 'TJS',
                                 'agent_paid_at' => $agent['paid_at'] ?? null,
-                            ]
+                            ],
                         ])->toArray()
                     );
                 }
@@ -644,7 +667,7 @@ class PropertyController extends Controller
         });
 
         return response()->json([
-            'message' => 'Объявление и сделка успешно обновлены',
+            'message' => 'Объявление успешно обновлено',
             'data' => $property->fresh(['saleAgents']),
         ]);
     }

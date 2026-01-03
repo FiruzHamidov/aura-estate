@@ -67,6 +67,10 @@ class Property extends Model
         'deposit_currency',
         'deposit_received_at',
         'deposit_taken_at',
+        'buyer_full_name',
+        'buyer_phone',
+        'company_expected_income',
+        'company_expected_income_currency',
     ];
 
     public function type()
