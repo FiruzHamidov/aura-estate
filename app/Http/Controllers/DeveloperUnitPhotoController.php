@@ -71,9 +71,9 @@ class DeveloperUnitPhotoController extends Controller
     public function destroy(NewBuilding $new_building, DeveloperUnit $unit, DeveloperUnitPhoto $photo)
     {
         // защитим принадлежность
-        if ($photo->developer_unit_id !== $unit->id) {
-            abort(404);
-        }
+//        if ($photo->developer_unit_id !== $unit->id) {
+//            abort(404);
+//        }
         if (!empty($photo->path)) {
             Storage::disk('public')->delete($photo->path);
         }
