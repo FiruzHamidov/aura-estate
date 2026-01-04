@@ -684,7 +684,8 @@ class PropertyController extends Controller
             'created_by' => 'nullable|string',
             'district' => 'nullable|string',
             'address' => 'nullable|string',
-            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,sold,rented,sold_by_owner','denied',
+            // --- Moderation status with deposit and fixed enum
+            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,deposit,sold,rented,sold_by_owner,denied',
             'contract_type_id' => 'nullable|exists:contract_types,id',
             'type_id' => 'required|exists:property_types,id',
             'status_id' => 'required|exists:property_statuses,id',
@@ -739,6 +740,26 @@ class PropertyController extends Controller
             'is_for_aura' => 'sometimes|boolean',
             'status_comment' => 'nullable|string',
             'sold_at' => 'nullable|date',
+
+            // ===== Deposit stage (optional) =====
+            'buyer_full_name' => 'nullable|string|max:255',
+            'buyer_phone' => 'nullable|string|max:30',
+            'deposit_amount' => 'nullable|numeric|min:0',
+            'deposit_currency' => 'nullable|in:TJS,USD',
+            'deposit_received_at' => 'nullable|date',
+            'deposit_taken_at' => 'nullable|date',
+            'planned_contract_signed_at' => 'nullable|date',
+            'company_expected_income' => 'nullable|numeric|min:0',
+            'company_expected_income_currency' => 'nullable|in:TJS,USD',
+
+            // ===== Final deal stage (optional) =====
+            'actual_sale_price' => 'nullable|numeric|min:0',
+            'actual_sale_currency' => 'nullable|in:TJS,USD',
+            'company_commission_amount' => 'nullable|numeric|min:0',
+            'company_commission_currency' => 'nullable|in:TJS,USD',
+            'money_holder' => 'nullable|in:company,agent,owner,developer,client',
+            'money_received_at' => 'nullable|date',
+            'contract_signed_at' => 'nullable|date',
         ]);
         return $validated;
     }
