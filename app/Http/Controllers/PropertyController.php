@@ -587,9 +587,8 @@ class PropertyController extends Controller
 
     public function updateModerationAndListingType(
         SavePropertyDealRequest $request,
-        Property                $property
-    )
-    {
+        Property $property
+    ) {
         $user = auth()->user();
 
         if (!$user || (!$user->hasRole('admin') && !$user->hasRole('agent'))) {
@@ -598,71 +597,71 @@ class PropertyController extends Controller
 
         DB::transaction(function () use ($request, $property) {
 
-            // 1️⃣ Общие поля (всегда можно менять)
-            $property->update([
-                'moderation_status' => $request->moderation_status,
-                'listing_type'      => $request->listing_type ?? $property->listing_type,
-                'status_comment'    => $request->status_comment,
-            ]);
+            /**
+             * 1️⃣ ОБНОВЛЯЕМ ВСЁ, ЧТО ПРИШЛО
+             * независимо от статуса
+             */
+            $fillable = [
+                // moderation
+                'moderation_status',
+                'listing_type',
+                'status_comment',
+
+                // buyer / deposit
+                'buyer_full_name',
+                'buyer_phone',
+                'deposit_amount',
+                'deposit_currency',
+                'deposit_received_at',
+                'deposit_taken_at',
+
+                // money
+                'money_holder',
+                'money_received_at',
+                'contract_signed_at',
+
+                // company
+                'company_expected_income',
+                'company_expected_income_currency',
+                'company_commission_amount',
+                'company_commission_currency',
+
+                // deal
+                'actual_sale_price',
+                'actual_sale_currency',
+                'planned_contract_signed_at',
+            ];
+
+            $property->update(
+                collect($fillable)
+                    ->filter(fn ($field) => $request->has($field))
+                    ->mapWithKeys(fn ($field) => [$field => $request->$field])
+                    ->toArray()
+            );
 
             /**
-             * =========================
-             * 🟡 ЭТАП: ЗАЛОГ (deposit)
-             * =========================
+             * 2️⃣ ЛОГИКА ПО СТАТУСУ (ТОЛЬКО БИЗНЕС-ПРАВИЛА)
              */
-            if ($request->moderation_status === 'deposit') {
+            if (in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true)) {
                 $property->update([
-                    'buyer_full_name' => $request->buyer_full_name,
-                    'buyer_phone'     => $request->buyer_phone,
-
-                    'deposit_amount'       => $request->deposit_amount,
-                    'deposit_currency'     => $request->deposit_currency,
-                    'deposit_received_at'  => $request->deposit_received_at,
-                    'deposit_taken_at'     => $request->deposit_taken_at,
-
-                    'money_holder' => $request->money_holder,
-
-                    'company_expected_income'           => $request->company_expected_income,
-                    'company_expected_income_currency'  => $request->company_expected_income_currency,
-
-                    'planned_contract_signed_at' => $request->planned_contract_signed_at,
+                    'sold_at' => now(),
                 ]);
             }
 
             /**
-             * =========================
-             * 🟢 ЭТАП: ФИНАЛ СДЕЛКИ
-             * =========================
+             * 3️⃣ АГЕНТЫ — ТОЛЬКО ЕСЛИ SOLD
              */
-            if (in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true)) {
-
-                $property->update([
-                    'actual_sale_price'    => $request->actual_sale_price,
-                    'actual_sale_currency' => $request->actual_sale_currency,
-
-                    'company_commission_amount'   => $request->company_commission_amount,
-                    'company_commission_currency' => $request->company_commission_currency,
-
-                    'money_holder'        => $request->money_holder,
-                    'money_received_at'   => $request->money_received_at,
-                    'contract_signed_at'  => $request->contract_signed_at,
-
-                    'sold_at' => now(),
-                ]);
-
-                // 3️⃣ Агенты — ТОЛЬКО если продано агентом
-                if ($request->moderation_status === 'sold' && $request->filled('agents')) {
-                    $property->saleAgents()->sync(
-                        collect($request->agents)->mapWithKeys(fn ($agent) => [
-                            $agent['agent_id'] => [
-                                'role' => $agent['role'] ?? 'assistant',
-                                'agent_commission_amount' => $agent['commission_amount'] ?? null,
-                                'agent_commission_currency' => $agent['commission_currency'] ?? 'TJS',
-                                'agent_paid_at' => $agent['paid_at'] ?? null,
-                            ],
-                        ])->toArray()
-                    );
-                }
+            if ($request->moderation_status === 'sold' && $request->filled('agents')) {
+                $property->saleAgents()->sync(
+                    collect($request->agents)->mapWithKeys(fn ($agent) => [
+                        $agent['agent_id'] => [
+                            'role' => $agent['role'] ?? 'assistant',
+                            'agent_commission_amount' => $agent['commission_amount'] ?? null,
+                            'agent_commission_currency' => $agent['commission_currency'] ?? 'TJS',
+                            'agent_paid_at' => $agent['paid_at'] ?? null,
+                        ],
+                    ])->toArray()
+                );
             }
         });
 
