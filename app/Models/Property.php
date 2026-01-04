@@ -71,6 +71,7 @@ class Property extends Model
         'buyer_phone',
         'company_expected_income',
         'company_expected_income_currency',
+        'planned_contract_signed_at',
     ];
 
     public function type()
