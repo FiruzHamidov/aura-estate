@@ -170,7 +170,7 @@ class PropertyController extends Controller
 
         // Статусы (мульти)
         if ($request->filled('moderation_status')) {
-            $available = ['pending', 'approved', 'rejected', 'draft', 'deleted', 'sold', 'rented', 'sold_by_owner', 'denied'];
+            $available = ['pending', 'approved', 'rejected', 'draft', 'deleted', 'sold', 'rented', 'sold_by_owner', 'denied', 'deposit'];
             $statuses = array_values(array_intersect($toArray($request->input('moderation_status')), $available));
             if (!empty($statuses)) {
                 $query->whereIn('moderation_status', $statuses);
