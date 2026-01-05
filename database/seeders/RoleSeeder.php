@@ -26,5 +26,11 @@ class RoleSeeder extends Seeder
             'slug' => 'client',
             'description' => 'Пользователь платформы'
         ]);
+
+        Role::create([
+            'name' => 'Суперадминистратор',
+            'slug' => 'superadmin',
+            'description' => 'Полный контроль над системой и администраторами'
+        ]);
     }
 }

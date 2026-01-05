@@ -41,11 +41,11 @@ class SavePropertyDealRequest extends FormRequest
              * 🟢 ЭТАП: ФИНАЛ СДЕЛКИ
              * =========================
              */
-            'actual_sale_price'    => 'required_if:moderation_status,sold,sold_by_owner,rented|numeric|min:0.01',
-            'actual_sale_currency' => 'required_if:moderation_status,sold,sold_by_owner,rented|in:TJS,USD',
+            'actual_sale_price'    => 'required_if:moderation_status,sold,rented|numeric|min:0.01',
+            'actual_sale_currency' => 'required_if:moderation_status,sold,rented|in:TJS,USD',
 
-            'company_commission_amount'   => 'required_if:moderation_status,sold,sold_by_owner,rented|numeric|min:0',
-            'company_commission_currency' => 'required_if:moderation_status,sold,sold_by_owner,rented|in:TJS,USD',
+            'company_commission_amount'   => 'required_if:moderation_status,sold,rented|numeric|min:0',
+            'company_commission_currency' => 'required_if:moderation_status,sold,rented|in:TJS,USD',
 
             'money_received_at'  => 'nullable|date',
             'contract_signed_at' => 'nullable|date',
