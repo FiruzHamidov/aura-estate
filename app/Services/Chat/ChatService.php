@@ -43,7 +43,14 @@ class ChatService
                     "- Use ONLY the exact filter parameter names defined in search_properties.\n".
                     "- For ranges, ALWAYS use From/To suffixes (priceFrom, roomsTo, etc).\n".
                     "- For districts, ALWAYS pass an array: districts[].\n".
-                    "- Do NOT invent fields that are not listed.\n",
+                    "- Do NOT invent fields that are not listed.\n".
+                    "- AVAILABLE DISTRICTS (strict values from database):\n".
+                    "  • Сино\n".
+                    "  • И Сомони\n".
+                    "  • Шохмансур\n".
+                    "  • Фирдавси\n".
+                    "- If user input is similar or misspelled (e.g. \"фирдоуси\", \"сомони\"), map it to the closest value from the list above.\n".
+                    "- ALWAYS pass district names EXACTLY as stored in the database.\n",
             ],
         ];
         foreach ($history as $h) {
@@ -132,8 +139,6 @@ class ChatService
                     // даты
                     'date_from'        => ['type' => 'string'],
                     'date_to'          => ['type' => 'string'],
-                    'sold_at_from'     => ['type' => 'string'],
-                    'sold_at_to'       => ['type' => 'string'],
 
                     // служебные
                     'limit'            => ['type' => 'integer', 'default' => 6],
@@ -170,7 +175,36 @@ class ChatService
 
             if (($call['name'] ?? '') === 'search_properties') {
                 $args  = json_decode($call['arguments'] ?? '{}', true) ?: [];
+
+                // --- Normalize districts to strict DB values (safety net)
+                if (!empty($args['districts']) && is_array($args['districts'])) {
+                    $allowedDistricts = ['Сино', 'И Сомони', 'Шохмансур', 'Фирдавси'];
+
+                    $normalized = [];
+                    foreach ($args['districts'] as $input) {
+                        $inputLower = mb_strtolower($input, 'UTF-8');
+                        foreach ($allowedDistricts as $allowed) {
+                            if (mb_strtolower($allowed, 'UTF-8') === $inputLower) {
+                                $normalized[] = $allowed;
+                                continue 2;
+                            }
+                        }
+                    }
+
+                    if (!empty($normalized)) {
+                        $args['districts'] = array_values(array_unique($normalized));
+                    }
+                }
+
                 $found = $this->props->search($args);
+
+                // Ensure photos are always present for frontend cards
+                foreach ($found as &$item) {
+                    if (empty($item['photos']) && !empty($item['images'])) {
+                        $item['photos'] = $item['images'];
+                    }
+                }
+                unset($item);
 
                 // логируем tool-вызов
                 $this->storeMessage($session->id, 'tool', null, [
