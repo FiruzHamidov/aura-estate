@@ -135,15 +135,15 @@ class PropertyRepository
         $photosByProperty = [];
         if (!empty($ids)) {
             $photos = DB::table('property_photos')
-                ->select('property_id', 'path', 'is_main', 'position')
+                ->select('property_id', 'file_path', 'position')
                 ->whereIn('property_id', $ids)
                 ->orderBy('position')
                 ->get();
 
             foreach ($photos as $p) {
                 $photosByProperty[$p->property_id][] = [
-                    'path'    => $p->path,
-                    'is_main' => (bool) $p->is_main,
+                    'path'    => $p->file_path,
+                    'is_main' => ((int)$p->position === 0),
                 ];
             }
         }
