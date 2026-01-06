@@ -85,6 +85,10 @@ class PropertyRepository
                 $q->where('properties.rooms', $rooms);
             }
 
+            if (!empty($opts['districts']) && is_array($opts['districts'])) {
+                $q->whereIn('properties.district', $opts['districts']);
+            }
+
             $priceMin = isset($opts['price_min']) ? $opts['price_min'] : null;
             $priceMax = isset($opts['price_max']) ? $opts['price_max'] : null;
 
@@ -106,27 +110,59 @@ class PropertyRepository
         // ---------- Ступени поиска (ослабляем постепенно) ----------
         // step 1: все фильтры
         $q1 = (clone $base);
-        $applyFilters($q1, ['city'=>true,'offer'=>true,'type'=>true,'rooms'=>true,'price_min'=>$priceMin,'price_max'=>$priceMax]);
+        $applyFilters($q1, [
+            'city'=>true,
+            'districts'=>$args['districts'] ?? null,
+            'offer'=>true,
+            'type'=>true,
+            'rooms'=>true,
+            'price_min'=>$priceMin,
+            'price_max'=>$priceMax
+        ]);
         $rows = $q1->limit($limit)->get();
 
         // step 2: если пусто, убираем city
         if ($rows->isEmpty() && $city) {
             $q2 = (clone $base);
-            $applyFilters($q2, ['city'=>false,'offer'=>true,'type'=>true,'rooms'=>true,'price_min'=>$priceMin,'price_max'=>$priceMax]);
+            $applyFilters($q2, [
+                'city'=>false,
+                'districts'=>$args['districts'] ?? null,
+                'offer'=>true,
+                'type'=>true,
+                'rooms'=>true,
+                'price_min'=>$priceMin,
+                'price_max'=>$priceMax
+            ]);
             $rows = $q2->limit($limit)->get();
         }
 
         // step 3: если пусто, убираем ещё и type
         if ($rows->isEmpty() && $typeId !== null) {
             $q3 = (clone $base);
-            $applyFilters($q3, ['city'=>false,'offer'=>true,'type'=>false,'rooms'=>true,'price_min'=>$priceMin,'price_max'=>$priceMax]);
+            $applyFilters($q3, [
+                'city'=>false,
+                'districts'=>$args['districts'] ?? null,
+                'offer'=>true,
+                'type'=>false,
+                'rooms'=>true,
+                'price_min'=>$priceMin,
+                'price_max'=>$priceMax
+            ]);
             $rows = $q3->limit($limit)->get();
         }
 
         // step 4: если пусто, убираем ещё и rooms
         if ($rows->isEmpty() && $rooms !== null) {
             $q4 = (clone $base);
-            $applyFilters($q4, ['city'=>false,'offer'=>true,'type'=>false,'rooms'=>false,'price_min'=>$priceMin,'price_max'=>$priceMax]);
+            $applyFilters($q4, [
+                'city'=>false,
+                'districts'=>$args['districts'] ?? null,
+                'offer'=>true,
+                'type'=>false,
+                'rooms'=>false,
+                'price_min'=>$priceMin,
+                'price_max'=>$priceMax
+            ]);
             $rows = $q4->limit($limit)->get();
         }
 

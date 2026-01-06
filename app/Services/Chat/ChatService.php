@@ -176,6 +176,24 @@ class ChatService
             if (($call['name'] ?? '') === 'search_properties') {
                 $args  = json_decode($call['arguments'] ?? '{}', true) ?: [];
 
+                // === NORMALIZE FILTERS FOR PropertyRepository ===
+                // price range
+                if (array_key_exists('priceFrom', $args)) {
+                    $args['price_min'] = is_numeric($args['priceFrom']) ? (float)$args['priceFrom'] : null;
+                }
+                if (array_key_exists('priceTo', $args)) {
+                    $args['price_max'] = is_numeric($args['priceTo']) ? (float)$args['priceTo'] : null;
+                }
+                // rooms range: поддержка "1-2 комнатные"
+                if (array_key_exists('roomsFrom', $args) && array_key_exists('roomsTo', $args)) {
+                    $args['rooms_min'] = (int)$args['roomsFrom'];
+                    $args['rooms_max'] = (int)$args['roomsTo'];
+                } elseif (array_key_exists('roomsFrom', $args)) {
+                    $args['rooms'] = (int)$args['roomsFrom'];
+                } elseif (array_key_exists('roomsTo', $args)) {
+                    $args['rooms'] = (int)$args['roomsTo'];
+                }
+
                 // --- Normalize districts to strict DB values (safety net)
                 if (!empty($args['districts']) && is_array($args['districts'])) {
                     $allowedDistricts = ['Сино', 'И Сомони', 'Шохмансур', 'Фирдавси'];
