@@ -54,6 +54,7 @@ class ChatController extends Controller
         $cursor = $request->query('cursor'); // created_at ISO или id — ниже выберем по created_at
 
         $qb = \App\Models\ChatMessage::where('chat_session_id', $session->id)
+            ->whereIn('role', ['user', 'assistant'])
             ->orderBy('created_at')
             ->orderBy('id'); // на случай одинаковых created_at
 
