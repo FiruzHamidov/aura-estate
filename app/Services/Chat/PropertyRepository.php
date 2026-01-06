@@ -248,7 +248,7 @@ class PropertyRepository
             'дом'      => 'house',
             'домик'    => 'house',
             'house'    => 'house',
-            'хона'     => 'house',   // если не сработала эвристика выше — оставим как house
+            'хона'     => 'house',
             'хонай'    => 'house',
 
             'дача'     => 'cottage',

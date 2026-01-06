@@ -212,15 +212,15 @@ class ChatService
                     'total'   => count($found),
                 ];
 
-                // Добавляем в диалог служебное сообщение для модели (developer),
+                // Добавляем в диалог сообщение для модели (assistant),
                 // чтобы она на основе этих данных дала короткий ответ пользователю.
                 $messages[] = [
-                    'role'    => 'developer',
+                    'role'    => 'assistant',
                     'content' =>
-                        "Tool search_properties returned JSON. " .
-                        "Use it to answer concisely in the user's language. " .
-                        "If results are empty, politely ask clarifying filters. " .
-                        "DATA:\n" . json_encode($resultsEnvelope, JSON_UNESCAPED_UNICODE),
+                        "Here are the search results in JSON format. ".
+                        "Use them to answer the user concisely in the user's language. ".
+                        "If results are empty, politely ask clarifying questions.\n".
+                        json_encode($resultsEnvelope, JSON_UNESCAPED_UNICODE),
                 ];
 
                 // Второй вызов: просто передаём обновлённый input (без tool_outputs и без role: tool)
