@@ -18,7 +18,14 @@ class ChatService
         // Логируем сообщение пользователя
         $this->storeMessage($session->id, 'user', $userMessage);
 
-        // Контекст (история) для модели
+        // Загрузка истории сообщений из БД (user+assistant, последние 20)
+        $history = ChatMessage::where('chat_session_id', $session->id)
+            ->whereIn('role', ['user', 'assistant'])
+            ->orderBy('id', 'asc')
+            ->limit(20)
+            ->get();
+
+        // Формируем массив messages: system + история + текущее сообщение пользователя
         $messages = [
             [
                 'role' => 'system',
@@ -27,31 +34,109 @@ class ChatService
                     "- Your ONLY domain is real estate listings published on Aura Estate: apartments, houses, cottages, rooms, commercial properties, land plots, new-buildings.\n".
                     "- Never discuss or recommend unrelated topics such as cars, transport, electronics, services, jobs, etc.\n".
                     "- Detect the user's language (Russian, Tajik, or English) and always respond in that language.\n".
-                    "- If the user is searching for real estate, extract relevant filters (city, district, offer type, property type, rooms, price range) and call the tool `search_properties`.\n".
+                    "- If the user is searching for real estate, extract relevant filters (city, district, offer type, property type, rooms, price range).\n".
+                    "- Users may provide filters gradually across multiple messages. You MUST remember and combine previous filters from the conversation.\n".
+                    "- When enough filters are collected, call the tool `search_properties`.\n".
                     "- When showing results, present 3–6 best matches with: title, price, currency, city/district, and a CTA link to aura.tj.\n".
-                    "- Be concise, polite, and professional — answer in short helpful sentences, like a property consultant.\n".
-                    "- If no properties are found, ask clarifying questions (e.g., budget, location, rooms) and offer to broaden the search.\n".
-                    "- Always represent Aura Estate as the source: mention 'Aura Estate' or aura.tj when appropriate.\n",
+                    "- If no properties are found, ask clarifying questions.\n".
+                    "- Always represent Aura Estate as the source.\n".
+                    "- Use ONLY the exact filter parameter names defined in search_properties.\n".
+                    "- For ranges, ALWAYS use From/To suffixes (priceFrom, roomsTo, etc).\n".
+                    "- For districts, ALWAYS pass an array: districts[].\n".
+                    "- Do NOT invent fields that are not listed.\n",
             ],
-            ['role' => 'user', 'content' => $userMessage],
+        ];
+        foreach ($history as $h) {
+            if ($h->content) {
+                $messages[] = [
+                    'role' => $h->role,
+                    'content' => $h->content,
+                ];
+            }
+        }
+        $messages[] = [
+            'role' => 'user',
+            'content' => $userMessage,
         ];
 
         // Описание инструмента (Responses API: name на верхнем уровне)
         $tools = [[
             'type'        => 'function',
             'name'        => 'search_properties',
-            'description' => 'Search Aura Estate DB for properties',
+            'description' => 'Search Aura Estate properties using advanced filters',
             'parameters'  => [
                 'type'       => 'object',
                 'properties' => [
-                    'city'          => ['type' => 'string'],
-                    'district'      => ['type' => 'string'],
-                    'offer_type'    => ['type' => 'string', 'enum' => ['sale','rent']],
-                    'property_type' => ['type' => 'string'],
-                    'rooms'         => ['type' => 'integer'],
-                    'price_max'     => ['type' => 'number'],
-                    'price_min'     => ['type' => 'number'],
-                    'limit'         => ['type' => 'integer', 'default' => 6],
+
+                    // мульти-статусы
+                    'moderation_status' => [
+                        'type'  => 'array',
+                        'items' => ['type' => 'string']
+                    ],
+
+                    // districts fuzzy
+                    'districts' => [
+                        'type'  => 'array',
+                        'items' => ['type' => 'string']
+                    ],
+
+                    // текстовые поля
+                    'title'           => ['type' => 'string'],
+                    'description'     => ['type' => 'string'],
+                    'address'         => ['type' => 'string'],
+                    'landmark'        => ['type' => 'string'],
+                    'condition'       => ['type' => 'string'],
+                    'apartment_type'  => ['type' => 'string'],
+                    'owner_phone'     => ['type' => 'string'],
+
+                    // точные поля
+                    'type_id'                => ['type' => 'integer'],
+                    'status_id'              => ['type' => 'integer'],
+                    'location_id'            => ['type' => 'integer'],
+                    'repair_type_id'         => ['type' => 'integer'],
+                    'currency'               => ['type' => 'string'],
+                    'offer_type'             => ['type' => 'string', 'enum' => ['sale','rent']],
+                    'agent_id'               => ['type' => 'integer'],
+                    'listing_type'           => ['type' => 'string'],
+                    'created_by'             => ['type' => 'integer'],
+                    'contract_type_id'       => ['type' => 'integer'],
+                    'developer_id'            => ['type' => 'integer'],
+                    'heating_type_id'        => ['type' => 'integer'],
+                    'parking_type_id'        => ['type' => 'integer'],
+
+                    // boolean
+                    'has_garden'             => ['type' => 'boolean'],
+                    'has_parking'            => ['type' => 'boolean'],
+                    'is_mortgage_available'  => ['type' => 'boolean'],
+                    'is_from_developer'      => ['type' => 'boolean'],
+                    'is_business_owner'      => ['type' => 'boolean'],
+                    'is_full_apartment'      => ['type' => 'boolean'],
+                    'is_for_aura'             => ['type' => 'boolean'],
+
+                    // диапазоны
+                    'priceFrom'        => ['type' => 'number'],
+                    'priceTo'          => ['type' => 'number'],
+                    'roomsFrom'        => ['type' => 'number'],
+                    'roomsTo'          => ['type' => 'number'],
+                    'total_areaFrom'   => ['type' => 'number'],
+                    'total_areaTo'     => ['type' => 'number'],
+                    'living_areaFrom'  => ['type' => 'number'],
+                    'living_areaTo'    => ['type' => 'number'],
+                    'floorFrom'        => ['type' => 'number'],
+                    'floorTo'          => ['type' => 'number'],
+                    'total_floorsFrom' => ['type' => 'number'],
+                    'total_floorsTo'   => ['type' => 'number'],
+                    'year_builtFrom'   => ['type' => 'number'],
+                    'year_builtTo'     => ['type' => 'number'],
+
+                    // даты
+                    'date_from'        => ['type' => 'string'],
+                    'date_to'          => ['type' => 'string'],
+                    'sold_at_from'     => ['type' => 'string'],
+                    'sold_at_to'       => ['type' => 'string'],
+
+                    // служебные
+                    'limit'            => ['type' => 'integer', 'default' => 6],
                 ],
             ],
         ]];
