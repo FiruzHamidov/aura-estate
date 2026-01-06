@@ -591,7 +591,7 @@ class PropertyController extends Controller
     ) {
         $user = auth()->user();
 
-        if (!$user || (!$user->hasRole('admin') && !$user->hasRole('agent'))) {
+        if (!$user || (!$user->hasRole('admin') || !$user->hasRole('superadmin') && !$user->hasRole('agent'))) {
             return response()->json(['message' => 'Доступ запрещён'], 403);
         }
 
