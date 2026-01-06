@@ -38,7 +38,12 @@ class PropertyReportController extends Controller
             $dateField = array_intersect($statusVals, $closed) ? 'sold_at' : 'created_at';
         }
 
-        if (!in_array($dateField, ['created_at', 'updated_at', 'sold_at'], true)) {
+        if (!in_array($dateField, [
+            'created_at',
+            'updated_at',
+            'sold_at',
+            'deposit_received_at',
+        ], true)) {
             $dateField = 'created_at';
         }
 
@@ -55,6 +60,15 @@ class PropertyReportController extends Controller
 
             if ($soldFrom) $query->whereDate('sold_at', '>=', $soldFrom);
             if ($soldTo)   $query->whereDate('sold_at', '<=', $soldTo);
+        }
+
+        $depositFrom = $request->input('deposit_received_at_from');
+        $depositTo   = $request->input('deposit_received_at_to');
+        if ($depositFrom) {
+            $query->whereDate('deposit_received_at', '>=', $depositFrom);
+        }
+        if ($depositTo) {
+            $query->whereDate('deposit_received_at', '<=', $depositTo);
         }
 
         // Мультиселекты (включая agent_id для отчётов по агентам)
@@ -119,6 +133,8 @@ class PropertyReportController extends Controller
             'rented',
         ];
 
+        $depositStatus = 'deposit';
+
         $base = Property::query();
         [$q] = $this->applyCommonFilters($request, $base);
 
@@ -126,6 +142,7 @@ class PropertyReportController extends Controller
 
         $soldRequest['sold_at_from'] = $request->input('date_from');
         $soldRequest['sold_at_to']   = $request->input('date_to');
+
 
         $soldBase = Property::query()
             ->whereIn('moderation_status', $soldStatuses);
@@ -135,14 +152,37 @@ class PropertyReportController extends Controller
             $soldBase
         );
 
+        // --- deposit: по deposit_received_at
+        $depositBase = Property::query()
+            ->where('moderation_status', 'deposit');
+
+        $depositRequest = $request->except(['date_from', 'date_to']);
+        $depositRequest['date_field'] = 'deposit_received_at';
+        $depositRequest['date_from']  = $request->input('date_from');
+        $depositRequest['date_to']    = $request->input('date_to');
+
+        [$depositQ] = $this->applyCommonFilters(
+            new Request($depositRequest),
+            $depositBase
+        );
+
+        $depositStatusRow = (clone $depositQ)
+            ->select('moderation_status', DB::raw('COUNT(*) as cnt'))
+            ->groupBy('moderation_status')
+            ->get();
+
         $total = (clone $q)->count();
 
         // --- byStatus: все НЕ закрытые статусы по created_at
         $byStatus = (clone $q)
-            ->whereNotIn('moderation_status', $soldStatuses)
+            ->whereNotIn('moderation_status', array_merge($soldStatuses, [$depositStatus]))
             ->select('moderation_status', DB::raw('COUNT(*) as cnt'))
             ->groupBy('moderation_status')
             ->get();
+
+        $byStatus = $byStatus
+            ->concat($depositStatusRow)
+            ->values();
 
         // --- soldStatus: закрытые статусы по sold_at
         $soldStatus = (clone $soldQ)
@@ -466,6 +506,7 @@ class PropertyReportController extends Controller
                 DB::raw("SUM(CASE WHEN moderation_status = 'pending' THEN 1 ELSE 0 END) as pending"),
                 DB::raw("SUM(CASE WHEN moderation_status = 'approved' THEN 1 ELSE 0 END) as approved"),
                 DB::raw("SUM(CASE WHEN moderation_status = 'rejected' THEN 1 ELSE 0 END) as rejected"),
+                DB::raw("SUM(CASE WHEN moderation_status = 'deposit' THEN 1 ELSE 0 END) as deposit"),
                 DB::raw("SUM(CASE WHEN moderation_status = 'sold' THEN 1 ELSE 0 END) as sold"),
                 DB::raw("SUM(CASE WHEN moderation_status = 'rented' THEN 1 ELSE 0 END) as rented"),
                 DB::raw("SUM(CASE WHEN moderation_status = 'sold_by_owner' THEN 1 ELSE 0 END) as sold_by_owner"),
