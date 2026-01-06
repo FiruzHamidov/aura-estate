@@ -134,6 +134,7 @@ class PropertyReportController extends Controller
         ];
 
         $depositStatus = 'deposit';
+        $approved = 'approved';
 
         $base = Property::query();
         [$q] = $this->applyCommonFilters($request, $base);
@@ -186,7 +187,7 @@ class PropertyReportController extends Controller
 
         // --- byStatus: все НЕ закрытые статусы по created_at
         $byStatus = (clone $q)
-            ->whereNotIn('moderation_status', array_merge($soldStatuses, [$depositStatus]))
+            ->whereNotIn('moderation_status', array_merge($soldStatuses, [$depositStatus], [$approved]))
             ->select('moderation_status', DB::raw('COUNT(*) as cnt'))
             ->groupBy('moderation_status')
             ->get();
