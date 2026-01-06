@@ -198,14 +198,6 @@ class ChatService
 
                 $found = $this->props->search($args);
 
-                // Ensure photos are always present for frontend cards
-                foreach ($found as &$item) {
-                    if (empty($item['photos']) && !empty($item['images'])) {
-                        $item['photos'] = $item['images'];
-                    }
-                }
-                unset($item);
-
                 // логируем tool-вызов
                 $this->storeMessage($session->id, 'tool', null, [
                     'tool_name' => 'search_properties',

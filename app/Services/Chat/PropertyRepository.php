@@ -20,6 +20,8 @@ class PropertyRepository
 
         [$typeId, $typeMeta] = $this->resolveTypeId($args['property_type'] ?? null);
 
+        $propertyIdsWithPhotos = [];
+
         // ---------- База запроса ----------
         $base = DB::table('properties')
             ->select([
@@ -128,8 +130,26 @@ class PropertyRepository
             $rows = $q4->limit($limit)->get();
         }
 
+        $ids = $rows->pluck('id')->all();
+
+        $photosByProperty = [];
+        if (!empty($ids)) {
+            $photos = DB::table('property_photos')
+                ->select('property_id', 'path', 'is_main', 'position')
+                ->whereIn('property_id', $ids)
+                ->orderBy('position')
+                ->get();
+
+            foreach ($photos as $p) {
+                $photosByProperty[$p->property_id][] = [
+                    'path'    => $p->path,
+                    'is_main' => (bool) $p->is_main,
+                ];
+            }
+        }
+
         // ---------- Mapping ----------
-        return $rows->map(function ($r) {
+        return $rows->map(function ($r) use ($photosByProperty) {
             $type = [
                 'id'   => $r->type_id,
                 'name' => property_exists($r, 'type_name') ? $r->type_name : null,
@@ -146,8 +166,14 @@ class PropertyRepository
                 'district'   => $r->district,
                 'rooms'      => $r->rooms,
                 'area'       => null,
-                'url' => rtrim(config('app.front_url','https://aura.tj'),'/')."/apartment/{$r->id}",
-                'image'      => null,
+                'url'        => rtrim(config('app.front_url','https://aura.tj'),'/')."/apartment/{$r->id}",
+
+                // 👇 ГЛАВНОЕ
+                'photos'     => $photosByProperty[$r->id] ?? [],
+
+                // оставляем для совместимости (если фронт где-то ждёт)
+                'image'      => $photosByProperty[$r->id][0]['path'] ?? null,
+
                 'badge'      => $r->offer_type === 'rent' ? 'Сдаётся' : 'Продаётся',
                 'type'       => $type,
                 'created_at' => $r->created_at,
