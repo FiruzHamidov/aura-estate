@@ -173,6 +173,17 @@ class PropertyReportController extends Controller
 
         $total = (clone $q)->count();
 
+        // --- опубликованные: продажа / аренда
+        $publishedSale = (clone $q)
+            ->where('moderation_status', 'approved')
+            ->where('offer_type', 'sale')
+            ->count();
+
+        $publishedRent = (clone $q)
+            ->where('moderation_status', 'approved')
+            ->where('offer_type', 'rent')
+            ->count();
+
         // --- byStatus: все НЕ закрытые статусы по created_at
         $byStatus = (clone $q)
             ->whereNotIn('moderation_status', array_merge($soldStatuses, [$depositStatus]))
@@ -203,6 +214,8 @@ class PropertyReportController extends Controller
 
         return response()->json([
             'total' => $total,
+            'published_sale' => $publishedSale,
+            'published_rent' => $publishedRent,
             'by_status' => $byStatus,
             'sold_status' => $soldStatus,
             'by_offer_type' => $byOffer,
@@ -296,7 +309,20 @@ class PropertyReportController extends Controller
                 'sum_total_area' => round((float)($baseRow->sum_total_area ?? 0), 2),
             ];
         })
-        ->sortByDesc('closed')
+        ->sort(function ($a, $b) {
+            // 1) сначала по количеству проданных (sold)
+            if ($b['sold'] !== $a['sold']) {
+                return $b['sold'] <=> $a['sold'];
+            }
+
+            // 2) затем по количеству approved
+            if ($b['approved'] !== $a['approved']) {
+                return $b['approved'] <=> $a['approved'];
+            }
+
+            // 3) затем по общему количеству
+            return $b['total'] <=> $a['total'];
+        })
         ->values();
 
         return response()->json($result);
