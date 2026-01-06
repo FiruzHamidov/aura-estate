@@ -31,6 +31,40 @@ class PropertyController extends Controller
         return response()->json($query->latest()->paginate($perPage));
     }
 
+    public function myProperties(Request $request)
+    {
+        $query = $this->baseQueryMyProperties($request);
+        $this->applyFilters($query, $request);
+        $this->applySorts($query, $request->input('sort'), $request->input('dir'));
+        $perPage = (int)$request->input('per_page', 20);
+        return response()->json($query->latest()->paginate($perPage));
+    }
+
+    private function baseQueryMyProperties(Request $request): Builder
+    {
+        $user = auth()->user();
+        $query = Property::query()->with(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'heating', 'parking', 'saleAgents']);
+
+        $hasStatusFilter = $request->filled('moderation_status');
+
+        if ($user && $user->hasRole('admin')) {
+            // без ограничений
+        } elseif (!$user) {
+            $query->where('moderation_status', 'approved');
+        } elseif ($user->hasRole('agent')) {
+            $query->where('created_by', $user->id);
+            if (!$hasStatusFilter) {
+                $query->where('moderation_status', '!=', 'deleted');
+            }
+        } elseif ($user->hasRole('client')) {
+            if (!$hasStatusFilter) {
+                $query->where('moderation_status', '!=', 'deleted');
+            }
+        }
+
+        return $query;
+    }
+
     // ==== Общая база для index/map: роли, связи, базовые статусы ====
     private function baseQuery(Request $request): Builder
     {

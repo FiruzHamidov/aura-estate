@@ -81,7 +81,7 @@ Route::get('/chat/history', [ChatController::class, 'history']);
 
 // --- ЗАЩИЩЁННЫЕ ---
 Route::middleware('auth:sanctum')->group(function () {
-    Route::get('/my-properties', [PropertyController::class, 'index']);
+    Route::get('/my-properties', [PropertyController::class, 'myProperties']);
     Route::get('/user/profile',  [UserController::class, 'profile']);
     Route::post('/logout',       [AuthController::class, 'logout']);
 
