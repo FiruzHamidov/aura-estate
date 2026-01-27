@@ -972,31 +972,36 @@ class PropertyReportController extends Controller
     // === Уникальные клиенты + бизнесмены ===
     public function agentClientsStats(Request $request)
     {
-        $base = Booking::query()
-            ->join('properties', 'properties.id', '=', 'bookings.property_id');
+        // Клиенты хранятся в properties (buyer / owner), а не в bookings
+        $base = Property::query();
 
-        // применяем общие фильтры через properties
         [$q] = $this->applyCommonFilters($request, $base);
 
         if ($request->filled('agent_id')) {
             $agentIds = $this->toArray($request->input('agent_id'));
-            $q->whereIn('properties.created_by', $agentIds);
+            $q->whereIn('created_by', $agentIds);
         }
 
+        // Уникальные клиенты по телефону или имени покупателя
         $rows = (clone $q)
             ->select([
-                'bookings.client_id',
-                'bookings.client_type',
+                'buyer_phone',
+                'buyer_full_name',
+                'is_business_owner',
             ])
+            ->where(function ($qq) {
+                $qq->whereNotNull('buyer_phone')
+                   ->orWhereNotNull('buyer_full_name');
+            })
             ->distinct()
             ->get();
 
-        $totalUnique = $rows->count();
-        $business = $rows->where('client_type', 'business')->count();
+        $uniqueClients = $rows->count();
+        $businessClients = $rows->where('is_business_owner', true)->count();
 
         return response()->json([
-            'unique_clients' => $totalUnique,
-            'business_clients' => $business,
+            'unique_clients' => $uniqueClients,
+            'business_clients' => $businessClients,
         ]);
     }
 
@@ -1006,7 +1011,12 @@ class PropertyReportController extends Controller
         $base = Booking::query()
             ->join('properties', 'properties.id', '=', 'bookings.property_id');
 
-        [$q] = $this->applyCommonFilters($request, $base);
+        // ЯВНО указываем поле даты
+        $requestWithDateField = $request->merge([
+            'date_field' => 'bookings.created_at',
+        ]);
+
+        [$q] = $this->applyCommonFilters($requestWithDateField, $base);
 
         if ($request->filled('agent_id')) {
             $agentIds = $this->toArray($request->input('agent_id'));
