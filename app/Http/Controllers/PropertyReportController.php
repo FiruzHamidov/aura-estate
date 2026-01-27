@@ -932,4 +932,127 @@ class PropertyReportController extends Controller
             return response()->json(['error' => 'Internal server error'], 500);
         }
     }
+
+    // === Кол-во объявлений по типу договора для агента ===
+    public function agentContractsStats(Request $request)
+    {
+        $base = Property::query();
+        [$q] = $this->applyCommonFilters($request, $base);
+
+        if ($request->filled('agent_id')) {
+            $agentIds = $this->toArray($request->input('agent_id'));
+            $q->whereIn('created_by', $agentIds);
+        }
+
+        $rows = (clone $q)
+            ->select([
+                'contract_type_id',
+                DB::raw('COUNT(*) as cnt')
+            ])
+            ->groupBy('contract_type_id')
+            ->get();
+
+        $labels = [
+            1 => 'Альтернативный',
+            2 => 'Эксклюзив',
+            3 => 'Без договора',
+        ];
+
+        $data = $rows->map(function ($r) use ($labels) {
+            return [
+                'contract_type_id' => (int)$r->contract_type_id,
+                'contract_type' => $labels[$r->contract_type_id] ?? '—',
+                'count' => (int)$r->cnt,
+            ];
+        });
+
+        return response()->json($data);
+    }
+
+    // === Уникальные клиенты + бизнесмены ===
+    public function agentClientsStats(Request $request)
+    {
+        $base = Booking::query()
+            ->join('properties', 'properties.id', '=', 'bookings.property_id');
+
+        // применяем общие фильтры через properties
+        [$q] = $this->applyCommonFilters($request, $base);
+
+        if ($request->filled('agent_id')) {
+            $agentIds = $this->toArray($request->input('agent_id'));
+            $q->whereIn('properties.created_by', $agentIds);
+        }
+
+        $rows = (clone $q)
+            ->select([
+                'bookings.client_id',
+                'bookings.client_type',
+            ])
+            ->distinct()
+            ->get();
+
+        $totalUnique = $rows->count();
+        $business = $rows->where('client_type', 'business')->count();
+
+        return response()->json([
+            'unique_clients' => $totalUnique,
+            'business_clients' => $business,
+        ]);
+    }
+
+    // === Кол-во показов агента ===
+    public function agentShowsStats(Request $request)
+    {
+        $base = Booking::query()
+            ->join('properties', 'properties.id', '=', 'bookings.property_id');
+
+        [$q] = $this->applyCommonFilters($request, $base);
+
+        if ($request->filled('agent_id')) {
+            $agentIds = $this->toArray($request->input('agent_id'));
+            $q->whereIn('properties.created_by', $agentIds);
+        }
+
+        $totalShows = (clone $q)->count();
+
+        return response()->json([
+            'shows_count' => (int)$totalShows,
+        ]);
+    }
+
+    // === Отчет по заработку агента ===
+    public function agentEarningsReport(Request $request)
+    {
+        $commissionPct = (float)$request->input('commission_pct', 3); // %
+        $commissionPct = max(0, min($commissionPct, 100));
+
+        $soldStatuses = ['sold', 'rented', 'sold_by_owner'];
+
+        $base = Property::query()
+            ->whereIn('moderation_status', $soldStatuses);
+
+        [$q] = $this->applyCommonFilters($request, $base);
+
+        if ($request->filled('agent_id')) {
+            $agentIds = $this->toArray($request->input('agent_id'));
+            $q->whereIn('created_by', $agentIds);
+        }
+
+        $rows = (clone $q)
+            ->select([
+                DB::raw('SUM(price) as sum_price'),
+                DB::raw('COUNT(*) as closed_count'),
+            ])
+            ->first();
+
+        $sumPrice = (float)($rows->sum_price ?? 0);
+        $commission = round($sumPrice * $commissionPct / 100, 2);
+
+        return response()->json([
+            'sum_price' => round($sumPrice, 2),
+            'commission_pct' => $commissionPct,
+            'earnings' => $commission,
+            'closed_count' => (int)($rows->closed_count ?? 0),
+        ]);
+    }
 }

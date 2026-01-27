@@ -128,6 +128,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/bookings/{id}', [BookingController::class, 'show'])->whereNumber('id');
 
     // Отчёты
+    // --- Агентские отчёты (дополнительно) ---
+    Route::get('/reports/agent/contracts', [PropertyReportController::class, 'agentContractsStats']);
+    Route::get('/reports/agent/clients',   [PropertyReportController::class, 'agentClientsStats']);
+    Route::get('/reports/agent/shows',     [PropertyReportController::class, 'agentShowsStats']);
+    Route::get('/reports/agent/earnings',  [PropertyReportController::class, 'agentEarningsReport']);
     Route::get('/reports/properties/summary',            [PropertyReportController::class, 'summary']);
     Route::get('/reports/properties/manager-efficiency', [PropertyReportController::class, 'managerEfficiency']);
     Route::get('/reports/properties/by-status',          [PropertyReportController::class, 'byStatus']);
