@@ -502,6 +502,17 @@ class PropertyController extends Controller
 
         $property->update($validated);
 
+        // Если статус закрытый и sold_at ещё не установлен — ставим текущую дату
+        if (
+            $request->filled('moderation_status') &&
+            in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true) &&
+            empty($property->sold_at)
+        ) {
+            $property->update([
+                'sold_at' => now(),
+            ]);
+        }
+
         // Optional: allow adding more photos on update
         $this->storePhotosFromRequest($request, $property, append: true);
 
