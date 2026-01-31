@@ -972,9 +972,7 @@ class PropertyReportController extends Controller
     // === Уникальные клиенты + бизнесмены ===
     public function agentClientsStats(Request $request)
     {
-        // Клиенты хранятся в properties (buyer / owner), а не в bookings
         $base = Property::query();
-
         [$q] = $this->applyCommonFilters($request, $base);
 
         if ($request->filled('agent_id')) {
@@ -982,26 +980,31 @@ class PropertyReportController extends Controller
             $q->whereIn('created_by', $agentIds);
         }
 
-        // Уникальные клиенты по телефону или имени покупателя
-        $rows = (clone $q)
-            ->select([
-                'buyer_phone',
-                'buyer_full_name',
-                'is_business_owner',
-            ])
+        // Берём только реальные записи клиентов
+        $clients = (clone $q)
             ->where(function ($qq) {
                 $qq->whereNotNull('buyer_phone')
-                   ->orWhereNotNull('buyer_full_name');
-            })
-            ->distinct()
-            ->get();
+                    ->orWhereNotNull('buyer_full_name');
+            });
 
-        $uniqueClients = $rows->count();
-        $businessClients = $rows->where('is_business_owner', true)->count();
+        // === УНИКАЛЬНЫЕ КЛИЕНТЫ ===
+        $uniqueClients = (clone $clients)
+            ->selectRaw(
+                "COUNT(DISTINCT COALESCE(buyer_phone, buyer_full_name)) as cnt"
+            )
+            ->value('cnt');
+
+        // === УНИКАЛЬНЫЕ БИЗНЕС-КЛИЕНТЫ ===
+        $businessClients = (clone $clients)
+            ->where('is_business_owner', true)
+            ->selectRaw(
+                "COUNT(DISTINCT COALESCE(buyer_phone, buyer_full_name)) as cnt"
+            )
+            ->value('cnt');
 
         return response()->json([
-            'unique_clients' => $uniqueClients,
-            'business_clients' => $businessClients,
+            'unique_clients'   => (int)$uniqueClients,
+            'business_clients' => (int)$businessClients,
         ]);
     }
 
