@@ -1013,7 +1013,7 @@ class PropertyReportController extends Controller
 
         // ЯВНО указываем поле даты
         $requestWithDateField = $request->merge([
-            'date_field' => 'bookings.created_at',
+            'date_field' => 'created_at',
         ]);
 
         [$q] = $this->applyCommonFilters($requestWithDateField, $base);
