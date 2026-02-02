@@ -984,31 +984,44 @@ class PropertyReportController extends Controller
             $q->whereIn('created_by', $agentIds);
         }
 
-        // Берём только реальные записи клиентов
+        // === УНИКАЛЬНЫЕ КЛИЕНТЫ (КОРРЕКТНО) ===
+        // 1) если есть телефон → уникальность ТОЛЬКО по телефону
+        // 2) если телефона нет → уникальность по имени
+
         $clients = (clone $q)
             ->where(function ($qq) {
                 $qq->whereNotNull('buyer_phone')
                     ->where('buyer_phone', '!=', '')
                     ->orWhere(function ($q2) {
                         $q2->whereNotNull('buyer_full_name')
-                           ->where('buyer_full_name', '!=', '');
+                            ->where('buyer_full_name', '!=', '');
                     });
             });
 
-        // === УНИКАЛЬНЫЕ КЛИЕНТЫ ===
-        // считаем уникальную пару (телефон + имя), а не COALESCE
         $uniqueClients = (clone $clients)
-            ->selectRaw(
-                "COUNT(DISTINCT CONCAT_WS('|', buyer_phone, buyer_full_name)) as cnt"
-            )
+            ->selectRaw("
+                COUNT(DISTINCT
+                    CASE
+                        WHEN buyer_phone IS NOT NULL AND buyer_phone != ''
+                            THEN buyer_phone
+                        ELSE CONCAT('name:', buyer_full_name)
+                    END
+                ) as cnt
+            ")
             ->value('cnt');
 
         // === УНИКАЛЬНЫЕ БИЗНЕС-КЛИЕНТЫ ===
         $businessClients = (clone $clients)
             ->where('is_business_owner', true)
-            ->selectRaw(
-                "COUNT(DISTINCT CONCAT_WS('|', buyer_phone, buyer_full_name)) as cnt"
-            )
+            ->selectRaw("
+                COUNT(DISTINCT
+                    CASE
+                        WHEN buyer_phone IS NOT NULL AND buyer_phone != ''
+                            THEN buyer_phone
+                        ELSE CONCAT('name:', buyer_full_name)
+                    END
+                ) as cnt
+            ")
             ->value('cnt');
 
         return response()->json([
