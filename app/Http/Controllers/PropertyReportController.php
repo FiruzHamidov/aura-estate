@@ -988,13 +988,18 @@ class PropertyReportController extends Controller
         $clients = (clone $q)
             ->where(function ($qq) {
                 $qq->whereNotNull('buyer_phone')
-                    ->orWhereNotNull('buyer_full_name');
+                    ->where('buyer_phone', '!=', '')
+                    ->orWhere(function ($q2) {
+                        $q2->whereNotNull('buyer_full_name')
+                           ->where('buyer_full_name', '!=', '');
+                    });
             });
 
         // === УНИКАЛЬНЫЕ КЛИЕНТЫ ===
+        // считаем уникальную пару (телефон + имя), а не COALESCE
         $uniqueClients = (clone $clients)
             ->selectRaw(
-                "COUNT(DISTINCT COALESCE(buyer_phone, buyer_full_name)) as cnt"
+                "COUNT(DISTINCT CONCAT_WS('|', buyer_phone, buyer_full_name)) as cnt"
             )
             ->value('cnt');
 
@@ -1002,7 +1007,7 @@ class PropertyReportController extends Controller
         $businessClients = (clone $clients)
             ->where('is_business_owner', true)
             ->selectRaw(
-                "COUNT(DISTINCT COALESCE(buyer_phone, buyer_full_name)) as cnt"
+                "COUNT(DISTINCT CONCAT_WS('|', buyer_phone, buyer_full_name)) as cnt"
             )
             ->value('cnt');
 
