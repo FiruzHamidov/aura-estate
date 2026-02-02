@@ -38,12 +38,16 @@ class PropertyReportController extends Controller
             $dateField = array_intersect($statusVals, $closed) ? 'sold_at' : 'created_at';
         }
 
-        if (!in_array($dateField, [
+        $allowedDateFields = [
             'created_at',
             'updated_at',
             'sold_at',
             'deposit_received_at',
-        ], true)) {
+            'bookings.created_at',
+            'properties.created_at',
+        ];
+
+        if (!in_array($dateField, $allowedDateFields, true)) {
             $dateField = 'created_at';
         }
 
@@ -1014,15 +1018,16 @@ class PropertyReportController extends Controller
         $base = Booking::query()
             ->join('properties', 'properties.id', '=', 'bookings.property_id');
 
-        // ЯВНО указываем поле даты
+        // ЯВНО указываем поле даты для bookings
         $requestWithDateField = $request->merge([
-            'date_field' => 'created_at',
+            'date_field' => 'bookings.created_at',
         ]);
 
         [$q] = $this->applyCommonFilters($requestWithDateField, $base);
 
         if ($request->filled('agent_id')) {
             $agentIds = $this->toArray($request->input('agent_id'));
+            // фильтр агента только по properties.created_by
             $q->whereIn('properties.created_by', $agentIds);
         }
 
