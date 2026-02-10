@@ -12,6 +12,31 @@ use Illuminate\Support\Facades\DB;
 
 class BookingController extends Controller
 {
+    private function applyBranchAccessForAgents(Request $request, $query, string $agentColumn = 'agent_id'): void
+    {
+        $authUser = $request->user();
+        $authUser?->loadMissing('role');
+        $roleSlug = $authUser->role->slug ?? null;
+
+        // Явный фильтр по филиалу (для админских отчётов)
+        if ($request->filled('branch_id')) {
+            $branchIds = array_values(array_filter(array_map('trim', explode(',', (string)$request->input('branch_id'))), fn($v) => $v !== ''));
+            if (!empty($branchIds)) {
+                $query->whereIn($agentColumn, User::query()->whereIn('branch_id', $branchIds)->select('id'));
+            }
+        }
+
+        // Принудительное ограничение для РОП: только агенты своего филиала
+        if ($roleSlug === 'rop') {
+            if (empty($authUser->branch_id)) {
+                $query->whereRaw('1 = 0');
+                return;
+            }
+
+            $query->whereIn($agentColumn, User::query()->where('branch_id', $authUser->branch_id)->select('id'));
+        }
+    }
+
     public function index(Request $request)
     {
         $q = Booking::query()->with(['property', 'agent', 'client']);
@@ -281,6 +306,8 @@ class BookingController extends Controller
             if ($request->filled('property_id')) {
                 $q->where('property_id', $request->integer('property_id'));
             }
+
+            $this->applyBranchAccessForAgents($request, $q, 'agent_id');
 
             // DB driver
             $driver = DB::getPdo()->getAttribute(\PDO::ATTR_DRIVER_NAME);

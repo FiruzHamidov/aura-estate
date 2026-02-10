@@ -18,6 +18,31 @@ class PropertyReportController extends Controller
         return array_values(array_filter(array_map('trim', explode(',', $value)), fn($v) => $v !== ''));
     }
 
+    private function applyBranchAccessFilter(Request $request, $query, string $creatorColumn = 'created_by'): void
+    {
+        $authUser = auth()->user();
+        $authUser?->loadMissing('role');
+        $roleSlug = $authUser->role->slug ?? null;
+
+        // Явный фильтр по филиалу для админских/общих отчётов
+        if ($request->filled('branch_id')) {
+            $branchIds = $this->toArray($request->input('branch_id'));
+            if (!empty($branchIds)) {
+                $query->whereIn($creatorColumn, User::query()->whereIn('branch_id', $branchIds)->select('id'));
+            }
+        }
+
+        // Принудительное ограничение для РОП: только свой филиал
+        if ($roleSlug === 'rop') {
+            if (empty($authUser->branch_id)) {
+                $query->whereRaw('1 = 0');
+                return;
+            }
+
+            $query->whereIn($creatorColumn, User::query()->where('branch_id', $authUser->branch_id)->select('id'));
+        }
+    }
+
     /**
      * Общие фильтры для отчётов.
      * - Поддерживает date_field: created_at | updated_at | sold_at
@@ -25,7 +50,7 @@ class PropertyReportController extends Controller
      *   автоматически используется sold_at для корректной отчётности.
      * - Поддерживает фильтрацию по agent_id.
      */
-    private function applyCommonFilters(Request $request, $query)
+    private function applyCommonFilters(Request $request, $query, string $creatorColumn = 'created_by')
     {
         // Диапазон дат и поле даты
         // created_at | updated_at | sold_at
@@ -84,7 +109,10 @@ class PropertyReportController extends Controller
         foreach ($multiFields as $f) {
             if ($request->has($f)) {
                 $vals = $this->toArray($request->input($f));
-                if (!empty($vals)) $query->whereIn($f, $vals);
+                if (!empty($vals)) {
+                    $column = $f === 'created_by' ? $creatorColumn : $f;
+                    $query->whereIn($column, $vals);
+                }
             }
         }
 
@@ -92,9 +120,11 @@ class PropertyReportController extends Controller
         if ($request->filled('agent_id')) {
             $agentIds = $this->toArray($request->input('agent_id'));
             if (!empty($agentIds)) {
-                $query->whereIn('created_by', $agentIds);
+                $query->whereIn($creatorColumn, $agentIds);
             }
         }
+
+        $this->applyBranchAccessFilter($request, $query, $creatorColumn);
 
         // Диапазоны
         foreach ([
@@ -726,6 +756,8 @@ class PropertyReportController extends Controller
                 $propsQ->whereIn('location_id', $locIds);
             }
 
+            $this->applyBranchAccessFilter($request, $propsQ, 'created_by');
+
             // If single-agent mode: restrict properties to that agent (agent_id OR created_by)
             if ($agentId !== null) {
                 $propsQ->where(function ($q) use ($agentId) {
@@ -1041,7 +1073,7 @@ class PropertyReportController extends Controller
             'date_field' => 'bookings.created_at',
         ]);
 
-        [$q] = $this->applyCommonFilters($requestWithDateField, $base);
+        [$q] = $this->applyCommonFilters($requestWithDateField, $base, 'properties.created_by');
 
         if ($request->filled('agent_id')) {
             $agentIds = $this->toArray($request->input('agent_id'));
