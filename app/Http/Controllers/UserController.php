@@ -14,7 +14,7 @@ class UserController extends Controller
     // Список всех пользователей
     public function index()
     {
-        $users = User::with('role')->get();
+        $users = User::with(['role', 'branch'])->get();
         return response()->json($users);
     }
 
@@ -28,11 +28,12 @@ class UserController extends Controller
             'phone' => 'required|string|unique:users,phone',
             'email' => 'nullable|email|unique:users,email',
             'role_id' => 'required|exists:roles,id',
+            'branch_id' => 'required|exists:branches,id',
             'auth_method' => 'required|in:password,sms',
             'password' => 'nullable|min:6|required_if:auth_method,password'
         ]);
 
-        $data = $request->only(['name', 'phone', 'email', 'role_id', 'auth_method', 'status', 'birthday']);
+        $data = $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'auth_method', 'status', 'birthday']);
 
         if ($request->auth_method === 'password') {
             $data['password'] = Hash::make($request->password);
@@ -46,7 +47,7 @@ class UserController extends Controller
     // Просмотр конкретного пользователя
     public function show(User $user)
     {
-        return response()->json($user->load('role'));
+        return response()->json($user->load(['role', 'branch']));
     }
 
     // Обновление пользователя
@@ -59,11 +60,12 @@ class UserController extends Controller
             'phone' => 'sometimes|string|unique:users,phone,' . $user->id,
             'email' => 'sometimes|email|unique:users,email,' . $user->id,
             'role_id' => 'sometimes|exists:roles,id',
+            'branch_id' => 'sometimes|exists:branches,id',
             'auth_method' => 'sometimes|in:password,sms',
             'password' => 'nullable|min:6|required_if:auth_method,password'
         ]);
 
-        $data = $request->only(['name', 'phone', 'email', 'role_id', 'auth_method', 'status', 'description', 'birthday']);
+        $data = $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'auth_method', 'status', 'description', 'birthday']);
 
         if ($request->filled('password')) {
             $data['password'] = Hash::make($request->password);
@@ -78,7 +80,7 @@ class UserController extends Controller
 
         $user->update($data);
 
-        return response()->json($user->fresh(['role']));
+        return response()->json($user->fresh(['role', 'branch']));
     }
 
     public function updatePhoto(Request $request, User $user)
@@ -112,7 +114,7 @@ class UserController extends Controller
 
     public function agents()
     {
-        $agents = User::with('role')->whereHas('role', function ($q) {
+        $agents = User::with(['role', 'branch'])->whereHas('role', function ($q) {
             $q->where('slug', 'agent');
         })->get();
 

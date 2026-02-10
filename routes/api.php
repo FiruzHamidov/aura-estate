@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\{AuthController,
     B24AuthController,
+    BranchController,
     BookingController,
     BuildingTypeController,
     ChatController,
@@ -53,6 +54,7 @@ Route::get('/parking-types',     [ParkingTypeController::class, 'index']);
 Route::get('/heating-types',     [HeatingTypeController::class, 'index']);
 Route::get('/repair-types',      [RepairTypeController::class, 'index']);
 Route::get('/contract-types',    [ContractTypeController::class, 'index']);
+Route::get('/branches',          [BranchController::class, 'index']);
 
 Route::get('/user/agents', [UserController::class, 'agents']);
 Route::get('/user/{user}', [UserController::class, 'show']);
@@ -104,6 +106,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('heating-types',     HeatingTypeController::class)->except(['index']);
     Route::apiResource('contract-types',    ContractTypeController::class)->except(['index']);
     Route::apiResource('repair-types',      RepairTypeController::class)->except(['index']);
+    Route::apiResource('branches',          BranchController::class)->except(['index']);
     Route::apiResource('developers', DeveloperController::class)->except(['index', 'show']);
     Route::apiResource('features',   FeatureController::class)->except(['index', 'show']);
     Route::apiResource('materials',  MaterialController::class)->except(['index', 'show']);
