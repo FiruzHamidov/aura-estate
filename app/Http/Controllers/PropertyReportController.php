@@ -6,6 +6,7 @@ use App\Models\Booking;
 use App\Models\Property;
 use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
 class PropertyReportController extends Controller
@@ -41,6 +42,202 @@ class PropertyReportController extends Controller
 
             $query->whereIn($creatorColumn, User::query()->where('branch_id', $authUser->branch_id)->select('id'));
         }
+    }
+
+    private function applyBranchAccessByUserColumn(Request $request, $query, string $userColumn): void
+    {
+        $authUser = auth()->user();
+        $authUser?->loadMissing('role');
+        $roleSlug = $authUser->role->slug ?? null;
+
+        if ($request->filled('branch_id')) {
+            $branchIds = $this->toArray($request->input('branch_id'));
+            if (!empty($branchIds)) {
+                $query->whereIn($userColumn, User::query()->whereIn('branch_id', $branchIds)->select('id'));
+            }
+        }
+
+        if ($roleSlug === 'rop') {
+            if (empty($authUser->branch_id)) {
+                $query->whereRaw('1 = 0');
+                return;
+            }
+
+            $query->whereIn($userColumn, User::query()->where('branch_id', $authUser->branch_id)->select('id'));
+        }
+    }
+
+    private function monthRange(Request $request): array
+    {
+        $tz = 'Asia/Dushanbe';
+        $month = trim((string)$request->input('month', ''));
+
+        if ($month !== '' && preg_match('/^\d{4}-\d{2}$/', $month)) {
+            $currentStart = Carbon::createFromFormat('Y-m', $month, $tz)->startOfMonth();
+        } else {
+            $currentStart = Carbon::now($tz)->startOfMonth();
+        }
+
+        $currentEnd = (clone $currentStart)->endOfMonth();
+        $previousStart = (clone $currentStart)->subMonth()->startOfMonth();
+        $previousEnd = (clone $previousStart)->endOfMonth();
+
+        return [$previousStart, $previousEnd, $currentStart, $currentEnd];
+    }
+
+    private function buildMonthSnapshot(Request $request, Carbon $start, Carbon $end): array
+    {
+        $soldStatuses = ['sold', 'rented', 'sold_by_owner'];
+
+        $addedQ = Property::query()
+            ->whereBetween('created_at', [$start, $end]);
+        $this->applyBranchAccessFilter($request, $addedQ, 'created_by');
+        if ($request->filled('agent_id')) {
+            $addedQ->whereIn('created_by', $this->toArray($request->input('agent_id')));
+        }
+
+        $closedQ = Property::query()
+            ->whereIn('moderation_status', $soldStatuses)
+            ->whereBetween('sold_at', [$start, $end]);
+        $this->applyBranchAccessFilter($request, $closedQ, 'created_by');
+        if ($request->filled('agent_id')) {
+            $closedQ->whereIn('created_by', $this->toArray($request->input('agent_id')));
+        }
+
+        $depositQ = Property::query()
+            ->where('moderation_status', 'deposit')
+            ->whereBetween('deposit_received_at', [$start, $end]);
+        $this->applyBranchAccessFilter($request, $depositQ, 'created_by');
+        if ($request->filled('agent_id')) {
+            $depositQ->whereIn('created_by', $this->toArray($request->input('agent_id')));
+        }
+
+        $showsQ = Booking::query()
+            ->leftJoin('properties', 'properties.id', '=', 'bookings.property_id')
+            ->whereBetween('bookings.start_time', [$start, $end]);
+
+        $this->applyBranchAccessByUserColumn($request, $showsQ, 'bookings.agent_id');
+
+        if ($request->filled('agent_id')) {
+            $showsQ->whereIn('bookings.agent_id', $this->toArray($request->input('agent_id')));
+        }
+
+        $topShowsRows = (clone $showsQ)
+            ->select([
+                'bookings.agent_id',
+                DB::raw('COUNT(*) as shows_count'),
+                DB::raw('COUNT(DISTINCT bookings.property_id) as unique_properties'),
+                DB::raw('COUNT(DISTINCT bookings.client_id) as unique_clients'),
+            ])
+            ->whereNotNull('bookings.agent_id')
+            ->groupBy('bookings.agent_id')
+            ->orderByDesc('shows_count')
+            ->limit(10)
+            ->get();
+
+        $addedByAgentRows = (clone $addedQ)
+            ->select([
+                'created_by',
+                DB::raw('COUNT(*) as added_count'),
+            ])
+            ->whereNotNull('created_by')
+            ->groupBy('created_by')
+            ->orderByDesc('added_count')
+            ->limit(10)
+            ->get();
+
+        $closedByAgentRows = (clone $closedQ)
+            ->select([
+                'created_by',
+                DB::raw('COUNT(*) as closed_count'),
+            ])
+            ->whereNotNull('created_by')
+            ->groupBy('created_by')
+            ->orderByDesc('closed_count')
+            ->limit(10)
+            ->get();
+
+        $userIds = collect()
+            ->merge($topShowsRows->pluck('agent_id'))
+            ->merge($addedByAgentRows->pluck('created_by'))
+            ->merge($closedByAgentRows->pluck('created_by'))
+            ->filter()
+            ->unique()
+            ->values();
+
+        $users = User::whereIn('id', $userIds)->get(['id', 'name', 'branch_id'])->keyBy('id');
+
+        $topShows = $topShowsRows->map(function ($r) use ($users) {
+            return [
+                'agent_id' => (int)$r->agent_id,
+                'agent_name' => $users[$r->agent_id]->name ?? '—',
+                'branch_id' => $users[$r->agent_id]->branch_id ?? null,
+                'shows_count' => (int)$r->shows_count,
+                'unique_properties' => (int)$r->unique_properties,
+                'unique_clients' => (int)$r->unique_clients,
+            ];
+        })->values();
+
+        $topAdded = $addedByAgentRows->map(function ($r) use ($users) {
+            return [
+                'agent_id' => (int)$r->created_by,
+                'agent_name' => $users[$r->created_by]->name ?? '—',
+                'branch_id' => $users[$r->created_by]->branch_id ?? null,
+                'added_count' => (int)$r->added_count,
+            ];
+        })->values();
+
+        $topClosed = $closedByAgentRows->map(function ($r) use ($users) {
+            return [
+                'agent_id' => (int)$r->created_by,
+                'agent_name' => $users[$r->created_by]->name ?? '—',
+                'branch_id' => $users[$r->created_by]->branch_id ?? null,
+                'closed_count' => (int)$r->closed_count,
+            ];
+        })->values();
+
+        return [
+            'period' => [
+                'from' => $start->toDateString(),
+                'to' => $end->toDateString(),
+            ],
+            'kpi' => [
+                'added_total' => (clone $addedQ)->count(),
+                'closed_total' => (clone $closedQ)->count(),
+                'sold_total' => (clone $closedQ)->where('moderation_status', 'sold')->count(),
+                'rented_total' => (clone $closedQ)->where('moderation_status', 'rented')->count(),
+                'sold_by_owner_total' => (clone $closedQ)->where('moderation_status', 'sold_by_owner')->count(),
+                'deposit_total' => (clone $depositQ)->count(),
+                'shows_total' => (clone $showsQ)->count(),
+            ],
+            'leaders' => [
+                'by_shows' => $topShows,
+                'by_added' => $topAdded,
+                'by_closed' => $topClosed,
+            ],
+        ];
+    }
+
+    private function diffMetrics(array $previous, array $current): array
+    {
+        $result = [];
+        foreach ($current as $key => $curValue) {
+            $prevValue = (int)($previous[$key] ?? 0);
+            $curValue = (int)$curValue;
+            $delta = $curValue - $prevValue;
+            $pct = $prevValue === 0
+                ? ($curValue > 0 ? 100 : 0)
+                : round(($delta / $prevValue) * 100, 2);
+
+            $result[$key] = [
+                'previous' => $prevValue,
+                'current' => $curValue,
+                'delta' => $delta,
+                'delta_pct' => $pct,
+            ];
+        }
+
+        return $result;
     }
 
     /**
@@ -1121,6 +1318,21 @@ class PropertyReportController extends Controller
             'commission_pct' => $commissionPct,
             'earnings' => $commission,
             'closed_count' => (int)($rows->closed_count ?? 0),
+        ]);
+    }
+
+    public function monthlyComparison(Request $request)
+    {
+        [$previousStart, $previousEnd, $currentStart, $currentEnd] = $this->monthRange($request);
+
+        $previous = $this->buildMonthSnapshot($request, $previousStart, $previousEnd);
+        $current = $this->buildMonthSnapshot($request, $currentStart, $currentEnd);
+
+        return response()->json([
+            'comparison_for' => $currentStart->format('Y-m'),
+            'previous_month' => $previous,
+            'current_month' => $current,
+            'diff' => $this->diffMetrics($previous['kpi'], $current['kpi']),
         ]);
     }
 }

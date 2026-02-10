@@ -143,6 +143,7 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::get('/reports/properties/by-status',          [PropertyReportController::class, 'byStatus']);
     Route::get('/reports/properties/by-type',            [PropertyReportController::class, 'byType']);
     Route::get('/reports/properties/by-location',        [PropertyReportController::class, 'byLocation']);
+    Route::get('/reports/properties/monthly-comparison', [PropertyReportController::class, 'monthlyComparison']);
     Route::get('/reports/properties/time-series',        [PropertyReportController::class, 'timeSeries']);
     Route::get('/reports/properties/price-buckets',      [PropertyReportController::class, 'priceBuckets']);
     Route::get('/reports/properties/rooms-hist',         [PropertyReportController::class, 'roomsHistogram']);
