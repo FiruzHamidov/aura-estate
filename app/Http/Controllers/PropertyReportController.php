@@ -218,16 +218,18 @@ class PropertyReportController extends Controller
         ];
     }
 
-    private function diffMetrics(array $previous, array $current): array
+    private function diffMetrics(array $previous, array $current, bool $nullOnZeroBase = false): array
     {
         $result = [];
         foreach ($current as $key => $curValue) {
             $prevValue = (int)($previous[$key] ?? 0);
             $curValue = (int)$curValue;
             $delta = $curValue - $prevValue;
-            $pct = $prevValue === 0
-                ? ($curValue > 0 ? 100 : 0)
-                : round(($delta / $prevValue) * 100, 2);
+            if ($prevValue === 0) {
+                $pct = $nullOnZeroBase ? null : ($curValue > 0 ? 100 : 0);
+            } else {
+                $pct = round(($delta / $prevValue) * 100, 2);
+            }
 
             $result[$key] = [
                 'previous' => $prevValue,
@@ -1333,6 +1335,44 @@ class PropertyReportController extends Controller
             'previous_month' => $previous,
             'current_month' => $current,
             'diff' => $this->diffMetrics($previous['kpi'], $current['kpi']),
+        ]);
+    }
+
+    public function monthlyComparisonRange(Request $request)
+    {
+        $validated = $request->validate([
+            'from_month' => ['required', 'date_format:Y-m'],
+            'to_month' => ['required', 'date_format:Y-m'],
+            'branch_id' => ['nullable', 'integer', 'exists:branches,id'],
+        ]);
+
+        $tz = 'Asia/Dushanbe';
+        $fromMonthStart = Carbon::createFromFormat('Y-m', $validated['from_month'], $tz)->startOfMonth();
+        $toMonthStart = Carbon::createFromFormat('Y-m', $validated['to_month'], $tz)->startOfMonth();
+
+        if ($fromMonthStart->gt($toMonthStart)) {
+            return response()->json([
+                'message' => 'from_month должен быть меньше или равен to_month',
+                'errors' => [
+                    'from_month' => ['from_month должен быть меньше или равен to_month'],
+                ],
+            ], 422);
+        }
+
+        $fromStart = (clone $fromMonthStart)->startOfMonth();
+        $fromEnd = (clone $fromMonthStart)->endOfMonth();
+        $toStart = (clone $toMonthStart)->startOfMonth();
+        $toEnd = (clone $toMonthStart)->endOfMonth();
+
+        $from = $this->buildMonthSnapshot($request, $fromStart, $fromEnd);
+        $to = $this->buildMonthSnapshot($request, $toStart, $toEnd);
+
+        return response()->json([
+            'from_month' => $validated['from_month'],
+            'to_month' => $validated['to_month'],
+            'from' => $from,
+            'to' => $to,
+            'diff' => $this->diffMetrics($from['kpi'], $to['kpi'], true),
         ]);
     }
 }
