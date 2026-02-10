@@ -19,8 +19,15 @@ class BranchController extends Controller
             'lat' => 'nullable|numeric|between:-90,90',
             'lng' => 'nullable|numeric|between:-180,180',
             'landmark' => 'nullable|string|max:255',
-            'photo' => 'nullable|string|max:2048',
+            'photo' => 'nullable|image|mimes:jpg,jpeg,png,webp|max:8192',
         ]);
+
+        if ($request->hasFile('photo')) {
+            $file = $request->file('photo');
+            $filename = 'branches/' . uniqid('', true) . '.' . $file->getClientOriginalExtension();
+            \Storage::disk('public')->put($filename, file_get_contents($file));
+            $validated['photo'] = $filename;
+        }
 
         $branch = Branch::create($validated);
 
@@ -39,8 +46,19 @@ class BranchController extends Controller
             'lat' => 'nullable|numeric|between:-90,90',
             'lng' => 'nullable|numeric|between:-180,180',
             'landmark' => 'nullable|string|max:255',
-            'photo' => 'nullable|string|max:2048',
+            'photo' => 'nullable|image|mimes:jpg,jpeg,png,webp|max:8192',
         ]);
+
+        if ($request->hasFile('photo')) {
+            if ($branch->photo && \Storage::disk('public')->exists($branch->photo)) {
+                \Storage::disk('public')->delete($branch->photo);
+            }
+
+            $file = $request->file('photo');
+            $filename = 'branches/' . uniqid('', true) . '.' . $file->getClientOriginalExtension();
+            \Storage::disk('public')->put($filename, file_get_contents($file));
+            $validated['photo'] = $filename;
+        }
 
         $branch->update($validated);
 
