@@ -22,6 +22,10 @@ class AuthController extends Controller
             return response()->json(['message' => 'Пользователь не найден'], 404);
         }
 
+        if ($user->status !== 'active') {
+            return response()->json(['message' => 'Пользователь деактивирован'], 403);
+        }
+
         return response()->json(['method' => $user->auth_method]);
     }
 
@@ -36,6 +40,10 @@ class AuthController extends Controller
 
         if (!$user) {
             return response()->json(['message' => 'Пользователь не найден или не настроен для SMS входа'], 404);
+        }
+
+        if ($user->status !== 'active') {
+            return response()->json(['message' => 'Пользователь деактивирован'], 403);
         }
 
         try {
@@ -58,6 +66,10 @@ class AuthController extends Controller
 
         if (!$user) {
             return response()->json(['message' => 'Пользователь не найден'], 404);
+        }
+
+        if ($user->status !== 'active') {
+            return response()->json(['message' => 'Пользователь деактивирован'], 403);
         }
 
         if ($smsAuthService->verifyCode($request->phone, $request->code)) {
@@ -89,6 +101,10 @@ class AuthController extends Controller
 
         if (!$user) {
             return response()->json(['message' => 'Метод авторизации — не пароль'], 403);
+        }
+
+        if ($user->status !== 'active') {
+            return response()->json(['message' => 'Пользователь деактивирован'], 403);
         }
 
         if (!Hash::check($request->password, $user->password)) {

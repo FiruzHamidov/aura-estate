@@ -14,6 +14,7 @@ use App\Http\Controllers\{AuthController,
     FavoriteController,
     FeatureController,
     HeatingTypeController,
+    LeadRequestController,
     LocationController,
     MaterialController,
     NewBuildingBlockController,
@@ -39,6 +40,7 @@ Route::get('/ping', fn() => response()->json(['message' => 'API works']));
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/sms/request', [AuthController::class, 'requestSmsCode']);
 Route::post('/sms/verify',  [AuthController::class, 'verifySmsCode']);
+Route::post('/lead-requests', [LeadRequestController::class, 'store'])->middleware('throttle:20,1');
 
 Route::get('/properties',      [PropertyController::class, 'index']);
 Route::get('/properties/map',  [PropertyController::class, 'map']);
@@ -82,7 +84,7 @@ Route::scopeBindings()->group(function () {
 Route::get('/chat/history', [ChatController::class, 'history']);
 
 // --- ЗАЩИЩЁННЫЕ ---
-Route::middleware('auth:sanctum')->group(function () {
+Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::get('/my-properties', [PropertyController::class, 'myProperties']);
     Route::get('/user/profile',  [UserController::class, 'profile']);
     Route::post('/logout',       [AuthController::class, 'logout']);
@@ -154,7 +156,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post(
         '/properties/{property}/deal',
         [PropertyController::class, 'saveDeal']
-    )->middleware('auth:sanctum');
+    );
 
 // агрегированный — новый (без параметра agent)
     Route::get('/reports/agents/properties', [PropertyReportController::class, 'agentPropertiesReport']);
@@ -193,7 +195,7 @@ Route::middleware('auth:sanctum')->group(function () {
 // --- CHAT (вне sanctum для бота/вебхуков) ---
 Route::middleware(['api'])->group(function () {
     Route::post('/chat', [ChatController::class, 'handle']);
-    Route::post('/chat/feedback', [ChatController::class, 'feedback'])->middleware('auth:sanctum');
+    Route::post('/chat/feedback', [ChatController::class, 'feedback'])->middleware(['auth:sanctum', 'active.user']);
 });
 
 // --- Публичная подборка по hash ---
@@ -204,5 +206,5 @@ Route::post('/b24/token', [B24AuthController::class,'issue']);
 Route::middleware('b24.jwt')->group(function(){
     Route::post('/selections',            [SelectionController::class,'store']);
     Route::post('/showings',              [BookingController::class,'store']);
-});
     Route::post('/selections/{id}/events',[SelectionController::class,'event']);
+});

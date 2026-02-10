@@ -8,6 +8,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Str;
 
 class UserController extends Controller
 {
@@ -121,7 +122,7 @@ class UserController extends Controller
         return response()->json($agents);
     }
 
-    // Удаление пользователя и перераспределения
+    // Увольнение пользователя и перераспределения
     public function destroy(Request $request, User $user)
     {
         // Валидация входных параметров
@@ -189,11 +190,15 @@ class UserController extends Controller
                 }
             }
 
-            // Удаляем пользователя
-            $user->delete();
+            // Увольняем пользователя: деактивация + отзыв всех токенов
+            $user->status = 'inactive';
+            $user->remember_token = null;
+            $user->password = Hash::make(Str::random(40));
+            $user->save();
+            $user->tokens()->delete();
         });
 
-        return response()->json(['message' => 'Пользователь удалён и объекты перераспределены.']);
+        return response()->json(['message' => 'Пользователь уволен, доступ в систему отключён, объекты перераспределены.']);
     }
 
     public function updatePassword(Request $request)
