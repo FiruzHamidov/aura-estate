@@ -157,10 +157,36 @@ class PropertyReportController extends Controller
             ->limit(10)
             ->get();
 
+        $soldByAgentRows = (clone $closedQ)
+            ->where('moderation_status', 'sold')
+            ->select([
+                'created_by',
+                DB::raw('COUNT(*) as sold_by_agent_count'),
+            ])
+            ->whereNotNull('created_by')
+            ->groupBy('created_by')
+            ->orderByDesc('sold_by_agent_count')
+            ->limit(10)
+            ->get();
+
+        $rentedByAgentRows = (clone $closedQ)
+            ->where('moderation_status', 'rented')
+            ->select([
+                'created_by',
+                DB::raw('COUNT(*) as rented_count'),
+            ])
+            ->whereNotNull('created_by')
+            ->groupBy('created_by')
+            ->orderByDesc('rented_count')
+            ->limit(10)
+            ->get();
+
         $userIds = collect()
             ->merge($topShowsRows->pluck('agent_id'))
             ->merge($addedByAgentRows->pluck('created_by'))
             ->merge($closedByAgentRows->pluck('created_by'))
+            ->merge($soldByAgentRows->pluck('created_by'))
+            ->merge($rentedByAgentRows->pluck('created_by'))
             ->filter()
             ->unique()
             ->values();
@@ -193,6 +219,22 @@ class PropertyReportController extends Controller
                 'agent_name' => $users[$r->created_by]->name ?? '—',
                 'branch_id' => $users[$r->created_by]->branch_id ?? null,
                 'closed_count' => (int)$r->closed_count,
+            ];
+        })->values();
+
+        $topSoldAgent = $soldByAgentRows->map(function ($r) use ($users) {
+            return [
+                'agent_id' => (int)$r->created_by,
+                'agent_name' => $users[$r->created_by]->name ?? '—',
+                'sold_by_agent_count' => (int)$r->sold_by_agent_count,
+            ];
+        })->values();
+
+        $topRented = $rentedByAgentRows->map(function ($r) use ($users) {
+            return [
+                'agent_id' => (int)$r->created_by,
+                'agent_name' => $users[$r->created_by]->name ?? '—',
+                'rented_count' => (int)$r->rented_count,
             ];
         })->values();
 
@@ -235,6 +277,8 @@ class PropertyReportController extends Controller
             'leaders' => [
                 'by_shows' => $topShows,
                 'by_added' => $topAdded,
+                'by_sold_agent' => $topSoldAgent,
+                'by_rented' => $topRented,
                 'by_closed' => $topClosed,
             ],
         ];
