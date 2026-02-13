@@ -20,15 +20,17 @@ class ChatService
         $locale  = request()->attributes->get('client_locale', app()->getLocale());
         $session = $this->getOrCreateSession($sessionUuid, $userId, $locale);
 
-        // Логируем сообщение пользователя
-        $this->storeMessage($session->id, 'user', $userMessage);
-
         // Загрузка истории сообщений из БД (user+assistant, последние 20)
         $history = ChatMessage::where('chat_session_id', $session->id)
             ->whereIn('role', ['user', 'assistant'])
-            ->orderBy('id', 'asc')
+            ->orderBy('id', 'desc')
             ->limit(20)
             ->get();
+        $history = $history->reverse()->values();
+
+        // Логируем текущее сообщение пользователя после чтения истории,
+        // чтобы не дублировать его в input для модели.
+        $this->storeMessage($session->id, 'user', $userMessage);
 
         // Формируем массив messages: system + история + текущее сообщение пользователя
         $messages = [
