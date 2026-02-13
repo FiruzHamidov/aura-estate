@@ -43,7 +43,11 @@ class ChatService
                     "- Detect the user's language (Russian, Tajik, or English) and always respond in that language.\n".
                     "- If the user is searching for real estate, extract relevant filters (city, district, offer type, property type, rooms, price range).\n".
                     "- Users may provide filters gradually across multiple messages. You MUST remember and combine previous filters from the conversation.\n".
-                    "- When enough filters are collected, call the tool `search_properties`.\n".
+                    "- When minimal filters are collected (for example rooms + price + city/district), call the tool `search_properties` immediately.\n".
+                    "- Do NOT block search for optional fields.\n".
+                    "- Currency is optional. If user gives price without currency, assume TJS and continue.\n".
+                    "- If offer type (sale/rent) is missing, run search anyway and optionally ask one brief follow-up after showing results.\n".
+                    "- Ask at most one clarifying question at a time, and only when truly required.\n".
                     "- When showing results, present 3–6 best matches with: title, price, currency, city/district, and a CTA link to aura.tj.\n".
                     "- If no properties are found, ask clarifying questions.\n".
                     "- If user wants to leave an application/request after finding a suitable option, collect name and phone, then call tool `create_lead_request`.\n".

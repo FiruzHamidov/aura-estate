@@ -196,19 +196,41 @@ class PropertyReportController extends Controller
             ];
         })->values();
 
+        $addedTotal = (clone $addedQ)->count();
+        $addedSaleTotal = (clone $addedQ)->where('offer_type', 'sale')->count();
+        $addedRentTotal = (clone $addedQ)->where('offer_type', 'rent')->count();
+
+        $soldByOwnerTotal = (clone $closedQ)->where('moderation_status', 'sold_by_owner')->count();
+        $soldByAgentTotal = (clone $closedQ)->where('moderation_status', 'sold')->count();
+        $closedRentTotal = (clone $closedQ)->where('moderation_status', 'rented')->count();
+        $closedSaleTotal = $soldByOwnerTotal + $soldByAgentTotal;
+        $closedTotal = $closedSaleTotal + $closedRentTotal;
+
+        $depositTotal = (clone $depositQ)->count();
+        $showsTotal = (clone $showsQ)->count();
+
         return [
             'period' => [
                 'from' => $start->toDateString(),
                 'to' => $end->toDateString(),
             ],
             'kpi' => [
-                'added_total' => (clone $addedQ)->count(),
-                'closed_total' => (clone $closedQ)->count(),
-                'sold_total' => (clone $closedQ)->where('moderation_status', 'sold')->count(),
-                'rented_total' => (clone $closedQ)->where('moderation_status', 'rented')->count(),
-                'sold_by_owner_total' => (clone $closedQ)->where('moderation_status', 'sold_by_owner')->count(),
-                'deposit_total' => (clone $depositQ)->count(),
-                'shows_total' => (clone $showsQ)->count(),
+                'added_total' => $addedTotal,
+                'added_sale_total' => $addedSaleTotal,
+                'added_rent_total' => $addedRentTotal,
+
+                'closed_total' => $closedTotal,
+                'closed_sale_total' => $closedSaleTotal,
+                'closed_rent_total' => $closedRentTotal,
+                'sold_by_owner_total' => $soldByOwnerTotal,
+                'sold_by_agent_total' => $soldByAgentTotal,
+
+                'deposit_total' => $depositTotal,
+                'shows_total' => $showsTotal,
+
+                // Backward-compatible aliases
+                'sold_total' => $soldByAgentTotal,
+                'rented_total' => $closedRentTotal,
             ],
             'leaders' => [
                 'by_shows' => $topShows,
