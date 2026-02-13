@@ -4,11 +4,16 @@ namespace App\Services\Chat;
 
 use App\Models\ChatMessage;
 use App\Models\ChatSession;
+use App\Services\Bitrix24Client;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\DB;
 
 class ChatService
 {
-    public function __construct(private PropertyRepository $props) {}
+    public function __construct(
+        private PropertyRepository $props,
+        private Bitrix24Client $b24
+    ) {}
 
     public function reply(string $userMessage, ?string $sessionUuid, ?int $userId, array $context = []): array
     {
@@ -39,6 +44,8 @@ class ChatService
                     "- When enough filters are collected, call the tool `search_properties`.\n".
                     "- When showing results, present 3–6 best matches with: title, price, currency, city/district, and a CTA link to aura.tj.\n".
                     "- If no properties are found, ask clarifying questions.\n".
+                    "- If user wants to leave an application/request after finding a suitable option, collect name and phone, then call tool `create_lead_request`.\n".
+                    "- Before calling `create_lead_request`, make sure you have: name, phone. Email/comment/property_id are optional.\n".
                     "- Always represent Aura Estate as the source.\n".
                     "- Use ONLY the exact filter parameter names defined in search_properties.\n".
                     "- For ranges, ALWAYS use From/To suffixes (priceFrom, roomsTo, etc).\n".
@@ -144,11 +151,28 @@ class ChatService
                     'limit'            => ['type' => 'integer', 'default' => 6],
                 ],
             ],
+        ], [
+            'type'        => 'function',
+            'name'        => 'create_lead_request',
+            'description' => 'Create a lead request in Aura Estate CRM when user wants to submit an application for a property',
+            'parameters'  => [
+                'type'       => 'object',
+                'properties' => [
+                    'service_type' => ['type' => 'string'],
+                    'name' => ['type' => 'string'],
+                    'phone' => ['type' => 'string'],
+                    'email' => ['type' => 'string'],
+                    'comment' => ['type' => 'string'],
+                    'property_id' => ['type' => 'integer'],
+                    'property_url' => ['type' => 'string'],
+                ],
+                'required' => ['name', 'phone'],
+            ],
         ]];
 
         // === 1) Первый проход: модель решает, вызывать ли tool ===
         $res1 = $this->openai([
-            'model'       => env('OPENAI_MODEL', 'o3-mini'),
+            'model'       => env('OPENAI_MODEL', 'gpt-5-mini'),
             'input'       => $messages,
             'tools'       => $tools,
             'tool_choice' => 'auto',
@@ -243,7 +267,7 @@ class ChatService
 
                 // Второй вызов: просто передаём обновлённый input (без tool_outputs и без role: tool)
                 $res2 = $this->openai([
-                    'model' => env('OPENAI_MODEL', 'o3-mini'),
+                    'model' => env('OPENAI_MODEL', 'gpt-5-mini'),
                     'input' => $messages,
                     'store' => false,
                 ]);
@@ -264,6 +288,49 @@ class ChatService
                     'locale'     => $locale,
                 ];
             }
+
+            if (($call['name'] ?? '') === 'create_lead_request') {
+                $args = json_decode($call['arguments'] ?? '{}', true) ?: [];
+
+                $leadResult = $this->createLeadRequest($args, $userMessage, $context);
+
+                $this->storeMessage($session->id, 'tool', null, [
+                    'tool_name' => 'create_lead_request',
+                    'tool_args' => $args,
+                    'items'     => $leadResult,
+                ]);
+
+                $messages[] = [
+                    'role'    => 'assistant',
+                    'content' =>
+                        "Here is the lead creation result in JSON format. ".
+                        "Explain the result concisely in the user's language. ".
+                        "If lead creation failed due to missing fields, ask only for missing fields.\n".
+                        json_encode($leadResult, JSON_UNESCAPED_UNICODE),
+                ];
+
+                $res2 = $this->openai([
+                    'model' => env('OPENAI_MODEL', 'gpt-5-mini'),
+                    'input' => $messages,
+                    'store' => false,
+                ]);
+
+                $assistantText = $this->extractAssistantText($res2);
+
+                $this->storeMessage($session->id, 'assistant', $assistantText, ['items' => []]);
+
+                $session->update([
+                    'last_user_message_at'      => now(),
+                    'last_assistant_message_at' => now(),
+                ]);
+
+                return [
+                    'session_id' => $session->session_uuid,
+                    'answer'     => $assistantText ?? '',
+                    'items'      => [],
+                    'locale'     => $locale,
+                ];
+            }
         }
 
         // === 3) Tool не понадобился — просто логируем ответ ассистента ===
@@ -279,6 +346,106 @@ class ChatService
             'answer'     => $assistantText ?? '',
             'items'      => [],
             'locale'     => $locale,
+        ];
+    }
+
+    private function createLeadRequest(array $args, string $userMessage, array $context = []): array
+    {
+        $name = trim((string) ($args['name'] ?? ''));
+        $phone = $this->normalizePhone((string) ($args['phone'] ?? ''));
+        $email = trim((string) ($args['email'] ?? ''));
+        $serviceType = trim((string) ($args['service_type'] ?? 'Подбор недвижимости'));
+        $comment = trim((string) ($args['comment'] ?? ''));
+        $propertyId = isset($args['property_id']) ? (int) $args['property_id'] : null;
+        $propertyUrl = trim((string) ($args['property_url'] ?? ''));
+
+        $missing = [];
+        if ($name === '') {
+            $missing[] = 'name';
+        }
+        if ($phone === '') {
+            $missing[] = 'phone';
+        }
+        if (!empty($missing)) {
+            return [
+                'ok' => false,
+                'error' => 'missing_required_fields',
+                'missing_fields' => $missing,
+            ];
+        }
+
+        if (empty(config('services.bitrix24.base'))) {
+            return [
+                'ok' => false,
+                'error' => 'bitrix_not_configured',
+            ];
+        }
+
+        $property = null;
+        if ($propertyId) {
+            $property = DB::table('properties')
+                ->select(['id', 'title', 'price', 'currency', 'address', 'district'])
+                ->where('id', $propertyId)
+                ->first();
+        }
+
+        $comments = [];
+        if ($comment !== '') {
+            $comments[] = 'Комментарий: '.$comment;
+        }
+        $comments[] = 'Источник: chat-assistant';
+        $comments[] = 'Сообщение клиента: '.$userMessage;
+
+        if ($property) {
+            $comments[] = 'Выбранный объект: #'.$property->id.' '.$property->title;
+            if (!empty($property->price)) {
+                $comments[] = 'Цена: '.(float) $property->price.' '.($property->currency ?? 'TJS');
+            }
+            if (!empty($property->district) || !empty($property->address)) {
+                $comments[] = 'Локация: '.trim(($property->district ?? '').' '.($property->address ?? ''));
+            }
+        }
+
+        if ($propertyUrl !== '') {
+            $comments[] = 'Ссылка на объект: '.$propertyUrl;
+        } elseif ($propertyId) {
+            $comments[] = 'Ссылка на объект: '.rtrim(config('app.front_url', 'https://aura.tj'), '/')."/apartment/{$propertyId}";
+        }
+
+        if (!empty($context)) {
+            $comments[] = 'Контекст: '.json_encode($context, JSON_UNESCAPED_UNICODE);
+        }
+
+        $leadFields = [
+            'TITLE' => sprintf('Заявка с чата: %s', $serviceType),
+            'NAME' => $name,
+            'PHONE' => [
+                ['VALUE' => $phone, 'VALUE_TYPE' => 'WORK'],
+            ],
+            'SOURCE_ID' => 'WEB',
+            'SOURCE_DESCRIPTION' => 'aura-chat-assistant',
+            'COMMENTS' => implode("\n", $comments),
+        ];
+
+        if ($email !== '') {
+            $leadFields['EMAIL'] = [
+                ['VALUE' => $email, 'VALUE_TYPE' => 'WORK'],
+            ];
+        }
+
+        $result = $this->b24->leadAdd($leadFields);
+
+        if (!empty($result['error'])) {
+            return [
+                'ok' => false,
+                'error' => 'bitrix_error',
+                'bitrix' => $result,
+            ];
+        }
+
+        return [
+            'ok' => true,
+            'lead_id' => $result['result'] ?? null,
         ];
     }
 
@@ -317,10 +484,22 @@ class ChatService
             $base = env('OPENAI_BASE', 'https://api.openai.com');
             $url  = rtrim($base, '/') . '/v1/responses';
 
-            // без ключей/PII
-            $safeHeaders = [
-                'X-Relay-Key' => env('RELAY_SHARED_KEY') ? '***set***' : '***empty***',
-            ];
+            $relayKey = env('RELAY_SHARED_KEY');
+            $openaiApiKey = env('OPENAI_API_KEY');
+
+            $requestHeaders = [];
+            $safeHeaders = [];
+
+            if (!empty($relayKey)) {
+                $requestHeaders['X-Relay-Key'] = $relayKey;
+                $safeHeaders['X-Relay-Key'] = '***set***';
+            } elseif (!empty($openaiApiKey)) {
+                $requestHeaders['Authorization'] = 'Bearer '.$openaiApiKey;
+                $safeHeaders['Authorization'] = 'Bearer ***set***';
+            } else {
+                $safeHeaders['auth'] = '***missing***';
+            }
+
             $payloadPreview = mb_substr(json_encode($payload, JSON_UNESCAPED_UNICODE), 0, 2000);
 
             \Log::info('[OpenAI][REQ]', [
@@ -331,9 +510,7 @@ class ChatService
 
             $start = microtime(true);
 
-            $resp = Http::withHeaders([
-                'X-Relay-Key' => env('RELAY_SHARED_KEY'),
-            ])
+            $resp = Http::withHeaders($requestHeaders)
                 ->baseUrl($base)       // важно: без /v1
                 ->timeout(60)
                 ->post('/v1/responses', $payload);
@@ -447,5 +624,10 @@ class ChatService
         }
 
         return $calls;
+    }
+
+    private function normalizePhone(string $phone): string
+    {
+        return trim((string) preg_replace('/\s+/', '', $phone));
     }
 }

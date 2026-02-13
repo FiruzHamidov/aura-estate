@@ -12,9 +12,19 @@ class OpenAITest extends Command
 
     public function handle(): void
     {
-        $resp = Http::withToken(env('OPENAI_API_KEY'))
-            ->post(env('OPENAI_BASE').'/v1/responses', [
-                'model' => env('OPENAI_MODEL', 'o3-mini'),
+        $request = Http::timeout(30);
+        $relayKey = env('RELAY_SHARED_KEY');
+
+        if (!empty($relayKey)) {
+            $request = $request->withHeaders([
+                'X-Relay-Key' => $relayKey,
+            ]);
+        } else {
+            $request = $request->withToken(env('OPENAI_API_KEY'));
+        }
+
+        $resp = $request->post(env('OPENAI_BASE').'/v1/responses', [
+                'model' => env('OPENAI_MODEL', 'gpt-5-mini'),
                 'input' => 'Say "pong" if you can read this.',
             ])
             ->json();
