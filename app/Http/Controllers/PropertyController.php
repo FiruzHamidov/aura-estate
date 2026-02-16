@@ -138,6 +138,9 @@ class PropertyController extends Controller
                         FLOOR(latitude  / {$cell}) as gx,
                         FLOOR(longitude / {$cell}) as gy,
                         COUNT(*) as cnt,
+                        MIN(price)      as min_price,
+                        COUNT(DISTINCT currency) as currency_count,
+                        MIN(currency) as currency_single,
                         AVG(latitude)  as lat_avg,
                         AVG(longitude) as lng_avg
                     ")
@@ -146,6 +149,10 @@ class PropertyController extends Controller
                     ->get();
 
                 $features = $rows->map(function ($r) {
+                    $minPrice = $this->normalizeRawNumber($r->min_price);
+                    $currency = ((int)$r->currency_count === 1) ? ($r->currency_single ?: null) : null;
+                    $priceFromLabel = $minPrice !== null ? 'от ' . $this->formatCompactPrice($minPrice) : null;
+
                     return [
                         'type' => 'Feature',
                         'geometry' => [
@@ -153,9 +160,12 @@ class PropertyController extends Controller
                             // ВНИМАНИЕ: проверь порядок в вашей карте. Для Yandex чаще [lat, lng]
                             'coordinates' => [(float)$r->lat_avg, (float)$r->lng_avg],
                         ],
-                        'property' => [
+                        'properties' => [
                             'cluster' => true,
                             'point_count' => (int)$r->cnt,
+                            'min_price' => $minPrice,
+                            'currency' => $currency,
+                            'price_from_label' => $priceFromLabel,
                         ],
                     ];
                 })->values();
@@ -168,20 +178,25 @@ class PropertyController extends Controller
 
             // Высокие зумы: отдаём точки
             $points = $query
-                ->select(['id', 'title', 'price', 'latitude', 'longitude'])
+                ->select(['id', 'title', 'price', 'currency', 'latitude', 'longitude'])
                 ->limit($limit)
                 ->get();
 
             $features = $points->map(function ($p) {
+                $price = $this->normalizeRawNumber($p->price);
+
                 return [
                     'type' => 'Feature',
                     'geometry' => [
                         'type' => 'Point',
                         'coordinates' => [(float)$p->latitude, (float)$p->longitude],
                     ],
-                    'property' => [
+                    'properties' => [
                         'id' => (int)$p->id,
                         'title' => (string)$p->title,
+                        'price' => $price,
+                        'currency' => $p->currency ?: null,
+                        'price_label' => $price !== null ? $this->formatCompactPrice($price) : null,
                     ],
                 ];
             })->values();
@@ -191,6 +206,73 @@ class PropertyController extends Controller
                 'features' => $features,
             ]);
         });
+    }
+
+    private function normalizeRawNumber($value)
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if (is_int($value) || is_float($value)) {
+            return $value;
+        }
+
+        if (!is_numeric($value)) {
+            return $value;
+        }
+
+        $numeric = (float)$value;
+        if (fmod($numeric, 1.0) === 0.0) {
+            return (int)$numeric;
+        }
+
+        return $numeric;
+    }
+
+    private function formatCompactPrice($price): ?string
+    {
+        if ($price === null || $price === '' || !is_numeric($price)) {
+            return null;
+        }
+
+        $value = (float)$price;
+        $abs = abs($value);
+
+        if ($abs >= 1000000000) {
+            return $this->formatWithUnit($value / 1000000000, 'млрд');
+        }
+
+        if ($abs >= 1000000) {
+            return $this->formatWithUnit($value / 1000000, 'млн');
+        }
+
+        if ($abs >= 1000) {
+            return $this->formatWithUnit($value / 1000, 'к');
+        }
+
+        if (fmod($value, 1.0) === 0.0) {
+            return (string)(int)$value;
+        }
+
+        return rtrim(rtrim(number_format($value, 2, '.', ''), '0'), '.');
+    }
+
+    private function formatWithUnit(float $value, string $unit): string
+    {
+        $rounded = round($value, 1);
+
+        if (fmod($rounded, 1.0) === 0.0) {
+            $formatted = (string)(int)$rounded;
+        } else {
+            $formatted = rtrim(rtrim(number_format($rounded, 1, '.', ''), '0'), '.');
+        }
+
+        if ($unit === 'к') {
+            return "{$formatted}{$unit}";
+        }
+
+        return "{$formatted} {$unit}";
     }
 
     // ==== Единая фильтрация для списка и карты ====
