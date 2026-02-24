@@ -9,6 +9,19 @@ use Illuminate\Support\Facades\Hash;
 
 class AuthController extends Controller
 {
+    private function ensureUserIsActive(User $user)
+    {
+        if ($user->status === 'active') {
+            return null;
+        }
+
+        if (method_exists($user, 'tokens')) {
+            $user->tokens()->delete();
+        }
+
+        return response()->json(['message' => 'Пользователь деактивирован'], 403);
+    }
+
     // Проверка метода авторизации
     public function checkMethod(Request $request)
     {
@@ -22,8 +35,8 @@ class AuthController extends Controller
             return response()->json(['message' => 'Пользователь не найден'], 404);
         }
 
-        if ($user->status !== 'active') {
-            return response()->json(['message' => 'Пользователь деактивирован'], 403);
+        if ($inactiveResponse = $this->ensureUserIsActive($user)) {
+            return $inactiveResponse;
         }
 
         return response()->json(['method' => $user->auth_method]);
@@ -42,8 +55,12 @@ class AuthController extends Controller
             return response()->json(['message' => 'Пользователь не найден или не настроен для SMS входа'], 404);
         }
 
-        if ($user->status !== 'active') {
-            return response()->json(['message' => 'Пользователь деактивирован'], 403);
+        if ($inactiveResponse = $this->ensureUserIsActive($user)) {
+            return $inactiveResponse;
+        }
+
+        if ($user->auth_method !== 'sms') {
+            return response()->json(['message' => 'Метод авторизации — не SMS'], 403);
         }
 
         try {
@@ -68,8 +85,12 @@ class AuthController extends Controller
             return response()->json(['message' => 'Пользователь не найден'], 404);
         }
 
-        if ($user->status !== 'active') {
-            return response()->json(['message' => 'Пользователь деактивирован'], 403);
+        if ($inactiveResponse = $this->ensureUserIsActive($user)) {
+            return $inactiveResponse;
+        }
+
+        if ($user->auth_method !== 'sms') {
+            return response()->json(['message' => 'Метод авторизации — не SMS'], 403);
         }
 
         if ($smsAuthService->verifyCode($request->phone, $request->code)) {
@@ -100,11 +121,15 @@ class AuthController extends Controller
         $user = User::where('phone', $request->phone)->with('role')->first();
 
         if (!$user) {
-            return response()->json(['message' => 'Метод авторизации — не пароль'], 403);
+            return response()->json(['message' => 'Пользователь не найден'], 404);
         }
 
-        if ($user->status !== 'active') {
-            return response()->json(['message' => 'Пользователь деактивирован'], 403);
+        if ($inactiveResponse = $this->ensureUserIsActive($user)) {
+            return $inactiveResponse;
+        }
+
+        if ($user->auth_method !== 'password') {
+            return response()->json(['message' => 'Метод авторизации — не пароль'], 403);
         }
 
         if (!Hash::check($request->password, $user->password)) {
