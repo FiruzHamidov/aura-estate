@@ -129,6 +129,7 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::get('/bookings',      [BookingController::class, 'index']);
     Route::post('/bookings',     [BookingController::class, 'store']);
     Route::put('/bookings/{id}',     [BookingController::class, 'update']);
+    Route::patch('/bookings/{id}',   [BookingController::class, 'update']);
     Route::get('/bookings/agents-report', [BookingController::class, 'agentsReport']);
     Route::get('/bookings/{id}', [BookingController::class, 'show'])->whereNumber('id');
 

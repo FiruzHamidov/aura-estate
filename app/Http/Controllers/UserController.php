@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 
 class UserController extends Controller
 {
@@ -113,11 +114,22 @@ class UserController extends Controller
         return response()->json(['message' => 'Ваша фотография была удалена']);
     }
 
-    public function agents()
+    public function agents(Request $request)
     {
-        $agents = User::with(['role', 'branch'])->whereHas('role', function ($q) {
-            $q->where('slug', 'agent');
-        })->get();
+        $validated = $request->validate([
+            'status' => ['nullable', Rule::in(['active', 'inactive', 'all'])],
+        ]);
+
+        $status = $validated['status'] ?? 'active';
+
+        $agents = User::with(['role', 'branch'])
+            ->whereHas('role', function ($q) {
+                $q->where('slug', 'agent');
+            })
+            ->when($status !== 'all', function ($q) use ($status) {
+                $q->where('status', $status);
+            })
+            ->get();
 
         return response()->json($agents);
     }
@@ -150,9 +162,9 @@ class UserController extends Controller
         // Проверка, что целевой получатель — агент (если указан)
         if ($agentId) {
             $target = User::with('role')->find($agentId);
-            if (!$target || !$target->role || $target->role->slug !== 'agent') {
+            if (!$target || !$target->role || $target->role->slug !== 'agent' || $target->status !== 'active') {
                 return response()->json([
-                    'message' => 'agent_id должен указывать на пользователя с ролью агент.',
+                    'message' => 'agent_id должен указывать на активного пользователя с ролью агент.',
                 ], 422);
             }
         }
@@ -167,6 +179,7 @@ class UserController extends Controller
                 if ($distribute) {
                     // Соберём список доступных агентов (кроме удаляемого)
                     $agentIds = User::whereHas('role', fn($q) => $q->where('slug', 'agent'))
+                        ->where('status', 'active')
                         ->where('id', '!=', $user->id)
                         ->pluck('id')
                         ->all();
