@@ -52,15 +52,11 @@ class AuthController extends Controller
         $user = User::where('phone', $request->phone)->first();
 
         if (!$user) {
-            return response()->json(['message' => 'Пользователь не найден или не настроен для SMS входа'], 404);
+            return response()->json(['message' => 'Пользователь не найден'], 404);
         }
 
         if ($inactiveResponse = $this->ensureUserIsActive($user)) {
             return $inactiveResponse;
-        }
-
-        if ($user->auth_method !== 'sms') {
-            return response()->json(['message' => 'Метод авторизации — не SMS'], 403);
         }
 
         try {
@@ -87,10 +83,6 @@ class AuthController extends Controller
 
         if ($inactiveResponse = $this->ensureUserIsActive($user)) {
             return $inactiveResponse;
-        }
-
-        if ($user->auth_method !== 'sms') {
-            return response()->json(['message' => 'Метод авторизации — не SMS'], 403);
         }
 
         if ($smsAuthService->verifyCode($request->phone, $request->code)) {
@@ -126,10 +118,6 @@ class AuthController extends Controller
 
         if ($inactiveResponse = $this->ensureUserIsActive($user)) {
             return $inactiveResponse;
-        }
-
-        if ($user->auth_method !== 'password') {
-            return response()->json(['message' => 'Метод авторизации — не пароль'], 403);
         }
 
         if (!Hash::check($request->password, $user->password)) {
