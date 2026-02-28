@@ -19,6 +19,7 @@ use App\Http\Controllers\{AuthController,
     MaterialController,
     NewBuildingBlockController,
     NewBuildingController,
+    NewBuildingPlanController,
     NewBuildingPhotoController,
     ParkingTypeController,
     PropertyController,
@@ -68,6 +69,7 @@ Route::scopeBindings()->group(function () {
     Route::apiResource('materials',  MaterialController::class)->only(['index', 'show']);
     Route::apiResource('features',   FeatureController::class)->only(['index', 'show']);
 
+    Route::get('new-buildings/plans', [NewBuildingPlanController::class, 'index']);
     Route::apiResource('new-buildings', NewBuildingController::class)->only(['index', 'show']);
 
     // blocks (полностью вложенные; публично index/show)
