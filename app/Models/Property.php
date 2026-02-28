@@ -17,6 +17,7 @@ class Property extends Model
         'location_id',
         'repair_type_id',
         'price',
+        'discount_price',
         'currency',
         'offer_type',
         'rooms',

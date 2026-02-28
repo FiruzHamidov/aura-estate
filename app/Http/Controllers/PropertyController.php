@@ -178,12 +178,13 @@ class PropertyController extends Controller
 
             // Высокие зумы: отдаём точки
             $points = $query
-                ->select(['id', 'title', 'price', 'currency', 'latitude', 'longitude'])
+                ->select(['id', 'title', 'price', 'discount_price', 'currency', 'latitude', 'longitude'])
                 ->limit($limit)
                 ->get();
 
             $features = $points->map(function ($p) {
                 $price = $this->normalizeRawNumber($p->price);
+                $discountPrice = $this->normalizeRawNumber($p->discount_price);
 
                 return [
                     'type' => 'Feature',
@@ -195,8 +196,10 @@ class PropertyController extends Controller
                         'id' => (int)$p->id,
                         'title' => (string)$p->title,
                         'price' => $price,
+                        'discount_price' => $discountPrice,
                         'currency' => $p->currency ?: null,
                         'price_label' => $price !== null ? $this->formatCompactPrice($price) : null,
+                        'discount_price_label' => $discountPrice !== null ? $this->formatCompactPrice($discountPrice) : null,
                     ],
                 ];
             })->values();
@@ -580,7 +583,7 @@ class PropertyController extends Controller
             return response()->json(['message' => 'Доступ запрещён'], 403);
         }
 
-        $validated = $this->validateProperty($request, isUpdate: true);
+        $validated = $this->validateProperty($request, isUpdate: true, property: $property);
 
         $property->update($validated);
 
@@ -809,7 +812,7 @@ class PropertyController extends Controller
      * @param Request $request
      * @return array
      */
-    public function validateProperty(Request $request, bool $isUpdate = false)
+    public function validateProperty(Request $request, bool $isUpdate = false, ?Property $property = null)
     {
         $validated = $request->validate([
             'title' => 'nullable|string',
@@ -825,6 +828,7 @@ class PropertyController extends Controller
             'location_id' => 'nullable|exists:locations,id',
             'repair_type_id' => 'nullable|exists:repair_types,id',
             'price' => 'required|numeric',
+            'discount_price' => 'nullable|numeric|min:0',
             'currency' => 'required|in:TJS,USD',
             'offer_type' => 'required|in:rent,sale',
             'rooms' => 'nullable|integer|min:1|max:10',
@@ -894,6 +898,22 @@ class PropertyController extends Controller
             'money_received_at' => 'nullable|date',
             'contract_signed_at' => 'nullable|date',
         ]);
+
+        $effectivePrice = array_key_exists('price', $validated)
+            ? (float) $validated['price']
+            : ($property ? (float) $property->price : null);
+
+        if (
+            array_key_exists('discount_price', $validated)
+            && $validated['discount_price'] !== null
+            && $effectivePrice !== null
+            && (float) $validated['discount_price'] > $effectivePrice
+        ) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'discount_price' => 'Цена со скидкой не может быть выше основной цены.',
+            ]);
+        }
+
         return $validated;
     }
 
