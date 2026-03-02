@@ -11,6 +11,8 @@ return [
         'https://*.bitrix24.kz',
         'https://*.aura.tj',
         'https://aura.tj',
+        'https://manora.tj',
+        'https://www.manora.tj',
         'http://localhost:3000',
     ],
 
