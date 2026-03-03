@@ -32,5 +32,17 @@ class RoleSeeder extends Seeder
             'slug' => 'superadmin',
             'description' => 'Полный контроль над системой и администраторами'
         ]);
+
+        Role::create([
+            'name' => 'РОП',
+            'slug' => 'rop',
+            'description' => 'Руководитель филиала с доступом к данным своего филиала'
+        ]);
+
+        Role::create([
+            'name' => 'Директор филиала',
+            'slug' => 'branch_director',
+            'description' => 'Директор филиала с доступом к управлению филиалом'
+        ]);
     }
 }

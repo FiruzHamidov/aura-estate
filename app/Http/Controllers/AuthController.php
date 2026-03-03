@@ -22,7 +22,7 @@ class AuthController extends Controller
         return response()->json(['message' => 'Пользователь деактивирован'], 403);
     }
 
-    // Проверка метода авторизации
+    // Проверка доступных способов входа без привязки к auth_method пользователя
     public function checkMethod(Request $request)
     {
         $request->validate([
@@ -39,7 +39,10 @@ class AuthController extends Controller
             return $inactiveResponse;
         }
 
-        return response()->json(['method' => $user->auth_method]);
+        return response()->json([
+            'method' => null,
+            'available_methods' => ['password', 'sms'],
+        ]);
     }
 
     // Отправка кода на SMS

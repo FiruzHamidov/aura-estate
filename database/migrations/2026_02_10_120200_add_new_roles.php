@@ -10,9 +10,9 @@ return new class extends Migration {
 
         DB::table('roles')->upsert([
             [
-                'name' => 'Администратор филиала',
-                'slug' => 'branch_admin',
-                'description' => 'Управление сотрудниками и процессами внутри филиала',
+                'name' => 'Директор филиала',
+                'slug' => 'branch_director',
+                'description' => 'Директор филиала с доступом к управлению филиалом',
                 'created_at' => $now,
                 'updated_at' => $now,
             ],
@@ -36,7 +36,7 @@ return new class extends Migration {
     public function down(): void
     {
         DB::table('roles')
-            ->whereIn('slug', ['branch_admin', 'manager', 'operator'])
+            ->whereIn('slug', ['branch_director', 'manager', 'operator'])
             ->delete();
     }
 };

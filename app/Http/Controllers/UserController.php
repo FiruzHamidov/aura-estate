@@ -31,13 +31,17 @@ class UserController extends Controller
             'email' => 'nullable|email|unique:users,email',
             'role_id' => 'required|exists:roles,id',
             'branch_id' => 'required|exists:branches,id',
-            'auth_method' => 'required|in:password,sms',
-            'password' => 'nullable|min:6|required_if:auth_method,password'
+            'auth_method' => 'nullable|in:password,sms',
+            'password' => 'nullable|string|min:6',
         ]);
 
         $data = $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'auth_method', 'status', 'birthday']);
 
-        if ($request->auth_method === 'password') {
+        if (!$request->filled('auth_method')) {
+            unset($data['auth_method']);
+        }
+
+        if ($request->filled('password')) {
             $data['password'] = Hash::make($request->password);
         }
 
@@ -63,8 +67,8 @@ class UserController extends Controller
             'email' => 'sometimes|email|unique:users,email,' . $user->id,
             'role_id' => 'sometimes|exists:roles,id',
             'branch_id' => 'sometimes|exists:branches,id',
-            'auth_method' => 'sometimes|in:password,sms',
-            'password' => 'nullable|min:6|required_if:auth_method,password'
+            'auth_method' => 'sometimes|nullable|in:password,sms',
+            'password' => 'nullable|string|min:6',
         ]);
 
         $data = $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'auth_method', 'status', 'description', 'birthday']);
