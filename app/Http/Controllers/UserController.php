@@ -18,6 +18,9 @@ class UserController extends Controller
     {
         /** @var User $user */
         $user = Auth::user();
+
+        abort_unless($user, 401, 'Unauthenticated.');
+
         $user->loadMissing('role');
 
         return $user;
