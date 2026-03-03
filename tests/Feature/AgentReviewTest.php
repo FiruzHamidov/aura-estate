@@ -225,4 +225,69 @@ class AgentReviewTest extends TestCase
         $response->assertJsonPath('summary.count', 1);
         $this->assertSame(5.0, (float) $response->json('summary.avg_rating'));
     }
+
+    public function test_public_profile_and_reviews_summary_use_same_approved_aggregates(): void
+    {
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $agent = User::create([
+            'name' => 'Agent',
+            'phone' => '900000120',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+            'description' => 'Agent description',
+        ]);
+
+        \DB::table('reviews')->insert([
+            [
+                'reviewable_type' => 'user',
+                'reviewable_id' => $agent->id,
+                'author_name' => 'A',
+                'author_phone' => '992900000101',
+                'rating' => 5,
+                'text' => 'A',
+                'status' => 'approved',
+                'published_at' => '2026-03-01 09:00:00',
+                'created_at' => '2026-03-01 09:00:00',
+                'updated_at' => '2026-03-01 09:00:00',
+            ],
+            [
+                'reviewable_type' => 'user',
+                'reviewable_id' => $agent->id,
+                'author_name' => 'B',
+                'author_phone' => '992900000102',
+                'rating' => 4,
+                'text' => 'B',
+                'status' => 'approved',
+                'published_at' => '2026-03-02 09:00:00',
+                'created_at' => '2026-03-02 09:00:00',
+                'updated_at' => '2026-03-02 09:00:00',
+            ],
+            [
+                'reviewable_type' => 'user',
+                'reviewable_id' => $agent->id,
+                'author_name' => 'C',
+                'author_phone' => '992900000103',
+                'rating' => 1,
+                'text' => 'C',
+                'status' => 'pending',
+                'published_at' => null,
+                'created_at' => '2026-03-03 09:00:00',
+                'updated_at' => '2026-03-03 09:00:00',
+            ],
+        ]);
+
+        $publicResponse = $this->getJson('/api/public/realtors/' . $agent->id);
+        $reviewsResponse = $this->getJson('/api/agents/' . $agent->id . '/reviews?per_page=10');
+
+        $publicResponse->assertOk();
+        $reviewsResponse->assertOk();
+
+        $this->assertSame($publicResponse->json('review_count'), $reviewsResponse->json('summary.count'));
+        $this->assertSame((float) $publicResponse->json('rating'), (float) $reviewsResponse->json('summary.avg_rating'));
+        $this->assertSame($reviewsResponse->json('pagination.total'), $reviewsResponse->json('summary.count'));
+        $publicResponse->assertJsonPath('review_count', 2);
+        $this->assertSame(4.5, (float) $publicResponse->json('rating'));
+    }
 }

@@ -4,12 +4,17 @@ namespace App\Http\Controllers;
 
 use App\Models\Review;
 use App\Models\User;
+use App\Services\RealtorReviewService;
 use App\Services\SmsAuthService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 class ReviewController extends Controller
 {
+    public function __construct(
+        private readonly RealtorReviewService $reviewService
+    ) {}
+
     /**
      * Отправляем SMS-код на номер, чтобы подтвердить владение номером перед добавлением отзыва.
      * body: { phone: string }
@@ -97,17 +102,8 @@ class ReviewController extends Controller
         $agent = $this->resolvePublicAgent($agent);
         $perPage = min((int) $request->get('per_page', 10), 50);
 
-        $reviews = Review::approved()
-            ->whereMorphedTo('reviewable', $agent)
-            ->latest('published_at')
-            ->latest('id')
-            ->paginate($perPage);
-
-        $stats = Review::query()
-            ->whereMorphedTo('reviewable', $agent)
-            ->approved()
-            ->selectRaw('COUNT(*) as cnt, AVG(rating) as avg_rating')
-            ->first();
+        $reviews = $this->reviewService->approvedPaginated($agent, $perPage);
+        $summary = $this->reviewService->approvedSummary($agent);
 
         return response()->json([
             'data' => collect($reviews->items())
@@ -120,8 +116,8 @@ class ReviewController extends Controller
                 'total'        => $reviews->total(),
             ],
             'summary' => [
-                'count' => (int) ($stats->cnt ?? 0),
-                'avg_rating' => $stats->cnt ? round((float) ($stats->avg_rating ?? 0), 2) : null,
+                'count' => $summary['count'],
+                'avg_rating' => $summary['avg_rating'],
             ],
         ]);
     }
@@ -131,13 +127,7 @@ class ReviewController extends Controller
      */
     private function agentPayload(User $agent): array
     {
-        $stats = $agent->reviewsReceived()
-            ->approved()
-            ->selectRaw('COUNT(*) as cnt, AVG(rating) as avg_rating')
-            ->first();
-
-        $count = (int) ($stats->cnt ?? 0);
-        $avg = $count > 0 ? round((float) ($stats->avg_rating ?? 0), 2) : null;
+        $summary = $this->reviewService->approvedSummary($agent);
 
         return [
             'id' => $agent->id,
@@ -145,8 +135,8 @@ class ReviewController extends Controller
             'phone' => $agent->phone,
             'photo' => $agent->photo,
             'description' => $agent->description,
-            'rating' => $avg,
-            'reviewCount' => $count,
+            'rating' => $summary['avg_rating'],
+            'reviewCount' => $summary['count'],
         ];
     }
 

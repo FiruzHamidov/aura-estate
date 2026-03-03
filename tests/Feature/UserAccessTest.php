@@ -184,4 +184,28 @@ class UserAccessTest extends TestCase
         $response->assertCreated();
         $response->assertJsonPath('branch_id', $branchA->id);
     }
+
+    public function test_authenticated_user_can_fetch_own_profile(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $user = User::create([
+            'name' => 'Agent A',
+            'phone' => '900000031',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $response = $this->getJson('/api/user/profile');
+
+        $response->assertOk();
+        $response->assertJsonPath('id', $user->id);
+        $response->assertJsonPath('role.slug', 'agent');
+        $response->assertJsonPath('branch.id', $branch->id);
+    }
 }

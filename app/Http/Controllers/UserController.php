@@ -229,6 +229,13 @@ class UserController extends Controller
         return response()->json($user->load(['role', 'branch']));
     }
 
+    public function profile()
+    {
+        return response()->json(
+            $this->authUser()->loadMissing(['role', 'branch'])
+        );
+    }
+
     // Обновление пользователя
     public function update(Request $request, User $user)
     {
