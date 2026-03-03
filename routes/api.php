@@ -29,6 +29,7 @@ use App\Http\Controllers\{AuthController,
     PublicRealtorController,
     PropertyTypeController,
     RepairTypeController,
+    ReviewController,
     RoleController,
     SelectionController,
     UserController
@@ -62,6 +63,9 @@ Route::get('/branches',          [BranchController::class, 'index']);
 
 Route::get('/user/agents', [UserController::class, 'agents']);
 Route::get('/public/realtors/{id}', [PublicRealtorController::class, 'show'])->whereNumber('id');
+Route::post('/reviews/request-code', [ReviewController::class, 'requestCode'])->middleware('throttle:10,1');
+Route::get('/agents/{agent}/reviews', [ReviewController::class, 'index'])->whereNumber('agent');
+Route::post('/agents/{agent}/reviews', [ReviewController::class, 'store'])->middleware('throttle:10,1')->whereNumber('agent');
 
 // --- Новостройки (public index/show + ВЛОЖЕННЫЕ index/show) ---
 Route::scopeBindings()->group(function () {

@@ -113,11 +113,14 @@ class PublicRealtorProfileTest extends TestCase
     {
         Schema::create('reviews', function (Blueprint $table) {
             $table->id();
-            $table->foreignId('agent_id')->constrained('users')->cascadeOnDelete();
-            $table->string('reviewer_name');
+            $table->string('reviewable_type');
+            $table->unsignedBigInteger('reviewable_id');
+            $table->string('author_name');
+            $table->string('author_phone', 64)->nullable();
             $table->unsignedTinyInteger('rating');
             $table->text('text')->nullable();
             $table->string('status')->default('approved');
+            $table->timestamp('published_at')->nullable();
             $table->timestamps();
         });
 
@@ -134,20 +137,26 @@ class PublicRealtorProfileTest extends TestCase
         Schema::disableForeignKeyConstraints();
         \DB::table('reviews')->insert([
             [
-                'agent_id' => $agent->id,
-                'reviewer_name' => 'Фирдавс',
+                'reviewable_type' => 'user',
+                'reviewable_id' => $agent->id,
+                'author_name' => 'Фирдавс',
+                'author_phone' => '992900000000',
                 'rating' => 5,
                 'text' => 'Хороший специалист',
                 'status' => 'approved',
+                'published_at' => '2026-03-01 10:00:00',
                 'created_at' => '2026-03-01 10:00:00',
                 'updated_at' => '2026-03-01 10:00:00',
             ],
             [
-                'agent_id' => $agent->id,
-                'reviewer_name' => 'Hidden',
+                'reviewable_type' => 'user',
+                'reviewable_id' => $agent->id,
+                'author_name' => 'Hidden',
+                'author_phone' => '992900000001',
                 'rating' => 1,
                 'text' => 'Не должен попасть',
                 'status' => 'pending',
+                'published_at' => null,
                 'created_at' => '2026-03-02 10:00:00',
                 'updated_at' => '2026-03-02 10:00:00',
             ],

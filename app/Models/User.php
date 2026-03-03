@@ -6,6 +6,7 @@ use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
 
 class User extends Authenticatable
 {
@@ -56,5 +57,10 @@ class User extends Authenticatable
                 'agent_commission_currency',
                 'agent_paid_at'
             ]);
+    }
+
+    public function reviewsReceived(): MorphMany
+    {
+        return $this->morphMany(Review::class, 'reviewable');
     }
 }

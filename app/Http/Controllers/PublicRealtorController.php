@@ -69,7 +69,7 @@ class PublicRealtorController extends Controller
         }
 
         $baseQuery = Review::query()
-            ->where('agent_id', $realtor->id)
+            ->whereMorphedTo('reviewable', $realtor)
             ->when(
                 Schema::hasColumn('reviews', 'status'),
                 fn ($query) => $query->where('status', 'approved')
@@ -80,15 +80,16 @@ class PublicRealtorController extends Controller
             ->first();
 
         $reviews = (clone $baseQuery)
-            ->select(['id', 'reviewer_name', 'rating', 'created_at', 'text'])
+            ->select(['id', 'author_name', 'rating', 'published_at', 'created_at', 'text'])
+            ->latest('published_at')
             ->latest('id')
             ->limit(10)
             ->get()
             ->map(fn (Review $review) => [
                 'id' => $review->id,
-                'author' => $review->reviewer_name,
+                'author' => $review->author_name,
                 'rating' => (int) $review->rating,
-                'date' => optional($review->created_at)->toDateString(),
+                'date' => optional($review->published_at ?? $review->created_at)->toDateString(),
                 'text' => $review->text,
             ])
             ->values()
@@ -107,8 +108,9 @@ class PublicRealtorController extends Controller
         }
 
         return Schema::hasColumns('reviews', [
-            'agent_id',
-            'reviewer_name',
+            'reviewable_type',
+            'reviewable_id',
+            'author_name',
             'rating',
             'text',
             'created_at',

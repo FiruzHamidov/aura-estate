@@ -5,9 +5,8 @@ namespace App\Http\Controllers;
 use App\Models\Review;
 use App\Models\User;
 use App\Services\SmsAuthService;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Validation\Rule;
-use Illuminate\Support\Facades\DB;
 
 class ReviewController extends Controller
 {
@@ -15,7 +14,7 @@ class ReviewController extends Controller
      * Отправляем SMS-код на номер, чтобы подтвердить владение номером перед добавлением отзыва.
      * body: { phone: string }
      */
-    public function requestCode(Request $request, SmsAuthService $smsAuthService)
+    public function requestCode(Request $request, SmsAuthService $smsAuthService): JsonResponse
     {
         $data = $request->validate([
             'phone' => ['required', 'string'],
@@ -43,10 +42,11 @@ class ReviewController extends Controller
      *   text?: string
      * }
      */
-    public function store(Request $request, SmsAuthService $smsAuthService)
+    public function store(Request $request, User $agent, SmsAuthService $smsAuthService): JsonResponse
     {
+        $agent = $this->resolvePublicAgent($agent);
+
         $data = $request->validate([
-            'agent_id'       => ['required', 'integer', Rule::exists('users', 'id')],
             'reviewer_name'  => ['required', 'string', 'max:255'],
             'reviewer_phone' => ['required', 'string', 'max:64'],
             'code'           => ['required', 'string', 'max:10'],
@@ -54,60 +54,37 @@ class ReviewController extends Controller
             'text'           => ['nullable', 'string', 'max:5000'],
         ]);
 
-        $agent = User::findOrFail($data['agent_id']);
-
-        // Нормализуем телефон
         $phone = $this->normalizePhone($data['reviewer_phone']);
 
-        // Проверка SMS-кода
         if (!$smsAuthService->verifyCode($phone, $data['code'])) {
             return response()->json(['message' => 'Неверный или просроченный код'], 401);
         }
 
-        // Защита от дублей: уникальность (agent_id, reviewer_phone)
-        // Если нужно разрешить повторно через N дней — лучше убрать unique в БД,
-        // а тут проверять вручную по дате.
-        $exists = Review::where('agent_id', $agent->id)
-            ->where('reviewer_phone', $phone)
+        $exists = Review::query()
+            ->whereMorphedTo('reviewable', $agent)
+            ->where('author_phone', $phone)
             ->exists();
 
         if ($exists) {
             return response()->json(['message' => 'Отзыв с этого номера для данного агента уже существует'], 409);
         }
 
-        // Транзакция: создать отзыв и обновить агрегаты агента (если кэшируем)
-        $review = DB::transaction(function () use ($agent, $data, $phone) {
-            $review = Review::create([
-                'agent_id'        => $agent->id,
-                'reviewer_user_id'=> auth('sanctum')->id(), // если автор залогинен, иначе null
-                'reviewer_name'   => $data['reviewer_name'],
-                'reviewer_phone'  => $phone,
-                'rating'          => (int)$data['rating'],
-                'text'            => $data['text'] ?? null,
-                'status'          => 'approved', // или 'pending' если нужна модерация
-            ]);
-
-            // Обновим кэш рейтинга, если колонки есть
-            if (Schema()->hasColumn('users', 'reviews_count') && Schema()->hasColumn('users', 'reviews_avg_rating')) {
-                // Пересчёт агрегатов (чтобы точно)
-                $stats = Review::where('agent_id', $agent->id)
-                    ->approved()
-                    ->selectRaw('COUNT(*) as cnt, AVG(rating) as avg_rating')
-                    ->first();
-
-                $agent->update([
-                    'reviews_count' => (int) ($stats->cnt ?? 0),
-                    'reviews_avg_rating' => round((float) ($stats->avg_rating ?? 0), 2),
-                ]);
-            }
-
-            return $review;
-        });
+        $review = Review::create([
+            'reviewable_type' => $agent->getMorphClass(),
+            'reviewable_id' => $agent->id,
+            'author_user_id' => null,
+            'author_name' => $data['reviewer_name'],
+            'author_phone' => $phone,
+            'rating' => (int) $data['rating'],
+            'text' => $data['text'] ?? null,
+            'status' => 'approved',
+            'published_at' => now(),
+        ]);
 
         return response()->json([
             'message' => 'Отзыв создан',
-            'review'  => $review,
-            'agent'   => $this->agentPayload($agent->fresh()),
+            'review' => $this->transformReview($review),
+            'agent' => $this->agentPayload($agent->fresh()),
         ], 201);
     }
 
@@ -115,23 +92,27 @@ class ReviewController extends Controller
      * Список отзывов по агенту (пагинация)
      * GET /api/agents/{agent}/reviews?page=1&per_page=10
      */
-    public function index(User $agent, Request $request)
+    public function index(User $agent, Request $request): JsonResponse
     {
+        $agent = $this->resolvePublicAgent($agent);
         $perPage = min((int) $request->get('per_page', 10), 50);
 
         $reviews = Review::approved()
-            ->where('agent_id', $agent->id)
-            ->latest()
+            ->whereMorphedTo('reviewable', $agent)
+            ->latest('published_at')
+            ->latest('id')
             ->paginate($perPage);
 
-        // Чтобы фронту было удобно — добавим агрегаты
-        $stats = Review::where('agent_id', $agent->id)
+        $stats = Review::query()
+            ->whereMorphedTo('reviewable', $agent)
             ->approved()
             ->selectRaw('COUNT(*) as cnt, AVG(rating) as avg_rating')
             ->first();
 
         return response()->json([
-            'data' => $reviews->items(),
+            'data' => collect($reviews->items())
+                ->map(fn (Review $review) => $this->transformReview($review))
+                ->values(),
             'pagination' => [
                 'current_page' => $reviews->currentPage(),
                 'last_page'    => $reviews->lastPage(),
@@ -140,7 +121,7 @@ class ReviewController extends Controller
             ],
             'summary' => [
                 'count' => (int) ($stats->cnt ?? 0),
-                'avg_rating' => round((float) ($stats->avg_rating ?? 0), 2),
+                'avg_rating' => $stats->cnt ? round((float) ($stats->avg_rating ?? 0), 2) : null,
             ],
         ]);
     }
@@ -150,14 +131,13 @@ class ReviewController extends Controller
      */
     private function agentPayload(User $agent): array
     {
-        // Если кэшируем — берём из полей, иначе считаем налету:
-        if (Schema()->hasColumn('users', 'reviews_count') && Schema()->hasColumn('users', 'reviews_avg_rating')) {
-            $count = (int) $agent->reviews_count;
-            $avg   = (float) $agent->reviews_avg_rating;
-        } else {
-            $count = (int) $agent->reviewsReceived()->approved()->count();
-            $avg   = (float) $agent->reviewsReceived()->approved()->avg('rating');
-        }
+        $stats = $agent->reviewsReceived()
+            ->approved()
+            ->selectRaw('COUNT(*) as cnt, AVG(rating) as avg_rating')
+            ->first();
+
+        $count = (int) ($stats->cnt ?? 0);
+        $avg = $count > 0 ? round((float) ($stats->avg_rating ?? 0), 2) : null;
 
         return [
             'id' => $agent->id,
@@ -165,16 +145,38 @@ class ReviewController extends Controller
             'phone' => $agent->phone,
             'photo' => $agent->photo,
             'description' => $agent->description,
-            'rating' => round($avg, 2),
+            'rating' => $avg,
             'reviewCount' => $count,
+        ];
+    }
+
+    private function resolvePublicAgent(User $agent): User
+    {
+        $isPublicAgent = User::query()
+            ->whereKey($agent->id)
+            ->where('status', 'active')
+            ->whereHas('role', fn ($query) => $query->where('slug', 'agent'))
+            ->exists();
+
+        abort_if(!$isPublicAgent, 404);
+
+        return $agent;
+    }
+
+    private function transformReview(Review $review): array
+    {
+        return [
+            'id' => $review->id,
+            'author' => $review->author_name,
+            'rating' => (int) $review->rating,
+            'date' => optional($review->published_at ?? $review->created_at)->toDateString(),
+            'text' => $review->text,
         ];
     }
 
     private function normalizePhone(string $phone): string
     {
-        // простой нормалайзер: оставим только цифры, и, например, добавим +992 при необходимости
         $digits = preg_replace('/\D+/', '', $phone) ?? '';
-        // Если твой проект использует свой формат — приведи к нему тут.
         return $digits;
     }
 }
