@@ -26,6 +26,7 @@ use App\Http\Controllers\{AuthController,
     PropertyPhotoController,
     PropertyReportController,
     PropertyStatusController,
+    PublicRealtorController,
     PropertyTypeController,
     RepairTypeController,
     RoleController,
@@ -60,6 +61,7 @@ Route::get('/contract-types',    [ContractTypeController::class, 'index']);
 Route::get('/branches',          [BranchController::class, 'index']);
 
 Route::get('/user/agents', [UserController::class, 'agents']);
+Route::get('/public/realtors/{id}', [PublicRealtorController::class, 'show'])->whereNumber('id');
 
 // --- Новостройки (public index/show + ВЛОЖЕННЫЕ index/show) ---
 Route::scopeBindings()->group(function () {
