@@ -840,6 +840,8 @@ class PropertyController extends Controller
             'total_floors' => 'nullable|integer',
             'year_built' => 'nullable|integer|min:1900|max:' . date('Y'),
             'condition' => 'nullable|string',
+            'construction_status' => 'nullable|in:under_construction,built,commissioned',
+            'renovation_permission_status' => 'nullable|in:not_allowed,allowed',
             'apartment_type' => 'nullable|string',
             'has_garden' => 'sometimes|boolean',
             'has_parking' => 'sometimes|boolean',

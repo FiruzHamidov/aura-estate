@@ -29,6 +29,8 @@ class Property extends Model
         'total_floors',
         'year_built',
         'condition',
+        'construction_status',
+        'renovation_permission_status',
         'apartment_type',
         'has_garden',
         'has_parking',

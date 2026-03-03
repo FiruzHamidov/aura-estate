@@ -60,7 +60,6 @@ Route::get('/contract-types',    [ContractTypeController::class, 'index']);
 Route::get('/branches',          [BranchController::class, 'index']);
 
 Route::get('/user/agents', [UserController::class, 'agents']);
-Route::get('/user/{user}', [UserController::class, 'show']);
 
 // --- Новостройки (public index/show + ВЛОЖЕННЫЕ index/show) ---
 Route::scopeBindings()->group(function () {
@@ -120,7 +119,7 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::post('/user/{user}/photo',       [UserController::class, 'updatePhoto']);
     Route::delete('/user/photo',            [UserController::class, 'deleteMyPhoto']);
     Route::post('/user/update-password',    [UserController::class, 'updatePassword']);
-    Route::apiResource('user',              UserController::class)->except(['show']);
+    Route::apiResource('user',              UserController::class);
 
     // Избранное
     Route::get('/favorites',  [FavoriteController::class, 'index']);

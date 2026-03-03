@@ -15,6 +15,24 @@ use Illuminate\Validation\ValidationException;
 
 class BookingController extends Controller
 {
+    private function authUser(Request $request): ?User
+    {
+        $user = $request->user();
+        $user?->loadMissing('role');
+
+        return $user;
+    }
+
+    private function roleSlug(?User $user): ?string
+    {
+        return $user?->role?->slug;
+    }
+
+    private function isPrivilegedRole(?string $roleSlug): bool
+    {
+        return in_array($roleSlug, ['admin', 'superadmin'], true);
+    }
+
     private function bookingApiTimezone(): string
     {
         return (string) config('app.timezone', 'Asia/Dushanbe');
@@ -73,20 +91,17 @@ class BookingController extends Controller
 
     private function applyBranchAccessForAgents(Request $request, $query, string $agentColumn = 'agent_id'): void
     {
-        $authUser = $request->user();
-        $authUser?->loadMissing('role');
-        $roleSlug = $authUser->role->slug ?? null;
+        $authUser = $this->authUser($request);
+        $roleSlug = $this->roleSlug($authUser);
 
-        // Явный фильтр по филиалу (для админских отчётов)
-        if ($request->filled('branch_id')) {
+        if ($this->isPrivilegedRole($roleSlug) && $request->filled('branch_id')) {
             $branchIds = array_values(array_filter(array_map('trim', explode(',', (string)$request->input('branch_id'))), fn($v) => $v !== ''));
             if (!empty($branchIds)) {
                 $query->whereIn($agentColumn, User::query()->whereIn('branch_id', $branchIds)->select('id'));
             }
         }
 
-        // Принудительное ограничение для РОП: только агенты своего филиала
-        if ($roleSlug === 'rop') {
+        if (in_array($roleSlug, ['rop', 'branch_director'], true)) {
             if (empty($authUser->branch_id)) {
                 $query->whereRaw('1 = 0');
                 return;
@@ -94,6 +109,16 @@ class BookingController extends Controller
 
             $query->whereIn($agentColumn, User::query()->where('branch_id', $authUser->branch_id)->select('id'));
         }
+    }
+
+    private function ensureBookingIsVisible(Request $request, Booking $booking): void
+    {
+        $visible = Booking::query()
+            ->whereKey($booking->id)
+            ->tap(fn ($query) => $this->applyBranchAccessForAgents($request, $query, 'agent_id'))
+            ->exists();
+
+        abort_unless($visible, 403, 'Forbidden');
     }
 
     public function index(Request $request)
@@ -120,6 +145,8 @@ class BookingController extends Controller
         if ($request->filled('property_id')) {
             $q->where('property_id', $request->integer('property_id'));
         }
+
+        $this->applyBranchAccessForAgents($request, $q, 'agent_id');
 
         $bookings = $q->orderBy('start_time')->get();
         $bookings->transform(fn (Booking $booking) => $this->transformBookingForResponse($booking));
@@ -223,6 +250,7 @@ class BookingController extends Controller
     public function show($id)
     {
         $booking = Booking::with(['property', 'agent', 'client'])->findOrFail($id);
+        $this->ensureBookingIsVisible(request(), $booking);
         $this->transformBookingForResponse($booking);
 
         return response()->json($booking);

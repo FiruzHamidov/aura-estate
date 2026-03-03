@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Property;
+use App\Models\Role;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -13,16 +14,179 @@ use Illuminate\Validation\Rule;
 
 class UserController extends Controller
 {
-    // Список всех пользователей
-    public function index()
+    private function authUser(): User
     {
-        $users = User::with(['role', 'branch'])->get();
+        /** @var User $user */
+        $user = Auth::user();
+        $user->loadMissing('role');
+
+        return $user;
+    }
+
+    private function roleSlug(?User $user): ?string
+    {
+        return $user?->role?->slug;
+    }
+
+    private function isPrivilegedRole(?string $roleSlug): bool
+    {
+        return in_array($roleSlug, ['superadmin', 'admin'], true);
+    }
+
+    private function isBranchScopedManager(?string $roleSlug): bool
+    {
+        return in_array($roleSlug, ['branch_director', 'rop'], true);
+    }
+
+    private function isBranchScopedRole(?string $roleSlug): bool
+    {
+        return in_array($roleSlug, ['branch_director', 'rop', 'agent', 'manager', 'operator'], true);
+    }
+
+    private function visibleUsersQuery(User $authUser)
+    {
+        $roleSlug = $this->roleSlug($authUser);
+
+        $query = User::query()->with(['role', 'branch']);
+
+        if ($this->isPrivilegedRole($roleSlug)) {
+            return $query;
+        }
+
+        if (!$this->isBranchScopedManager($roleSlug) || empty($authUser->branch_id)) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        $query->where('branch_id', $authUser->branch_id);
+
+        if ($roleSlug === 'rop') {
+            $query->whereHas('role', fn ($q) => $q->where('slug', '!=', 'branch_director'));
+        }
+
+        return $query;
+    }
+
+    private function ensureUserIsVisible(User $authUser, User $targetUser): void
+    {
+        $allowed = $this->visibleUsersQuery($authUser)
+            ->whereKey($targetUser->id)
+            ->exists();
+
+        abort_unless($allowed, 403, 'Forbidden');
+    }
+
+    private function allowedRoleSlugsForActor(User $authUser): ?array
+    {
+        return match ($this->roleSlug($authUser)) {
+            'superadmin', 'admin' => null,
+            'rop' => ['agent', 'client'],
+            'branch_director' => ['agent', 'client'],
+            default => [],
+        };
+    }
+
+    private function resolveTargetRole(Request $request, ?User $targetUser = null): ?Role
+    {
+        if ($request->filled('role_id')) {
+            return Role::find($request->integer('role_id'));
+        }
+
+        if ($targetUser) {
+            $targetUser->loadMissing('role');
+            return $targetUser->role;
+        }
+
+        return null;
+    }
+
+    private function authorizeAssignedRole(User $authUser, ?Role $targetRole): void
+    {
+        if (!$targetRole) {
+            return;
+        }
+
+        $allowedRoleSlugs = $this->allowedRoleSlugsForActor($authUser);
+
+        if ($allowedRoleSlugs === null) {
+            return;
+        }
+
+        abort_unless(in_array($targetRole->slug, $allowedRoleSlugs, true), 422, 'This role cannot be assigned.');
+    }
+
+    private function normalizeBranchIdForMutation(array $data, User $authUser, ?Role $targetRole): array
+    {
+        $roleSlug = $targetRole?->slug;
+
+        if (!$roleSlug) {
+            return $data;
+        }
+
+        if ($this->isBranchScopedRole($roleSlug) && $this->isBranchScopedManager($this->roleSlug($authUser))) {
+            $data['branch_id'] = $authUser->branch_id;
+        }
+
+        if ($this->isBranchScopedRole($roleSlug) && empty($data['branch_id'])) {
+            abort(422, 'branch_id is required for this role.');
+        }
+
+        return $data;
+    }
+
+    // Список всех пользователей
+    public function index(Request $request)
+    {
+        $authUser = $this->authUser();
+
+        $validated = $request->validate([
+            'name' => 'nullable|string',
+            'phone' => 'nullable|string',
+            'branch_id' => 'nullable|integer|exists:branches,id',
+            'role' => 'nullable|string|exists:roles,slug',
+            'status' => ['nullable', Rule::in(['active', 'inactive'])],
+            'page' => 'nullable|integer|min:1',
+            'per_page' => 'nullable|integer|min:1|max:100',
+        ]);
+
+        $query = $this->visibleUsersQuery($authUser);
+
+        if (!empty($validated['name'])) {
+            $query->where('name', 'like', '%' . trim($validated['name']) . '%');
+        }
+
+        if (!empty($validated['phone'])) {
+            $query->where('phone', 'like', '%' . trim($validated['phone']) . '%');
+        }
+
+        if ($this->isPrivilegedRole($this->roleSlug($authUser))) {
+            if (!empty($validated['branch_id'])) {
+                $query->where('branch_id', $validated['branch_id']);
+            }
+        } elseif (!empty($authUser->branch_id)) {
+            $query->where('branch_id', $authUser->branch_id);
+        }
+
+        if (!empty($validated['role'])) {
+            $query->whereHas('role', fn ($q) => $q->where('slug', $validated['role']));
+        }
+
+        if (!empty($validated['status'])) {
+            $query->where('status', $validated['status']);
+        }
+
+        $users = $query
+            ->orderByDesc('id')
+            ->paginate((int) ($validated['per_page'] ?? 15))
+            ->withQueryString();
+
         return response()->json($users);
     }
 
     // Создание пользователя
     public function store(Request $request)
     {
+        $authUser = $this->authUser();
+
         $request->validate([
             'name' => 'required|string',
             'description' => 'nullable|string',
@@ -30,12 +194,16 @@ class UserController extends Controller
             'phone' => 'required|string|unique:users,phone',
             'email' => 'nullable|email|unique:users,email',
             'role_id' => 'required|exists:roles,id',
-            'branch_id' => 'required|exists:branches,id',
+            'branch_id' => 'nullable|exists:branches,id',
             'auth_method' => 'nullable|in:password,sms',
             'password' => 'nullable|string|min:6',
         ]);
 
-        $data = $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'auth_method', 'status', 'birthday']);
+        $targetRole = $this->resolveTargetRole($request);
+        $this->authorizeAssignedRole($authUser, $targetRole);
+
+        $data = $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'auth_method', 'status', 'birthday', 'description']);
+        $data = $this->normalizeBranchIdForMutation($data, $authUser, $targetRole);
 
         if (!$request->filled('auth_method')) {
             unset($data['auth_method']);
@@ -53,12 +221,17 @@ class UserController extends Controller
     // Просмотр конкретного пользователя
     public function show(User $user)
     {
+        $this->ensureUserIsVisible($this->authUser(), $user);
+
         return response()->json($user->load(['role', 'branch']));
     }
 
     // Обновление пользователя
     public function update(Request $request, User $user)
     {
+        $authUser = $this->authUser();
+        $this->ensureUserIsVisible($authUser, $user);
+
         $request->validate([
             'name' => 'sometimes|string',
             'description' => 'nullable|string',
@@ -66,12 +239,16 @@ class UserController extends Controller
             'phone' => 'sometimes|string|unique:users,phone,' . $user->id,
             'email' => 'sometimes|email|unique:users,email,' . $user->id,
             'role_id' => 'sometimes|exists:roles,id',
-            'branch_id' => 'sometimes|exists:branches,id',
+            'branch_id' => 'sometimes|nullable|exists:branches,id',
             'auth_method' => 'sometimes|nullable|in:password,sms',
             'password' => 'nullable|string|min:6',
         ]);
 
+        $targetRole = $this->resolveTargetRole($request, $user);
+        $this->authorizeAssignedRole($authUser, $targetRole);
+
         $data = $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'auth_method', 'status', 'description', 'birthday']);
+        $data = $this->normalizeBranchIdForMutation($data, $authUser, $targetRole);
 
         if ($request->filled('password')) {
             $data['password'] = Hash::make($request->password);
@@ -141,6 +318,9 @@ class UserController extends Controller
     // Увольнение пользователя и перераспределения
     public function destroy(Request $request, User $user)
     {
+        $authUser = $this->authUser();
+        $this->ensureUserIsVisible($authUser, $user);
+
         // Валидация входных параметров
         $request->validate([
             'distribute_to_agents' => 'nullable|boolean',
@@ -171,6 +351,8 @@ class UserController extends Controller
                     'message' => 'agent_id должен указывать на активного пользователя с ролью агент.',
                 ], 422);
             }
+
+            $this->ensureUserIsVisible($authUser, $target);
         }
 
         DB::transaction(function () use ($user, $distribute, $agentId) {
