@@ -11,6 +11,11 @@ use Illuminate\Support\Facades\DB;
 
 class PropertyReportController extends Controller
 {
+    private function isBranchScopedRole(?string $roleSlug): bool
+    {
+        return in_array($roleSlug, ['rop', 'branch_director'], true);
+    }
+
     // --- Helper: нормализация входа (array или "1,2,3")
     private function toArray($value): array
     {
@@ -33,8 +38,8 @@ class PropertyReportController extends Controller
             }
         }
 
-        // Принудительное ограничение для РОП: только свой филиал
-        if ($roleSlug === 'rop') {
+        // Принудительное ограничение для branch-scoped ролей: только свой филиал
+        if ($this->isBranchScopedRole($roleSlug)) {
             if (empty($authUser->branch_id)) {
                 $query->whereRaw('1 = 0');
                 return;
@@ -57,7 +62,7 @@ class PropertyReportController extends Controller
             }
         }
 
-        if ($roleSlug === 'rop') {
+        if ($this->isBranchScopedRole($roleSlug)) {
             if (empty($authUser->branch_id)) {
                 $query->whereRaw('1 = 0');
                 return;

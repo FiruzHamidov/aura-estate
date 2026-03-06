@@ -208,4 +208,49 @@ class UserAccessTest extends TestCase
         $response->assertJsonPath('role.slug', 'agent');
         $response->assertJsonPath('branch.id', $branch->id);
     }
+
+    public function test_superadmin_user_index_is_global_and_not_forced_to_own_branch(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $superadminRole = Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $superadmin = User::create([
+            'name' => 'Superadmin',
+            'phone' => '900000041',
+            'password' => bcrypt('password'),
+            'role_id' => $superadminRole->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+
+        User::create([
+            'name' => 'Agent A',
+            'phone' => '900000042',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+
+        $agentB = User::create([
+            'name' => 'Agent B',
+            'phone' => '900000043',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branchB->id,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($superadmin);
+
+        $response = $this->getJson('/api/user?branch_id=' . $branchB->id . '&role=agent&status=active');
+        $response->assertOk();
+        $response->assertJsonCount(1, 'data');
+        $response->assertJsonPath('data.0.id', $agentB->id);
+
+        $this->getJson('/api/user/' . $agentB->id)->assertOk();
+    }
 }

@@ -168,4 +168,83 @@ class BookingAccessTest extends TestCase
         $response->assertJsonCount(1);
         $response->assertJsonPath('0.id', $bookingA->id);
     }
+
+    public function test_superadmin_sees_all_bookings_and_can_filter_any_branch_globally(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $superadminRole = Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $superadmin = User::create([
+            'name' => 'Superadmin',
+            'phone' => '910000011',
+            'password' => bcrypt('password'),
+            'role_id' => $superadminRole->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+
+        $agentA = User::create([
+            'name' => 'Agent A',
+            'phone' => '910000012',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+
+        $agentB = User::create([
+            'name' => 'Agent B',
+            'phone' => '910000013',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branchB->id,
+            'status' => 'active',
+        ]);
+
+        $propertyA = Property::create([
+            'title' => 'Property A',
+            'created_by' => $agentA->id,
+            'agent_id' => $agentA->id,
+        ]);
+
+        $propertyB = Property::create([
+            'title' => 'Property B',
+            'created_by' => $agentB->id,
+            'agent_id' => $agentB->id,
+        ]);
+
+        $bookingA = Booking::create([
+            'property_id' => $propertyA->id,
+            'agent_id' => $agentA->id,
+            'start_time' => now()->toDateTimeString(),
+            'end_time' => now()->addHour()->toDateTimeString(),
+            'client_name' => 'Client A',
+            'client_phone' => '920000011',
+        ]);
+
+        $bookingB = Booking::create([
+            'property_id' => $propertyB->id,
+            'agent_id' => $agentB->id,
+            'start_time' => now()->toDateTimeString(),
+            'end_time' => now()->addHour()->toDateTimeString(),
+            'client_name' => 'Client B',
+            'client_phone' => '920000012',
+        ]);
+
+        Sanctum::actingAs($superadmin);
+
+        $all = $this->getJson('/api/bookings');
+        $all->assertOk();
+        $all->assertJsonCount(2);
+        $all->assertJsonFragment(['id' => $bookingA->id]);
+        $all->assertJsonFragment(['id' => $bookingB->id]);
+
+        $filtered = $this->getJson('/api/bookings?branch_id=' . $branchB->id);
+        $filtered->assertOk();
+        $filtered->assertJsonCount(1);
+        $filtered->assertJsonPath('0.id', $bookingB->id);
+    }
 }

@@ -47,7 +47,7 @@ class PropertyController extends Controller
 
         $hasStatusFilter = $request->filled('moderation_status');
 
-        if ($user && $user->hasRole('admin')) {
+        if ($user && ($user->hasRole('admin') || $user->hasRole('superadmin'))) {
             // без ограничений
         } elseif (!$user) {
             $query->where('moderation_status', 'approved');
@@ -73,7 +73,7 @@ class PropertyController extends Controller
 
         $hasStatusFilter = $request->filled('moderation_status');
 
-        if ($user && $user->hasRole('admin')) {
+        if ($user && ($user->hasRole('admin') || $user->hasRole('superadmin'))) {
             // без ограничений
         } elseif (!$user) {
             $query->where('moderation_status', 'approved');

@@ -279,8 +279,8 @@ class BookingController extends Controller
         $authUser = $request->user();
         $userRole = $authUser->role->slug ?? null;
 
-        // permission: only admin or the booking's agent can update
-        if (!($authUser && $userRole === 'admin') && $booking->agent_id !== ($authUser->id ?? null)) {
+        // permission: privileged roles or the booking's agent can update
+        if (!($authUser && $this->isPrivilegedRole($userRole)) && $booking->agent_id !== ($authUser->id ?? null)) {
             return response()->json(['error' => 'Forbidden'], 403);
         }
 
@@ -308,7 +308,9 @@ class BookingController extends Controller
         if (array_key_exists('note', $validated)) $booking->note = $validated['note'];
         if (array_key_exists('client_name', $validated)) $booking->client_name = $validated['client_name'];
         if (array_key_exists('client_phone', $validated)) $booking->client_phone = $validated['client_phone'];
-        if (array_key_exists('agent_id', $validated) && $userRole === 'admin') $booking->agent_id = $validated['agent_id'];
+        if (array_key_exists('agent_id', $validated) && $this->isPrivilegedRole($userRole)) {
+            $booking->agent_id = $validated['agent_id'];
+        }
 
         $booking->save();
 
