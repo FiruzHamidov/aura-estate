@@ -11,6 +11,9 @@ class DatabaseSeeder extends Seeder
         // Вызываем все сидеры по очереди
         $this->call([
             RoleSeeder::class,
+            ClientTypeSeeder::class,
+            ClientNeedTypeSeeder::class,
+            ClientNeedStatusSeeder::class,
             PropertyTypeSeeder::class,
             PropertyStatusSeeder::class,
             LocationSeeder::class,

@@ -158,7 +158,7 @@ class BookingController extends Controller
 
     public function index(Request $request)
     {
-        $q = Booking::query()->with(['property', 'agent', 'client']);
+        $q = Booking::query()->with(['property', 'agent', 'client.type']);
 
         // from / to: convert to UTC for DB comparison
         $fromRaw = $request->input('from') ?? $request->input('date_from');
@@ -233,7 +233,7 @@ class BookingController extends Controller
         $booking = Booking::create($validated);
 
         // Ensure relations are available for subject/description
-        $booking->load(['property', 'agent', 'client']);
+        $booking->load(['property', 'agent', 'client.type']);
         $this->transformBookingForResponse($booking);
 
         $bitrixResult = null;
@@ -288,7 +288,7 @@ class BookingController extends Controller
 
     public function show($id)
     {
-        $booking = Booking::with(['property', 'agent', 'client'])->findOrFail($id);
+        $booking = Booking::with(['property', 'agent', 'client.type'])->findOrFail($id);
         $this->ensureBookingIsVisible(request(), $booking);
         $this->transformBookingForResponse($booking);
 
@@ -364,7 +364,7 @@ class BookingController extends Controller
 
         $booking->save();
 
-        $booking->load(['property', 'agent', 'client']);
+        $booking->load(['property', 'agent', 'client.type']);
         $this->transformBookingForResponse($booking);
 
         return response()->json($booking);

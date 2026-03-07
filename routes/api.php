@@ -7,6 +7,10 @@ use App\Http\Controllers\{AuthController,
     BuildingTypeController,
     ChatController,
     ClientController,
+    ClientNeedController,
+    ClientNeedStatusController,
+    ClientNeedTypeController,
+    ClientTypeController,
     ConstructionStageController,
     ContractTypeController,
     DeveloperController,
@@ -61,6 +65,9 @@ Route::get('/heating-types',     [HeatingTypeController::class, 'index']);
 Route::get('/repair-types',      [RepairTypeController::class, 'index']);
 Route::get('/contract-types',    [ContractTypeController::class, 'index']);
 Route::get('/branches',          [BranchController::class, 'index']);
+Route::get('/client-types',      [ClientTypeController::class, 'index']);
+Route::get('/client-need-types', [ClientNeedTypeController::class, 'index']);
+Route::get('/client-need-statuses', [ClientNeedStatusController::class, 'index']);
 
 Route::get('/user/agents', [UserController::class, 'agents']);
 Route::get('/public/realtors/{id}', [PublicRealtorController::class, 'show'])->whereNumber('id');
@@ -131,6 +138,11 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::put('/clients/settings',         [ClientController::class, 'updateSettings']);
     Route::patch('/clients/settings',       [ClientController::class, 'updateSettings']);
     Route::apiResource('clients',           ClientController::class);
+    Route::apiResource('clients.needs',     ClientNeedController::class)->only(['index', 'store']);
+    Route::apiResource('client-needs',      ClientNeedController::class)->only(['show', 'update', 'destroy']);
+    Route::apiResource('client-types',      ClientTypeController::class)->except(['index']);
+    Route::apiResource('client-need-types', ClientNeedTypeController::class)->except(['index']);
+    Route::apiResource('client-need-statuses', ClientNeedStatusController::class)->except(['index']);
 
     // Избранное
     Route::get('/favorites',  [FavoriteController::class, 'index']);

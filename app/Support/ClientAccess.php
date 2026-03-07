@@ -3,6 +3,8 @@
 namespace App\Support;
 
 use App\Models\Client;
+use App\Models\ClientNeed;
+use App\Models\ClientType;
 use App\Models\Setting;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
@@ -62,7 +64,7 @@ class ClientAccess
     {
         $roleSlug = $this->roleSlug($authUser);
 
-        $query = Client::query()->with(['branch', 'creator', 'responsibleAgent']);
+        $query = Client::query()->with(['branch', 'creator', 'responsibleAgent', 'type']);
 
         if ($this->isPrivilegedRole($roleSlug)) {
             return $query;
@@ -97,6 +99,15 @@ class ClientAccess
         abort_unless($allowed, 403, 'Forbidden');
     }
 
+    public function ensureNeedVisible(User $authUser, ClientNeed $clientNeed): void
+    {
+        $clientNeed->loadMissing('client');
+
+        abort_unless($clientNeed->client, 404, 'Client not found.');
+
+        $this->ensureVisible($authUser, $clientNeed->client);
+    }
+
     public function normalizeMutationData(array $data, User $authUser): array
     {
         $roleSlug = $this->roleSlug($authUser);
@@ -113,6 +124,10 @@ class ClientAccess
             && empty($data['responsible_agent_id'])
         ) {
             $data['responsible_agent_id'] = $authUser->id;
+        }
+
+        if (empty($data['client_type_id'])) {
+            $data['client_type_id'] = $this->defaultClientTypeId();
         }
 
         return $data;
@@ -143,5 +158,48 @@ class ClientAccess
                 abort(422, sprintf('%s must belong to your branch.', $field));
             }
         }
+    }
+
+    public function normalizeNeedMutationData(array $data, User $authUser, Client $client): array
+    {
+        $data['client_id'] = $client->id;
+        $data['created_by'] ??= $authUser->id;
+        $data['responsible_agent_id'] ??= $client->responsible_agent_id ?: $authUser->id;
+
+        return $data;
+    }
+
+    public function validateNeedMutationTargets(User $authUser, Client $client, array $data): void
+    {
+        $this->ensureVisible($authUser, $client);
+
+        $roleSlug = $this->roleSlug($authUser);
+
+        if (!$this->isBranchScopedRole($roleSlug)) {
+            return;
+        }
+
+        foreach (['created_by', 'responsible_agent_id'] as $field) {
+            if (empty($data[$field])) {
+                continue;
+            }
+
+            $targetUser = User::query()->find($data[$field]);
+
+            if (!$targetUser || (int) $targetUser->branch_id !== (int) $client->branch_id) {
+                abort(422, sprintf('%s must belong to the client branch.', $field));
+            }
+        }
+    }
+
+    public function defaultClientTypeId(): int
+    {
+        $id = ClientType::query()
+            ->where('slug', ClientType::SLUG_INDIVIDUAL)
+            ->value('id');
+
+        abort_unless($id, 500, 'Default client type is not configured.');
+
+        return (int) $id;
     }
 }

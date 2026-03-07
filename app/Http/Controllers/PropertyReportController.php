@@ -1247,7 +1247,7 @@ class PropertyReportController extends Controller
 
         if ($request->filled('agent_id')) {
             $agentIds = $this->toArray($request->input('agent_id'));
-            $q->whereIn('created_by', $agentIds);
+            $q->whereIn('properties.created_by', $agentIds);
         }
 
         $rows = (clone $q)
@@ -1279,11 +1279,11 @@ class PropertyReportController extends Controller
     public function agentClientsStats(Request $request)
     {
         $base = Property::query();
-        [$q] = $this->applyCommonFilters($request, $base);
+        [$q] = $this->applyCommonFilters($request, $base, 'properties.created_by');
 
         if ($request->filled('agent_id')) {
             $agentIds = $this->toArray($request->input('agent_id'));
-            $q->whereIn('created_by', $agentIds);
+            $q->whereIn('properties.created_by', $agentIds);
         }
 
         // === УНИКАЛЬНЫЕ КЛИЕНТЫ (КОРРЕКТНО) ===
@@ -1291,12 +1291,17 @@ class PropertyReportController extends Controller
         // 2) если телефона нет → уникальность по имени
 
         $clients = (clone $q)
+            ->leftJoin('clients as buyer_clients', 'buyer_clients.id', '=', 'properties.buyer_client_id')
+            ->leftJoin('client_types as buyer_client_types', 'buyer_client_types.id', '=', 'buyer_clients.client_type_id')
             ->where(function ($qq) {
-                $qq->whereNotNull('buyer_phone')
-                    ->where('buyer_phone', '!=', '')
+                $qq->whereNotNull('properties.buyer_client_id')
                     ->orWhere(function ($q2) {
-                        $q2->whereNotNull('buyer_full_name')
-                            ->where('buyer_full_name', '!=', '');
+                        $q2->whereNotNull('properties.buyer_phone')
+                            ->where('properties.buyer_phone', '!=', '');
+                    })
+                    ->orWhere(function ($q2) {
+                        $q2->whereNotNull('properties.buyer_full_name')
+                            ->where('properties.buyer_full_name', '!=', '');
                     });
             });
 
@@ -1304,9 +1309,11 @@ class PropertyReportController extends Controller
             ->selectRaw("
                 COUNT(DISTINCT
                     CASE
-                        WHEN buyer_phone IS NOT NULL AND buyer_phone != ''
-                            THEN buyer_phone
-                        ELSE CONCAT('name:', buyer_full_name)
+                        WHEN properties.buyer_client_id IS NOT NULL
+                            THEN CONCAT('client:', properties.buyer_client_id)
+                        WHEN properties.buyer_phone IS NOT NULL AND properties.buyer_phone != ''
+                            THEN properties.buyer_phone
+                        ELSE CONCAT('name:', properties.buyer_full_name)
                     END
                 ) as cnt
             ")
@@ -1314,13 +1321,23 @@ class PropertyReportController extends Controller
 
         // === УНИКАЛЬНЫЕ БИЗНЕС-КЛИЕНТЫ ===
         $businessClients = (clone $clients)
-            ->where('is_business_owner', true)
+            ->where(function ($query) {
+                $query->where(function ($q) {
+                    $q->whereNotNull('properties.buyer_client_id')
+                        ->where('buyer_client_types.is_business', true);
+                })->orWhere(function ($q) {
+                    $q->whereNull('properties.buyer_client_id')
+                        ->where('properties.is_business_owner', true);
+                });
+            })
             ->selectRaw("
                 COUNT(DISTINCT
                     CASE
-                        WHEN buyer_phone IS NOT NULL AND buyer_phone != ''
-                            THEN buyer_phone
-                        ELSE CONCAT('name:', buyer_full_name)
+                        WHEN properties.buyer_client_id IS NOT NULL
+                            THEN CONCAT('client:', properties.buyer_client_id)
+                        WHEN properties.buyer_phone IS NOT NULL AND properties.buyer_phone != ''
+                            THEN properties.buyer_phone
+                        ELSE CONCAT('name:', properties.buyer_full_name)
                     END
                 ) as cnt
             ")

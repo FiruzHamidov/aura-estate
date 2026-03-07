@@ -4,11 +4,13 @@ namespace Tests\Feature;
 
 use App\Models\Branch;
 use App\Models\Client;
+use App\Models\ClientType;
 use App\Models\Role;
 use App\Models\Setting;
 use App\Models\User;
 use App\Support\ClientAccess;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
@@ -57,6 +59,35 @@ class ClientAccessTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('client_types', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->unique();
+            $table->boolean('is_business')->default(false);
+            $table->unsignedInteger('sort_order')->default(0);
+            $table->boolean('is_active')->default(true);
+            $table->timestamps();
+        });
+
+        Schema::create('client_need_types', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->unique();
+            $table->unsignedInteger('sort_order')->default(0);
+            $table->boolean('is_active')->default(true);
+            $table->timestamps();
+        });
+
+        Schema::create('client_need_statuses', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->unique();
+            $table->boolean('is_closed')->default(false);
+            $table->unsignedInteger('sort_order')->default(0);
+            $table->boolean('is_active')->default(true);
+            $table->timestamps();
+        });
+
         Schema::create('clients', function (Blueprint $table) {
             $table->id();
             $table->string('full_name');
@@ -67,8 +98,33 @@ class ClientAccessTest extends TestCase
             $table->unsignedBigInteger('branch_id')->nullable();
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('responsible_agent_id')->nullable();
+            $table->unsignedBigInteger('client_type_id')->nullable();
             $table->enum('status', ['active', 'inactive'])->default('active');
             $table->unsignedBigInteger('bitrix_contact_id')->nullable();
+            $table->json('meta')->nullable();
+            $table->softDeletes();
+            $table->timestamps();
+        });
+
+        Schema::create('client_needs', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('client_id');
+            $table->unsignedBigInteger('type_id');
+            $table->unsignedBigInteger('status_id');
+            $table->decimal('budget_from', 15, 2)->nullable();
+            $table->decimal('budget_to', 15, 2)->nullable();
+            $table->string('currency', 3)->default('TJS');
+            $table->unsignedBigInteger('location_id')->nullable();
+            $table->string('district')->nullable();
+            $table->unsignedBigInteger('property_type_id')->nullable();
+            $table->unsignedInteger('rooms_from')->nullable();
+            $table->unsignedInteger('rooms_to')->nullable();
+            $table->decimal('area_from', 10, 2)->nullable();
+            $table->decimal('area_to', 10, 2)->nullable();
+            $table->text('comment')->nullable();
+            $table->unsignedBigInteger('created_by')->nullable();
+            $table->unsignedBigInteger('responsible_agent_id')->nullable();
+            $table->timestamp('closed_at')->nullable();
             $table->json('meta')->nullable();
             $table->softDeletes();
             $table->timestamps();
@@ -84,6 +140,50 @@ class ClientAccessTest extends TestCase
             $table->timestamp('expires_at')->nullable();
             $table->timestamps();
         });
+
+        DB::table('client_types')->insert([
+            [
+                'id' => 1,
+                'name' => 'Физлицо',
+                'slug' => ClientType::SLUG_INDIVIDUAL,
+                'is_business' => false,
+                'sort_order' => 10,
+                'is_active' => true,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'id' => 2,
+                'name' => 'Бизнесмен',
+                'slug' => ClientType::SLUG_BUSINESS_OWNER,
+                'is_business' => true,
+                'sort_order' => 20,
+                'is_active' => true,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+        ]);
+
+        DB::table('client_need_types')->insert([
+            'id' => 1,
+            'name' => 'Покупка',
+            'slug' => 'buy',
+            'sort_order' => 10,
+            'is_active' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        DB::table('client_need_statuses')->insert([
+            'id' => 1,
+            'name' => 'Новая',
+            'slug' => 'new',
+            'is_closed' => false,
+            'sort_order' => 10,
+            'is_active' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
     }
 
     public function test_agent_sees_all_clients_from_own_branch_in_all_branch_mode(): void
@@ -215,6 +315,46 @@ class ClientAccessTest extends TestCase
             ->assertJsonPath('agent_visibility_mode', ClientAccess::VISIBILITY_OWN_ONLY);
     }
 
+    public function test_admin_can_create_business_client_with_client_type(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $admin = $this->createUser($adminRole, $branch, 'Admin');
+
+        Sanctum::actingAs($admin);
+
+        $response = $this->postJson('/api/clients', [
+            'full_name' => 'Business Client',
+            'phone' => '+992900000111',
+            'branch_id' => $branch->id,
+            'client_type_id' => 2,
+        ]);
+
+        $response->assertCreated();
+        $response->assertJsonPath('client_type_id', 2);
+        $response->assertJsonPath('type.slug', ClientType::SLUG_BUSINESS_OWNER);
+        $response->assertJsonPath('is_business_client', true);
+    }
+
+    public function test_admin_can_filter_clients_by_business_and_type(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $admin = $this->createUser($adminRole, $branch, 'Admin');
+
+        $businessClient = $this->createClient($branch, $admin, $admin, 'Business Client', 2);
+        $this->createClient($branch, $admin, $admin, 'Regular Client', 1);
+
+        Sanctum::actingAs($admin);
+
+        $response = $this->getJson('/api/clients?is_business=1&client_type_id=2');
+
+        $response->assertOk();
+        $response->assertJsonCount(1, 'data');
+        $response->assertJsonPath('data.0.id', $businessClient->id);
+        $response->assertJsonPath('data.0.is_business_client', true);
+    }
+
     private function createUser(Role $role, Branch $branch, string $name): User
     {
         return User::create([
@@ -227,7 +367,7 @@ class ClientAccessTest extends TestCase
         ]);
     }
 
-    private function createClient(Branch $branch, User $creator, User $responsibleAgent, string $fullName): Client
+    private function createClient(Branch $branch, User $creator, User $responsibleAgent, string $fullName, int $clientTypeId = 1): Client
     {
         return Client::create([
             'full_name' => $fullName,
@@ -236,6 +376,7 @@ class ClientAccessTest extends TestCase
             'branch_id' => $branch->id,
             'created_by' => $creator->id,
             'responsible_agent_id' => $responsibleAgent->id,
+            'client_type_id' => $clientTypeId,
             'status' => 'active',
         ]);
     }

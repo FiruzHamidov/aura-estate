@@ -28,15 +28,16 @@ class PropertyController extends Controller
     private function syncPropertyClientSnapshots(array $data): array
     {
         if (!empty($data['owner_client_id'])) {
-            $ownerClient = Client::query()->find($data['owner_client_id']);
+            $ownerClient = Client::query()->with('type')->find($data['owner_client_id']);
             if ($ownerClient) {
                 $data['owner_name'] = $ownerClient->full_name;
                 $data['owner_phone'] = $ownerClient->phone;
+                $data['is_business_owner'] = (bool) ($ownerClient->type?->is_business ?? false);
             }
         }
 
         if (!empty($data['buyer_client_id'])) {
-            $buyerClient = Client::query()->find($data['buyer_client_id']);
+            $buyerClient = Client::query()->with('type')->find($data['buyer_client_id']);
             if ($buyerClient) {
                 $data['buyer_full_name'] = $buyerClient->full_name;
                 $data['buyer_phone'] = $buyerClient->phone;
@@ -86,7 +87,7 @@ class PropertyController extends Controller
     private function baseQueryMyProperties(Request $request): Builder
     {
         $user = auth()->user();
-        $query = Property::query()->with(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'heating', 'parking', 'saleAgents', 'ownerClient', 'buyerClient']);
+        $query = Property::query()->with(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'heating', 'parking', 'saleAgents', 'ownerClient.type', 'buyerClient.type']);
 
         $hasStatusFilter = $request->filled('moderation_status');
 
@@ -112,7 +113,7 @@ class PropertyController extends Controller
     private function baseQuery(Request $request): Builder
     {
         $user = auth()->user();
-        $query = Property::query()->with(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'heating', 'parking', 'ownerClient', 'buyerClient']);
+        $query = Property::query()->with(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'heating', 'parking', 'ownerClient.type', 'buyerClient.type']);
 
         $hasStatusFilter = $request->filled('moderation_status');
 
@@ -611,7 +612,7 @@ class PropertyController extends Controller
 
         $this->storePhotosFromRequest($request, $property);
 
-        return response()->json($property->load(['photos', 'ownerClient', 'buyerClient']));
+        return response()->json($property->load(['photos', 'ownerClient.type', 'buyerClient.type']));
     }
 
     /**
@@ -653,7 +654,7 @@ class PropertyController extends Controller
             $this->applyOrder($property, $request->photo_order);
         }
 
-        return response()->json($property->load(['photos', 'ownerClient', 'buyerClient']));
+        return response()->json($property->load(['photos', 'ownerClient.type', 'buyerClient.type']));
     }
 
     private function storePhotosFromRequest(Request $request, Property $property, bool $append = false): void
@@ -720,7 +721,7 @@ class PropertyController extends Controller
     {
 //        $user = auth()->user();
 
-        return response()->json($property->load(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'contractType','developer', 'heating', 'parking', 'buildingType', 'ownerClient', 'buyerClient']));
+        return response()->json($property->load(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'contractType','developer', 'heating', 'parking', 'buildingType', 'ownerClient.type', 'buyerClient.type']));
     }
 
     public function destroy(Property $property)
@@ -855,7 +856,7 @@ class PropertyController extends Controller
 
         return response()->json([
             'message' => 'Объявление успешно обновлено',
-            'data' => $property->fresh(['saleAgents', 'buyerClient', 'ownerClient']),
+            'data' => $property->fresh(['saleAgents', 'buyerClient.type', 'ownerClient.type']),
         ]);
     }
 
@@ -1336,7 +1337,7 @@ class PropertyController extends Controller
         }
 
         // eager load
-        $result = $query->with(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'contractType', 'ownerClient', 'buyerClient'])
+        $result = $query->with(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'contractType', 'ownerClient.type', 'buyerClient.type'])
             ->limit($limit)
             ->get();
 

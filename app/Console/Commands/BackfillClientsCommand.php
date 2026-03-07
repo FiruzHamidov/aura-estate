@@ -2,8 +2,9 @@
 
 namespace App\Console\Commands;
 
-use App\Models\Client;
 use App\Models\Booking;
+use App\Models\Client;
+use App\Models\ClientType;
 use App\Models\Property;
 use App\Models\User;
 use App\Support\ClientPhone;
@@ -14,6 +15,9 @@ class BackfillClientsCommand extends Command
 {
     protected $signature = 'clients:backfill';
     protected $description = 'Create and link CRM clients from existing bookings and properties';
+
+    private ?int $individualTypeId = null;
+    private ?int $businessTypeId = null;
 
     public function handle(): int
     {
@@ -59,6 +63,8 @@ class BackfillClientsCommand extends Command
                             'client_name' => DB::raw("COALESCE(client_name, '" . str_replace("'", "''", $client->full_name) . "')"),
                             'client_phone' => DB::raw("COALESCE(client_phone, '" . str_replace("'", "''", (string) $client->phone) . "')"),
                         ]);
+
+                    $this->ensureClientHasType($client);
                 }
             });
     }
@@ -83,6 +89,12 @@ class BackfillClientsCommand extends Command
                         $property->created_by,
                         $property->agent_id ?: $property->created_by
                     );
+
+                    if ($property->is_business_owner) {
+                        $this->markClientAsBusiness($client);
+                    } else {
+                        $this->ensureClientHasType($client);
+                    }
 
                     $property->update(['owner_client_id' => $client->id]);
                 }
@@ -110,6 +122,7 @@ class BackfillClientsCommand extends Command
                         $property->agent_id ?: $property->created_by
                     );
 
+                    $this->ensureClientHasType($client);
                     $property->update(['buyer_client_id' => $client->id]);
                 }
             });
@@ -137,9 +150,44 @@ class BackfillClientsCommand extends Command
                         $booking->agent_id
                     );
 
+                    $this->ensureClientHasType($client);
                     $booking->update(['crm_client_id' => $client->id]);
                 }
             });
+    }
+
+    private function individualTypeId(): ?int
+    {
+        return $this->individualTypeId ??= ClientType::query()
+            ->where('slug', ClientType::SLUG_INDIVIDUAL)
+            ->value('id');
+    }
+
+    private function businessTypeId(): ?int
+    {
+        return $this->businessTypeId ??= ClientType::query()
+            ->where('slug', ClientType::SLUG_BUSINESS_OWNER)
+            ->value('id');
+    }
+
+    private function ensureClientHasType(Client $client): void
+    {
+        if ($client->client_type_id || !$this->individualTypeId()) {
+            return;
+        }
+
+        $client->update(['client_type_id' => $this->individualTypeId()]);
+    }
+
+    private function markClientAsBusiness(Client $client): void
+    {
+        $businessTypeId = $this->businessTypeId();
+
+        if (!$businessTypeId) {
+            return;
+        }
+
+        $client->update(['client_type_id' => $businessTypeId]);
     }
 
     private function findOrCreateClient(
@@ -175,6 +223,7 @@ class BackfillClientsCommand extends Command
             'branch_id' => $branchId,
             'created_by' => $createdBy,
             'responsible_agent_id' => $responsibleAgentId,
+            'client_type_id' => $this->individualTypeId(),
             'status' => 'active',
         ]);
     }

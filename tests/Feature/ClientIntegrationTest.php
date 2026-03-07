@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\Branch;
 use App\Models\Client;
+use App\Models\ClientType;
 use App\Models\Property;
 use App\Models\Role;
 use App\Models\User;
@@ -57,6 +58,16 @@ class ClientIntegrationTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('client_types', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->unique();
+            $table->boolean('is_business')->default(false);
+            $table->unsignedInteger('sort_order')->default(0);
+            $table->boolean('is_active')->default(true);
+            $table->timestamps();
+        });
+
         Schema::create('clients', function (Blueprint $table) {
             $table->id();
             $table->string('full_name');
@@ -67,6 +78,7 @@ class ClientIntegrationTest extends TestCase
             $table->unsignedBigInteger('branch_id')->nullable();
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('responsible_agent_id')->nullable();
+            $table->unsignedBigInteger('client_type_id')->nullable();
             $table->enum('status', ['active', 'inactive'])->default('active');
             $table->unsignedBigInteger('bitrix_contact_id')->nullable();
             $table->json('meta')->nullable();
@@ -212,6 +224,29 @@ class ClientIntegrationTest extends TestCase
             $table->timestamp('expires_at')->nullable();
             $table->timestamps();
         });
+
+        DB::table('client_types')->insert([
+            [
+                'id' => 1,
+                'name' => 'Физлицо',
+                'slug' => ClientType::SLUG_INDIVIDUAL,
+                'is_business' => false,
+                'sort_order' => 10,
+                'is_active' => true,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'id' => 2,
+                'name' => 'Бизнесмен',
+                'slug' => ClientType::SLUG_BUSINESS_OWNER,
+                'is_business' => true,
+                'sort_order' => 20,
+                'is_active' => true,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+        ]);
     }
 
     public function test_booking_store_uses_new_client_entity_and_fills_snapshot_fields(): void
@@ -292,6 +327,62 @@ class ClientIntegrationTest extends TestCase
         $this->assertSame('sold', $property->moderation_status);
     }
 
+    public function test_agent_clients_stats_use_linked_client_type_with_legacy_fallback(): void
+    {
+        [$agent] = $this->seedClientContext(withProperty: false);
+
+        $businessClient = Client::create([
+            'full_name' => 'Business Buyer',
+            'phone' => '+992 90 555 1001',
+            'phone_normalized' => '992905551001',
+            'branch_id' => $agent->branch_id,
+            'created_by' => $agent->id,
+            'responsible_agent_id' => $agent->id,
+            'client_type_id' => 2,
+            'status' => 'active',
+        ]);
+
+        Property::create([
+            'title' => 'Property with linked business client',
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 100000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+            'buyer_client_id' => $businessClient->id,
+            'buyer_full_name' => $businessClient->full_name,
+            'buyer_phone' => $businessClient->phone,
+            'listing_type' => 'regular',
+            'moderation_status' => 'sold',
+        ]);
+
+        Property::create([
+            'title' => 'Legacy business property',
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 120000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+            'buyer_full_name' => 'Legacy Buyer',
+            'buyer_phone' => '+992 90 555 2002',
+            'is_business_owner' => true,
+            'listing_type' => 'regular',
+            'moderation_status' => 'sold',
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $response = $this->getJson('/api/reports/agent/clients?agent_id=' . $agent->id);
+
+        $response->assertOk();
+        $response->assertJsonPath('unique_clients', 2);
+        $response->assertJsonPath('business_clients', 2);
+    }
+
     private function seedClientContext(bool $withProperty = true): array
     {
         $branch = Branch::create(['name' => 'Branch A']);
@@ -312,6 +403,7 @@ class ClientIntegrationTest extends TestCase
             'branch_id' => $branch->id,
             'created_by' => $agent->id,
             'responsible_agent_id' => $agent->id,
+            'client_type_id' => 1,
             'status' => 'active',
         ]);
 
