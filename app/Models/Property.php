@@ -49,6 +49,7 @@ class Property extends Model
         'contract_type_id',
         'views_count',
         'owner_name',
+        'owner_client_id',
         'object_key',
         'is_business_owner',
         'developer_id',
@@ -72,6 +73,7 @@ class Property extends Model
         'deposit_taken_at',
         'buyer_full_name',
         'buyer_phone',
+        'buyer_client_id',
         'company_expected_income',
         'company_expected_income_currency',
         'planned_contract_signed_at',
@@ -125,6 +127,16 @@ class Property extends Model
     public function agent()
     {
         return $this->belongsTo(User::class, 'agent_id');
+    }
+
+    public function ownerClient()
+    {
+        return $this->belongsTo(Client::class, 'owner_client_id');
+    }
+
+    public function buyerClient()
+    {
+        return $this->belongsTo(Client::class, 'buyer_client_id');
     }
 
     public function getCurrencySymbolAttribute(): string

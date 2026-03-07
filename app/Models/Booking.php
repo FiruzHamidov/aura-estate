@@ -14,6 +14,7 @@ class Booking extends Model
         'property_id',
         'agent_id',
         'client_id',
+        'crm_client_id',
         'start_time',
         'end_time',
         'note',
@@ -33,6 +34,11 @@ class Booking extends Model
     }
 
     public function client()
+    {
+        return $this->belongsTo(Client::class, 'crm_client_id');
+    }
+
+    public function legacyClientUser()
     {
         return $this->belongsTo(User::class, 'client_id');
     }

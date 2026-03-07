@@ -3,10 +3,12 @@
 namespace App\Http\Controllers;
 
 use App\Models\Booking;
+use App\Models\Client;
 use App\Models\Role;
 use App\Models\User;
-use Illuminate\Http\Request;
 use App\Services\Bitrix24Client;
+use App\Support\ClientAccess;
+use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -15,6 +17,11 @@ use Illuminate\Validation\ValidationException;
 
 class BookingController extends Controller
 {
+    public function __construct(
+        private readonly ClientAccess $clientAccess
+    ) {
+    }
+
     private function authUser(Request $request): ?User
     {
         $user = $request->user();
@@ -87,6 +94,34 @@ class BookingController extends Controller
         $booking->end_time = $this->formatUtcToApiIso8601($booking->end_time);
 
         return $booking;
+    }
+
+    private function resolveVisibleClient(Request $request, ?int $clientId): ?Client
+    {
+        if (!$clientId) {
+            return null;
+        }
+
+        $client = Client::query()->findOrFail($clientId);
+
+        if ($authUser = $this->authUser($request)) {
+            $this->clientAccess->ensureVisible($authUser, $client);
+        }
+
+        return $client;
+    }
+
+    private function syncBookingSnapshot(array $data, ?Client $client): array
+    {
+        if (!$client) {
+            return $data;
+        }
+
+        $data['crm_client_id'] = $client->id;
+        $data['client_name'] = $client->full_name;
+        $data['client_phone'] = $client->phone;
+
+        return $data;
     }
 
     private function applyBranchAccessForAgents(Request $request, $query, string $agentColumn = 'agent_id'): void
@@ -166,17 +201,21 @@ class BookingController extends Controller
                         ->whereIn('role_id', Role::query()->where('slug', 'agent')->select('id'));
                 }),
             ],
-            'client_id' => 'nullable|exists:users,id',
+            'client_id' => 'nullable|exists:clients,id',
             'start_time' => 'required|date',
             'end_time' => 'required|date',
             'note' => 'nullable|string',
-            'client_name' => 'required|string',
-            'client_phone' => 'required|string',
+            'client_name' => 'required_without:client_id|string',
+            'client_phone' => 'required_without:client_id|string',
             'deal_id' => 'nullable|integer',
             'contact_id' => 'nullable|integer',
             'place' => 'nullable|string',
             'sync_to_b24' => 'sometimes|boolean',
         ]);
+
+        $client = $this->resolveVisibleClient($request, $validated['client_id'] ?? null);
+        $validated = $this->syncBookingSnapshot($validated, $client);
+        unset($validated['client_id']);
 
         $startCarbon = $this->parseInputDateTimeToUtc($validated['start_time']);
         $endCarbon   = $this->parseInputDateTimeToUtc($validated['end_time']);
@@ -272,6 +311,7 @@ class BookingController extends Controller
                         ->whereIn('role_id', Role::query()->where('slug', 'agent')->select('id'));
                 }),
             ],
+            'client_id' => 'sometimes|nullable|exists:clients,id',
             'client_name' => 'sometimes|string',
             'client_phone' => 'sometimes|string',
         ]);
@@ -303,6 +343,16 @@ class BookingController extends Controller
         }
         if (isset($validated['end_time'])) {
             $booking->end_time = $endCarbon->toDateTimeString();
+        }
+
+        if (array_key_exists('client_id', $validated)) {
+            $client = $this->resolveVisibleClient($request, $validated['client_id']);
+            $booking->crm_client_id = $client?->id;
+
+            if ($client) {
+                $booking->client_name = $client->full_name;
+                $booking->client_phone = $client->phone;
+            }
         }
 
         if (array_key_exists('note', $validated)) $booking->note = $validated['note'];
@@ -360,7 +410,7 @@ class BookingController extends Controller
                 'agent_id',
                 DB::raw('COUNT(*) as shows_count'),
                 DB::raw($minutesExpr),
-                DB::raw('COUNT(DISTINCT client_id) as unique_clients'),
+                DB::raw('COUNT(DISTINCT COALESCE(crm_client_id, client_id)) as unique_clients'),
                 DB::raw('COUNT(DISTINCT property_id) as unique_properties'),
                 DB::raw('MIN(start_time) as first_show'),
                 DB::raw('MAX(start_time) as last_show'),

@@ -23,6 +23,7 @@ class SavePropertyDealRequest extends FormRequest
              */
             'buyer_full_name' => 'required_if:moderation_status,deposit|string|min:3',
             'buyer_phone'     => 'required_if:moderation_status,deposit|string|min:6',
+            'buyer_client_id' => 'nullable|exists:clients,id',
 
             'deposit_amount'       => 'required_if:moderation_status,deposit|numeric|min:0.01',
             'deposit_currency'     => 'required_if:moderation_status,deposit|in:TJS,USD',

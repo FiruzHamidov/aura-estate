@@ -1,0 +1,349 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Models\Branch;
+use App\Models\Client;
+use App\Models\Property;
+use App\Models\Role;
+use App\Models\User;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\DB;
+use Laravel\Sanctum\Sanctum;
+use Tests\TestCase;
+
+class ClientIntegrationTest extends TestCase
+{
+    private int $phoneCounter = 940000000;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        Schema::dropAllTables();
+
+        Schema::create('roles', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->unique();
+            $table->string('description')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('branches', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->timestamps();
+        });
+
+        Schema::create('users', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('email')->nullable()->unique();
+            $table->string('phone')->unique();
+            $table->string('password')->nullable();
+            $table->foreignId('role_id')->constrained('roles')->cascadeOnDelete();
+            $table->foreignId('branch_id')->nullable()->constrained('branches')->nullOnDelete();
+            $table->enum('status', ['active', 'inactive'])->default('active');
+            $table->enum('auth_method', ['password', 'sms'])->default('password');
+            $table->rememberToken()->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('settings', function (Blueprint $table) {
+            $table->string('key')->primary();
+            $table->text('value')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('clients', function (Blueprint $table) {
+            $table->id();
+            $table->string('full_name');
+            $table->string('phone')->nullable();
+            $table->string('phone_normalized')->nullable();
+            $table->string('email')->nullable();
+            $table->text('note')->nullable();
+            $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('created_by')->nullable();
+            $table->unsignedBigInteger('responsible_agent_id')->nullable();
+            $table->enum('status', ['active', 'inactive'])->default('active');
+            $table->unsignedBigInteger('bitrix_contact_id')->nullable();
+            $table->json('meta')->nullable();
+            $table->softDeletes();
+            $table->timestamps();
+        });
+
+        Schema::create('property_types', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->timestamps();
+        });
+
+        Schema::create('property_statuses', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->timestamps();
+        });
+
+        Schema::create('properties', function (Blueprint $table) {
+            $table->id();
+            $table->string('title')->nullable();
+            $table->text('description')->nullable();
+            $table->unsignedBigInteger('type_id')->nullable();
+            $table->unsignedBigInteger('status_id')->nullable();
+            $table->unsignedBigInteger('location_id')->nullable();
+            $table->unsignedBigInteger('repair_type_id')->nullable();
+            $table->decimal('price', 15, 2)->nullable();
+            $table->decimal('discount_price', 15, 2)->nullable();
+            $table->string('currency', 3)->nullable();
+            $table->string('offer_type')->nullable();
+            $table->integer('rooms')->nullable();
+            $table->string('youtube_link')->nullable();
+            $table->decimal('total_area', 10, 2)->nullable();
+            $table->integer('land_size')->nullable();
+            $table->decimal('living_area', 10, 2)->nullable();
+            $table->integer('floor')->nullable();
+            $table->integer('total_floors')->nullable();
+            $table->integer('year_built')->nullable();
+            $table->string('condition')->nullable();
+            $table->string('construction_status')->nullable();
+            $table->string('renovation_permission_status')->nullable();
+            $table->string('apartment_type')->nullable();
+            $table->boolean('has_garden')->default(false);
+            $table->boolean('has_parking')->default(false);
+            $table->boolean('is_mortgage_available')->default(false);
+            $table->boolean('is_from_developer')->default(false);
+            $table->string('moderation_status')->default('approved');
+            $table->string('landmark')->nullable();
+            $table->decimal('latitude', 10, 7)->nullable();
+            $table->decimal('longitude', 10, 7)->nullable();
+            $table->unsignedBigInteger('created_by')->nullable();
+            $table->unsignedBigInteger('agent_id')->nullable();
+            $table->string('district')->nullable();
+            $table->string('address')->nullable();
+            $table->string('owner_phone')->nullable();
+            $table->string('listing_type')->nullable();
+            $table->unsignedBigInteger('contract_type_id')->nullable();
+            $table->unsignedInteger('views_count')->default(0);
+            $table->string('owner_name')->nullable();
+            $table->unsignedBigInteger('owner_client_id')->nullable();
+            $table->string('object_key')->nullable();
+            $table->boolean('is_business_owner')->default(false);
+            $table->unsignedBigInteger('developer_id')->nullable();
+            $table->boolean('is_full_apartment')->default(false);
+            $table->boolean('is_for_aura')->default(false);
+            $table->unsignedBigInteger('parking_type_id')->nullable();
+            $table->unsignedBigInteger('heating_type_id')->nullable();
+            $table->text('rejection_comment')->nullable();
+            $table->text('status_comment')->nullable();
+            $table->timestamp('sold_at')->nullable();
+            $table->decimal('actual_sale_price', 15, 2)->nullable();
+            $table->string('actual_sale_currency', 3)->nullable();
+            $table->decimal('company_commission_amount', 15, 2)->nullable();
+            $table->string('company_commission_currency', 3)->nullable();
+            $table->string('money_holder')->nullable();
+            $table->timestamp('money_received_at')->nullable();
+            $table->timestamp('contract_signed_at')->nullable();
+            $table->decimal('deposit_amount', 15, 2)->nullable();
+            $table->string('deposit_currency', 3)->nullable();
+            $table->timestamp('deposit_received_at')->nullable();
+            $table->timestamp('deposit_taken_at')->nullable();
+            $table->string('buyer_full_name')->nullable();
+            $table->string('buyer_phone')->nullable();
+            $table->unsignedBigInteger('buyer_client_id')->nullable();
+            $table->decimal('company_expected_income', 15, 2)->nullable();
+            $table->string('company_expected_income_currency', 3)->nullable();
+            $table->timestamp('planned_contract_signed_at')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('property_logs', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('property_id');
+            $table->unsignedBigInteger('user_id')->nullable();
+            $table->string('action');
+            $table->json('changes')->nullable();
+            $table->text('comment')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('property_photos', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('property_id');
+            $table->string('file_path');
+            $table->integer('position')->default(0);
+            $table->timestamps();
+        });
+
+        Schema::create('bookings', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('property_id');
+            $table->unsignedBigInteger('agent_id');
+            $table->unsignedBigInteger('client_id')->nullable();
+            $table->unsignedBigInteger('crm_client_id')->nullable();
+            $table->dateTime('start_time');
+            $table->dateTime('end_time');
+            $table->text('note')->nullable();
+            $table->string('status')->default('pending');
+            $table->string('client_name')->nullable();
+            $table->string('client_phone')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('property_agent_sales', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('property_id');
+            $table->unsignedBigInteger('agent_id');
+            $table->string('role')->nullable();
+            $table->decimal('agent_commission_amount', 15, 2)->nullable();
+            $table->string('agent_commission_currency', 3)->nullable();
+            $table->timestamp('agent_paid_at')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('personal_access_tokens', function (Blueprint $table) {
+            $table->id();
+            $table->morphs('tokenable');
+            $table->string('name');
+            $table->string('token', 64)->unique();
+            $table->text('abilities')->nullable();
+            $table->timestamp('last_used_at')->nullable();
+            $table->timestamp('expires_at')->nullable();
+            $table->timestamps();
+        });
+    }
+
+    public function test_booking_store_uses_new_client_entity_and_fills_snapshot_fields(): void
+    {
+        [$agent, $client, $property] = $this->seedClientContext();
+
+        Sanctum::actingAs($agent);
+
+        $response = $this->postJson('/api/bookings', [
+            'property_id' => $property->id,
+            'agent_id' => $agent->id,
+            'client_id' => $client->id,
+            'start_time' => '2026-03-07T10:00:00+05:00',
+            'end_time' => '2026-03-07T11:00:00+05:00',
+        ]);
+
+        $response->assertCreated();
+        $response->assertJsonPath('booking.crm_client_id', $client->id);
+        $response->assertJsonPath('booking.client_name', $client->full_name);
+        $response->assertJsonPath('booking.client_phone', $client->phone);
+    }
+
+    public function test_property_store_links_owner_client_and_snapshots(): void
+    {
+        [$agent, $client] = $this->seedClientContext(withProperty: false);
+        $typeId = DB::table('property_types')->insertGetId([
+            'name' => 'Apartment',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $statusId = DB::table('property_statuses')->insertGetId([
+            'name' => 'New',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $response = $this->postJson('/api/properties', [
+            'title' => 'Client Owner Property',
+            'type_id' => $typeId,
+            'status_id' => $statusId,
+            'price' => 120000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'owner_client_id' => $client->id,
+        ]);
+
+        $response->assertOk();
+        $response->assertJsonPath('owner_client_id', $client->id);
+        $response->assertJsonPath('owner_name', $client->full_name);
+        $response->assertJsonPath('owner_phone', $client->phone);
+    }
+
+    public function test_save_deal_links_buyer_client_and_snapshots(): void
+    {
+        [$agent, $client, $property] = $this->seedClientContext();
+
+        Sanctum::actingAs($agent);
+
+        $response = $this->postJson('/api/properties/' . $property->id . '/deal', [
+            'moderation_status' => 'sold',
+            'buyer_client_id' => $client->id,
+            'actual_sale_price' => 150000,
+            'actual_sale_currency' => 'USD',
+            'company_commission_amount' => 5000,
+            'company_commission_currency' => 'USD',
+            'agents' => [],
+        ]);
+
+        $response->assertOk();
+
+        $property->refresh();
+
+        $this->assertSame($client->id, $property->buyer_client_id);
+        $this->assertSame($client->full_name, $property->buyer_full_name);
+        $this->assertSame($client->phone, $property->buyer_phone);
+        $this->assertSame('sold', $property->moderation_status);
+    }
+
+    private function seedClientContext(bool $withProperty = true): array
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = User::create([
+            'name' => 'Agent A',
+            'phone' => (string) ++$this->phoneCounter,
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $client = Client::create([
+            'full_name' => 'Visible Client',
+            'phone' => '+992 90 555 0001',
+            'phone_normalized' => '992905550001',
+            'branch_id' => $branch->id,
+            'created_by' => $agent->id,
+            'responsible_agent_id' => $agent->id,
+            'status' => 'active',
+        ]);
+
+        DB::table('property_types')->insert([
+            'id' => 1,
+            'name' => 'Apartment',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('property_statuses')->insert([
+            'id' => 1,
+            'name' => 'New',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $property = null;
+        if ($withProperty) {
+            $property = Property::create([
+                'title' => 'Test Property',
+                'type_id' => 1,
+                'status_id' => 1,
+                'price' => 100000,
+                'currency' => 'USD',
+                'offer_type' => 'sale',
+                'created_by' => $agent->id,
+                'agent_id' => $agent->id,
+                'listing_type' => 'regular',
+                'moderation_status' => 'approved',
+            ]);
+        }
+
+        return [$agent, $client, $property];
+    }
+}

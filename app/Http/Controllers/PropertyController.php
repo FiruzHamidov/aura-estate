@@ -3,7 +3,9 @@
 namespace App\Http\Controllers;
 
 use App\Http\Requests\SavePropertyDealRequest;
+use App\Models\Client;
 use App\Models\Property;
+use App\Support\ClientAccess;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -15,10 +17,51 @@ use Intervention\Image\ImageManager;
 class PropertyController extends Controller
 {
     protected ImageManager $imageManager;
+    protected ClientAccess $clientAccess;
 
     public function __construct()
     {
         $this->imageManager = new ImageManager(new Driver());
+        $this->clientAccess = app(ClientAccess::class);
+    }
+
+    private function syncPropertyClientSnapshots(array $data): array
+    {
+        if (!empty($data['owner_client_id'])) {
+            $ownerClient = Client::query()->find($data['owner_client_id']);
+            if ($ownerClient) {
+                $data['owner_name'] = $ownerClient->full_name;
+                $data['owner_phone'] = $ownerClient->phone;
+            }
+        }
+
+        if (!empty($data['buyer_client_id'])) {
+            $buyerClient = Client::query()->find($data['buyer_client_id']);
+            if ($buyerClient) {
+                $data['buyer_full_name'] = $buyerClient->full_name;
+                $data['buyer_phone'] = $buyerClient->phone;
+            }
+        }
+
+        return $data;
+    }
+
+    private function ensureVisibleClientsForProperty(array $data): void
+    {
+        $authUser = auth()->user();
+
+        if (!$authUser) {
+            return;
+        }
+
+        foreach (['owner_client_id', 'buyer_client_id'] as $field) {
+            if (empty($data[$field])) {
+                continue;
+            }
+
+            $client = Client::query()->findOrFail($data[$field]);
+            $this->clientAccess->ensureVisible($authUser, $client);
+        }
     }
 
     // ==== Список (как у тебя), но на общих методах ====
@@ -43,7 +86,7 @@ class PropertyController extends Controller
     private function baseQueryMyProperties(Request $request): Builder
     {
         $user = auth()->user();
-        $query = Property::query()->with(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'heating', 'parking', 'saleAgents']);
+        $query = Property::query()->with(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'heating', 'parking', 'saleAgents', 'ownerClient', 'buyerClient']);
 
         $hasStatusFilter = $request->filled('moderation_status');
 
@@ -69,7 +112,7 @@ class PropertyController extends Controller
     private function baseQuery(Request $request): Builder
     {
         $user = auth()->user();
-        $query = Property::query()->with(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'heating', 'parking']);
+        $query = Property::query()->with(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'heating', 'parking', 'ownerClient', 'buyerClient']);
 
         $hasStatusFilter = $request->filled('moderation_status');
 
@@ -501,6 +544,8 @@ class PropertyController extends Controller
     public function store(Request $request)
     {
         $validated = $this->validateProperty($request);
+        $this->ensureVisibleClientsForProperty($validated);
+        $validated = $this->syncPropertyClientSnapshots($validated);
 
         // --- Дубликаты: пропускаем только если force=1
         $force = (bool)$request->boolean('force', false);
@@ -566,7 +611,7 @@ class PropertyController extends Controller
 
         $this->storePhotosFromRequest($request, $property);
 
-        return response()->json($property->load('photos'));
+        return response()->json($property->load(['photos', 'ownerClient', 'buyerClient']));
     }
 
     /**
@@ -584,6 +629,8 @@ class PropertyController extends Controller
         }
 
         $validated = $this->validateProperty($request, isUpdate: true, property: $property);
+        $this->ensureVisibleClientsForProperty($validated);
+        $validated = $this->syncPropertyClientSnapshots($validated);
 
         $property->update($validated);
 
@@ -606,7 +653,7 @@ class PropertyController extends Controller
             $this->applyOrder($property, $request->photo_order);
         }
 
-        return response()->json($property->load('photos'));
+        return response()->json($property->load(['photos', 'ownerClient', 'buyerClient']));
     }
 
     private function storePhotosFromRequest(Request $request, Property $property, bool $append = false): void
@@ -673,7 +720,7 @@ class PropertyController extends Controller
     {
 //        $user = auth()->user();
 
-        return response()->json($property->load(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'contractType','developer', 'heating', 'parking', 'buildingType']));
+        return response()->json($property->load(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'contractType','developer', 'heating', 'parking', 'buildingType', 'ownerClient', 'buyerClient']));
     }
 
     public function destroy(Property $property)
@@ -745,6 +792,7 @@ class PropertyController extends Controller
                 'status_comment',
 
                 // buyer / deposit
+                'buyer_client_id',
                 'buyer_full_name',
                 'buyer_phone',
                 'deposit_amount',
@@ -769,12 +817,15 @@ class PropertyController extends Controller
                 'planned_contract_signed_at',
             ];
 
-            $property->update(
-                collect($fillable)
-                    ->filter(fn ($field) => $request->has($field))
-                    ->mapWithKeys(fn ($field) => [$field => $request->$field])
-                    ->toArray()
-            );
+            $payload = collect($fillable)
+                ->filter(fn ($field) => $request->has($field))
+                ->mapWithKeys(fn ($field) => [$field => $request->$field])
+                ->toArray();
+
+            $this->ensureVisibleClientsForProperty($payload);
+            $payload = $this->syncPropertyClientSnapshots($payload);
+
+            $property->update($payload);
 
             /**
              * 2️⃣ ЛОГИКА ПО СТАТУСУ (ТОЛЬКО БИЗНЕС-ПРАВИЛА)
@@ -804,7 +855,7 @@ class PropertyController extends Controller
 
         return response()->json([
             'message' => 'Объявление успешно обновлено',
-            'data' => $property->fresh(['saleAgents']),
+            'data' => $property->fresh(['saleAgents', 'buyerClient', 'ownerClient']),
         ]);
     }
 
@@ -854,6 +905,7 @@ class PropertyController extends Controller
             'owner_phone' => 'nullable|string|max:30',
             'listing_type' => 'sometimes|in:regular,vip,urgent',
             'owner_name' => 'nullable|string|max:255',
+            'owner_client_id' => 'nullable|exists:clients,id',
             'object_key' => 'nullable|string|max:255',
             'rejection_comment' => 'nullable|string',
 
@@ -883,6 +935,7 @@ class PropertyController extends Controller
             // ===== Deposit stage (optional) =====
             'buyer_full_name' => 'nullable|string|max:255',
             'buyer_phone' => 'nullable|string|max:30',
+            'buyer_client_id' => 'nullable|exists:clients,id',
             'deposit_amount' => 'nullable|numeric|min:0',
             'deposit_currency' => 'nullable|in:TJS,USD',
             'deposit_received_at' => 'nullable|date',
@@ -1283,7 +1336,7 @@ class PropertyController extends Controller
         }
 
         // eager load
-        $result = $query->with(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'contractType'])
+        $result = $query->with(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'contractType', 'ownerClient', 'buyerClient'])
             ->limit($limit)
             ->get();
 
@@ -1308,28 +1361,30 @@ class PropertyController extends Controller
         Property                $property
     ) {
         DB::transaction(function () use ($request, $property) {
-
-            // 1️⃣ Обновляем сам объект
-            $property->update([
+            $payload = [
+                'buyer_client_id' => $request->buyer_client_id,
+                'buyer_full_name' => $request->buyer_full_name,
+                'buyer_phone' => $request->buyer_phone,
                 'actual_sale_price' => $request->actual_sale_price,
                 'actual_sale_currency' => $request->actual_sale_currency ?? 'TJS',
-
                 'company_commission_amount' => $request->company_commission_amount,
                 'company_commission_currency' => $request->company_commission_currency ?? 'TJS',
-
                 'money_holder' => $request->money_holder,
                 'money_received_at' => $request->money_received_at,
                 'contract_signed_at' => $request->contract_signed_at,
-
                 'deposit_amount' => $request->deposit_amount,
                 'deposit_currency' => $request->deposit_currency ?? 'TJS',
                 'deposit_received_at' => $request->deposit_received_at,
                 'deposit_taken_at' => $request->deposit_taken_at,
-
-                // если сделка оформлена — считаем проданным
                 'moderation_status' => 'sold',
                 'sold_at' => now(),
-            ]);
+            ];
+
+            $this->ensureVisibleClientsForProperty($payload);
+            $payload = $this->syncPropertyClientSnapshots($payload);
+
+            // 1️⃣ Обновляем сам объект
+            $property->update($payload);
 
             // 2️⃣ Агенты — очищаем и записываем заново
             $property->saleAgents()->detach();

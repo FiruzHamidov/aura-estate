@@ -6,6 +6,7 @@ use App\Http\Controllers\{AuthController,
     BookingController,
     BuildingTypeController,
     ChatController,
+    ClientController,
     ConstructionStageController,
     ContractTypeController,
     DeveloperController,
@@ -126,6 +127,10 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::delete('/user/photo',            [UserController::class, 'deleteMyPhoto']);
     Route::post('/user/update-password',    [UserController::class, 'updatePassword']);
     Route::apiResource('user',              UserController::class);
+    Route::get('/clients/settings',         [ClientController::class, 'settings']);
+    Route::put('/clients/settings',         [ClientController::class, 'updateSettings']);
+    Route::patch('/clients/settings',       [ClientController::class, 'updateSettings']);
+    Route::apiResource('clients',           ClientController::class);
 
     // Избранное
     Route::get('/favorites',  [FavoriteController::class, 'index']);

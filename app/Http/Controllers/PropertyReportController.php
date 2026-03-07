@@ -132,7 +132,7 @@ class PropertyReportController extends Controller
                 'bookings.agent_id',
                 DB::raw('COUNT(*) as shows_count'),
                 DB::raw('COUNT(DISTINCT bookings.property_id) as unique_properties'),
-                DB::raw('COUNT(DISTINCT bookings.client_id) as unique_clients'),
+                DB::raw('COUNT(DISTINCT COALESCE(bookings.crm_client_id, bookings.client_id)) as unique_clients'),
             ])
             ->whereNotNull('bookings.agent_id')
             ->groupBy('bookings.agent_id')
