@@ -11,6 +11,9 @@ use App\Http\Controllers\{AuthController,
     ClientNeedStatusController,
     ClientNeedTypeController,
     ClientTypeController,
+    DealController,
+    DealPipelineController,
+    DealStageController,
     ConstructionStageController,
     ContractTypeController,
     DeveloperController,
@@ -19,6 +22,7 @@ use App\Http\Controllers\{AuthController,
     FavoriteController,
     FeatureController,
     HeatingTypeController,
+    LeadController,
     LeadRequestController,
     LocationController,
     MaterialController,
@@ -137,6 +141,15 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::get('/clients/settings',         [ClientController::class, 'settings']);
     Route::put('/clients/settings',         [ClientController::class, 'updateSettings']);
     Route::patch('/clients/settings',       [ClientController::class, 'updateSettings']);
+    Route::get('/deal-pipelines/{dealPipeline}/board', [DealPipelineController::class, 'board']);
+    Route::patch('/deal-pipelines/{dealPipeline}/stages/reorder', [DealStageController::class, 'reorder']);
+    Route::post('/deal-pipelines/{dealPipeline}/stages', [DealStageController::class, 'store']);
+    Route::apiResource('deal-pipelines',    DealPipelineController::class);
+    Route::apiResource('deal-stages',       DealStageController::class)->only(['show', 'update', 'destroy']);
+    Route::patch('/deals/{deal}/move',      [DealController::class, 'move']);
+    Route::apiResource('deals',             DealController::class);
+    Route::post('/leads/{lead}/convert',    [LeadController::class, 'convert']);
+    Route::apiResource('leads',             LeadController::class);
     Route::apiResource('clients',           ClientController::class);
     Route::apiResource('clients.needs',     ClientNeedController::class)->only(['index', 'store']);
     Route::apiResource('client-needs',      ClientNeedController::class)->only(['show', 'update', 'destroy']);

@@ -21,4 +21,19 @@ class Branch extends Model
     {
         return $this->hasMany(User::class);
     }
+
+    public function leads()
+    {
+        return $this->hasMany(Lead::class);
+    }
+
+    public function dealPipelines()
+    {
+        return $this->hasMany(DealPipeline::class);
+    }
+
+    public function deals()
+    {
+        return $this->hasMany(Deal::class);
+    }
 }

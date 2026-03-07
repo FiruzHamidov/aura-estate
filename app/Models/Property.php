@@ -139,6 +139,11 @@ class Property extends Model
         return $this->belongsTo(Client::class, 'buyer_client_id');
     }
 
+    public function deals()
+    {
+        return $this->hasMany(Deal::class, 'primary_property_id')->latest('id');
+    }
+
     public function getCurrencySymbolAttribute(): string
     {
         return match ($this->currency) {

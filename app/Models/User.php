@@ -48,6 +48,31 @@ class User extends Authenticatable
         return $this->hasMany(Booking::class, 'client_id');
     }
 
+    public function createdLeads()
+    {
+        return $this->hasMany(Lead::class, 'created_by');
+    }
+
+    public function responsibleLeads()
+    {
+        return $this->hasMany(Lead::class, 'responsible_agent_id');
+    }
+
+    public function createdDeals()
+    {
+        return $this->hasMany(Deal::class, 'created_by');
+    }
+
+    public function responsibleDeals()
+    {
+        return $this->hasMany(Deal::class, 'responsible_agent_id');
+    }
+
+    public function crmAuditLogs()
+    {
+        return $this->hasMany(CrmAuditLog::class, 'actor_id');
+    }
+
     public function soldProperties()
     {
         return $this->belongsToMany(Property::class, 'property_agent_sales', 'agent_id', 'property_id')

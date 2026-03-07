@@ -69,6 +69,11 @@ class Client extends Model
         return $this->hasMany(Booking::class, 'crm_client_id');
     }
 
+    public function deals()
+    {
+        return $this->hasMany(Deal::class)->latest('id');
+    }
+
     public function ownerProperties()
     {
         return $this->hasMany(Property::class, 'owner_client_id');
@@ -77,6 +82,16 @@ class Client extends Model
     public function buyerProperties()
     {
         return $this->hasMany(Property::class, 'buyer_client_id');
+    }
+
+    public function leads()
+    {
+        return $this->hasMany(Lead::class)->latest('id');
+    }
+
+    public function auditLogs()
+    {
+        return $this->morphMany(CrmAuditLog::class, 'auditable')->latest('id');
     }
 
     public function getIsBusinessClientAttribute(): bool
