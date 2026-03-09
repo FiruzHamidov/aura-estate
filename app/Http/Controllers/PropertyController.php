@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Requests\SavePropertyDealRequest;
 use App\Models\Client;
 use App\Models\Property;
+use App\Models\User;
 use App\Support\ClientAccess;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
@@ -23,6 +24,56 @@ class PropertyController extends Controller
     {
         $this->imageManager = new ImageManager(new Driver());
         $this->clientAccess = app(ClientAccess::class);
+    }
+
+    private function propertyDetailRelations(): array
+    {
+        return [
+            'type',
+            'status',
+            'location',
+            'repairType',
+            'photos',
+            'creator',
+            'contractType',
+            'developer',
+            'heating',
+            'parking',
+            'buildingType',
+            'ownerClient.type',
+            'buyerClient.type',
+        ];
+    }
+
+    private function propertyShowAuthUser(Request $request): ?User
+    {
+        $user = $request->user() ?? $request->user('sanctum');
+        $user?->loadMissing('role');
+
+        return $user;
+    }
+
+    private function serializePropertyShow(Property $property, bool $includeAuthContacts): array
+    {
+        if ($includeAuthContacts) {
+            $property->makeVisible([
+                'owner_client_id',
+                'owner_name',
+                'owner_phone',
+                'buyer_client_id',
+                'buyer_full_name',
+                'buyer_phone',
+            ]);
+        }
+
+        $payload = $property->toArray();
+
+        if ($includeAuthContacts) {
+            $payload['ownerClient'] = $payload['owner_client'] ?? null;
+            $payload['buyerClient'] = $payload['buyer_client'] ?? null;
+        }
+
+        return $payload;
     }
 
     private function syncClientContactKind(?Client $client, string $contactKind): void
@@ -733,11 +784,15 @@ class PropertyController extends Controller
         }
     }
 
-    public function show(Property $property)
+    public function show(Request $request, Property $property)
     {
-//        $user = auth()->user();
+        $authUser = $this->propertyShowAuthUser($request);
 
-        return response()->json($property->load(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'contractType','developer', 'heating', 'parking', 'buildingType', 'ownerClient.type', 'buyerClient.type']));
+        $property->load($this->propertyDetailRelations());
+
+        return response()->json(
+            $this->serializePropertyShow($property, $authUser !== null)
+        );
     }
 
     public function destroy(Property $property)
