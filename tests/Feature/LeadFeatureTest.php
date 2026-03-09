@@ -74,6 +74,7 @@ class LeadFeatureTest extends TestCase
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('responsible_agent_id')->nullable();
             $table->unsignedBigInteger('client_type_id')->nullable();
+            $table->string('contact_kind', 16)->default(Client::CONTACT_KIND_BUYER);
             $table->enum('status', ['active', 'inactive'])->default('active');
             $table->unsignedBigInteger('bitrix_contact_id')->nullable();
             $table->json('meta')->nullable();
@@ -215,6 +216,7 @@ class LeadFeatureTest extends TestCase
         $response->assertOk();
         $response->assertJsonPath('status', Lead::STATUS_CONVERTED);
         $response->assertJsonPath('client.id', $existingClient->id);
+        $response->assertJsonPath('client.contact_kind', Client::CONTACT_KIND_BUYER);
 
         $this->assertDatabaseHas('leads', [
             'id' => $lead->id,
@@ -251,6 +253,7 @@ class LeadFeatureTest extends TestCase
         $response->assertJsonPath('status', Lead::STATUS_CONVERTED);
         $response->assertJsonPath('client.full_name', 'Fresh Lead');
         $response->assertJsonPath('client.phone', '992950000030');
+        $response->assertJsonPath('client.contact_kind', Client::CONTACT_KIND_BUYER);
 
         $this->assertDatabaseCount('clients', 1);
         $this->assertDatabaseHas('clients', [
@@ -288,6 +291,7 @@ class LeadFeatureTest extends TestCase
             'created_by' => $agent->id,
             'responsible_agent_id' => $agent->id,
             'client_type_id' => 1,
+            'contact_kind' => Client::CONTACT_KIND_BUYER,
             'status' => 'active',
         ]);
     }

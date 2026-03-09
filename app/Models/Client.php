@@ -10,6 +10,10 @@ class Client extends Model
 {
     use HasFactory, SoftDeletes;
 
+    public const CONTACT_KIND_BUYER = 'buyer';
+    public const CONTACT_KIND_SELLER = 'seller';
+    public const CONTACT_KIND_BOTH = 'both';
+
     protected $fillable = [
         'full_name',
         'phone',
@@ -20,6 +24,7 @@ class Client extends Model
         'created_by',
         'responsible_agent_id',
         'client_type_id',
+        'contact_kind',
         'status',
         'bitrix_contact_id',
         'meta',
@@ -31,7 +36,59 @@ class Client extends Model
 
     protected $appends = [
         'is_business_client',
+        'is_buyer_contact',
+        'is_seller_contact',
     ];
+
+    public static function contactKinds(): array
+    {
+        return [
+            self::CONTACT_KIND_BUYER,
+            self::CONTACT_KIND_SELLER,
+            self::CONTACT_KIND_BOTH,
+        ];
+    }
+
+    public static function kindsMatchingFilter(?string $kind): array
+    {
+        return match ($kind) {
+            self::CONTACT_KIND_BUYER => [self::CONTACT_KIND_BUYER, self::CONTACT_KIND_BOTH],
+            self::CONTACT_KIND_SELLER => [self::CONTACT_KIND_SELLER, self::CONTACT_KIND_BOTH],
+            self::CONTACT_KIND_BOTH => [self::CONTACT_KIND_BOTH],
+            default => self::contactKinds(),
+        };
+    }
+
+    public function mergedContactKindFor(?string $nextKind): string
+    {
+        $normalizedCurrent = in_array($this->contact_kind, self::contactKinds(), true)
+            ? $this->contact_kind
+            : self::CONTACT_KIND_BUYER;
+        $normalizedNext = in_array($nextKind, self::contactKinds(), true)
+            ? $nextKind
+            : self::CONTACT_KIND_BUYER;
+
+        if ($normalizedCurrent === $normalizedNext) {
+            return $normalizedCurrent;
+        }
+
+        if (
+            $normalizedCurrent === self::CONTACT_KIND_BOTH
+            || $normalizedNext === self::CONTACT_KIND_BOTH
+        ) {
+            return self::CONTACT_KIND_BOTH;
+        }
+
+        if ($normalizedNext === self::CONTACT_KIND_SELLER) {
+            return $this->hasBuyerSignals()
+                ? self::CONTACT_KIND_BOTH
+                : self::CONTACT_KIND_SELLER;
+        }
+
+        return $this->hasSellerSignals()
+            ? self::CONTACT_KIND_BOTH
+            : self::CONTACT_KIND_BUYER;
+    }
 
     public function branch()
     {
@@ -97,5 +154,35 @@ class Client extends Model
     public function getIsBusinessClientAttribute(): bool
     {
         return (bool) ($this->type?->is_business ?? false);
+    }
+
+    public function getIsBuyerContactAttribute(): bool
+    {
+        return in_array($this->contact_kind, [
+            self::CONTACT_KIND_BUYER,
+            self::CONTACT_KIND_BOTH,
+        ], true);
+    }
+
+    public function getIsSellerContactAttribute(): bool
+    {
+        return in_array($this->contact_kind, [
+            self::CONTACT_KIND_SELLER,
+            self::CONTACT_KIND_BOTH,
+        ], true);
+    }
+
+    private function hasBuyerSignals(): bool
+    {
+        return $this->buyerProperties()->exists()
+            || $this->bookings()->exists()
+            || $this->leads()->exists()
+            || $this->needs()->whereHas('type', fn ($query) => $query->whereIn('slug', ['buy', 'rent', 'invest']))->exists();
+    }
+
+    private function hasSellerSignals(): bool
+    {
+        return $this->ownerProperties()->exists()
+            || $this->needs()->whereHas('type', fn ($query) => $query->where('slug', 'sell'))->exists();
     }
 }

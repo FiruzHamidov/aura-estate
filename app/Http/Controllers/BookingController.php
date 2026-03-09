@@ -117,6 +117,12 @@ class BookingController extends Controller
             return $data;
         }
 
+        $mergedContactKind = $client->mergedContactKindFor(Client::CONTACT_KIND_BUYER);
+        if ($mergedContactKind !== $client->contact_kind) {
+            $client->update(['contact_kind' => $mergedContactKind]);
+            $client->contact_kind = $mergedContactKind;
+        }
+
         $data['crm_client_id'] = $client->id;
         $data['client_name'] = $client->full_name;
         $data['client_phone'] = $client->phone;

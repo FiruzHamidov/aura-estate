@@ -25,11 +25,26 @@ class PropertyController extends Controller
         $this->clientAccess = app(ClientAccess::class);
     }
 
+    private function syncClientContactKind(?Client $client, string $contactKind): void
+    {
+        if (!$client) {
+            return;
+        }
+
+        $mergedContactKind = $client->mergedContactKindFor($contactKind);
+
+        if ($mergedContactKind !== $client->contact_kind) {
+            $client->update(['contact_kind' => $mergedContactKind]);
+            $client->contact_kind = $mergedContactKind;
+        }
+    }
+
     private function syncPropertyClientSnapshots(array $data): array
     {
         if (!empty($data['owner_client_id'])) {
             $ownerClient = Client::query()->with('type')->find($data['owner_client_id']);
             if ($ownerClient) {
+                $this->syncClientContactKind($ownerClient, Client::CONTACT_KIND_SELLER);
                 $data['owner_name'] = $ownerClient->full_name;
                 $data['owner_phone'] = $ownerClient->phone;
                 $data['is_business_owner'] = (bool) ($ownerClient->type?->is_business ?? false);
@@ -39,6 +54,7 @@ class PropertyController extends Controller
         if (!empty($data['buyer_client_id'])) {
             $buyerClient = Client::query()->with('type')->find($data['buyer_client_id']);
             if ($buyerClient) {
+                $this->syncClientContactKind($buyerClient, Client::CONTACT_KIND_BUYER);
                 $data['buyer_full_name'] = $buyerClient->full_name;
                 $data['buyer_phone'] = $buyerClient->phone;
             }

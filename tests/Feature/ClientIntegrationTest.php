@@ -68,6 +68,13 @@ class ClientIntegrationTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('client_need_types', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->unique();
+            $table->timestamps();
+        });
+
         Schema::create('clients', function (Blueprint $table) {
             $table->id();
             $table->string('full_name');
@@ -79,9 +86,25 @@ class ClientIntegrationTest extends TestCase
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('responsible_agent_id')->nullable();
             $table->unsignedBigInteger('client_type_id')->nullable();
+            $table->string('contact_kind', 16)->default(Client::CONTACT_KIND_BUYER);
             $table->enum('status', ['active', 'inactive'])->default('active');
             $table->unsignedBigInteger('bitrix_contact_id')->nullable();
             $table->json('meta')->nullable();
+            $table->softDeletes();
+            $table->timestamps();
+        });
+
+        Schema::create('client_needs', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('client_id');
+            $table->unsignedBigInteger('type_id');
+            $table->softDeletes();
+            $table->timestamps();
+        });
+
+        Schema::create('leads', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('client_id')->nullable();
             $table->softDeletes();
             $table->timestamps();
         });
@@ -247,6 +270,13 @@ class ClientIntegrationTest extends TestCase
                 'updated_at' => now(),
             ],
         ]);
+
+        DB::table('client_need_types')->insert([
+            ['id' => 1, 'name' => 'Покупка', 'slug' => 'buy', 'created_at' => now(), 'updated_at' => now()],
+            ['id' => 2, 'name' => 'Аренда', 'slug' => 'rent', 'created_at' => now(), 'updated_at' => now()],
+            ['id' => 3, 'name' => 'Продажа', 'slug' => 'sell', 'created_at' => now(), 'updated_at' => now()],
+            ['id' => 4, 'name' => 'Инвестиция', 'slug' => 'invest', 'created_at' => now(), 'updated_at' => now()],
+        ]);
     }
 
     public function test_booking_store_uses_new_client_entity_and_fills_snapshot_fields(): void
@@ -267,6 +297,9 @@ class ClientIntegrationTest extends TestCase
         $response->assertJsonPath('booking.crm_client_id', $client->id);
         $response->assertJsonPath('booking.client_name', $client->full_name);
         $response->assertJsonPath('booking.client_phone', $client->phone);
+
+        $client->refresh();
+        $this->assertSame(Client::CONTACT_KIND_BUYER, $client->contact_kind);
     }
 
     public function test_property_store_links_owner_client_and_snapshots(): void
@@ -299,6 +332,9 @@ class ClientIntegrationTest extends TestCase
         $response->assertJsonPath('owner_client_id', $client->id);
         $response->assertJsonPath('owner_name', $client->full_name);
         $response->assertJsonPath('owner_phone', $client->phone);
+
+        $client->refresh();
+        $this->assertSame(Client::CONTACT_KIND_SELLER, $client->contact_kind);
     }
 
     public function test_save_deal_links_buyer_client_and_snapshots(): void
@@ -327,6 +363,46 @@ class ClientIntegrationTest extends TestCase
         $this->assertSame('sold', $property->moderation_status);
     }
 
+    public function test_same_contact_becomes_both_when_used_as_owner_and_buyer(): void
+    {
+        [$agent, $client] = $this->seedClientContext(withProperty: false);
+        $typeId = DB::table('property_types')->insertGetId([
+            'name' => 'Apartment',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        $statusId = DB::table('property_statuses')->insertGetId([
+            'name' => 'New',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $propertyId = $this->postJson('/api/properties', [
+            'title' => 'Dual Role Client Property',
+            'type_id' => $typeId,
+            'status_id' => $statusId,
+            'price' => 120000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'owner_client_id' => $client->id,
+        ])->assertOk()->json('id');
+
+        $this->postJson('/api/properties/' . $propertyId . '/deal', [
+            'moderation_status' => 'sold',
+            'buyer_client_id' => $client->id,
+            'actual_sale_price' => 140000,
+            'actual_sale_currency' => 'USD',
+            'company_commission_amount' => 4000,
+            'company_commission_currency' => 'USD',
+            'agents' => [],
+        ])->assertOk();
+
+        $client->refresh();
+        $this->assertSame(Client::CONTACT_KIND_BOTH, $client->contact_kind);
+    }
+
     public function test_agent_clients_stats_use_linked_client_type_with_legacy_fallback(): void
     {
         [$agent] = $this->seedClientContext(withProperty: false);
@@ -339,6 +415,7 @@ class ClientIntegrationTest extends TestCase
             'created_by' => $agent->id,
             'responsible_agent_id' => $agent->id,
             'client_type_id' => 2,
+            'contact_kind' => Client::CONTACT_KIND_BUYER,
             'status' => 'active',
         ]);
 
@@ -404,6 +481,7 @@ class ClientIntegrationTest extends TestCase
             'created_by' => $agent->id,
             'responsible_agent_id' => $agent->id,
             'client_type_id' => 1,
+            'contact_kind' => Client::CONTACT_KIND_BUYER,
             'status' => 'active',
         ]);
 

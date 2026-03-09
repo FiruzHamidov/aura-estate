@@ -84,6 +84,7 @@ class DealBoardFeatureTest extends TestCase
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('responsible_agent_id')->nullable();
             $table->unsignedBigInteger('client_type_id')->nullable();
+            $table->string('contact_kind', 16)->default(Client::CONTACT_KIND_BUYER);
             $table->enum('status', ['active', 'inactive'])->default('active');
             $table->unsignedBigInteger('bitrix_contact_id')->nullable();
             $table->json('meta')->nullable();
@@ -395,6 +396,7 @@ class DealBoardFeatureTest extends TestCase
             'created_by' => $agent->id,
             'responsible_agent_id' => $agent->id,
             'client_type_id' => 1,
+            'contact_kind' => Client::CONTACT_KIND_BUYER,
             'status' => 'active',
         ]);
     }

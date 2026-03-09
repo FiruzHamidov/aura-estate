@@ -52,7 +52,8 @@ class BackfillClientsCommand extends Command
                         $user->email,
                         $user->branch_id,
                         $user->id,
-                        $user->id
+                        $user->id,
+                        Client::CONTACT_KIND_BUYER
                     );
 
                     Booking::query()
@@ -87,7 +88,8 @@ class BackfillClientsCommand extends Command
                         null,
                         $creator?->branch_id,
                         $property->created_by,
-                        $property->agent_id ?: $property->created_by
+                        $property->agent_id ?: $property->created_by,
+                        Client::CONTACT_KIND_SELLER
                     );
 
                     if ($property->is_business_owner) {
@@ -119,7 +121,8 @@ class BackfillClientsCommand extends Command
                         null,
                         $creator?->branch_id,
                         $property->created_by,
-                        $property->agent_id ?: $property->created_by
+                        $property->agent_id ?: $property->created_by,
+                        Client::CONTACT_KIND_BUYER
                     );
 
                     $this->ensureClientHasType($client);
@@ -147,7 +150,8 @@ class BackfillClientsCommand extends Command
                         null,
                         $agent?->branch_id,
                         $booking->agent_id,
-                        $booking->agent_id
+                        $booking->agent_id,
+                        Client::CONTACT_KIND_BUYER
                     );
 
                     $this->ensureClientHasType($client);
@@ -196,7 +200,8 @@ class BackfillClientsCommand extends Command
         ?string $email,
         ?int $branchId,
         ?int $createdBy,
-        ?int $responsibleAgentId
+        ?int $responsibleAgentId,
+        string $contactKind = Client::CONTACT_KIND_BUYER
     ): Client {
         $normalizedPhone = ClientPhone::normalize($phone);
 
@@ -212,6 +217,8 @@ class BackfillClientsCommand extends Command
         $existing = $query->first();
 
         if ($existing) {
+            $this->syncClientContactKind($existing, $contactKind);
+
             return $existing;
         }
 
@@ -224,7 +231,17 @@ class BackfillClientsCommand extends Command
             'created_by' => $createdBy,
             'responsible_agent_id' => $responsibleAgentId,
             'client_type_id' => $this->individualTypeId(),
+            'contact_kind' => $contactKind,
             'status' => 'active',
         ]);
+    }
+
+    private function syncClientContactKind(Client $client, string $contactKind): void
+    {
+        $mergedContactKind = $client->mergedContactKindFor($contactKind);
+
+        if ($mergedContactKind !== $client->contact_kind) {
+            $client->update(['contact_kind' => $mergedContactKind]);
+        }
     }
 }

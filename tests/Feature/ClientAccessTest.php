@@ -99,6 +99,7 @@ class ClientAccessTest extends TestCase
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('responsible_agent_id')->nullable();
             $table->unsignedBigInteger('client_type_id')->nullable();
+            $table->string('contact_kind', 16)->default(Client::CONTACT_KIND_BUYER);
             $table->enum('status', ['active', 'inactive'])->default('active');
             $table->unsignedBigInteger('bitrix_contact_id')->nullable();
             $table->json('meta')->nullable();
@@ -274,6 +275,134 @@ class ClientAccessTest extends TestCase
         $response->assertJsonMissing(['full_name' => 'Client B']);
     }
 
+    public function test_agent_sees_branch_buyers_but_only_own_sellers_in_all_branch_mode(): void
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_ALL_BRANCH,
+        ]);
+        Setting::create([
+            'key' => ClientAccess::AGENT_CAN_VIEW_SELLERS_SETTING_KEY,
+            'value' => '1',
+        ]);
+
+        $branch = Branch::create(['name' => 'Branch A']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $agentA = $this->createUser($agentRole, $branch, 'Agent A');
+        $agentB = $this->createUser($agentRole, $branch, 'Agent B');
+
+        $buyerA = $this->createClient($branch, $agentA, $agentA, 'Buyer A', 1, Client::CONTACT_KIND_BUYER);
+        $buyerB = $this->createClient($branch, $agentB, $agentB, 'Buyer B', 1, Client::CONTACT_KIND_BUYER);
+        $sellerA = $this->createClient($branch, $agentA, $agentA, 'Seller A', 1, Client::CONTACT_KIND_SELLER);
+        $sellerB = $this->createClient($branch, $agentB, $agentB, 'Seller B', 1, Client::CONTACT_KIND_SELLER);
+
+        Sanctum::actingAs($agentA);
+
+        $this->getJson('/api/clients')
+            ->assertOk()
+            ->assertJsonCount(3, 'data')
+            ->assertJsonFragment(['id' => $buyerA->id])
+            ->assertJsonFragment(['id' => $buyerB->id])
+            ->assertJsonFragment(['id' => $sellerA->id])
+            ->assertJsonMissing(['full_name' => $sellerB->full_name]);
+
+        $this->getJson('/api/clients/' . $buyerB->id)->assertOk();
+        $this->getJson('/api/clients/' . $sellerB->id)->assertForbidden();
+    }
+
+    public function test_agent_does_not_see_any_sellers_when_seller_visibility_setting_is_disabled(): void
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_ALL_BRANCH,
+        ]);
+        Setting::create([
+            'key' => ClientAccess::AGENT_CAN_VIEW_SELLERS_SETTING_KEY,
+            'value' => '0',
+        ]);
+
+        $branch = Branch::create(['name' => 'Branch A']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $agentA = $this->createUser($agentRole, $branch, 'Agent A');
+        $agentB = $this->createUser($agentRole, $branch, 'Agent B');
+
+        $buyerA = $this->createClient($branch, $agentA, $agentA, 'Buyer A', 1, Client::CONTACT_KIND_BUYER);
+        $buyerB = $this->createClient($branch, $agentB, $agentB, 'Buyer B', 1, Client::CONTACT_KIND_BUYER);
+        $sellerA = $this->createClient($branch, $agentA, $agentA, 'Seller A', 1, Client::CONTACT_KIND_SELLER);
+        $sellerB = $this->createClient($branch, $agentB, $agentB, 'Seller B', 1, Client::CONTACT_KIND_SELLER);
+
+        Sanctum::actingAs($agentA);
+
+        $this->getJson('/api/clients')
+            ->assertOk()
+            ->assertJsonCount(2, 'data')
+            ->assertJsonFragment(['id' => $buyerA->id])
+            ->assertJsonFragment(['id' => $buyerB->id])
+            ->assertJsonMissing(['id' => $sellerA->id])
+            ->assertJsonMissing(['id' => $sellerB->id]);
+
+        $this->getJson('/api/clients/' . $buyerB->id)->assertOk();
+        $this->getJson('/api/clients/' . $sellerA->id)->assertForbidden();
+        $this->getJson('/api/clients/' . $sellerB->id)->assertForbidden();
+    }
+
+    public function test_agent_in_own_only_mode_does_not_see_own_seller_when_seller_visibility_setting_is_disabled(): void
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_OWN_ONLY,
+        ]);
+        Setting::create([
+            'key' => ClientAccess::AGENT_CAN_VIEW_SELLERS_SETTING_KEY,
+            'value' => '0',
+        ]);
+
+        $branch = Branch::create(['name' => 'Branch A']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $agent = $this->createUser($agentRole, $branch, 'Agent A');
+
+        $ownBuyer = $this->createClient($branch, $agent, $agent, 'Buyer A', 1, Client::CONTACT_KIND_BUYER);
+        $ownSeller = $this->createClient($branch, $agent, $agent, 'Seller A', 1, Client::CONTACT_KIND_SELLER);
+
+        Sanctum::actingAs($agent);
+
+        $this->getJson('/api/clients')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $ownBuyer->id)
+            ->assertJsonMissing(['id' => $ownSeller->id]);
+
+        $this->getJson('/api/clients/' . $ownSeller->id)->assertForbidden();
+    }
+
+    public function test_branch_director_can_filter_sellers_and_see_entire_branch(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $directorRole = Role::create(['name' => 'Director', 'slug' => 'branch_director']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $director = $this->createUser($directorRole, $branchA, 'Director A');
+        $agentA = $this->createUser($agentRole, $branchA, 'Agent A');
+        $agentB = $this->createUser($agentRole, $branchB, 'Agent B');
+
+        $sellerA = $this->createClient($branchA, $agentA, $agentA, 'Seller A', 1, Client::CONTACT_KIND_SELLER);
+        $this->createClient($branchA, $agentA, $agentA, 'Buyer A', 1, Client::CONTACT_KIND_BUYER);
+        $this->createClient($branchB, $agentB, $agentB, 'Seller B', 1, Client::CONTACT_KIND_SELLER);
+
+        Sanctum::actingAs($director);
+
+        $this->getJson('/api/clients?contact_kind=seller')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $sellerA->id)
+            ->assertJsonMissing(['full_name' => 'Seller B']);
+    }
+
     public function test_agent_create_forces_branch_to_own_branch(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
@@ -294,9 +423,10 @@ class ClientAccessTest extends TestCase
         $response->assertJsonPath('branch_id', $branchA->id);
         $response->assertJsonPath('responsible_agent_id', $agent->id);
         $response->assertJsonPath('created_by', $agent->id);
+        $response->assertJsonPath('contact_kind', Client::CONTACT_KIND_BUYER);
     }
 
-    public function test_admin_can_update_client_visibility_setting(): void
+    public function test_admin_can_update_client_settings_independently(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
@@ -306,13 +436,23 @@ class ClientAccessTest extends TestCase
 
         $this->putJson('/api/clients/settings', [
             'agent_visibility_mode' => ClientAccess::VISIBILITY_OWN_ONLY,
+            'agent_can_view_sellers' => true,
         ])
             ->assertOk()
-            ->assertJsonPath('agent_visibility_mode', ClientAccess::VISIBILITY_OWN_ONLY);
+            ->assertJsonPath('agent_visibility_mode', ClientAccess::VISIBILITY_OWN_ONLY)
+            ->assertJsonPath('agent_can_view_sellers', true);
+
+        $this->patchJson('/api/clients/settings', [
+            'agent_can_view_sellers' => false,
+        ])
+            ->assertOk()
+            ->assertJsonPath('agent_visibility_mode', ClientAccess::VISIBILITY_OWN_ONLY)
+            ->assertJsonPath('agent_can_view_sellers', false);
 
         $this->getJson('/api/clients/settings')
             ->assertOk()
-            ->assertJsonPath('agent_visibility_mode', ClientAccess::VISIBILITY_OWN_ONLY);
+            ->assertJsonPath('agent_visibility_mode', ClientAccess::VISIBILITY_OWN_ONLY)
+            ->assertJsonPath('agent_can_view_sellers', false);
     }
 
     public function test_admin_can_create_business_client_with_client_type(): void
@@ -367,7 +507,14 @@ class ClientAccessTest extends TestCase
         ]);
     }
 
-    private function createClient(Branch $branch, User $creator, User $responsibleAgent, string $fullName, int $clientTypeId = 1): Client
+    private function createClient(
+        Branch $branch,
+        User $creator,
+        User $responsibleAgent,
+        string $fullName,
+        int $clientTypeId = 1,
+        string $contactKind = Client::CONTACT_KIND_BUYER
+    ): Client
     {
         return Client::create([
             'full_name' => $fullName,
@@ -377,6 +524,7 @@ class ClientAccessTest extends TestCase
             'created_by' => $creator->id,
             'responsible_agent_id' => $responsibleAgent->id,
             'client_type_id' => $clientTypeId,
+            'contact_kind' => $contactKind,
             'status' => 'active',
         ]);
     }

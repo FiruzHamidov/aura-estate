@@ -93,6 +93,7 @@ class LeadConversionService
             'note' => $lead->note,
             'branch_id' => $lead->branch_id ?: $actor->branch_id,
             'responsible_agent_id' => $lead->responsible_agent_id ?: $actor->id,
+            'contact_kind' => Client::CONTACT_KIND_BUYER,
             'status' => 'active',
             'meta' => array_filter([
                 'lead_source' => $lead->source,
@@ -108,6 +109,8 @@ class LeadConversionService
 
     private function updateExistingClient(Client $client, Lead $lead): Client
     {
+        $mergedContactKind = $client->mergedContactKindFor(Client::CONTACT_KIND_BUYER);
+
         $payload = array_filter([
             'full_name' => $client->full_name ?: $lead->full_name,
             'phone' => $client->phone ?: $lead->phone,
@@ -116,6 +119,7 @@ class LeadConversionService
             'note' => $client->note ?: $lead->note,
             'branch_id' => $client->branch_id ?: $lead->branch_id,
             'responsible_agent_id' => $client->responsible_agent_id ?: $lead->responsible_agent_id,
+            'contact_kind' => $mergedContactKind !== $client->contact_kind ? $mergedContactKind : null,
         ], fn ($value) => $value !== null && $value !== '');
 
         if (!empty($payload)) {

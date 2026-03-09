@@ -71,6 +71,7 @@ class ClientController extends Controller
             'responsible_agent_id' => 'nullable|integer|exists:users,id',
             'branch_id' => 'nullable|integer|exists:branches,id',
             'client_type_id' => 'nullable|integer|exists:client_types,id',
+            'contact_kind' => ['nullable', Rule::in(Client::contactKinds())],
             'is_business' => 'nullable|boolean',
             'has_open_needs' => 'nullable|boolean',
             'need_status_id' => 'nullable|integer|exists:client_need_statuses,id',
@@ -116,6 +117,10 @@ class ClientController extends Controller
             $query->where('client_type_id', $validated['client_type_id']);
         }
 
+        if (!empty($validated['contact_kind'])) {
+            $query->whereIn('contact_kind', Client::kindsMatchingFilter($validated['contact_kind']));
+        }
+
         if (array_key_exists('is_business', $validated) && $validated['is_business'] !== null) {
             $query->whereHas('type', fn ($builder) => $builder->where('is_business', $validated['is_business']));
         }
@@ -159,6 +164,7 @@ class ClientController extends Controller
             'branch_id' => 'nullable|integer|exists:branches,id',
             'responsible_agent_id' => 'nullable|integer|exists:users,id',
             'client_type_id' => 'nullable|integer|exists:client_types,id',
+            'contact_kind' => ['nullable', Rule::in(Client::contactKinds())],
             'status' => ['nullable', Rule::in(['active', 'inactive'])],
             'bitrix_contact_id' => 'nullable|integer',
             'meta' => 'nullable|array',
@@ -172,6 +178,7 @@ class ClientController extends Controller
             'branch_id',
             'responsible_agent_id',
             'client_type_id',
+            'contact_kind',
             'status',
             'bitrix_contact_id',
             'meta',
@@ -209,6 +216,7 @@ class ClientController extends Controller
             'branch_id' => 'sometimes|nullable|integer|exists:branches,id',
             'responsible_agent_id' => 'sometimes|nullable|integer|exists:users,id',
             'client_type_id' => 'sometimes|nullable|integer|exists:client_types,id',
+            'contact_kind' => ['sometimes', 'nullable', Rule::in(Client::contactKinds())],
             'status' => ['sometimes', Rule::in(['active', 'inactive'])],
             'bitrix_contact_id' => 'sometimes|nullable|integer',
             'meta' => 'sometimes|nullable|array',
@@ -222,12 +230,20 @@ class ClientController extends Controller
             'branch_id',
             'responsible_agent_id',
             'client_type_id',
+            'contact_kind',
             'status',
             'bitrix_contact_id',
             'meta',
         ]);
 
         $data = $this->normalizeInput($data);
+        $data = array_merge([
+            'branch_id' => $client->branch_id,
+            'created_by' => $client->created_by,
+            'responsible_agent_id' => $client->responsible_agent_id,
+            'client_type_id' => $client->client_type_id,
+            'contact_kind' => $client->contact_kind,
+        ], $data);
         $data = $this->clientAccess->normalizeMutationData($data, $authUser);
         $this->clientAccess->validateMutationTargets($authUser, $data);
 
@@ -247,9 +263,7 @@ class ClientController extends Controller
 
     public function settings()
     {
-        return response()->json([
-            'agent_visibility_mode' => $this->clientAccess->visibilityMode(),
-        ]);
+        return response()->json($this->clientAccess->settings());
     }
 
     public function updateSettings(Request $request)
@@ -258,14 +272,22 @@ class ClientController extends Controller
         abort_unless($this->isPrivilegedRole($authUser), 403, 'Forbidden');
 
         $validated = $request->validate([
-            'agent_visibility_mode' => ['required', Rule::in([
+            'agent_visibility_mode' => ['sometimes', Rule::in([
                 ClientAccess::VISIBILITY_ALL_BRANCH,
                 ClientAccess::VISIBILITY_OWN_ONLY,
             ])],
+            'agent_can_view_sellers' => ['sometimes', 'boolean'],
         ]);
 
-        return response()->json([
-            'agent_visibility_mode' => $this->clientAccess->setVisibilityMode($validated['agent_visibility_mode']),
-        ]);
+        abort_if($validated === [], 422, 'At least one client setting must be provided.');
+
+        if (array_key_exists('agent_can_view_sellers', $validated)) {
+            $validated['agent_can_view_sellers'] = filter_var(
+                $validated['agent_can_view_sellers'],
+                FILTER_VALIDATE_BOOL
+            );
+        }
+
+        return response()->json($this->clientAccess->updateSettings($validated));
     }
 }
