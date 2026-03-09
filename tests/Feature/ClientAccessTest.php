@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\Branch;
+use App\Models\BranchGroup;
 use App\Models\Client;
 use App\Models\ClientType;
 use App\Models\Role;
@@ -39,6 +40,16 @@ class ClientAccessTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('branch_groups', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('branch_id')->constrained('branches')->cascadeOnDelete();
+            $table->string('name');
+            $table->text('description')->nullable();
+            $table->string('contact_visibility_mode', 32)->default(BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY);
+            $table->timestamps();
+            $table->unique(['branch_id', 'name']);
+        });
+
         Schema::create('users', function (Blueprint $table) {
             $table->id();
             $table->string('name');
@@ -47,6 +58,7 @@ class ClientAccessTest extends TestCase
             $table->string('password')->nullable();
             $table->foreignId('role_id')->constrained('roles')->cascadeOnDelete();
             $table->foreignId('branch_id')->nullable()->constrained('branches')->nullOnDelete();
+            $table->foreignId('branch_group_id')->nullable()->constrained('branch_groups')->nullOnDelete();
             $table->enum('status', ['active', 'inactive'])->default('active');
             $table->enum('auth_method', ['password', 'sms'])->default('password');
             $table->rememberToken()->nullable();
@@ -96,6 +108,7 @@ class ClientAccessTest extends TestCase
             $table->string('email')->nullable();
             $table->text('note')->nullable();
             $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('branch_group_id')->nullable();
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('responsible_agent_id')->nullable();
             $table->unsignedBigInteger('client_type_id')->nullable();
@@ -407,9 +420,11 @@ class ClientAccessTest extends TestCase
     {
         $branchA = Branch::create(['name' => 'Branch A']);
         $branchB = Branch::create(['name' => 'Branch B']);
+        $groupA = $this->createBranchGroup($branchA, 'Group A');
+        $groupB = $this->createBranchGroup($branchB, 'Group B');
 
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
-        $agent = $this->createUser($agentRole, $branchA, 'Agent A');
+        $agent = $this->createUser($agentRole, $branchA, 'Agent A', $groupA);
 
         Sanctum::actingAs($agent);
 
@@ -417,10 +432,13 @@ class ClientAccessTest extends TestCase
             'full_name' => 'New Client',
             'phone' => '+992 90 000 0001',
             'branch_id' => $branchB->id,
+            'branch_group_id' => $groupB->id,
         ]);
 
         $response->assertCreated();
         $response->assertJsonPath('branch_id', $branchA->id);
+        $response->assertJsonPath('branch_group_id', $groupA->id);
+        $response->assertJsonPath('branch_group.id', $groupA->id);
         $response->assertJsonPath('responsible_agent_id', $agent->id);
         $response->assertJsonPath('created_by', $agent->id);
         $response->assertJsonPath('contact_kind', Client::CONTACT_KIND_BUYER);
@@ -495,7 +513,172 @@ class ClientAccessTest extends TestCase
         $response->assertJsonPath('data.0.is_business_client', true);
     }
 
-    private function createUser(Role $role, Branch $branch, string $name): User
+    public function test_agent_from_group_only_sees_only_contacts_from_own_group(): void
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_ALL_BRANCH,
+        ]);
+
+        $branch = Branch::create(['name' => 'Branch A']);
+        $groupA = $this->createBranchGroup($branch, 'Group A', BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY);
+        $groupB = $this->createBranchGroup($branch, 'Group B', BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $agentA = $this->createUser($agentRole, $branch, 'Agent A', $groupA);
+        $agentB = $this->createUser($agentRole, $branch, 'Agent B', $groupB);
+
+        $clientA = $this->createClient($branch, $agentA, $agentA, 'Client A', 1, Client::CONTACT_KIND_BUYER, $groupA);
+        $clientB = $this->createClient($branch, $agentB, $agentB, 'Client B', 1, Client::CONTACT_KIND_BUYER, $groupB);
+
+        Sanctum::actingAs($agentA);
+
+        $this->getJson('/api/clients')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $clientA->id)
+            ->assertJsonPath('data.0.branch_group.id', $groupA->id)
+            ->assertJsonMissing(['id' => $clientB->id]);
+
+        $this->getJson('/api/clients/' . $clientB->id)->assertForbidden();
+    }
+
+    public function test_agent_from_branch_visible_group_sees_contacts_from_entire_branch(): void
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_ALL_BRANCH,
+        ]);
+
+        $branch = Branch::create(['name' => 'Branch A']);
+        $groupA = $this->createBranchGroup($branch, 'Group A', BranchGroup::CONTACT_VISIBILITY_BRANCH);
+        $groupB = $this->createBranchGroup($branch, 'Group B', BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $agentA = $this->createUser($agentRole, $branch, 'Agent A', $groupA);
+        $agentB = $this->createUser($agentRole, $branch, 'Agent B', $groupB);
+
+        $clientA = $this->createClient($branch, $agentA, $agentA, 'Client A', 1, Client::CONTACT_KIND_BUYER, $groupA);
+        $clientB = $this->createClient($branch, $agentB, $agentB, 'Client B', 1, Client::CONTACT_KIND_BUYER, $groupB);
+
+        Sanctum::actingAs($agentA);
+
+        $this->getJson('/api/clients')
+            ->assertOk()
+            ->assertJsonCount(2, 'data')
+            ->assertJsonFragment(['id' => $clientA->id])
+            ->assertJsonFragment(['id' => $clientB->id]);
+
+        $this->getJson('/api/clients/' . $clientB->id)->assertOk();
+    }
+
+    public function test_own_only_setting_is_applied_after_group_scope(): void
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_OWN_ONLY,
+        ]);
+
+        $branch = Branch::create(['name' => 'Branch A']);
+        $groupA = $this->createBranchGroup($branch, 'Group A', BranchGroup::CONTACT_VISIBILITY_BRANCH);
+        $groupB = $this->createBranchGroup($branch, 'Group B', BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $agentA = $this->createUser($agentRole, $branch, 'Agent A', $groupA);
+        $agentB = $this->createUser($agentRole, $branch, 'Agent B', $groupB);
+
+        $ownClient = $this->createClient($branch, $agentA, $agentA, 'Own Client', 1, Client::CONTACT_KIND_BUYER, $groupA);
+        $foreignClient = $this->createClient($branch, $agentB, $agentB, 'Foreign Client', 1, Client::CONTACT_KIND_BUYER, $groupB);
+
+        Sanctum::actingAs($agentA);
+
+        $this->getJson('/api/clients')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $ownClient->id)
+            ->assertJsonMissing(['id' => $foreignClient->id]);
+    }
+
+    public function test_branch_director_sees_all_groups_in_own_branch(): void
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_ALL_BRANCH,
+        ]);
+
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+        $groupA1 = $this->createBranchGroup($branchA, 'Group A1', BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY);
+        $groupA2 = $this->createBranchGroup($branchA, 'Group A2', BranchGroup::CONTACT_VISIBILITY_BRANCH);
+        $groupB1 = $this->createBranchGroup($branchB, 'Group B1', BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY);
+
+        $directorRole = Role::create(['name' => 'Director', 'slug' => 'branch_director']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $director = $this->createUser($directorRole, $branchA, 'Director A');
+        $agentA = $this->createUser($agentRole, $branchA, 'Agent A', $groupA1);
+        $agentB = $this->createUser($agentRole, $branchA, 'Agent B', $groupA2);
+        $foreignAgent = $this->createUser($agentRole, $branchB, 'Agent C', $groupB1);
+
+        $clientA1 = $this->createClient($branchA, $agentA, $agentA, 'Client A1', 1, Client::CONTACT_KIND_BUYER, $groupA1);
+        $clientA2 = $this->createClient($branchA, $agentB, $agentB, 'Client A2', 1, Client::CONTACT_KIND_BUYER, $groupA2);
+        $this->createClient($branchB, $foreignAgent, $foreignAgent, 'Client B1', 1, Client::CONTACT_KIND_BUYER, $groupB1);
+
+        Sanctum::actingAs($director);
+
+        $this->getJson('/api/clients')
+            ->assertOk()
+            ->assertJsonCount(2, 'data')
+            ->assertJsonFragment(['id' => $clientA1->id])
+            ->assertJsonFragment(['id' => $clientA2->id])
+            ->assertJsonMissing(['full_name' => 'Client B1']);
+    }
+
+    public function test_admin_cannot_assign_client_to_group_from_another_branch(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+        $groupB = $this->createBranchGroup($branchB, 'Group B');
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $admin = $this->createUser($adminRole, $branchA, 'Admin');
+
+        Sanctum::actingAs($admin);
+
+        $this->postJson('/api/clients', [
+            'full_name' => 'Wrong Group Client',
+            'branch_id' => $branchA->id,
+            'branch_group_id' => $groupB->id,
+        ])->assertStatus(422);
+    }
+
+    public function test_admin_create_and_show_client_include_branch_group_relation(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $group = $this->createBranchGroup($branch, 'Group A');
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $admin = $this->createUser($adminRole, $branch, 'Admin');
+
+        Sanctum::actingAs($admin);
+
+        $response = $this->postJson('/api/clients', [
+            'full_name' => 'Grouped Client',
+            'phone' => '+992900000111',
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+        ]);
+
+        $clientId = $response->json('id');
+
+        $response->assertCreated();
+        $response->assertJsonPath('branch_group.id', $group->id);
+        $response->assertJsonPath('branch_group_id', $group->id);
+
+        $this->getJson('/api/clients/' . $clientId)
+            ->assertOk()
+            ->assertJsonPath('branch_group.id', $group->id);
+    }
+
+    private function createUser(Role $role, Branch $branch, string $name, ?BranchGroup $branchGroup = null): User
     {
         return User::create([
             'name' => $name,
@@ -503,7 +686,20 @@ class ClientAccessTest extends TestCase
             'password' => bcrypt('password'),
             'role_id' => $role->id,
             'branch_id' => $branch->id,
+            'branch_group_id' => $branchGroup?->id,
             'status' => 'active',
+        ]);
+    }
+
+    private function createBranchGroup(
+        Branch $branch,
+        string $name,
+        string $contactVisibilityMode = BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY
+    ): BranchGroup {
+        return BranchGroup::create([
+            'branch_id' => $branch->id,
+            'name' => $name,
+            'contact_visibility_mode' => $contactVisibilityMode,
         ]);
     }
 
@@ -513,7 +709,8 @@ class ClientAccessTest extends TestCase
         User $responsibleAgent,
         string $fullName,
         int $clientTypeId = 1,
-        string $contactKind = Client::CONTACT_KIND_BUYER
+        string $contactKind = Client::CONTACT_KIND_BUYER,
+        ?BranchGroup $branchGroup = null
     ): Client
     {
         return Client::create([
@@ -521,6 +718,7 @@ class ClientAccessTest extends TestCase
             'phone' => '+992900000' . random_int(100, 999),
             'phone_normalized' => '992900000' . random_int(100, 999),
             'branch_id' => $branch->id,
+            'branch_group_id' => $branchGroup?->id,
             'created_by' => $creator->id,
             'responsible_agent_id' => $responsibleAgent->id,
             'client_type_id' => $clientTypeId,

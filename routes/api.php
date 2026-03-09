@@ -3,6 +3,7 @@
 use App\Http\Controllers\{AuthController,
     B24AuthController,
     BranchController,
+    BranchGroupController,
     BookingController,
     BuildingTypeController,
     ChatController,
@@ -128,6 +129,7 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::apiResource('contract-types',    ContractTypeController::class)->except(['index']);
     Route::apiResource('repair-types',      RepairTypeController::class)->except(['index']);
     Route::apiResource('branches',          BranchController::class)->except(['index']);
+    Route::apiResource('branch-groups',     BranchGroupController::class);
     Route::apiResource('developers', DeveloperController::class)->except(['index', 'show']);
     Route::apiResource('features',   FeatureController::class)->except(['index', 'show']);
     Route::apiResource('materials',  MaterialController::class)->except(['index', 'show']);

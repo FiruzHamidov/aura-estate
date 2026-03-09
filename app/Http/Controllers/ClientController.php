@@ -47,6 +47,7 @@ class ClientController extends Controller
     {
         return [
             'branch',
+            'branchGroup',
             'creator',
             'responsibleAgent',
             'type',
@@ -70,6 +71,7 @@ class ClientController extends Controller
             'email' => 'nullable|string',
             'responsible_agent_id' => 'nullable|integer|exists:users,id',
             'branch_id' => 'nullable|integer|exists:branches,id',
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'client_type_id' => 'nullable|integer|exists:client_types,id',
             'contact_kind' => ['nullable', Rule::in(Client::contactKinds())],
             'is_business' => 'nullable|boolean',
@@ -111,6 +113,10 @@ class ClientController extends Controller
 
         if ($this->isPrivilegedRole($authUser) && !empty($validated['branch_id'])) {
             $query->where('branch_id', $validated['branch_id']);
+        }
+
+        if (!empty($validated['branch_group_id'])) {
+            $query->where('branch_group_id', $validated['branch_group_id']);
         }
 
         if (!empty($validated['client_type_id'])) {
@@ -162,6 +168,7 @@ class ClientController extends Controller
             'email' => 'nullable|email|max:255',
             'note' => 'nullable|string',
             'branch_id' => 'nullable|integer|exists:branches,id',
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'responsible_agent_id' => 'nullable|integer|exists:users,id',
             'client_type_id' => 'nullable|integer|exists:client_types,id',
             'contact_kind' => ['nullable', Rule::in(Client::contactKinds())],
@@ -176,6 +183,7 @@ class ClientController extends Controller
             'email',
             'note',
             'branch_id',
+            'branch_group_id',
             'responsible_agent_id',
             'client_type_id',
             'contact_kind',
@@ -214,6 +222,7 @@ class ClientController extends Controller
             'email' => 'sometimes|nullable|email|max:255',
             'note' => 'nullable|string',
             'branch_id' => 'sometimes|nullable|integer|exists:branches,id',
+            'branch_group_id' => 'sometimes|nullable|integer|exists:branch_groups,id',
             'responsible_agent_id' => 'sometimes|nullable|integer|exists:users,id',
             'client_type_id' => 'sometimes|nullable|integer|exists:client_types,id',
             'contact_kind' => ['sometimes', 'nullable', Rule::in(Client::contactKinds())],
@@ -228,6 +237,7 @@ class ClientController extends Controller
             'email',
             'note',
             'branch_id',
+            'branch_group_id',
             'responsible_agent_id',
             'client_type_id',
             'contact_kind',
@@ -239,6 +249,7 @@ class ClientController extends Controller
         $data = $this->normalizeInput($data);
         $data = array_merge([
             'branch_id' => $client->branch_id,
+            'branch_group_id' => $client->branch_group_id,
             'created_by' => $client->created_by,
             'responsible_agent_id' => $client->responsible_agent_id,
             'client_type_id' => $client->client_type_id,

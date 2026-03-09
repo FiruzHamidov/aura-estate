@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\BranchGroup;
 use App\Models\Property;
 use App\Models\Role;
 use App\Models\User;
@@ -50,7 +51,7 @@ class UserController extends Controller
     {
         $roleSlug = $this->roleSlug($authUser);
 
-        $query = User::query()->with(['role', 'branch']);
+        $query = User::query()->with(['role', 'branch', 'branchGroup']);
 
         if ($this->isPrivilegedRole($roleSlug)) {
             return $query;
@@ -136,6 +137,33 @@ class UserController extends Controller
         return $data;
     }
 
+    private function normalizeBranchGroupIdForMutation(array $data, ?Role $targetRole): array
+    {
+        $roleSlug = $targetRole?->slug;
+
+        if (!$roleSlug) {
+            return $data;
+        }
+
+        if (!$this->isBranchScopedRole($roleSlug)) {
+            $data['branch_group_id'] = null;
+
+            return $data;
+        }
+
+        if (empty($data['branch_group_id'])) {
+            return $data;
+        }
+
+        $branchGroup = BranchGroup::query()->find($data['branch_group_id']);
+
+        if (!$branchGroup || empty($data['branch_id']) || (int) $branchGroup->branch_id !== (int) $data['branch_id']) {
+            abort(422, 'branch_group_id must belong to the user branch.');
+        }
+
+        return $data;
+    }
+
     // Список всех пользователей
     public function index(Request $request)
     {
@@ -145,6 +173,7 @@ class UserController extends Controller
             'name' => 'nullable|string',
             'phone' => 'nullable|string',
             'branch_id' => 'nullable|integer|exists:branches,id',
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'role' => 'nullable|string|exists:roles,slug',
             'status' => ['nullable', Rule::in(['active', 'inactive'])],
             'page' => 'nullable|integer|min:1',
@@ -167,6 +196,10 @@ class UserController extends Controller
             }
         } elseif (!empty($authUser->branch_id)) {
             $query->where('branch_id', $authUser->branch_id);
+        }
+
+        if (!empty($validated['branch_group_id'])) {
+            $query->where('branch_group_id', $validated['branch_group_id']);
         }
 
         if (!empty($validated['role'])) {
@@ -198,6 +231,7 @@ class UserController extends Controller
             'email' => 'nullable|email|unique:users,email',
             'role_id' => 'required|exists:roles,id',
             'branch_id' => 'nullable|exists:branches,id',
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'auth_method' => 'nullable|in:password,sms',
             'password' => 'nullable|string|min:6',
         ]);
@@ -205,8 +239,9 @@ class UserController extends Controller
         $targetRole = $this->resolveTargetRole($request);
         $this->authorizeAssignedRole($authUser, $targetRole);
 
-        $data = $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'auth_method', 'status', 'birthday', 'description']);
+        $data = $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'birthday', 'description']);
         $data = $this->normalizeBranchIdForMutation($data, $authUser, $targetRole);
+        $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
 
         if (!$request->filled('auth_method')) {
             unset($data['auth_method']);
@@ -218,7 +253,7 @@ class UserController extends Controller
 
         $user = User::create($data);
 
-        return response()->json($user, 201);
+        return response()->json($user->load(['role', 'branch', 'branchGroup']), 201);
     }
 
     // Просмотр конкретного пользователя
@@ -226,13 +261,13 @@ class UserController extends Controller
     {
         $this->ensureUserIsVisible($this->authUser(), $user);
 
-        return response()->json($user->load(['role', 'branch']));
+        return response()->json($user->load(['role', 'branch', 'branchGroup']));
     }
 
     public function profile()
     {
         return response()->json(
-            $this->authUser()->loadMissing(['role', 'branch'])
+            $this->authUser()->loadMissing(['role', 'branch', 'branchGroup'])
         );
     }
 
@@ -250,6 +285,7 @@ class UserController extends Controller
             'email' => 'sometimes|email|unique:users,email,' . $user->id,
             'role_id' => 'sometimes|exists:roles,id',
             'branch_id' => 'sometimes|nullable|exists:branches,id',
+            'branch_group_id' => 'sometimes|nullable|integer|exists:branch_groups,id',
             'auth_method' => 'sometimes|nullable|in:password,sms',
             'password' => 'nullable|string|min:6',
         ]);
@@ -257,8 +293,12 @@ class UserController extends Controller
         $targetRole = $this->resolveTargetRole($request, $user);
         $this->authorizeAssignedRole($authUser, $targetRole);
 
-        $data = $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'auth_method', 'status', 'description', 'birthday']);
+        $data = array_merge([
+            'branch_id' => $user->branch_id,
+            'branch_group_id' => $user->branch_group_id,
+        ], $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'description', 'birthday']));
         $data = $this->normalizeBranchIdForMutation($data, $authUser, $targetRole);
+        $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
 
         if ($request->filled('password')) {
             $data['password'] = Hash::make($request->password);
@@ -273,7 +313,7 @@ class UserController extends Controller
 
         $user->update($data);
 
-        return response()->json($user->fresh(['role', 'branch']));
+        return response()->json($user->fresh(['role', 'branch', 'branchGroup']));
     }
 
     public function updatePhoto(Request $request, User $user)
@@ -313,7 +353,7 @@ class UserController extends Controller
 
         $status = $validated['status'] ?? 'active';
 
-        $agents = User::with(['role', 'branch'])
+        $agents = User::with(['role', 'branch', 'branchGroup'])
             ->whereHas('role', function ($q) {
                 $q->where('slug', 'agent');
             })

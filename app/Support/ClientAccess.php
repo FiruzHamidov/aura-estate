@@ -2,6 +2,7 @@
 
 namespace App\Support;
 
+use App\Models\BranchGroup;
 use App\Models\Client;
 use App\Models\ClientNeed;
 use App\Models\ClientType;
@@ -110,7 +111,7 @@ class ClientAccess
     {
         $roleSlug = $this->roleSlug($authUser);
 
-        $query = Client::query()->with(['branch', 'creator', 'responsibleAgent', 'type']);
+        $query = Client::query()->with(['branch', 'branchGroup', 'creator', 'responsibleAgent', 'type']);
 
         if ($this->isPrivilegedRole($roleSlug)) {
             return $query;
@@ -125,6 +126,8 @@ class ClientAccess
         if (!$this->isAgentScopedRole($roleSlug)) {
             return $query;
         }
+
+        $query = $this->applyGroupVisibilityScope($query, $authUser);
 
         if ($this->visibilityMode() === self::VISIBILITY_OWN_ONLY) {
             return $this->filterSellerVisibilityForAgent(
@@ -164,6 +167,8 @@ class ClientAccess
             $data['branch_id'] = $authUser->branch_id;
         }
 
+        $authUser->loadMissing('branchGroup');
+
         $data['created_by'] ??= $authUser->id;
 
         if (
@@ -171,6 +176,19 @@ class ClientAccess
             && empty($data['responsible_agent_id'])
         ) {
             $data['responsible_agent_id'] = $authUser->id;
+        }
+
+        if ($this->isAgentScopedRole($roleSlug)) {
+            $data['branch_group_id'] = $authUser->branch_group_id ?: null;
+        } elseif ($this->isBranchScopedRole($roleSlug)) {
+            if (empty($data['branch_group_id']) && !empty($authUser->branch_group_id)) {
+                $data['branch_group_id'] = $authUser->branch_group_id;
+            }
+        } elseif (empty($data['branch_id']) && !empty($data['branch_group_id'])) {
+            $group = BranchGroup::query()->find($data['branch_group_id']);
+            if ($group) {
+                $data['branch_id'] = $group->branch_id;
+            }
         }
 
         if (empty($data['contact_kind']) || !in_array($data['contact_kind'], Client::contactKinds(), true)) {
@@ -187,12 +205,23 @@ class ClientAccess
     public function validateMutationTargets(User $authUser, array $data): void
     {
         $roleSlug = $this->roleSlug($authUser);
+        $branchId = $data['branch_id'] ?? null;
+
+        if (!empty($data['branch_group_id'])) {
+            $targetGroup = BranchGroup::query()->find($data['branch_group_id']);
+
+            if (!$targetGroup) {
+                abort(422, 'branch_group_id is invalid.');
+            }
+
+            if (empty($branchId) || (int) $targetGroup->branch_id !== (int) $branchId) {
+                abort(422, 'branch_group_id must belong to the client branch.');
+            }
+        }
 
         if (!$this->isBranchScopedRole($roleSlug)) {
             return;
         }
-
-        $branchId = $data['branch_id'] ?? null;
 
         if ((int) $branchId !== (int) $authUser->branch_id) {
             abort(422, 'branch_id must match your branch.');
@@ -259,6 +288,20 @@ class ClientAccess
         return $query->where(function (Builder $builder) use ($authUser) {
             $this->applyOwnContactConstraint($builder, $authUser);
         });
+    }
+
+    private function applyGroupVisibilityScope(Builder $query, User $authUser): Builder
+    {
+        $authUser->loadMissing('branchGroup');
+
+        if (
+            empty($authUser->branch_group_id)
+            || $authUser->branchGroup?->contact_visibility_mode !== BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY
+        ) {
+            return $query;
+        }
+
+        return $query->where('branch_group_id', $authUser->branch_group_id);
     }
 
     private function filterSellerVisibilityForAgent(

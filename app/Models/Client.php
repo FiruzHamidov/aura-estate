@@ -21,6 +21,7 @@ class Client extends Model
         'email',
         'note',
         'branch_id',
+        'branch_group_id',
         'created_by',
         'responsible_agent_id',
         'client_type_id',
@@ -93,6 +94,11 @@ class Client extends Model
     public function branch()
     {
         return $this->belongsTo(Branch::class);
+    }
+
+    public function branchGroup()
+    {
+        return $this->belongsTo(BranchGroup::class);
     }
 
     public function creator()

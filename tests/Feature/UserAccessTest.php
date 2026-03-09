@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\Branch;
+use App\Models\BranchGroup;
 use App\Models\Role;
 use App\Models\User;
 use Illuminate\Database\Schema\Blueprint;
@@ -32,6 +33,16 @@ class UserAccessTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('branch_groups', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('branch_id')->constrained('branches')->cascadeOnDelete();
+            $table->string('name');
+            $table->text('description')->nullable();
+            $table->string('contact_visibility_mode', 32)->default(BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY);
+            $table->timestamps();
+            $table->unique(['branch_id', 'name']);
+        });
+
         Schema::create('users', function (Blueprint $table) {
             $table->id();
             $table->string('name');
@@ -40,6 +51,7 @@ class UserAccessTest extends TestCase
             $table->string('password')->nullable();
             $table->foreignId('role_id')->constrained('roles')->cascadeOnDelete();
             $table->foreignId('branch_id')->nullable()->constrained('branches')->nullOnDelete();
+            $table->foreignId('branch_group_id')->nullable()->constrained('branch_groups')->nullOnDelete();
             $table->enum('status', ['active', 'inactive'])->default('active');
             $table->enum('auth_method', ['password', 'sms'])->default('password');
             $table->rememberToken()->nullable();
@@ -188,6 +200,11 @@ class UserAccessTest extends TestCase
     public function test_authenticated_user_can_fetch_own_profile(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);
+        $group = BranchGroup::create([
+            'branch_id' => $branch->id,
+            'name' => 'Group A',
+            'contact_visibility_mode' => BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY,
+        ]);
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
 
         $user = User::create([
@@ -196,6 +213,7 @@ class UserAccessTest extends TestCase
             'password' => bcrypt('password'),
             'role_id' => $agentRole->id,
             'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
             'status' => 'active',
         ]);
 
@@ -207,6 +225,7 @@ class UserAccessTest extends TestCase
         $response->assertJsonPath('id', $user->id);
         $response->assertJsonPath('role.slug', 'agent');
         $response->assertJsonPath('branch.id', $branch->id);
+        $response->assertJsonPath('branch_group.id', $group->id);
     }
 
     public function test_superadmin_user_index_is_global_and_not_forced_to_own_branch(): void
@@ -252,5 +271,61 @@ class UserAccessTest extends TestCase
         $response->assertJsonPath('data.0.id', $agentB->id);
 
         $this->getJson('/api/user/' . $agentB->id)->assertOk();
+    }
+
+    public function test_branch_director_cannot_assign_group_from_another_branch_and_user_payload_includes_group(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $directorRole = Role::create(['name' => 'Director', 'slug' => 'branch_director']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $groupA = BranchGroup::create([
+            'branch_id' => $branchA->id,
+            'name' => 'Group A',
+            'contact_visibility_mode' => BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY,
+        ]);
+        $groupB = BranchGroup::create([
+            'branch_id' => $branchB->id,
+            'name' => 'Group B',
+            'contact_visibility_mode' => BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY,
+        ]);
+
+        $director = User::create([
+            'name' => 'Director A',
+            'phone' => '900000051',
+            'password' => bcrypt('password'),
+            'role_id' => $directorRole->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($director);
+
+        $this->postJson('/api/user', [
+            'name' => 'Agent Wrong Group',
+            'phone' => '900000052',
+            'role_id' => $agentRole->id,
+            'branch_group_id' => $groupB->id,
+        ])->assertStatus(422);
+
+        $response = $this->postJson('/api/user', [
+            'name' => 'Agent Right Group',
+            'phone' => '900000053',
+            'role_id' => $agentRole->id,
+            'branch_group_id' => $groupA->id,
+        ]);
+
+        $createdUserId = $response->json('id');
+
+        $response->assertCreated();
+        $response->assertJsonPath('branch_id', $branchA->id);
+        $response->assertJsonPath('branch_group_id', $groupA->id);
+        $response->assertJsonPath('branch_group.id', $groupA->id);
+
+        $this->getJson('/api/user/' . $createdUserId)
+            ->assertOk()
+            ->assertJsonPath('branch_group.id', $groupA->id);
     }
 }

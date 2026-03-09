@@ -22,6 +22,11 @@ class Branch extends Model
         return $this->hasMany(User::class);
     }
 
+    public function branchGroups()
+    {
+        return $this->hasMany(BranchGroup::class);
+    }
+
     public function leads()
     {
         return $this->hasMany(Lead::class);
