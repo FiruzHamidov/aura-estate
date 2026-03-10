@@ -11,11 +11,17 @@ class Lead extends Model
     use HasFactory, SoftDeletes;
 
     public const STATUS_NEW = 'new';
+
     public const STATUS_ASSIGNED = 'assigned';
+
     public const STATUS_IN_PROGRESS = 'in_progress';
+
     public const STATUS_QUALIFIED = 'qualified';
+
     public const STATUS_CONVERTED = 'converted';
+
     public const STATUS_LOST = 'lost';
+
     public const DEFAULT_FIRST_CONTACT_SLA_MINUTES = 15;
 
     protected $fillable = [
@@ -37,15 +43,23 @@ class Lead extends Model
         'closed_at',
         'lost_reason',
         'meta',
+        'tags',
+        'last_contact_result',
+        'next_follow_up_at',
+        'next_activity_at',
+        'updated_by',
     ];
 
     protected $casts = [
         'meta' => 'array',
+        'tags' => 'array',
         'first_contact_due_at' => 'datetime',
         'first_contacted_at' => 'datetime',
         'last_activity_at' => 'datetime',
         'converted_at' => 'datetime',
         'closed_at' => 'datetime',
+        'next_follow_up_at' => 'datetime',
+        'next_activity_at' => 'datetime',
     ];
 
     protected $appends = [
@@ -88,6 +102,11 @@ class Lead extends Model
         return $this->belongsTo(User::class, 'responsible_agent_id');
     }
 
+    public function updater()
+    {
+        return $this->belongsTo(User::class, 'updated_by');
+    }
+
     public function client()
     {
         return $this->belongsTo(Client::class);
@@ -103,6 +122,11 @@ class Lead extends Model
         return $this->morphMany(CrmAuditLog::class, 'auditable')->latest('id');
     }
 
+    public function activities()
+    {
+        return $this->morphMany(CrmAuditLog::class, 'auditable')->latest('id');
+    }
+
     public function getIsClosedAttribute(): bool
     {
         return in_array($this->status, self::closedStatuses(), true);
@@ -110,7 +134,7 @@ class Lead extends Model
 
     public function getIsFirstContactOverdueAttribute(): bool
     {
-        if ($this->is_closed || $this->first_contacted_at || !$this->first_contact_due_at) {
+        if ($this->is_closed || $this->first_contacted_at || ! $this->first_contact_due_at) {
             return false;
         }
 

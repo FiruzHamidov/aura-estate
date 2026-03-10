@@ -9,8 +9,8 @@ use App\Models\Property;
 use App\Models\Role;
 use App\Models\User;
 use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
@@ -83,6 +83,7 @@ class ClientIntegrationTest extends TestCase
             $table->string('email')->nullable();
             $table->text('note')->nullable();
             $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('branch_group_id')->nullable();
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('responsible_agent_id')->nullable();
             $table->unsignedBigInteger('client_type_id')->nullable();
@@ -343,7 +344,7 @@ class ClientIntegrationTest extends TestCase
 
         Sanctum::actingAs($agent);
 
-        $response = $this->postJson('/api/properties/' . $property->id . '/deal', [
+        $response = $this->postJson('/api/properties/'.$property->id.'/deal', [
             'moderation_status' => 'sold',
             'buyer_client_id' => $client->id,
             'actual_sale_price' => 150000,
@@ -389,7 +390,7 @@ class ClientIntegrationTest extends TestCase
             'owner_client_id' => $client->id,
         ])->assertOk()->json('id');
 
-        $this->postJson('/api/properties/' . $propertyId . '/deal', [
+        $this->postJson('/api/properties/'.$propertyId.'/deal', [
             'moderation_status' => 'sold',
             'buyer_client_id' => $client->id,
             'actual_sale_price' => 140000,
@@ -453,7 +454,7 @@ class ClientIntegrationTest extends TestCase
 
         Sanctum::actingAs($agent);
 
-        $response = $this->getJson('/api/reports/agent/clients?agent_id=' . $agent->id);
+        $response = $this->getJson('/api/reports/agent/clients?agent_id='.$agent->id);
 
         $response->assertOk();
         $response->assertJsonPath('unique_clients', 2);

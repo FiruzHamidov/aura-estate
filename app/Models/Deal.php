@@ -37,12 +37,20 @@ class Deal extends Model
         'source',
         'board_position',
         'meta',
+        'note',
+        'tags',
+        'last_contact_result',
+        'next_activity_at',
+        'source_property_status',
+        'updated_by',
     ];
 
     protected $casts = [
         'deadline_at' => 'datetime',
         'closed_at' => 'datetime',
         'meta' => 'array',
+        'tags' => 'array',
+        'next_activity_at' => 'datetime',
     ];
 
     protected $appends = [
@@ -74,6 +82,11 @@ class Deal extends Model
         return $this->belongsTo(User::class, 'responsible_agent_id');
     }
 
+    public function updater()
+    {
+        return $this->belongsTo(User::class, 'updated_by');
+    }
+
     public function pipeline()
     {
         return $this->belongsTo(DealPipeline::class, 'pipeline_id');
@@ -94,8 +107,13 @@ class Deal extends Model
         return $this->morphMany(CrmAuditLog::class, 'auditable')->latest('id');
     }
 
+    public function activities()
+    {
+        return $this->morphMany(CrmAuditLog::class, 'auditable')->latest('id');
+    }
+
     public function getIsClosedAttribute(): bool
     {
-        return !is_null($this->closed_at) || (bool) ($this->stage?->is_closed ?? false);
+        return ! is_null($this->closed_at) || (bool) ($this->stage?->is_closed ?? false);
     }
 }

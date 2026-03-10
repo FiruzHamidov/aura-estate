@@ -81,6 +81,7 @@ class DealBoardFeatureTest extends TestCase
             $table->string('email')->nullable();
             $table->text('note')->nullable();
             $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('branch_group_id')->nullable();
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('responsible_agent_id')->nullable();
             $table->unsignedBigInteger('client_type_id')->nullable();
@@ -112,6 +113,11 @@ class DealBoardFeatureTest extends TestCase
             $table->timestamp('closed_at')->nullable();
             $table->text('lost_reason')->nullable();
             $table->json('meta')->nullable();
+            $table->json('tags')->nullable();
+            $table->string('last_contact_result', 100)->nullable();
+            $table->timestamp('next_follow_up_at')->nullable();
+            $table->timestamp('next_activity_at')->nullable();
+            $table->unsignedBigInteger('updated_by')->nullable();
             $table->softDeletes();
             $table->timestamps();
         });
@@ -130,6 +136,8 @@ class DealBoardFeatureTest extends TestCase
             $table->id();
             $table->string('name');
             $table->string('slug')->unique();
+            $table->string('code')->nullable();
+            $table->string('type')->default('sales');
             $table->unsignedBigInteger('branch_id')->nullable();
             $table->unsignedInteger('sort_order')->default(0);
             $table->boolean('is_default')->default(false);
@@ -179,6 +187,12 @@ class DealBoardFeatureTest extends TestCase
             $table->string('source')->nullable();
             $table->unsignedInteger('board_position')->default(0);
             $table->json('meta')->nullable();
+            $table->text('note')->nullable();
+            $table->json('tags')->nullable();
+            $table->string('last_contact_result', 100)->nullable();
+            $table->timestamp('next_activity_at')->nullable();
+            $table->string('source_property_status', 40)->nullable();
+            $table->unsignedBigInteger('updated_by')->nullable();
             $table->softDeletes();
             $table->timestamps();
         });
@@ -240,7 +254,7 @@ class DealBoardFeatureTest extends TestCase
         $this->assertSame($branch->id, $createPipeline->json('branch_id'));
         $this->assertCount(4, $createPipeline->json('stages'));
 
-        $createStage = $this->postJson('/api/deal-pipelines/' . $pipelineId . '/stages', [
+        $createStage = $this->postJson('/api/deal-pipelines/'.$pipelineId.'/stages', [
             'name' => 'Договор',
             'slug' => 'contract',
             'color' => '#111827',
@@ -249,7 +263,7 @@ class DealBoardFeatureTest extends TestCase
         $createStage->assertCreated();
         $stageId = $createStage->json('id');
 
-        $this->patchJson('/api/deal-stages/' . $stageId, [
+        $this->patchJson('/api/deal-stages/'.$stageId, [
             'name' => 'Подписание договора',
             'is_closed' => true,
         ])->assertOk()
@@ -259,7 +273,7 @@ class DealBoardFeatureTest extends TestCase
         $currentStages = DealPipeline::findOrFail($pipelineId)->stages()->pluck('id')->all();
         $reordered = array_reverse($currentStages);
 
-        $this->patchJson('/api/deal-pipelines/' . $pipelineId . '/stages/reorder', [
+        $this->patchJson('/api/deal-pipelines/'.$pipelineId.'/stages/reorder', [
             'stage_ids' => $reordered,
         ])->assertOk();
 
@@ -294,21 +308,21 @@ class DealBoardFeatureTest extends TestCase
             'title' => 'Deal B',
         ])->assertCreated()->json();
 
-        $this->patchJson('/api/deals/' . $dealB['id'] . '/move', [
+        $this->patchJson('/api/deals/'.$dealB['id'].'/move', [
             'stage_id' => $negotiationStage->id,
             'position' => 0,
         ])->assertOk()
             ->assertJsonPath('stage_id', $negotiationStage->id)
             ->assertJsonPath('board_position', 1);
 
-        $this->patchJson('/api/deals/' . $dealA['id'] . '/move', [
+        $this->patchJson('/api/deals/'.$dealA['id'].'/move', [
             'stage_id' => $negotiationStage->id,
             'position' => 0,
         ])->assertOk()
             ->assertJsonPath('stage_id', $negotiationStage->id)
             ->assertJsonPath('board_position', 1);
 
-        $board = $this->getJson('/api/deal-pipelines/' . $pipeline->id . '/board')
+        $board = $this->getJson('/api/deal-pipelines/'.$pipeline->id.'/board')
             ->assertOk()
             ->json();
 
@@ -343,13 +357,13 @@ class DealBoardFeatureTest extends TestCase
 
         Sanctum::actingAs($agentA);
 
-        $this->patchJson('/api/deals/' . $foreignSameBranchDeal->id . '/move', [
+        $this->patchJson('/api/deals/'.$foreignSameBranchDeal->id.'/move', [
             'stage_id' => $wonStageA->id,
         ])->assertForbidden();
 
         Sanctum::actingAs($rop);
 
-        $this->getJson('/api/deal-pipelines/' . $pipelineA->id . '/board')
+        $this->getJson('/api/deal-pipelines/'.$pipelineA->id.'/board')
             ->assertOk()
             ->assertJsonFragment(['id' => $foreignSameBranchDeal->id])
             ->assertJsonMissing(['title' => $foreignBranchDeal->title]);
@@ -369,7 +383,7 @@ class DealBoardFeatureTest extends TestCase
 
         Sanctum::actingAs($director);
 
-        $this->deleteJson('/api/deal-stages/' . $newStage->id)
+        $this->deleteJson('/api/deal-stages/'.$newStage->id)
             ->assertStatus(409)
             ->assertJsonPath('message', 'Нельзя удалить стадию: в ней есть сделки.');
     }
@@ -404,8 +418,8 @@ class DealBoardFeatureTest extends TestCase
     private function createPipelineWithStages(Branch $branch): array
     {
         $pipeline = DealPipeline::create([
-            'name' => 'Pipeline ' . $branch->id . '-' . $this->nextPhone(),
-            'slug' => 'pipeline_' . $branch->id . '_' . $this->nextPhone(),
+            'name' => 'Pipeline '.$branch->id.'-'.$this->nextPhone(),
+            'slug' => 'pipeline_'.$branch->id.'_'.$this->nextPhone(),
             'branch_id' => $branch->id,
             'sort_order' => 10,
             'is_default' => true,
@@ -464,6 +478,6 @@ class DealBoardFeatureTest extends TestCase
 
     private function nextPhone(): string
     {
-        return '992' . $this->phoneCounter++;
+        return '992'.$this->phoneCounter++;
     }
 }

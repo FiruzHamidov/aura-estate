@@ -9,11 +9,19 @@ class DealPipeline extends Model
 {
     use HasFactory;
 
+    public const TYPE_SALES = 'sales';
+
+    public const TYPE_PROPERTY_CONTROL = 'property_control';
+
+    public const CODE_PROPERTY_CONTROL = 'property_control';
+
     protected $table = 'crm_deal_pipelines';
 
     protected $fillable = [
         'name',
         'slug',
+        'code',
+        'type',
         'branch_id',
         'sort_order',
         'is_default',
@@ -26,6 +34,12 @@ class DealPipeline extends Model
         'is_active' => 'boolean',
         'meta' => 'array',
     ];
+
+    public function isPropertyControl(): bool
+    {
+        return $this->code === self::CODE_PROPERTY_CONTROL
+            || $this->type === self::TYPE_PROPERTY_CONTROL;
+    }
 
     public function branch()
     {

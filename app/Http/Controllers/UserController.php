@@ -57,7 +57,7 @@ class UserController extends Controller
             return $query;
         }
 
-        if (!$this->isBranchScopedManager($roleSlug) || empty($authUser->branch_id)) {
+        if (! $this->isBranchScopedManager($roleSlug) || empty($authUser->branch_id)) {
             return $query->whereRaw('1 = 0');
         }
 
@@ -83,8 +83,8 @@ class UserController extends Controller
     {
         return match ($this->roleSlug($authUser)) {
             'superadmin', 'admin' => null,
-            'rop' => ['agent', 'client'],
-            'branch_director' => ['agent', 'client'],
+            'rop' => ['agent', 'manager', 'operator', 'client'],
+            'branch_director' => ['agent', 'manager', 'operator', 'client'],
             default => [],
         };
     }
@@ -97,6 +97,7 @@ class UserController extends Controller
 
         if ($targetUser) {
             $targetUser->loadMissing('role');
+
             return $targetUser->role;
         }
 
@@ -105,7 +106,7 @@ class UserController extends Controller
 
     private function authorizeAssignedRole(User $authUser, ?Role $targetRole): void
     {
-        if (!$targetRole) {
+        if (! $targetRole) {
             return;
         }
 
@@ -122,7 +123,7 @@ class UserController extends Controller
     {
         $roleSlug = $targetRole?->slug;
 
-        if (!$roleSlug) {
+        if (! $roleSlug) {
             return $data;
         }
 
@@ -141,11 +142,11 @@ class UserController extends Controller
     {
         $roleSlug = $targetRole?->slug;
 
-        if (!$roleSlug) {
+        if (! $roleSlug) {
             return $data;
         }
 
-        if (!$this->isBranchScopedRole($roleSlug)) {
+        if (! $this->isBranchScopedRole($roleSlug)) {
             $data['branch_group_id'] = null;
 
             return $data;
@@ -157,7 +158,7 @@ class UserController extends Controller
 
         $branchGroup = BranchGroup::query()->find($data['branch_group_id']);
 
-        if (!$branchGroup || empty($data['branch_id']) || (int) $branchGroup->branch_id !== (int) $data['branch_id']) {
+        if (! $branchGroup || empty($data['branch_id']) || (int) $branchGroup->branch_id !== (int) $data['branch_id']) {
             abort(422, 'branch_group_id must belong to the user branch.');
         }
 
@@ -182,31 +183,31 @@ class UserController extends Controller
 
         $query = $this->visibleUsersQuery($authUser);
 
-        if (!empty($validated['name'])) {
-            $query->where('name', 'like', '%' . trim($validated['name']) . '%');
+        if (! empty($validated['name'])) {
+            $query->where('name', 'like', '%'.trim($validated['name']).'%');
         }
 
-        if (!empty($validated['phone'])) {
-            $query->where('phone', 'like', '%' . trim($validated['phone']) . '%');
+        if (! empty($validated['phone'])) {
+            $query->where('phone', 'like', '%'.trim($validated['phone']).'%');
         }
 
         if ($this->isPrivilegedRole($this->roleSlug($authUser))) {
-            if (!empty($validated['branch_id'])) {
+            if (! empty($validated['branch_id'])) {
                 $query->where('branch_id', $validated['branch_id']);
             }
-        } elseif (!empty($authUser->branch_id)) {
+        } elseif (! empty($authUser->branch_id)) {
             $query->where('branch_id', $authUser->branch_id);
         }
 
-        if (!empty($validated['branch_group_id'])) {
+        if (! empty($validated['branch_group_id'])) {
             $query->where('branch_group_id', $validated['branch_group_id']);
         }
 
-        if (!empty($validated['role'])) {
+        if (! empty($validated['role'])) {
             $query->whereHas('role', fn ($q) => $q->where('slug', $validated['role']));
         }
 
-        if (!empty($validated['status'])) {
+        if (! empty($validated['status'])) {
             $query->where('status', $validated['status']);
         }
 
@@ -243,7 +244,7 @@ class UserController extends Controller
         $data = $this->normalizeBranchIdForMutation($data, $authUser, $targetRole);
         $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
 
-        if (!$request->filled('auth_method')) {
+        if (! $request->filled('auth_method')) {
             unset($data['auth_method']);
         }
 
@@ -281,8 +282,8 @@ class UserController extends Controller
             'name' => 'sometimes|string',
             'description' => 'nullable|string',
             'birthday' => 'nullable|date',
-            'phone' => 'sometimes|string|unique:users,phone,' . $user->id,
-            'email' => 'sometimes|email|unique:users,email,' . $user->id,
+            'phone' => 'sometimes|string|unique:users,phone,'.$user->id,
+            'email' => 'sometimes|email|unique:users,email,'.$user->id,
             'role_id' => 'sometimes|exists:roles,id',
             'branch_id' => 'sometimes|nullable|exists:branches,id',
             'branch_group_id' => 'sometimes|nullable|integer|exists:branch_groups,id',
@@ -306,7 +307,7 @@ class UserController extends Controller
 
         if ($request->hasFile('photo')) {
             $file = $request->file('photo');
-            $filename = 'users/' . uniqid() . '.' . $file->getClientOriginalExtension();
+            $filename = 'users/'.uniqid().'.'.$file->getClientOriginalExtension();
             $path = \Storage::disk('public')->put($filename, file_get_contents($file));
             $data['photo'] = $filename;
         }
@@ -319,12 +320,12 @@ class UserController extends Controller
     public function updatePhoto(Request $request, User $user)
     {
         $request->validate([
-            'photo' => 'required|image|max:2048'
+            'photo' => 'required|image|max:2048',
         ]);
 
         if ($request->hasFile('photo')) {
             $file = $request->file('photo');
-            $filename = 'users/' . uniqid() . '.' . $file->getClientOriginalExtension();
+            $filename = 'users/'.uniqid().'.'.$file->getClientOriginalExtension();
             \Storage::disk('public')->put($filename, file_get_contents($file));
             $user->update(['photo' => $filename]);
         }
@@ -381,13 +382,13 @@ class UserController extends Controller
         $agentId = $request->input('agent_id');
 
         // Нормы: либо distribute_to_agents=true, либо agent_id обязателен
-        if (!$distribute && !$agentId) {
+        if (! $distribute && ! $agentId) {
             return response()->json([
                 'message' => 'Укажите distribute_to_agents=true для авто-распределения ИЛИ передайте agent_id.',
             ], 422);
         }
 
-        if ($agentId && (int)$agentId === (int)$user->id) {
+        if ($agentId && (int) $agentId === (int) $user->id) {
             return response()->json([
                 'message' => 'Нельзя передать объекты самому удаляемому пользователю.',
             ], 422);
@@ -396,7 +397,7 @@ class UserController extends Controller
         // Проверка, что целевой получатель — агент (если указан)
         if ($agentId) {
             $target = User::with('role')->find($agentId);
-            if (!$target || !$target->role || $target->role->slug !== 'agent' || $target->status !== 'active') {
+            if (! $target || ! $target->role || $target->role->slug !== 'agent' || $target->status !== 'active') {
                 return response()->json([
                     'message' => 'agent_id должен указывать на активного пользователя с ролью агент.',
                 ], 422);
@@ -414,7 +415,7 @@ class UserController extends Controller
             if ($props->isNotEmpty()) {
                 if ($distribute) {
                     // Соберём список доступных агентов (кроме удаляемого)
-                    $agentIds = User::whereHas('role', fn($q) => $q->where('slug', 'agent'))
+                    $agentIds = User::whereHas('role', fn ($q) => $q->where('slug', 'agent'))
                         ->where('status', 'active')
                         ->where('id', '!=', $user->id)
                         ->pluck('id')
@@ -456,13 +457,13 @@ class UserController extends Controller
 
         $request->validate([
             'current_password' => 'required',
-            'new_password'     => 'required|string|min:6|confirmed',
+            'new_password' => 'required|string|min:6|confirmed',
         ]);
 
         // Проверка текущего пароля
-        if (!Hash::check($request->current_password, $user->password)) {
+        if (! Hash::check($request->current_password, $user->password)) {
             return response()->json([
-                'message' => 'Текущий пароль введён неверно'
+                'message' => 'Текущий пароль введён неверно',
             ], 422);
         }
 

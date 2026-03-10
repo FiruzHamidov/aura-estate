@@ -20,8 +20,7 @@ class DealPipelineController extends Controller
         private readonly DealPipelineAccess $pipelineAccess,
         private readonly DealAccess $dealAccess,
         private readonly AuditLogger $auditLogger
-    ) {
-    }
+    ) {}
 
     private function authUser(): User
     {
@@ -47,9 +46,19 @@ class DealPipelineController extends Controller
 
     private function normalizePayload(array $data): array
     {
-        if (!array_key_exists('slug', $data) && !empty($data['name'])) {
+        if (! array_key_exists('slug', $data) && ! empty($data['name'])) {
             $data['slug'] = Str::slug($data['name'], '_');
         }
+
+        if (($data['type'] ?? null) === DealPipeline::TYPE_PROPERTY_CONTROL) {
+            $data['code'] = DealPipeline::CODE_PROPERTY_CONTROL;
+        } elseif (empty($data['code'])) {
+            $data['code'] = ! empty($data['slug'])
+                ? $data['slug']
+                : Str::slug((string) ($data['name'] ?? 'pipeline'), '_');
+        }
+
+        $data['type'] = $data['type'] ?? DealPipeline::TYPE_SALES;
 
         return $data;
     }
@@ -63,14 +72,42 @@ class DealPipelineController extends Controller
             ->update(['is_default' => false]);
     }
 
-    private function defaultStagesPayload(): array
+    private function defaultStagesPayload(string $type = DealPipeline::TYPE_SALES): array
     {
+        if ($type === DealPipeline::TYPE_PROPERTY_CONTROL) {
+            return [
+                ['name' => 'Новая', 'slug' => 'new', 'color' => '#64748b', 'sort_order' => 10, 'is_default' => true, 'is_closed' => false, 'is_lost' => false, 'is_active' => true],
+                ['name' => 'На проверке', 'slug' => 'in_review', 'color' => '#2563eb', 'sort_order' => 20, 'is_default' => false, 'is_closed' => false, 'is_lost' => false, 'is_active' => true],
+                ['name' => 'Связались', 'slug' => 'contacted', 'color' => '#0891b2', 'sort_order' => 30, 'is_default' => false, 'is_closed' => false, 'is_lost' => false, 'is_active' => true],
+                ['name' => 'Ждём владельца', 'slug' => 'waiting_owner', 'color' => '#f59e0b', 'sort_order' => 40, 'is_default' => false, 'is_closed' => false, 'is_lost' => false, 'is_active' => true],
+                ['name' => 'Возврат в работу', 'slug' => 'reactivation_in_progress', 'color' => '#8b5cf6', 'sort_order' => 50, 'is_default' => false, 'is_closed' => false, 'is_lost' => false, 'is_active' => true],
+                ['name' => 'Реактивирован', 'slug' => 'reactivated', 'color' => '#16a34a', 'sort_order' => 60, 'is_default' => false, 'is_closed' => true, 'is_lost' => false, 'is_active' => true],
+                ['name' => 'Продан владельцем', 'slug' => 'owner_sold_confirmed', 'color' => '#dc2626', 'sort_order' => 70, 'is_default' => false, 'is_closed' => true, 'is_lost' => true, 'is_active' => true],
+                ['name' => 'Нет ответа', 'slug' => 'no_answer', 'color' => '#f97316', 'sort_order' => 80, 'is_default' => false, 'is_closed' => false, 'is_lost' => false, 'is_active' => true],
+                ['name' => 'Неактуально', 'slug' => 'not_relevant', 'color' => '#6b7280', 'sort_order' => 90, 'is_default' => false, 'is_closed' => true, 'is_lost' => true, 'is_active' => true],
+                ['name' => 'Закрыто', 'slug' => 'closed', 'color' => '#111827', 'sort_order' => 100, 'is_default' => false, 'is_closed' => true, 'is_lost' => true, 'is_active' => true],
+            ];
+        }
+
         return [
             ['name' => 'Новая', 'slug' => 'new', 'color' => '#64748b', 'sort_order' => 10, 'is_default' => true, 'is_closed' => false, 'is_lost' => false, 'is_active' => true],
             ['name' => 'В работе', 'slug' => 'in_progress', 'color' => '#2563eb', 'sort_order' => 20, 'is_default' => false, 'is_closed' => false, 'is_lost' => false, 'is_active' => true],
             ['name' => 'Успешно закрыта', 'slug' => 'won', 'color' => '#16a34a', 'sort_order' => 30, 'is_default' => false, 'is_closed' => true, 'is_lost' => false, 'is_active' => true],
             ['name' => 'Потеряна', 'slug' => 'lost', 'color' => '#dc2626', 'sort_order' => 40, 'is_default' => false, 'is_closed' => true, 'is_lost' => true, 'is_active' => true],
         ];
+    }
+
+    private function ensureUniqueCode(array $data, ?DealPipeline $pipeline = null): void
+    {
+        $query = DealPipeline::query()
+            ->where('branch_id', $data['branch_id'] ?? null)
+            ->where('code', $data['code']);
+
+        if ($pipeline) {
+            $query->whereKeyNot($pipeline->id);
+        }
+
+        abort_if($query->exists(), 422, 'Pipeline code must be unique inside branch.');
     }
 
     private function createStages(DealPipeline $pipeline, array $stages): void
@@ -120,6 +157,8 @@ class DealPipelineController extends Controller
         $validated = $request->validate([
             'name' => 'required|string|max:255',
             'slug' => 'nullable|string|max:255|unique:crm_deal_pipelines,slug',
+            'code' => 'nullable|string|max:255',
+            'type' => ['nullable', Rule::in([DealPipeline::TYPE_SALES, DealPipeline::TYPE_PROPERTY_CONTROL])],
             'branch_id' => 'nullable|integer|exists:branches,id',
             'sort_order' => 'sometimes|integer|min:0',
             'is_default' => 'sometimes|boolean',
@@ -140,10 +179,13 @@ class DealPipelineController extends Controller
         $validated = $this->normalizePayload($validated);
         $validated = $this->pipelineAccess->normalizeMutationData($validated, $authUser);
         $this->pipelineAccess->validateMutationData($authUser, $validated);
+        $this->ensureUniqueCode($validated);
 
         $pipeline = DealPipeline::create(Arr::only($validated, [
             'name',
             'slug',
+            'code',
+            'type',
             'branch_id',
             'sort_order',
             'is_default',
@@ -155,7 +197,7 @@ class DealPipelineController extends Controller
             $this->resetDefaultPipeline($pipeline->branch_id, $pipeline->id);
         }
 
-        $this->createStages($pipeline, $validated['stages'] ?? $this->defaultStagesPayload());
+        $this->createStages($pipeline, $validated['stages'] ?? $this->defaultStagesPayload($pipeline->type));
 
         $this->auditLogger->log(
             $pipeline,
@@ -165,6 +207,8 @@ class DealPipelineController extends Controller
             Arr::only($pipeline->getAttributes(), [
                 'name',
                 'slug',
+                'code',
+                'type',
                 'branch_id',
                 'sort_order',
                 'is_default',
@@ -194,6 +238,8 @@ class DealPipelineController extends Controller
         $validated = $request->validate([
             'name' => 'sometimes|string|max:255',
             'slug' => ['sometimes', 'string', 'max:255', Rule::unique('crm_deal_pipelines', 'slug')->ignore($dealPipeline->id)],
+            'code' => 'sometimes|string|max:255',
+            'type' => ['sometimes', Rule::in([DealPipeline::TYPE_SALES, DealPipeline::TYPE_PROPERTY_CONTROL])],
             'branch_id' => 'sometimes|nullable|integer|exists:branches,id',
             'sort_order' => 'sometimes|integer|min:0',
             'is_default' => 'sometimes|boolean',
@@ -205,16 +251,21 @@ class DealPipelineController extends Controller
         $validated = $this->pipelineAccess->normalizeMutationData($validated, $authUser);
         $this->pipelineAccess->validateMutationData($authUser, array_merge([
             'branch_id' => $dealPipeline->branch_id,
+            'code' => $dealPipeline->code,
         ], $validated));
+        $this->ensureUniqueCode(array_merge([
+            'branch_id' => $dealPipeline->branch_id,
+            'code' => $dealPipeline->code,
+        ], $validated), $dealPipeline);
 
         $dealPipeline->fill($validated);
         $dirty = $dealPipeline->getDirty();
 
-        if (!empty($dirty)) {
+        if (! empty($dirty)) {
             $oldValues = Arr::only($dealPipeline->getOriginal(), array_keys($dirty));
             $dealPipeline->save();
 
-            if (!empty($validated['is_default'])) {
+            if (! empty($validated['is_default'])) {
                 $this->resetDefaultPipeline($dealPipeline->branch_id, $dealPipeline->id);
             }
 
@@ -273,18 +324,18 @@ class DealPipelineController extends Controller
             ->orderBy('board_position')
             ->orderBy('id');
 
-        if (!empty($validated['search'])) {
+        if (! empty($validated['search'])) {
             $term = trim($validated['search']);
             $dealsQuery->where(function ($builder) use ($term) {
                 $builder
-                    ->where('title', 'like', '%' . $term . '%')
-                    ->orWhereHas('client', fn ($query) => $query->where('full_name', 'like', '%' . $term . '%'))
-                    ->orWhereHas('lead', fn ($query) => $query->where('full_name', 'like', '%' . $term . '%'));
+                    ->where('title', 'like', '%'.$term.'%')
+                    ->orWhereHas('client', fn ($query) => $query->where('full_name', 'like', '%'.$term.'%'))
+                    ->orWhereHas('lead', fn ($query) => $query->where('full_name', 'like', '%'.$term.'%'));
             });
         }
 
         foreach (['responsible_agent_id', 'client_id', 'lead_id'] as $field) {
-            if (!empty($validated[$field])) {
+            if (! empty($validated[$field])) {
                 $dealsQuery->where($field, $validated[$field]);
             }
         }

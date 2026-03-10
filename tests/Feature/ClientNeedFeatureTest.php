@@ -96,6 +96,7 @@ class ClientNeedFeatureTest extends TestCase
             $table->string('email')->nullable();
             $table->text('note')->nullable();
             $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('branch_group_id')->nullable();
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('responsible_agent_id')->nullable();
             $table->unsignedBigInteger('client_type_id')->nullable();
@@ -184,7 +185,7 @@ class ClientNeedFeatureTest extends TestCase
 
         Sanctum::actingAs($agent);
 
-        $this->postJson('/api/clients/' . $client->id . '/needs', [
+        $this->postJson('/api/clients/'.$client->id.'/needs', [
             'type_id' => 1,
             'status_id' => 1,
             'budget_from' => 100000,
@@ -192,7 +193,7 @@ class ClientNeedFeatureTest extends TestCase
             'comment' => 'Need one',
         ])->assertCreated();
 
-        $this->postJson('/api/clients/' . $client->id . '/needs', [
+        $this->postJson('/api/clients/'.$client->id.'/needs', [
             'type_id' => 2,
             'status_id' => 2,
             'budget_from' => 500,
@@ -200,11 +201,11 @@ class ClientNeedFeatureTest extends TestCase
             'comment' => 'Need two',
         ])->assertCreated();
 
-        $this->getJson('/api/clients/' . $client->id . '/needs')
+        $this->getJson('/api/clients/'.$client->id.'/needs')
             ->assertOk()
             ->assertJsonCount(2);
 
-        $this->getJson('/api/clients/' . $client->id)
+        $this->getJson('/api/clients/'.$client->id)
             ->assertOk()
             ->assertJsonPath('needs_count', 2)
             ->assertJsonPath('open_needs_count', 2)
@@ -217,7 +218,7 @@ class ClientNeedFeatureTest extends TestCase
 
         Sanctum::actingAs($agent);
 
-        $create = $this->postJson('/api/clients/' . $client->id . '/needs', [
+        $create = $this->postJson('/api/clients/'.$client->id.'/needs', [
             'type_id' => 1,
             'status_id' => 1,
             'comment' => 'Lifecycle',
@@ -226,19 +227,19 @@ class ClientNeedFeatureTest extends TestCase
         $create->assertCreated();
         $needId = $create->json('id');
 
-        $this->patchJson('/api/client-needs/' . $needId, [
+        $this->patchJson('/api/client-needs/'.$needId, [
             'status_id' => 4,
         ])
             ->assertOk()
             ->assertJsonPath('status.slug', 'closed_success');
 
-        $closedAt = $this->getJson('/api/client-needs/' . $needId)
+        $closedAt = $this->getJson('/api/client-needs/'.$needId)
             ->assertOk()
             ->json('closed_at');
 
         $this->assertNotNull($closedAt);
 
-        $this->patchJson('/api/client-needs/' . $needId, [
+        $this->patchJson('/api/client-needs/'.$needId, [
             'status_id' => 3,
         ])
             ->assertOk()
@@ -260,7 +261,7 @@ class ClientNeedFeatureTest extends TestCase
         $foreignClient = $this->createClient($branch, $agentB, $agentB, 'Foreign Client');
 
         Sanctum::actingAs($agentB);
-        $create = $this->postJson('/api/clients/' . $foreignClient->id . '/needs', [
+        $create = $this->postJson('/api/clients/'.$foreignClient->id.'/needs', [
             'type_id' => 1,
             'status_id' => 1,
             'comment' => 'Hidden need',
@@ -270,8 +271,8 @@ class ClientNeedFeatureTest extends TestCase
 
         Sanctum::actingAs($agentA);
 
-        $this->getJson('/api/clients/' . $foreignClient->id . '/needs')->assertForbidden();
-        $this->getJson('/api/client-needs/' . $needId)->assertForbidden();
+        $this->getJson('/api/clients/'.$foreignClient->id.'/needs')->assertForbidden();
+        $this->getJson('/api/client-needs/'.$needId)->assertForbidden();
     }
 
     private function seedClientContext(): array
@@ -300,8 +301,8 @@ class ClientNeedFeatureTest extends TestCase
     {
         return Client::create([
             'full_name' => $fullName,
-            'phone' => '+992900000' . random_int(100, 999),
-            'phone_normalized' => '992900000' . random_int(100, 999),
+            'phone' => '+992900000'.random_int(100, 999),
+            'phone_normalized' => '992900000'.random_int(100, 999),
             'branch_id' => $branch->id,
             'created_by' => $creator->id,
             'responsible_agent_id' => $responsibleAgent->id,

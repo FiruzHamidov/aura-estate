@@ -25,6 +25,11 @@ class DealPipelineAccess
         return in_array($roleSlug, ['branch_director', 'rop'], true);
     }
 
+    public function isManagerScopedRole(?string $roleSlug): bool
+    {
+        return $roleSlug === 'manager';
+    }
+
     public function isBranchScopedRole(?string $roleSlug): bool
     {
         return in_array($roleSlug, ['branch_director', 'rop', 'agent', 'manager', 'operator'], true);
@@ -38,11 +43,11 @@ class DealPipelineAccess
             return true;
         }
 
-        if (!$this->isBranchManager($roleSlug) || empty($user?->branch_id)) {
+        if (! $this->isBranchManager($roleSlug) || empty($user?->branch_id)) {
             return false;
         }
 
-        if (!$pipeline) {
+        if (! $pipeline) {
             return true;
         }
 
@@ -59,15 +64,21 @@ class DealPipelineAccess
             return $query;
         }
 
-        if (!$this->isBranchScopedRole($roleSlug) || empty($authUser->branch_id)) {
+        if (! $this->isBranchScopedRole($roleSlug) || empty($authUser->branch_id)) {
             return $query->whereRaw('1 = 0');
         }
 
-        return $query->where(function (Builder $builder) use ($authUser) {
+        $query->where(function (Builder $builder) use ($authUser) {
             $builder
                 ->whereNull('branch_id')
                 ->orWhere('branch_id', $authUser->branch_id);
         });
+
+        if ($this->isManagerScopedRole($roleSlug)) {
+            $query->where('code', DealPipeline::CODE_PROPERTY_CONTROL);
+        }
+
+        return $query;
     }
 
     public function ensureVisible(User $authUser, DealPipeline $pipeline): void

@@ -15,8 +15,7 @@ class DealAccess
         private readonly DealPipelineAccess $pipelineAccess,
         private readonly ClientAccess $clientAccess,
         private readonly LeadAccess $leadAccess
-    ) {
-    }
+    ) {}
 
     public function roleSlug(?User $user): ?string
     {
@@ -31,6 +30,11 @@ class DealAccess
     public function isBranchManager(?string $roleSlug): bool
     {
         return $this->pipelineAccess->isBranchManager($roleSlug);
+    }
+
+    public function isManagerScopedRole(?string $roleSlug): bool
+    {
+        return $roleSlug === 'manager';
     }
 
     public function isBranchScopedRole(?string $roleSlug): bool
@@ -57,11 +61,15 @@ class DealAccess
             return $query;
         }
 
-        if (!$this->isBranchScopedRole($roleSlug) || empty($authUser->branch_id)) {
+        if (! $this->isBranchScopedRole($roleSlug) || empty($authUser->branch_id)) {
             return $query->whereRaw('1 = 0');
         }
 
         $query->where('branch_id', $authUser->branch_id);
+
+        if ($this->isManagerScopedRole($roleSlug)) {
+            return $query->whereHas('pipeline', fn (Builder $builder) => $builder->where('code', DealPipeline::CODE_PROPERTY_CONTROL));
+        }
 
         if ($this->isBranchManager($roleSlug)) {
             return $query;
@@ -108,7 +116,7 @@ class DealAccess
     {
         $roleSlug = $this->roleSlug($authUser);
 
-        if (!$this->isBranchScopedRole($roleSlug)) {
+        if (! $this->isBranchScopedRole($roleSlug)) {
             return;
         }
 
@@ -125,7 +133,7 @@ class DealAccess
 
             $targetUser = User::query()->find($data[$field]);
 
-            if (!$targetUser || (int) $targetUser->branch_id !== (int) $authUser->branch_id) {
+            if (! $targetUser || (int) $targetUser->branch_id !== (int) $authUser->branch_id) {
                 abort(422, sprintf('%s must belong to your branch.', $field));
             }
         }

@@ -60,6 +60,7 @@ class PropertyShowAuthContactsTest extends TestCase
             $table->string('email')->nullable();
             $table->text('note')->nullable();
             $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('branch_group_id')->nullable();
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('responsible_agent_id')->nullable();
             $table->unsignedBigInteger('client_type_id')->nullable();
@@ -258,7 +259,7 @@ class PropertyShowAuthContactsTest extends TestCase
             now()->addHours(24)
         )->plainTextToken;
 
-        $response = $this->withToken($token)->getJson('/api/properties/' . $property->id);
+        $response = $this->withToken($token)->getJson('/api/properties/'.$property->id);
 
         $response->assertOk();
         $response->assertJsonPath('owner_client_id', $ownerClient->id);

@@ -20,9 +20,9 @@ class LeadAccess
         return in_array($roleSlug, ['superadmin', 'admin'], true);
     }
 
-    public function isBranchScopedManager(?string $roleSlug): bool
+    public function isBranchWideLeadRole(?string $roleSlug): bool
     {
-        return in_array($roleSlug, ['branch_director', 'rop'], true);
+        return in_array($roleSlug, ['branch_director', 'rop', 'operator'], true);
     }
 
     public function isBranchScopedRole(?string $roleSlug): bool
@@ -40,13 +40,13 @@ class LeadAccess
             return $query;
         }
 
-        if (!$this->isBranchScopedRole($roleSlug) || empty($authUser->branch_id)) {
+        if (! $this->isBranchScopedRole($roleSlug) || empty($authUser->branch_id)) {
             return $query->whereRaw('1 = 0');
         }
 
         $query->where('branch_id', $authUser->branch_id);
 
-        if ($this->isBranchScopedManager($roleSlug)) {
+        if ($this->isBranchWideLeadRole($roleSlug)) {
             return $query;
         }
 
@@ -102,7 +102,7 @@ class LeadAccess
     {
         $roleSlug = $this->roleSlug($authUser);
 
-        if (!$this->isBranchScopedRole($roleSlug)) {
+        if (! $this->isBranchScopedRole($roleSlug)) {
             return;
         }
 
@@ -119,7 +119,7 @@ class LeadAccess
 
             $targetUser = User::query()->find($data[$field]);
 
-            if (!$targetUser || (int) $targetUser->branch_id !== (int) $authUser->branch_id) {
+            if (! $targetUser || (int) $targetUser->branch_id !== (int) $authUser->branch_id) {
                 abort(422, sprintf('%s must belong to your branch.', $field));
             }
         }

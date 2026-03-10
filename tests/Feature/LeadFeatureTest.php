@@ -71,6 +71,7 @@ class LeadFeatureTest extends TestCase
             $table->string('email')->nullable();
             $table->text('note')->nullable();
             $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('branch_group_id')->nullable();
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('responsible_agent_id')->nullable();
             $table->unsignedBigInteger('client_type_id')->nullable();
@@ -102,6 +103,11 @@ class LeadFeatureTest extends TestCase
             $table->timestamp('closed_at')->nullable();
             $table->text('lost_reason')->nullable();
             $table->json('meta')->nullable();
+            $table->json('tags')->nullable();
+            $table->string('last_contact_result', 100)->nullable();
+            $table->timestamp('next_follow_up_at')->nullable();
+            $table->timestamp('next_activity_at')->nullable();
+            $table->unsignedBigInteger('updated_by')->nullable();
             $table->softDeletes();
             $table->timestamps();
         });
@@ -188,7 +194,7 @@ class LeadFeatureTest extends TestCase
             ->assertJsonCount(1, 'data')
             ->assertJsonPath('data.0.id', $ownLead->id);
 
-        $this->getJson('/api/leads/' . $sameBranchForeignLead->id)->assertForbidden();
+        $this->getJson('/api/leads/'.$sameBranchForeignLead->id)->assertForbidden();
 
         Sanctum::actingAs($rop);
 
@@ -211,7 +217,7 @@ class LeadFeatureTest extends TestCase
 
         Sanctum::actingAs($agent);
 
-        $response = $this->postJson('/api/leads/' . $lead->id . '/convert');
+        $response = $this->postJson('/api/leads/'.$lead->id.'/convert');
 
         $response->assertOk();
         $response->assertJsonPath('status', Lead::STATUS_CONVERTED);
@@ -247,7 +253,7 @@ class LeadFeatureTest extends TestCase
 
         Sanctum::actingAs($agent);
 
-        $response = $this->postJson('/api/leads/' . $lead->id . '/convert');
+        $response = $this->postJson('/api/leads/'.$lead->id.'/convert');
 
         $response->assertOk();
         $response->assertJsonPath('status', Lead::STATUS_CONVERTED);
@@ -315,6 +321,6 @@ class LeadFeatureTest extends TestCase
 
     private function nextPhone(): string
     {
-        return '992' . $this->phoneCounter++;
+        return '992'.$this->phoneCounter++;
     }
 }
