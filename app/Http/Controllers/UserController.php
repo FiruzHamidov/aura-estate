@@ -6,6 +6,7 @@ use App\Models\BranchGroup;
 use App\Models\Property;
 use App\Models\Role;
 use App\Models\User;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -68,6 +69,61 @@ class UserController extends Controller
         }
 
         return $query;
+    }
+
+    private function applyStatusFilter(Builder $query, string $status): Builder
+    {
+        return $query->where(function (Builder $statusQuery) use ($status) {
+            if ($status === 'active') {
+                $statusQuery->where('status', 'active')
+                    ->orWhereNull('status');
+
+                return;
+            }
+
+            $statusQuery->where('status', 'inactive');
+        });
+    }
+
+    private function applyIndexFilters(Builder $query, array $validated, User $authUser, bool $applyStatusFilter = true): Builder
+    {
+        if (! empty($validated['name'])) {
+            $query->where('name', 'like', '%'.trim($validated['name']).'%');
+        }
+
+        if (! empty($validated['phone'])) {
+            $query->where('phone', 'like', '%'.trim($validated['phone']).'%');
+        }
+
+        if ($this->isPrivilegedRole($this->roleSlug($authUser))) {
+            if (! empty($validated['branch_id'])) {
+                $query->where('branch_id', $validated['branch_id']);
+            }
+        } elseif (! empty($authUser->branch_id)) {
+            $query->where('branch_id', $authUser->branch_id);
+        }
+
+        if (! empty($validated['branch_group_id'])) {
+            $query->where('branch_group_id', $validated['branch_group_id']);
+        }
+
+        if (! empty($validated['role'])) {
+            $query->whereHas('role', fn ($roleQuery) => $roleQuery->where('slug', $validated['role']));
+        }
+
+        if ($applyStatusFilter && ! empty($validated['status'])) {
+            $this->applyStatusFilter($query, $validated['status']);
+        }
+
+        return $query;
+    }
+
+    private function statusCountsForIndex(Builder $query): array
+    {
+        return [
+            'active_count' => $this->applyStatusFilter(clone $query, 'active')->count(),
+            'inactive_count' => $this->applyStatusFilter(clone $query, 'inactive')->count(),
+        ];
     }
 
     private function ensureUserIsVisible(User $authUser, User $targetUser): void
@@ -182,33 +238,12 @@ class UserController extends Controller
         ]);
 
         $query = $this->visibleUsersQuery($authUser);
-
-        if (! empty($validated['name'])) {
-            $query->where('name', 'like', '%'.trim($validated['name']).'%');
-        }
-
-        if (! empty($validated['phone'])) {
-            $query->where('phone', 'like', '%'.trim($validated['phone']).'%');
-        }
-
-        if ($this->isPrivilegedRole($this->roleSlug($authUser))) {
-            if (! empty($validated['branch_id'])) {
-                $query->where('branch_id', $validated['branch_id']);
-            }
-        } elseif (! empty($authUser->branch_id)) {
-            $query->where('branch_id', $authUser->branch_id);
-        }
-
-        if (! empty($validated['branch_group_id'])) {
-            $query->where('branch_group_id', $validated['branch_group_id']);
-        }
-
-        if (! empty($validated['role'])) {
-            $query->whereHas('role', fn ($q) => $q->where('slug', $validated['role']));
-        }
+        $baseQuery = $this->applyIndexFilters($query, $validated, $authUser, false);
+        $tabCounts = $this->statusCountsForIndex(clone $baseQuery);
+        $query = clone $baseQuery;
 
         if (! empty($validated['status'])) {
-            $query->where('status', $validated['status']);
+            $this->applyStatusFilter($query, $validated['status']);
         }
 
         $users = $query
@@ -216,7 +251,7 @@ class UserController extends Controller
             ->paginate((int) ($validated['per_page'] ?? 15))
             ->withQueryString();
 
-        return response()->json($users);
+        return response()->json(array_merge($users->toArray(), $tabCounts));
     }
 
     // Создание пользователя
@@ -234,6 +269,7 @@ class UserController extends Controller
             'branch_id' => 'nullable|exists:branches,id',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'auth_method' => 'nullable|in:password,sms',
+            'status' => ['nullable', Rule::in(['active', 'inactive'])],
             'password' => 'nullable|string|min:6',
         ]);
 
@@ -288,6 +324,7 @@ class UserController extends Controller
             'branch_id' => 'sometimes|nullable|exists:branches,id',
             'branch_group_id' => 'sometimes|nullable|integer|exists:branch_groups,id',
             'auth_method' => 'sometimes|nullable|in:password,sms',
+            'status' => ['sometimes', Rule::in(['active', 'inactive'])],
             'password' => 'nullable|string|min:6',
         ]);
 
@@ -359,7 +396,7 @@ class UserController extends Controller
                 $q->where('slug', 'agent');
             })
             ->when($status !== 'all', function ($q) use ($status) {
-                $q->where('status', $status);
+                $this->applyStatusFilter($q, $status);
             })
             ->get();
 
@@ -416,7 +453,10 @@ class UserController extends Controller
                 if ($distribute) {
                     // Соберём список доступных агентов (кроме удаляемого)
                     $agentIds = User::whereHas('role', fn ($q) => $q->where('slug', 'agent'))
-                        ->where('status', 'active')
+                        ->where(function (Builder $query) {
+                            $query->where('status', 'active')
+                                ->orWhereNull('status');
+                        })
                         ->where('id', '!=', $user->id)
                         ->pluck('id')
                         ->all();

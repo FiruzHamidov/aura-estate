@@ -12,6 +12,10 @@ class User extends Authenticatable
 {
     use HasApiTokens, HasFactory, Notifiable;
 
+    public const STATUS_ACTIVE = 'active';
+
+    public const STATUS_INACTIVE = 'inactive';
+
     protected $fillable = [
         'name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'password', 'photo', 'description', 'birthday'
     ];
@@ -20,6 +24,13 @@ class User extends Authenticatable
         'password',
         'remember_token',
     ];
+
+    public function getStatusAttribute($value): string
+    {
+        return in_array($value, [self::STATUS_ACTIVE, self::STATUS_INACTIVE], true)
+            ? $value
+            : self::STATUS_ACTIVE;
+    }
 
 
     public function role()
