@@ -561,6 +561,48 @@ class ClientWorkflowFeatureTest extends TestCase
         );
     }
 
+    public function test_booking_store_auto_adds_assigned_agent_as_client_viewer_when_client_is_not_visible(): void
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_OWN_ONLY,
+        ]);
+        Setting::create([
+            'key' => ClientAccess::AGENT_CAN_VIEW_SELLERS_SETTING_KEY,
+            'value' => '1',
+        ]);
+
+        $branch = Branch::create(['name' => 'Branch A']);
+        $group = $this->createBranchGroup($branch, 'Group A');
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $managerRole = Role::create(['name' => 'Manager', 'slug' => 'manager']);
+        $ownerAgent = $this->createUser($agentRole, $branch, 'Owner Agent', $group);
+        $bookingAgent = $this->createUser($managerRole, $branch, 'Booking Agent', $group);
+        $client = $this->createClient($branch, $ownerAgent, $ownerAgent, 'Private Buyer', '+992 90 101 0101');
+        $propertyId = $this->createProperty();
+
+        Sanctum::actingAs($bookingAgent);
+        $this->getJson('/api/clients/' . $client->id)->assertForbidden();
+
+        $this->postJson('/api/bookings', [
+            'property_id' => $propertyId,
+            'agent_id' => $bookingAgent->id,
+            'client_id' => $client->id,
+            'start_time' => '2026-03-11T14:00:00+05:00',
+            'end_time' => '2026-03-11T15:00:00+05:00',
+        ])->assertCreated();
+
+        $this->getJson('/api/clients/' . $client->id)
+            ->assertOk()
+            ->assertJsonPath('id', $client->id);
+
+        $this->assertDatabaseHas('client_collaborators', [
+            'client_id' => $client->id,
+            'user_id' => $bookingAgent->id,
+            'role' => Client::COLLABORATOR_ROLE_VIEWER,
+        ]);
+    }
+
     private function createUser(Role $role, Branch $branch, string $name, ?BranchGroup $group = null): User
     {
         return User::create([

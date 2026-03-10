@@ -4,7 +4,6 @@ namespace App\Http\Controllers;
 
 use App\Models\Booking;
 use App\Models\Client;
-use App\Models\Role;
 use App\Models\User;
 use App\Services\Bitrix24Client;
 use App\Services\Crm\AuditLogger;
@@ -111,6 +110,65 @@ class BookingController extends Controller
         }
 
         return $client;
+    }
+
+    private function resolveClient(?int $clientId): ?Client
+    {
+        if (!$clientId) {
+            return null;
+        }
+
+        return Client::query()->findOrFail($clientId);
+    }
+
+    private function activeUserExistsRule()
+    {
+        return Rule::exists('users', 'id')->where(function ($q) {
+            $q->where('status', User::STATUS_ACTIVE);
+        });
+    }
+
+    private function ensureBookingAgentClientAccess(?Client $client, ?int $agentId, ?User $actor = null): void
+    {
+        if (!$client || !$agentId) {
+            return;
+        }
+
+        if ((int) $client->responsible_agent_id === (int) $agentId) {
+            return;
+        }
+
+        $existing = $client->collaborators()->whereKey($agentId)->exists();
+
+        if ($existing) {
+            return;
+        }
+
+        $client->collaborators()->attach($agentId, [
+            'role' => Client::COLLABORATOR_ROLE_VIEWER,
+            'granted_by' => $actor?->id,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->auditLogger->log(
+            $client,
+            $actor,
+            'collaborator_added',
+            [],
+            [
+                'user_id' => $agentId,
+                'role' => Client::COLLABORATOR_ROLE_VIEWER,
+                'source' => 'booking_store',
+            ],
+            'Client collaborator added automatically from booking.',
+            [
+                'client_id' => $client->id,
+                'user_id' => $agentId,
+                'role' => Client::COLLABORATOR_ROLE_VIEWER,
+                'source' => 'booking_store',
+            ]
+        );
     }
 
     private function syncBookingSnapshot(array $data, ?Client $client, ?User $actor = null): array
@@ -278,10 +336,7 @@ class BookingController extends Controller
             'agent_id' => [
                 'required',
                 'integer',
-                Rule::exists('users', 'id')->where(function ($q) {
-                    $q->where('status', 'active')
-                        ->whereIn('role_id', Role::query()->where('slug', 'agent')->select('id'));
-                }),
+                $this->activeUserExistsRule(),
             ],
             'client_id' => 'required|integer|exists:clients,id',
             'start_time' => 'required|date',
@@ -295,7 +350,8 @@ class BookingController extends Controller
             'sync_to_b24' => 'sometimes|boolean',
         ]);
 
-        $client = $this->resolveVisibleClient($request, $validated['client_id']);
+        $client = $this->resolveClient($validated['client_id']);
+        $this->ensureBookingAgentClientAccess($client, $validated['agent_id'] ?? null, $authUser);
         $validated = $this->syncBookingSnapshot($validated, $client, $authUser);
         unset($validated['client_id']);
 
@@ -389,10 +445,7 @@ class BookingController extends Controller
             'agent_id' => [
                 'sometimes',
                 'integer',
-                Rule::exists('users', 'id')->where(function ($q) {
-                    $q->where('status', 'active')
-                        ->whereIn('role_id', Role::query()->where('slug', 'agent')->select('id'));
-                }),
+                $this->activeUserExistsRule(),
             ],
             'client_id' => 'sometimes|integer|exists:clients,id',
             'client_name' => 'prohibited',
