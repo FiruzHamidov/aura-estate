@@ -117,27 +117,35 @@ class ClientAccess
             return $query;
         }
 
-        if (!$this->isBranchScopedRole($roleSlug) || empty($authUser->branch_id)) {
-            return $query->whereRaw('1 = 0');
-        }
+        return $query->where(function (Builder $builder) use ($authUser, $roleSlug) {
+            $this->applyCollaboratorVisibility($builder, $authUser);
 
-        $query->where('branch_id', $authUser->branch_id);
+            if (!$this->isBranchScopedRole($roleSlug) || empty($authUser->branch_id)) {
+                return;
+            }
 
-        if (!$this->isAgentScopedRole($roleSlug)) {
-            return $query;
-        }
+            $builder->orWhere(function (Builder $scopedQuery) use ($authUser, $roleSlug) {
+                $scopedQuery->where('branch_id', $authUser->branch_id);
 
-        $query = $this->applyGroupVisibilityScope($query, $authUser);
+                if (!$this->isAgentScopedRole($roleSlug)) {
+                    return;
+                }
 
-        if ($this->visibilityMode() === self::VISIBILITY_OWN_ONLY) {
-            return $this->filterSellerVisibilityForAgent(
-                $this->restrictToOwnContacts($query, $authUser),
-                $authUser,
-                true
-            );
-        }
+                $scopedQuery = $this->applyGroupVisibilityScope($scopedQuery, $authUser);
 
-        return $this->filterSellerVisibilityForAgent($query, $authUser);
+                if ($this->visibilityMode() === self::VISIBILITY_OWN_ONLY) {
+                    $this->filterSellerVisibilityForAgent(
+                        $this->restrictToOwnContacts($scopedQuery, $authUser),
+                        $authUser,
+                        true
+                    );
+
+                    return;
+                }
+
+                $this->filterSellerVisibilityForAgent($scopedQuery, $authUser);
+            });
+        });
     }
 
     public function ensureVisible(User $authUser, Client $client): void
@@ -272,6 +280,22 @@ class ClientAccess
         }
     }
 
+    public function canManageCollaborators(User $authUser, Client $client): bool
+    {
+        $roleSlug = $this->roleSlug($authUser);
+
+        if ($this->isPrivilegedRole($roleSlug) || $this->isBranchScopedManager($roleSlug)) {
+            return true;
+        }
+
+        return (int) $client->responsible_agent_id === (int) $authUser->id;
+    }
+
+    public function ensureCanManageCollaborators(User $authUser, Client $client): void
+    {
+        abort_unless($this->canManageCollaborators($authUser, $client), 403, 'Forbidden');
+    }
+
     public function defaultClientTypeId(): int
     {
         $id = ClientType::query()
@@ -355,6 +379,13 @@ class ClientAccess
         $builder
             ->where('responsible_agent_id', $authUser->id)
             ->orWhere('created_by', $authUser->id);
+    }
+
+    private function applyCollaboratorVisibility(Builder $builder, User $authUser): void
+    {
+        $builder->whereHas('collaborators', function (Builder $query) use ($authUser) {
+            $query->whereKey($authUser->id);
+        });
     }
 
     private function normalizeBooleanSetting(mixed $value, bool $default): bool

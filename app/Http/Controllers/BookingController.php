@@ -7,6 +7,7 @@ use App\Models\Client;
 use App\Models\Role;
 use App\Models\User;
 use App\Services\Bitrix24Client;
+use App\Services\Crm\AuditLogger;
 use App\Support\ClientAccess;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
@@ -18,7 +19,8 @@ use Illuminate\Validation\ValidationException;
 class BookingController extends Controller
 {
     public function __construct(
-        private readonly ClientAccess $clientAccess
+        private readonly ClientAccess $clientAccess,
+        private readonly AuditLogger $auditLogger,
     ) {
     }
 
@@ -111,7 +113,7 @@ class BookingController extends Controller
         return $client;
     }
 
-    private function syncBookingSnapshot(array $data, ?Client $client): array
+    private function syncBookingSnapshot(array $data, ?Client $client, ?User $actor = null): array
     {
         if (!$client) {
             return $data;
@@ -119,8 +121,19 @@ class BookingController extends Controller
 
         $mergedContactKind = $client->mergedContactKindFor(Client::CONTACT_KIND_BUYER);
         if ($mergedContactKind !== $client->contact_kind) {
+            $oldContactKind = $client->contact_kind;
             $client->update(['contact_kind' => $mergedContactKind]);
             $client->contact_kind = $mergedContactKind;
+
+            $this->auditLogger->log(
+                $client,
+                $actor,
+                'contact_kind_changed',
+                ['contact_kind' => $oldContactKind],
+                ['contact_kind' => $mergedContactKind],
+                'Client contact kind changed.',
+                ['client_id' => $client->id]
+            );
         }
 
         $data['crm_client_id'] = $client->id;
@@ -162,6 +175,67 @@ class BookingController extends Controller
         abort_unless($visible, 403, 'Forbidden');
     }
 
+    private function bookingAuditContext(Booking $booking): array
+    {
+        return [
+            'booking_id' => $booking->id,
+            'property_id' => $booking->property_id,
+            'agent_id' => $booking->agent_id,
+            'start_time' => $booking->start_time,
+            'end_time' => $booking->end_time,
+        ];
+    }
+
+    private function logClientBookingCreated(?Client $client, ?User $actor, Booking $booking): void
+    {
+        if (!$client) {
+            return;
+        }
+
+        $this->auditLogger->log(
+            $client,
+            $actor,
+            'booking_created',
+            [],
+            [
+                'booking_id' => $booking->id,
+                'property_id' => $booking->property_id,
+                'agent_id' => $booking->agent_id,
+                'start_time' => $booking->start_time,
+                'end_time' => $booking->end_time,
+            ],
+            'Booking created for client.',
+            $this->bookingAuditContext($booking)
+        );
+    }
+
+    private function logClientBookingUpdated(?Client $client, ?User $actor, Booking $booking, array $oldValues): void
+    {
+        if (!$client) {
+            return;
+        }
+
+        $newValues = [
+            'booking_id' => $booking->id,
+            'property_id' => $booking->property_id,
+            'agent_id' => $booking->agent_id,
+            'start_time' => $booking->start_time,
+            'end_time' => $booking->end_time,
+            'crm_client_id' => $booking->crm_client_id,
+            'note' => $booking->note,
+        ];
+
+        $this->auditLogger->log(
+            $client,
+            $actor,
+            'booking_updated',
+            $oldValues,
+            $newValues,
+            'Booking updated for client.',
+            $this->bookingAuditContext($booking)
+        );
+    }
+
     public function index(Request $request)
     {
         $q = Booking::query()->with(['property', 'agent', 'client.type']);
@@ -197,6 +271,8 @@ class BookingController extends Controller
 
     public function store(Request $request)
     {
+        $authUser = $this->authUser($request);
+
         $validated = $request->validate([
             'property_id' => 'required|exists:properties,id',
             'agent_id' => [
@@ -207,20 +283,20 @@ class BookingController extends Controller
                         ->whereIn('role_id', Role::query()->where('slug', 'agent')->select('id'));
                 }),
             ],
-            'client_id' => 'nullable|exists:clients,id',
+            'client_id' => 'required|integer|exists:clients,id',
             'start_time' => 'required|date',
             'end_time' => 'required|date',
             'note' => 'nullable|string',
-            'client_name' => 'required_without:client_id|string',
-            'client_phone' => 'required_without:client_id|string',
+            'client_name' => 'prohibited',
+            'client_phone' => 'prohibited',
             'deal_id' => 'nullable|integer',
             'contact_id' => 'nullable|integer',
             'place' => 'nullable|string',
             'sync_to_b24' => 'sometimes|boolean',
         ]);
 
-        $client = $this->resolveVisibleClient($request, $validated['client_id'] ?? null);
-        $validated = $this->syncBookingSnapshot($validated, $client);
+        $client = $this->resolveVisibleClient($request, $validated['client_id']);
+        $validated = $this->syncBookingSnapshot($validated, $client, $authUser);
         unset($validated['client_id']);
 
         $startCarbon = $this->parseInputDateTimeToUtc($validated['start_time']);
@@ -237,6 +313,7 @@ class BookingController extends Controller
         $validated['end_time']   = $endCarbon->toDateTimeString();
 
         $booking = Booking::create($validated);
+        $this->logClientBookingCreated($client, $authUser, $booking);
 
         // Ensure relations are available for subject/description
         $booking->load(['property', 'agent', 'client.type']);
@@ -317,9 +394,9 @@ class BookingController extends Controller
                         ->whereIn('role_id', Role::query()->where('slug', 'agent')->select('id'));
                 }),
             ],
-            'client_id' => 'sometimes|nullable|exists:clients,id',
-            'client_name' => 'sometimes|string',
-            'client_phone' => 'sometimes|string',
+            'client_id' => 'sometimes|integer|exists:clients,id',
+            'client_name' => 'prohibited',
+            'client_phone' => 'prohibited',
         ]);
 
         $authUser = $request->user();
@@ -351,19 +428,27 @@ class BookingController extends Controller
             $booking->end_time = $endCarbon->toDateTimeString();
         }
 
+        $currentClient = $booking->client;
+        $auditOldValues = [
+            'booking_id' => $booking->id,
+            'property_id' => $booking->property_id,
+            'agent_id' => $booking->agent_id,
+            'start_time' => $booking->start_time,
+            'end_time' => $booking->end_time,
+            'crm_client_id' => $booking->crm_client_id,
+            'note' => $booking->note,
+        ];
+
         if (array_key_exists('client_id', $validated)) {
             $client = $this->resolveVisibleClient($request, $validated['client_id']);
-            $booking->crm_client_id = $client?->id;
-
-            if ($client) {
-                $booking->client_name = $client->full_name;
-                $booking->client_phone = $client->phone;
-            }
+            $snapshot = $this->syncBookingSnapshot([], $client, $authUser);
+            $booking->crm_client_id = $snapshot['crm_client_id'];
+            $booking->client_name = $snapshot['client_name'];
+            $booking->client_phone = $snapshot['client_phone'];
+            $currentClient = $client;
         }
 
         if (array_key_exists('note', $validated)) $booking->note = $validated['note'];
-        if (array_key_exists('client_name', $validated)) $booking->client_name = $validated['client_name'];
-        if (array_key_exists('client_phone', $validated)) $booking->client_phone = $validated['client_phone'];
         if (array_key_exists('agent_id', $validated) && $this->isPrivilegedRole($userRole)) {
             $booking->agent_id = $validated['agent_id'];
         }
@@ -372,6 +457,7 @@ class BookingController extends Controller
 
         $booking->load(['property', 'agent', 'client.type']);
         $this->transformBookingForResponse($booking);
+        $this->logClientBookingUpdated($currentClient, $authUser, $booking, $auditOldValues);
 
         return response()->json($booking);
     }

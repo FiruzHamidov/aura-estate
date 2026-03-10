@@ -158,6 +158,11 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::get('/crm/deals/{deal}/activities', [CrmActivityController::class, 'dealIndex']);
     Route::post('/crm/deals/{deal}/activities', [CrmActivityController::class, 'dealStore']);
     Route::get('/crm/reports/performance', [CrmReportController::class, 'performance']);
+    Route::post('/clients/duplicate-check', [ClientController::class, 'duplicateCheck']);
+    Route::get('/clients/{client}/activities', [ClientController::class, 'activities']);
+    Route::get('/clients/{client}/collaborators', [ClientController::class, 'collaborators']);
+    Route::post('/clients/{client}/collaborators', [ClientController::class, 'storeCollaborator']);
+    Route::delete('/clients/{client}/collaborators/{user}', [ClientController::class, 'destroyCollaborator']);
     Route::apiResource('clients', ClientController::class);
     Route::apiResource('clients.needs', ClientNeedController::class)->only(['index', 'store']);
     Route::apiResource('client-needs', ClientNeedController::class)->only(['show', 'update', 'destroy']);

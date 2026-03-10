@@ -6,6 +6,9 @@ use App\Models\Branch;
 use App\Models\BranchGroup;
 use App\Models\Client;
 use App\Models\ClientType;
+use App\Models\Property;
+use App\Models\PropertyStatus;
+use App\Models\PropertyType;
 use App\Models\Role;
 use App\Models\Setting;
 use App\Models\User;
@@ -141,6 +144,109 @@ class ClientAccessTest extends TestCase
             $table->timestamp('closed_at')->nullable();
             $table->json('meta')->nullable();
             $table->softDeletes();
+            $table->timestamps();
+        });
+
+        Schema::create('property_types', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('property_statuses', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('properties', function (Blueprint $table) {
+            $table->id();
+            $table->string('title')->nullable();
+            $table->text('description')->nullable();
+            $table->unsignedBigInteger('type_id');
+            $table->unsignedBigInteger('status_id');
+            $table->unsignedBigInteger('location_id')->nullable();
+            $table->unsignedBigInteger('repair_type_id')->nullable();
+            $table->decimal('price', 15, 2);
+            $table->decimal('discount_price', 15, 2)->nullable();
+            $table->string('currency')->default('TJS');
+            $table->string('offer_type')->default('sale');
+            $table->tinyInteger('rooms')->nullable();
+            $table->string('youtube_link')->nullable();
+            $table->float('total_area')->nullable();
+            $table->unsignedInteger('land_size')->nullable();
+            $table->float('living_area')->nullable();
+            $table->integer('floor')->nullable();
+            $table->integer('total_floors')->nullable();
+            $table->integer('year_built')->nullable();
+            $table->string('condition')->nullable();
+            $table->string('construction_status')->nullable();
+            $table->string('renovation_permission_status')->nullable();
+            $table->string('apartment_type')->nullable();
+            $table->boolean('has_garden')->default(false);
+            $table->boolean('has_parking')->default(false);
+            $table->boolean('is_mortgage_available')->default(false);
+            $table->boolean('is_from_developer')->default(false);
+            $table->string('moderation_status')->default('approved');
+            $table->string('landmark')->nullable();
+            $table->decimal('latitude', 10, 8)->nullable();
+            $table->decimal('longitude', 11, 8)->nullable();
+            $table->unsignedBigInteger('created_by');
+            $table->unsignedBigInteger('agent_id')->nullable();
+            $table->string('district')->nullable();
+            $table->string('address')->nullable();
+            $table->string('owner_phone')->nullable();
+            $table->string('listing_type')->default('regular');
+            $table->unsignedBigInteger('contract_type_id')->nullable();
+            $table->string('owner_name')->nullable();
+            $table->unsignedBigInteger('owner_client_id')->nullable();
+            $table->string('object_key')->nullable();
+            $table->boolean('is_business_owner')->default(false);
+            $table->unsignedBigInteger('developer_id')->nullable();
+            $table->boolean('is_full_apartment')->default(false);
+            $table->boolean('is_for_aura')->default(false);
+            $table->unsignedBigInteger('parking_type_id')->nullable();
+            $table->unsignedBigInteger('heating_type_id')->nullable();
+            $table->text('rejection_comment')->nullable();
+            $table->text('status_comment')->nullable();
+            $table->timestamp('sold_at')->nullable();
+            $table->decimal('actual_sale_price', 15, 2)->nullable();
+            $table->string('actual_sale_currency')->nullable();
+            $table->decimal('company_commission_amount', 15, 2)->nullable();
+            $table->string('company_commission_currency')->nullable();
+            $table->string('money_holder')->nullable();
+            $table->timestamp('money_received_at')->nullable();
+            $table->timestamp('contract_signed_at')->nullable();
+            $table->decimal('deposit_amount', 15, 2)->nullable();
+            $table->string('deposit_currency')->nullable();
+            $table->timestamp('deposit_received_at')->nullable();
+            $table->timestamp('deposit_taken_at')->nullable();
+            $table->string('buyer_full_name')->nullable();
+            $table->string('buyer_phone')->nullable();
+            $table->unsignedBigInteger('buyer_client_id')->nullable();
+            $table->decimal('company_expected_income', 15, 2)->nullable();
+            $table->string('company_expected_income_currency')->nullable();
+            $table->timestamp('planned_contract_signed_at')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('property_photos', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('property_id');
+            $table->string('file_path');
+            $table->unsignedInteger('position')->default(0);
+            $table->timestamps();
+        });
+
+        Schema::create('property_logs', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('property_id');
+            $table->unsignedBigInteger('user_id')->nullable();
+            $table->string('action');
+            $table->json('changes')->nullable();
+            $table->text('comment')->nullable();
             $table->timestamps();
         });
 
@@ -678,6 +784,88 @@ class ClientAccessTest extends TestCase
             ->assertJsonPath('branch_group.id', $group->id);
     }
 
+    public function test_agent_can_update_own_property_when_hidden_client_stays_unchanged(): void
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_ALL_BRANCH,
+        ]);
+        Setting::create([
+            'key' => ClientAccess::AGENT_CAN_VIEW_SELLERS_SETTING_KEY,
+            'value' => '1',
+        ]);
+
+        $branch = Branch::create(['name' => 'Branch A']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $agentA = $this->createUser($agentRole, $branch, 'Agent A');
+        $agentB = $this->createUser($agentRole, $branch, 'Agent B');
+        $hiddenSeller = $this->createClient($branch, $agentB, $agentB, 'Hidden Seller', 1, Client::CONTACT_KIND_SELLER);
+
+        $propertyType = PropertyType::create(['name' => 'Apartment']);
+        $propertyStatus = PropertyStatus::create(['name' => 'Available']);
+        $property = $this->createProperty($propertyType, $propertyStatus, $agentA, [
+            'owner_client_id' => $hiddenSeller->id,
+            'owner_name' => $hiddenSeller->full_name,
+            'owner_phone' => $hiddenSeller->phone,
+        ]);
+
+        Sanctum::actingAs($agentA);
+
+        $this->putJson('/api/properties/' . $property->id, [
+            'title' => 'Updated title',
+            'type_id' => $propertyType->id,
+            'status_id' => $propertyStatus->id,
+            'price' => 260000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'owner_client_id' => $hiddenSeller->id,
+        ])
+            ->assertOk()
+            ->assertJsonPath('title', 'Updated title')
+            ->assertJsonPath('owner_client_id', $hiddenSeller->id);
+    }
+
+    public function test_agent_cannot_reassign_property_to_hidden_client(): void
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_ALL_BRANCH,
+        ]);
+        Setting::create([
+            'key' => ClientAccess::AGENT_CAN_VIEW_SELLERS_SETTING_KEY,
+            'value' => '1',
+        ]);
+
+        $branch = Branch::create(['name' => 'Branch A']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $agentA = $this->createUser($agentRole, $branch, 'Agent A');
+        $agentB = $this->createUser($agentRole, $branch, 'Agent B');
+        $visibleSeller = $this->createClient($branch, $agentA, $agentA, 'Visible Seller', 1, Client::CONTACT_KIND_SELLER);
+        $hiddenSeller = $this->createClient($branch, $agentB, $agentB, 'Hidden Seller', 1, Client::CONTACT_KIND_SELLER);
+
+        $propertyType = PropertyType::create(['name' => 'Apartment']);
+        $propertyStatus = PropertyStatus::create(['name' => 'Available']);
+        $property = $this->createProperty($propertyType, $propertyStatus, $agentA, [
+            'owner_client_id' => $visibleSeller->id,
+            'owner_name' => $visibleSeller->full_name,
+            'owner_phone' => $visibleSeller->phone,
+        ]);
+
+        Sanctum::actingAs($agentA);
+
+        $this->putJson('/api/properties/' . $property->id, [
+            'title' => 'Updated title',
+            'type_id' => $propertyType->id,
+            'status_id' => $propertyStatus->id,
+            'price' => 260000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'owner_client_id' => $hiddenSeller->id,
+        ])->assertForbidden();
+    }
+
     private function createUser(Role $role, Branch $branch, string $name, ?BranchGroup $branchGroup = null): User
     {
         return User::create([
@@ -725,5 +913,24 @@ class ClientAccessTest extends TestCase
             'contact_kind' => $contactKind,
             'status' => 'active',
         ]);
+    }
+
+    private function createProperty(
+        PropertyType $propertyType,
+        PropertyStatus $propertyStatus,
+        User $creator,
+        array $overrides = []
+    ): Property {
+        return Property::create(array_merge([
+            'title' => 'Test property',
+            'type_id' => $propertyType->id,
+            'status_id' => $propertyStatus->id,
+            'price' => 250000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'moderation_status' => 'approved',
+            'created_by' => $creator->id,
+            'agent_id' => $creator->id,
+        ], $overrides));
     }
 }

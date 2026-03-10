@@ -114,16 +114,27 @@ class PropertyController extends Controller
         return $data;
     }
 
-    private function ensureVisibleClientsForProperty(array $data): void
+    private function ensureVisibleClientsForProperty(array $data, ?Property $property = null): void
     {
         $authUser = auth()->user();
+        $currentProperty = null;
 
         if (!$authUser) {
             return;
         }
 
+        if ($property?->exists) {
+            $currentProperty = Property::query()
+                ->select(['id', 'owner_client_id', 'buyer_client_id'])
+                ->find($property->getKey());
+        }
+
         foreach (['owner_client_id', 'buyer_client_id'] as $field) {
             if (empty($data[$field])) {
+                continue;
+            }
+
+            if ($currentProperty && (int) $currentProperty->{$field} === (int) $data[$field]) {
                 continue;
             }
 
@@ -697,7 +708,7 @@ class PropertyController extends Controller
         }
 
         $validated = $this->validateProperty($request, isUpdate: true, property: $property);
-        $this->ensureVisibleClientsForProperty($validated);
+        $this->ensureVisibleClientsForProperty($validated, $property);
         $validated = $this->syncPropertyClientSnapshots($validated);
 
         $property->update($validated);
@@ -894,7 +905,7 @@ class PropertyController extends Controller
                 ->mapWithKeys(fn ($field) => [$field => $request->$field])
                 ->toArray();
 
-            $this->ensureVisibleClientsForProperty($payload);
+            $this->ensureVisibleClientsForProperty($payload, $property);
             $payload = $this->syncPropertyClientSnapshots($payload);
 
             $property->update($payload);
@@ -1452,7 +1463,7 @@ class PropertyController extends Controller
                 'sold_at' => now(),
             ];
 
-            $this->ensureVisibleClientsForProperty($payload);
+            $this->ensureVisibleClientsForProperty($payload, $property);
             $payload = $this->syncPropertyClientSnapshots($payload);
 
             // 1️⃣ Обновляем сам объект

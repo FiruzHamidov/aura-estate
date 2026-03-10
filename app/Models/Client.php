@@ -13,6 +13,9 @@ class Client extends Model
     public const CONTACT_KIND_BUYER = 'buyer';
     public const CONTACT_KIND_SELLER = 'seller';
     public const CONTACT_KIND_BOTH = 'both';
+    public const COLLABORATOR_ROLE_OWNER = 'owner';
+    public const COLLABORATOR_ROLE_COLLABORATOR = 'collaborator';
+    public const COLLABORATOR_ROLE_VIEWER = 'viewer';
 
     protected $fillable = [
         'full_name',
@@ -47,6 +50,15 @@ class Client extends Model
             self::CONTACT_KIND_BUYER,
             self::CONTACT_KIND_SELLER,
             self::CONTACT_KIND_BOTH,
+        ];
+    }
+
+    public static function collaboratorRoles(): array
+    {
+        return [
+            self::COLLABORATOR_ROLE_OWNER,
+            self::COLLABORATOR_ROLE_COLLABORATOR,
+            self::COLLABORATOR_ROLE_VIEWER,
         ];
     }
 
@@ -109,6 +121,13 @@ class Client extends Model
     public function responsibleAgent()
     {
         return $this->belongsTo(User::class, 'responsible_agent_id');
+    }
+
+    public function collaborators()
+    {
+        return $this->belongsToMany(User::class, 'client_collaborators')
+            ->withPivot(['role', 'granted_by'])
+            ->withTimestamps();
     }
 
     public function type()

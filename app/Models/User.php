@@ -84,6 +84,13 @@ class User extends Authenticatable
         return $this->hasMany(Deal::class, 'responsible_agent_id');
     }
 
+    public function collaboratingClients()
+    {
+        return $this->belongsToMany(Client::class, 'client_collaborators')
+            ->withPivot(['role', 'granted_by'])
+            ->withTimestamps();
+    }
+
     public function crmAuditLogs()
     {
         return $this->hasMany(CrmAuditLog::class, 'actor_id');
