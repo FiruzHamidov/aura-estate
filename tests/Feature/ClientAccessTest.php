@@ -123,6 +123,16 @@ class ClientAccessTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('client_collaborators', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('client_id');
+            $table->unsignedBigInteger('user_id');
+            $table->string('role', 32)->default(Client::COLLABORATOR_ROLE_COLLABORATOR);
+            $table->unsignedBigInteger('granted_by')->nullable();
+            $table->timestamps();
+            $table->unique(['client_id', 'user_id']);
+        });
+
         Schema::create('client_needs', function (Blueprint $table) {
             $table->id();
             $table->unsignedBigInteger('client_id');
@@ -247,6 +257,19 @@ class ClientAccessTest extends TestCase
             $table->string('action');
             $table->json('changes')->nullable();
             $table->text('comment')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('crm_audit_logs', function (Blueprint $table) {
+            $table->id();
+            $table->string('auditable_type');
+            $table->unsignedBigInteger('auditable_id');
+            $table->unsignedBigInteger('actor_id')->nullable();
+            $table->string('event');
+            $table->json('old_values')->nullable();
+            $table->json('new_values')->nullable();
+            $table->json('context')->nullable();
+            $table->text('message')->nullable();
             $table->timestamps();
         });
 
@@ -864,6 +887,49 @@ class ClientAccessTest extends TestCase
             'offer_type' => 'sale',
             'owner_client_id' => $hiddenSeller->id,
         ])->assertForbidden();
+    }
+
+    public function test_agent_can_create_property_with_attachable_hidden_client(): void
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_ALL_BRANCH,
+        ]);
+        Setting::create([
+            'key' => ClientAccess::AGENT_CAN_VIEW_SELLERS_SETTING_KEY,
+            'value' => '1',
+        ]);
+
+        $branch = Branch::create(['name' => 'Branch A']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $agentA = $this->createUser($agentRole, $branch, 'Agent A');
+        $agentB = $this->createUser($agentRole, $branch, 'Agent B');
+        $hiddenSeller = $this->createClient($branch, $agentB, $agentB, 'Hidden Seller', 1, Client::CONTACT_KIND_SELLER);
+
+        $propertyType = PropertyType::create(['name' => 'Apartment']);
+        $propertyStatus = PropertyStatus::create(['name' => 'Available']);
+
+        Sanctum::actingAs($agentA);
+
+        $this->postJson('/api/properties', [
+            'title' => 'New property with attached hidden seller',
+            'type_id' => $propertyType->id,
+            'status_id' => $propertyStatus->id,
+            'price' => 260000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'owner_client_id' => $hiddenSeller->id,
+        ])
+            ->assertOk()
+            ->assertJsonPath('owner_client_id', $hiddenSeller->id)
+            ->assertJsonPath('owner_name', $hiddenSeller->full_name);
+
+        $this->assertDatabaseHas('client_collaborators', [
+            'client_id' => $hiddenSeller->id,
+            'user_id' => $agentA->id,
+            'role' => Client::COLLABORATOR_ROLE_VIEWER,
+        ]);
     }
 
     private function createUser(Role $role, Branch $branch, string $name, ?BranchGroup $branchGroup = null): User

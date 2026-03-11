@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Requests\SavePropertyDealRequest;
 use App\Models\Client;
 use App\Models\Property;
+use App\Services\Crm\ClientAttachService;
 use App\Models\User;
 use App\Support\ClientAccess;
 use Illuminate\Database\Eloquent\Builder;
@@ -14,16 +15,19 @@ use Illuminate\Support\Facades\DB;
 use Intervention\Image\Drivers\Gd\Driver;
 use Intervention\Image\Encoders\JpegEncoder;
 use Intervention\Image\ImageManager;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
 class PropertyController extends Controller
 {
     protected ImageManager $imageManager;
     protected ClientAccess $clientAccess;
+    protected ClientAttachService $clientAttachService;
 
     public function __construct()
     {
         $this->imageManager = new ImageManager(new Driver());
         $this->clientAccess = app(ClientAccess::class);
+        $this->clientAttachService = app(ClientAttachService::class);
     }
 
     private function propertyDetailRelations(): array
@@ -118,6 +122,7 @@ class PropertyController extends Controller
     {
         $authUser = auth()->user();
         $currentProperty = null;
+        $canAutoAttach = !$property?->exists;
 
         if (!$authUser) {
             return;
@@ -139,7 +144,32 @@ class PropertyController extends Controller
             }
 
             $client = Client::query()->findOrFail($data[$field]);
-            $this->clientAccess->ensureVisible($authUser, $client);
+
+            try {
+                $this->clientAccess->ensureVisible($authUser, $client);
+            } catch (HttpExceptionInterface $exception) {
+                if (
+                    !$canAutoAttach
+                    || $exception->getStatusCode() !== 403
+                    || !$this->clientAttachService->canAttachClient(
+                        $authUser,
+                        $client,
+                        $this->clientAttachService->normalizedContext([
+                            'context_type' => ClientAttachService::CONTEXT_CLIENT,
+                        ])
+                    )
+                ) {
+                    throw $exception;
+                }
+
+                $this->clientAttachService->attach(
+                    $authUser,
+                    $client,
+                    $this->clientAttachService->normalizedContext([
+                        'context_type' => ClientAttachService::CONTEXT_CLIENT,
+                    ])
+                );
+            }
         }
     }
 
