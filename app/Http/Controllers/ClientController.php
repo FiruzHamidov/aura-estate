@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Client;
 use App\Models\User;
 use App\Services\Crm\AuditLogger;
+use App\Services\Crm\ClientAttachService;
 use App\Services\Crm\ClientDeduplicator;
 use App\Support\ClientAccess;
 use App\Support\ClientPhone;
@@ -18,6 +19,7 @@ class ClientController extends Controller
     public function __construct(
         private readonly ClientAccess $clientAccess,
         private readonly ClientDeduplicator $deduplicator,
+        private readonly ClientAttachService $attachService,
         private readonly AuditLogger $auditLogger,
     ) {
     }
@@ -78,19 +80,20 @@ class ClientController extends Controller
             ->all();
     }
 
-    private function summarizeDuplicates(User $authUser, array $data, ?int $excludeClientId = null): array
+    private function summarizeDuplicates(
+        User $authUser,
+        array $data,
+        ?int $excludeClientId = null,
+        array $context = []
+    ): array
     {
-        return $this->deduplicator->summarize($authUser, $data, $excludeClientId);
+        return $this->deduplicator->summarize($authUser, $data, $excludeClientId, $context);
     }
 
     private function duplicateConflictResponse(array $summary)
     {
-        $message = $summary['hidden_matches_count'] > 0 && $summary['visible_matches_count'] === 0
-            ? 'Duplicate client exists but is not visible for current user.'
-            : 'Duplicate client already exists.';
-
         return response()->json([
-            'message' => $message,
+            'message' => $summary['message'] ?? 'Duplicate client already exists.',
             'duplicate_summary' => $summary,
         ], 409);
     }
@@ -230,13 +233,17 @@ class ClientController extends Controller
             'email' => 'nullable|email|max:255',
             'branch_id' => 'nullable|integer|exists:branches,id',
             'exclude_client_id' => 'nullable|integer|exists:clients,id',
+            'context_type' => ['nullable', Rule::in(ClientAttachService::contextTypes())],
+            'context_id' => 'nullable|integer',
+            'property_relation' => ['nullable', Rule::in(ClientAttachService::propertyRelations())],
         ]);
 
         $data = $this->normalizeInput($request->only(['phone', 'email', 'branch_id']));
         $data = $this->clientAccess->normalizeMutationData($data, $authUser);
+        $context = $this->attachService->normalizedContext($validated);
 
         return response()->json(
-            $this->summarizeDuplicates($authUser, $data, $validated['exclude_client_id'] ?? null)
+            $this->summarizeDuplicates($authUser, $data, $validated['exclude_client_id'] ?? null, $context)
         );
     }
 
@@ -376,7 +383,12 @@ class ClientController extends Controller
         $data = $this->clientAccess->normalizeMutationData($data, $authUser);
         $this->clientAccess->validateMutationTargets($authUser, $data);
 
-        $duplicateSummary = $this->summarizeDuplicates($authUser, $data);
+        $duplicateSummary = $this->summarizeDuplicates(
+            $authUser,
+            $data,
+            null,
+            $this->attachService->normalizedContext([])
+        );
         if ($duplicateSummary['has_duplicates']) {
             return $this->duplicateConflictResponse($duplicateSummary);
         }
@@ -457,7 +469,12 @@ class ClientController extends Controller
         $data = $this->clientAccess->normalizeMutationData($data, $authUser);
         $this->clientAccess->validateMutationTargets($authUser, $data);
 
-        $duplicateSummary = $this->summarizeDuplicates($authUser, $data, $client->id);
+        $duplicateSummary = $this->summarizeDuplicates(
+            $authUser,
+            $data,
+            $client->id,
+            $this->attachService->normalizedContext([])
+        );
         if ($duplicateSummary['has_duplicates']) {
             return $this->duplicateConflictResponse($duplicateSummary);
         }
@@ -507,6 +524,27 @@ class ClientController extends Controller
         $this->clientAccess->ensureVisible($authUser, $client);
 
         return response()->json($this->loadCollaboratorPayload($client));
+    }
+
+    public function attachExisting(Request $request)
+    {
+        $authUser = $this->authUser();
+
+        $validated = $request->validate([
+            'client_id' => 'required|integer|exists:clients,id',
+            'context_type' => ['nullable', Rule::in(ClientAttachService::contextTypes())],
+            'context_id' => 'nullable|integer',
+            'property_relation' => ['nullable', Rule::in(ClientAttachService::propertyRelations())],
+        ]);
+
+        $client = Client::query()->findOrFail($validated['client_id']);
+        $result = $this->attachService->attach(
+            $authUser,
+            $client,
+            $this->attachService->normalizedContext($validated)
+        );
+
+        return response()->json($result);
     }
 
     public function storeCollaborator(Request $request, Client $client)

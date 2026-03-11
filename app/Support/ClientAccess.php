@@ -325,7 +325,20 @@ class ClientAccess
             return $query;
         }
 
-        return $query->where('branch_group_id', $authUser->branch_group_id);
+        return $query->where(function (Builder $builder) use ($authUser) {
+            $builder->where(function (Builder $nonSellerQuery) {
+                $this->applyNonSellerConstraint($nonSellerQuery);
+            })->orWhere(function (Builder $sellerQuery) use ($authUser) {
+                $this->applySellerConstraint($sellerQuery);
+
+                $sellerQuery->where(function (Builder $groupedOrOwnQuery) use ($authUser) {
+                    $groupedOrOwnQuery->where('branch_group_id', $authUser->branch_group_id)
+                        ->orWhere(function (Builder $ownContactQuery) use ($authUser) {
+                            $this->applyOwnContactConstraint($ownContactQuery, $authUser);
+                        });
+                });
+            });
+        });
     }
 
     private function filterSellerVisibilityForAgent(

@@ -159,6 +159,7 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::post('/crm/deals/{deal}/activities', [CrmActivityController::class, 'dealStore']);
     Route::get('/crm/reports/performance', [CrmReportController::class, 'performance']);
     Route::post('/clients/duplicate-check', [ClientController::class, 'duplicateCheck']);
+    Route::post('/clients/attach-existing', [ClientController::class, 'attachExisting']);
     Route::get('/clients/{client}/activities', [ClientController::class, 'activities']);
     Route::get('/clients/{client}/collaborators', [ClientController::class, 'collaborators']);
     Route::post('/clients/{client}/collaborators', [ClientController::class, 'storeCollaborator']);

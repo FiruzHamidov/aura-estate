@@ -262,7 +262,7 @@ class ClientWorkflowFeatureTest extends TestCase
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
         $agentA = $this->createUser($agentRole, $branch, 'Agent A', $group);
         $agentB = $this->createUser($agentRole, $branch, 'Agent B', $group);
-        $this->createClient(
+        $hiddenClient = $this->createClient(
             $branch,
             $agentB,
             $agentB,
@@ -281,8 +281,66 @@ class ClientWorkflowFeatureTest extends TestCase
         ])
             ->assertStatus(409)
             ->assertJsonPath('duplicate_summary.visible_matches_count', 0)
-            ->assertJsonPath('duplicate_summary.hidden_matches_count', 1)
+            ->assertJsonPath('duplicate_summary.hidden_matches_count', 0)
+            ->assertJsonPath('duplicate_summary.attachable_hidden_matches_count', 1)
+            ->assertJsonPath('duplicate_summary.attachable_matches.0.id', $hiddenClient->id)
+            ->assertJsonPath('duplicate_summary.attachable_matches.0.limited_visibility', true)
+            ->assertJsonPath('duplicate_summary.attachable_matches.0.can_attach', true)
             ->assertJsonPath('duplicate_summary.top_visible_match', null);
+    }
+
+    public function test_agent_can_attach_existing_hidden_client_and_receive_shared_access(): void
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_OWN_ONLY,
+        ]);
+        Setting::create([
+            'key' => ClientAccess::AGENT_CAN_VIEW_SELLERS_SETTING_KEY,
+            'value' => '1',
+        ]);
+
+        $branch = Branch::create(['name' => 'Branch A']);
+        $group = $this->createBranchGroup($branch, 'Group A');
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $ownerAgent = $this->createUser($agentRole, $branch, 'Owner Agent', $group);
+        $secondAgent = $this->createUser($agentRole, $branch, 'Second Agent', $group);
+        $client = $this->createClient(
+            $branch,
+            $ownerAgent,
+            $ownerAgent,
+            'Shared Existing Client',
+            '+992 90 212 1212',
+            null,
+            Client::CONTACT_KIND_SELLER
+        );
+
+        Sanctum::actingAs($secondAgent);
+
+        $this->getJson('/api/clients/'.$client->id)->assertForbidden();
+
+        $this->postJson('/api/clients/attach-existing', [
+            'client_id' => $client->id,
+        ])
+            ->assertOk()
+            ->assertJsonPath('client.id', $client->id)
+            ->assertJsonPath('context.context_type', 'client');
+
+        $this->getJson('/api/clients/'.$client->id)
+            ->assertOk()
+            ->assertJsonPath('id', $client->id);
+
+        $this->assertDatabaseHas('client_collaborators', [
+            'client_id' => $client->id,
+            'user_id' => $secondAgent->id,
+            'role' => Client::COLLABORATOR_ROLE_VIEWER,
+        ]);
+
+        $this->assertDatabaseHas('crm_audit_logs', [
+            'auditable_type' => Client::class,
+            'auditable_id' => $client->id,
+            'event' => 'attached_existing_client',
+        ]);
     }
 
     public function test_update_excludes_current_client_from_duplicate_check(): void

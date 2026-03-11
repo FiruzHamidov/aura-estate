@@ -87,6 +87,34 @@ class CrmOperatorManagerFeatureTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('client_collaborators', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('client_id');
+            $table->unsignedBigInteger('user_id');
+            $table->string('role', 32)->default(Client::COLLABORATOR_ROLE_COLLABORATOR);
+            $table->unsignedBigInteger('granted_by')->nullable();
+            $table->timestamps();
+            $table->unique(['client_id', 'user_id']);
+        });
+
+        Schema::create('client_need_types', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->unique();
+            $table->timestamps();
+        });
+
+        Schema::create('client_needs', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('client_id');
+            $table->unsignedBigInteger('type_id')->nullable();
+            $table->unsignedBigInteger('status_id')->nullable();
+            $table->unsignedBigInteger('created_by')->nullable();
+            $table->unsignedBigInteger('responsible_agent_id')->nullable();
+            $table->softDeletes();
+            $table->timestamps();
+        });
+
         Schema::create('leads', function (Blueprint $table) {
             $table->id();
             $table->string('full_name')->nullable();
@@ -236,6 +264,14 @@ class CrmOperatorManagerFeatureTest extends TestCase
             'is_business' => false,
             'sort_order' => 10,
             'is_active' => true,
+        ]);
+
+        \DB::table('client_need_types')->insert([
+            'id' => 1,
+            'name' => 'Продажа',
+            'slug' => 'sell',
+            'created_at' => now(),
+            'updated_at' => now(),
         ]);
     }
 
@@ -661,6 +697,124 @@ class CrmOperatorManagerFeatureTest extends TestCase
             ->assertJsonCount(1, 'data')
             ->assertJsonPath('data.0.event', 'comment')
             ->assertJsonPath('data.0.new_values.comment', 'Recent comment');
+    }
+
+    public function test_operator_can_attach_existing_hidden_client_to_lead_without_changing_owner(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $operatorRole = Role::create(['name' => 'Operator', 'slug' => 'operator']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $operator = $this->createUser($operatorRole, $branch, 'Operator A');
+        $ownerAgent = $this->createUser($agentRole, $branch, 'Owner Agent');
+        $leadAgent = $this->createUser($agentRole, $branch, 'Lead Agent');
+        $client = $this->createClient($branch, $ownerAgent, 'Private Client');
+        $lead = $this->createLead($branch, $operator, $leadAgent, 'Lead A');
+
+        Sanctum::actingAs($operator);
+
+        $this->postJson('/api/clients/attach-existing', [
+            'client_id' => $client->id,
+            'context_type' => 'lead',
+            'context_id' => $lead->id,
+        ])
+            ->assertOk()
+            ->assertJsonPath('client.id', $client->id)
+            ->assertJsonPath('context.context_type', 'lead')
+            ->assertJsonPath('context.context_id', $lead->id);
+
+        $lead->refresh();
+        $client->refresh();
+
+        $this->assertSame($client->id, $lead->client_id);
+        $this->assertSame($ownerAgent->id, $client->responsible_agent_id);
+        $this->assertDatabaseHas('client_collaborators', [
+            'client_id' => $client->id,
+            'user_id' => $operator->id,
+            'role' => Client::COLLABORATOR_ROLE_VIEWER,
+        ]);
+        $this->assertDatabaseHas('client_collaborators', [
+            'client_id' => $client->id,
+            'user_id' => $leadAgent->id,
+            'role' => Client::COLLABORATOR_ROLE_VIEWER,
+        ]);
+    }
+
+    public function test_manager_can_attach_existing_hidden_client_to_deal(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $managerRole = Role::create(['name' => 'Manager', 'slug' => 'manager']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $manager = $this->createUser($managerRole, $branch, 'Manager A');
+        $ownerAgent = $this->createUser($agentRole, $branch, 'Owner Agent');
+        $dealAgent = $this->createUser($agentRole, $branch, 'Deal Agent');
+        $client = $this->createClient($branch, $ownerAgent, 'Deal Client');
+        [$pipeline, $stage] = $this->createPipeline($branch, DealPipeline::CODE_PROPERTY_CONTROL, DealPipeline::TYPE_PROPERTY_CONTROL, true);
+
+        $deal = Deal::create([
+            'title' => 'Control Deal',
+            'branch_id' => $branch->id,
+            'created_by' => $manager->id,
+            'responsible_agent_id' => $dealAgent->id,
+            'pipeline_id' => $pipeline->id,
+            'stage_id' => $stage->id,
+            'board_position' => 1,
+            'currency' => 'TJS',
+            'expected_company_income_currency' => 'TJS',
+            'expected_agent_commission_currency' => 'TJS',
+            'actual_company_income_currency' => 'TJS',
+        ]);
+
+        Sanctum::actingAs($manager);
+
+        $this->postJson('/api/clients/attach-existing', [
+            'client_id' => $client->id,
+            'context_type' => 'deal',
+            'context_id' => $deal->id,
+        ])
+            ->assertOk()
+            ->assertJsonPath('context.context_type', 'deal')
+            ->assertJsonPath('context.context_id', $deal->id);
+
+        $deal->refresh();
+
+        $this->assertSame($client->id, $deal->client_id);
+        $this->assertDatabaseHas('client_collaborators', [
+            'client_id' => $client->id,
+            'user_id' => $dealAgent->id,
+            'role' => Client::COLLABORATOR_ROLE_VIEWER,
+        ]);
+    }
+
+    public function test_branch_director_can_attach_existing_hidden_client_to_branch_lead(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $directorRole = Role::create(['name' => 'Director', 'slug' => 'branch_director']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $director = $this->createUser($directorRole, $branch, 'Director A');
+        $ownerAgent = $this->createUser($agentRole, $branch, 'Owner Agent');
+        $leadAgent = $this->createUser($agentRole, $branch, 'Lead Agent');
+        $client = $this->createClient($branch, $ownerAgent, 'Director Client');
+        $lead = $this->createLead($branch, $leadAgent, $leadAgent, 'Lead B');
+
+        Sanctum::actingAs($director);
+
+        $this->postJson('/api/clients/attach-existing', [
+            'client_id' => $client->id,
+            'context_type' => 'lead',
+            'context_id' => $lead->id,
+        ])
+            ->assertOk()
+            ->assertJsonPath('context.context_type', 'lead')
+            ->assertJsonPath('context.context_id', $lead->id);
+
+        $this->assertDatabaseHas('client_collaborators', [
+            'client_id' => $client->id,
+            'user_id' => $leadAgent->id,
+            'role' => Client::COLLABORATOR_ROLE_VIEWER,
+        ]);
     }
 
     private function createUser(Role $role, Branch $branch, string $name): User
