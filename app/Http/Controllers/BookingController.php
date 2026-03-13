@@ -38,7 +38,12 @@ class BookingController extends Controller
 
     private function isPrivilegedRole(?string $roleSlug): bool
     {
-        return in_array($roleSlug, ['admin', 'superadmin'], true);
+        return in_array($roleSlug, ['admin', 'superadmin', 'marketing'], true);
+    }
+
+    private function ensureReportsAllowed(Request $request): void
+    {
+        abort_if($this->roleSlug($this->authUser($request)) === 'marketing', 403, 'Forbidden');
     }
 
     private function bookingApiTimezone(): string
@@ -517,6 +522,8 @@ class BookingController extends Controller
 
     public function agentsReport(Request $request)
     {
+        $this->ensureReportsAllowed($request);
+
         try {
             $fromRaw = $request->input('from') ?? $request->input('date_from');
             $toRaw   = $request->input('to')   ?? $request->input('date_to');

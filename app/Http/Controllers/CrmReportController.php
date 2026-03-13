@@ -26,9 +26,15 @@ class CrmReportController extends Controller
         'updated',
     ];
 
+    private function ensureReportsAllowed(User $authUser): void
+    {
+        abort_if($authUser->role?->slug === 'marketing', 403, 'Forbidden');
+    }
+
     public function performance(Request $request)
     {
         $authUser = $this->authUser();
+        $this->ensureReportsAllowed($authUser);
 
         $validated = $request->validate([
             'role_type' => ['required', Rule::in(['operator', 'manager'])],

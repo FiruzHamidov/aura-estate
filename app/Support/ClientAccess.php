@@ -26,7 +26,7 @@ class ClientAccess
 
     public function isPrivilegedRole(?string $roleSlug): bool
     {
-        return in_array($roleSlug, ['superadmin', 'admin'], true);
+        return in_array($roleSlug, ['superadmin', 'admin', 'marketing'], true);
     }
 
     public function isBranchScopedManager(?string $roleSlug): bool
@@ -115,6 +115,14 @@ class ClientAccess
 
         if ($this->isPrivilegedRole($roleSlug)) {
             return $query;
+        }
+
+        if ($this->isBranchScopedManager($roleSlug)) {
+            if (empty($authUser->branch_id)) {
+                return $query->whereRaw('1 = 0');
+            }
+
+            return $query->where('branch_id', $authUser->branch_id);
         }
 
         return $query->where(function (Builder $builder) use ($authUser, $roleSlug) {

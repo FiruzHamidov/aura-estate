@@ -17,7 +17,7 @@ class DealPipelineAccess
 
     public function isPrivilegedRole(?string $roleSlug): bool
     {
-        return in_array($roleSlug, ['superadmin', 'admin'], true);
+        return in_array($roleSlug, ['superadmin', 'admin', 'marketing'], true);
     }
 
     public function isBranchManager(?string $roleSlug): bool

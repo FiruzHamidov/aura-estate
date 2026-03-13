@@ -545,6 +545,40 @@ class ClientAccessTest extends TestCase
             ->assertJsonMissing(['full_name' => 'Seller B']);
     }
 
+    public function test_rop_can_filter_sellers_and_see_entire_branch_even_when_agent_seller_visibility_is_disabled(): void
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_OWN_ONLY,
+        ]);
+        Setting::create([
+            'key' => ClientAccess::AGENT_CAN_VIEW_SELLERS_SETTING_KEY,
+            'value' => '0',
+        ]);
+
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $rop = $this->createUser($ropRole, $branchA, 'ROP A');
+        $agentA = $this->createUser($agentRole, $branchA, 'Agent A');
+        $agentB = $this->createUser($agentRole, $branchB, 'Agent B');
+
+        $sellerA = $this->createClient($branchA, $agentA, $agentA, 'Seller A', 1, Client::CONTACT_KIND_SELLER);
+        $this->createClient($branchA, $agentA, $agentA, 'Buyer A', 1, Client::CONTACT_KIND_BUYER);
+        $this->createClient($branchB, $agentB, $agentB, 'Seller B', 1, Client::CONTACT_KIND_SELLER);
+
+        Sanctum::actingAs($rop);
+
+        $this->getJson('/api/clients?contact_kind=seller')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $sellerA->id)
+            ->assertJsonMissing(['full_name' => 'Seller B']);
+    }
+
     public function test_agent_create_forces_branch_to_own_branch(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);

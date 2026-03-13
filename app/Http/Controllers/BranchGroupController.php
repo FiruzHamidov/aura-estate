@@ -29,7 +29,7 @@ class BranchGroupController extends Controller
 
     private function isPrivilegedRole(?string $roleSlug): bool
     {
-        return in_array($roleSlug, ['superadmin', 'admin'], true);
+        return in_array($roleSlug, ['superadmin', 'admin', 'marketing'], true);
     }
 
     private function isBranchScopedManager(?string $roleSlug): bool

@@ -461,6 +461,26 @@ class ClientIntegrationTest extends TestCase
         $response->assertJsonPath('business_clients', 2);
     }
 
+    public function test_marketing_cannot_access_agent_reports(): void
+    {
+        [$agent] = $this->seedClientContext();
+
+        $marketingRole = Role::create(['name' => 'Marketing', 'slug' => 'marketing']);
+        $marketing = User::create([
+            'name' => 'Marketing A',
+            'phone' => (string) ++$this->phoneCounter,
+            'password' => bcrypt('password'),
+            'role_id' => $marketingRole->id,
+            'branch_id' => $agent->branch_id,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($marketing);
+
+        $this->getJson('/api/reports/agent/clients?agent_id=' . $agent->id)->assertForbidden();
+        $this->getJson('/api/bookings/agents-report?agent_id=' . $agent->id)->assertForbidden();
+    }
+
     private function seedClientContext(bool $withProperty = true): array
     {
         $branch = Branch::create(['name' => 'Branch A']);

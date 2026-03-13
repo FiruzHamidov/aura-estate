@@ -34,6 +34,12 @@ class RoleSeeder extends Seeder
         ]);
 
         Role::create([
+            'name' => 'Маркетолог',
+            'slug' => 'marketing',
+            'description' => 'Доступ уровня администратора без доступа к отчетам'
+        ]);
+
+        Role::create([
             'name' => 'РОП',
             'slug' => 'rop',
             'description' => 'Руководитель филиала с доступом к данным своего филиала'

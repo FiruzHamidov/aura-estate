@@ -122,6 +122,26 @@ class BranchGroupFeatureTest extends TestCase
             ->assertJsonPath('branch_id', $branchA->id);
     }
 
+    public function test_marketing_can_create_group_for_any_branch(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+        $marketingRole = Role::create(['name' => 'Marketing', 'slug' => 'marketing']);
+
+        $marketing = $this->createUser($marketingRole, $branchA, 'Marketing');
+
+        Sanctum::actingAs($marketing);
+
+        $this->postJson('/api/branch-groups', [
+            'branch_id' => $branchB->id,
+            'name' => 'Marketing B',
+            'contact_visibility_mode' => BranchGroup::CONTACT_VISIBILITY_BRANCH,
+        ])
+            ->assertCreated()
+            ->assertJsonPath('branch_id', $branchB->id)
+            ->assertJsonPath('contact_visibility_mode', BranchGroup::CONTACT_VISIBILITY_BRANCH);
+    }
+
     public function test_agent_can_list_only_own_branch_groups_but_cannot_manage_them(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);

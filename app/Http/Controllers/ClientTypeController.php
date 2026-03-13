@@ -20,7 +20,7 @@ class ClientTypeController extends Controller
     private function ensurePrivileged(Request $request): void
     {
         $user = $this->authUser($request);
-        abort_unless($user && in_array($user->role?->slug, ['admin', 'superadmin'], true), 403, 'Forbidden');
+        abort_unless($user && in_array($user->role?->slug, ['admin', 'superadmin', 'marketing'], true), 403, 'Forbidden');
     }
 
     public function index()

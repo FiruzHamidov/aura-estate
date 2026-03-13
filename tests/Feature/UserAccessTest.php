@@ -273,6 +273,109 @@ class UserAccessTest extends TestCase
         $this->getJson('/api/user/' . $agentB->id)->assertOk();
     }
 
+    public function test_marketing_user_index_is_global_and_not_forced_to_own_branch(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $marketingRole = Role::create(['name' => 'Marketing', 'slug' => 'marketing']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $marketing = User::create([
+            'name' => 'Marketing',
+            'phone' => '900000051',
+            'password' => bcrypt('password'),
+            'role_id' => $marketingRole->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+
+        User::create([
+            'name' => 'Agent A',
+            'phone' => '900000052',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+
+        $agentB = User::create([
+            'name' => 'Agent B',
+            'phone' => '900000053',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branchB->id,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($marketing);
+
+        $response = $this->getJson('/api/user?branch_id=' . $branchB->id . '&role=agent&status=active');
+        $response->assertOk();
+        $response->assertJsonCount(1, 'data');
+        $response->assertJsonPath('data.0.id', $agentB->id);
+
+        $this->getJson('/api/user/' . $agentB->id)->assertOk();
+    }
+
+    public function test_marketing_cannot_assign_admin_or_superadmin_roles(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+
+        $marketingRole = Role::create(['name' => 'Marketing', 'slug' => 'marketing']);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $superadminRole = Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']);
+
+        $marketing = User::create([
+            'name' => 'Marketing',
+            'phone' => '900000054',
+            'password' => bcrypt('password'),
+            'role_id' => $marketingRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($marketing);
+
+        $this->postJson('/api/user', [
+            'name' => 'Blocked Admin',
+            'phone' => '900000055',
+            'role_id' => $adminRole->id,
+        ])->assertStatus(422);
+
+        $this->postJson('/api/user', [
+            'name' => 'Blocked Superadmin',
+            'phone' => '900000056',
+            'role_id' => $superadminRole->id,
+        ])->assertStatus(422);
+    }
+
+    public function test_branch_director_cannot_assign_admin_role(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+
+        $directorRole = Role::create(['name' => 'Director', 'slug' => 'branch_director']);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+
+        $director = User::create([
+            'name' => 'Director',
+            'phone' => '900000057',
+            'password' => bcrypt('password'),
+            'role_id' => $directorRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($director);
+
+        $this->postJson('/api/user', [
+            'name' => 'Blocked Admin',
+            'phone' => '900000058',
+            'role_id' => $adminRole->id,
+            'branch_id' => $branch->id,
+        ])->assertStatus(422);
+    }
+
     public function test_user_index_filters_inactive_users_and_returns_tab_counts(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);

@@ -11,6 +11,13 @@ use Illuminate\Support\Facades\DB;
 
 class PropertyReportController extends Controller
 {
+    private function ensureReportsAllowed(Request $request): void
+    {
+        $request->user()?->loadMissing('role');
+
+        abort_if($request->user()?->role?->slug === 'marketing', 403, 'Forbidden');
+    }
+
     private function isBranchScopedRole(?string $roleSlug): bool
     {
         return in_array($roleSlug, ['rop', 'branch_director'], true);
@@ -92,6 +99,8 @@ class PropertyReportController extends Controller
 
     private function buildMonthSnapshot(Request $request, Carbon $start, Carbon $end): array
     {
+        $this->ensureReportsAllowed($request);
+
         $soldStatuses = ['sold', 'rented', 'sold_by_owner'];
 
         $addedQ = Property::query()
@@ -322,6 +331,8 @@ class PropertyReportController extends Controller
      */
     private function applyCommonFilters(Request $request, $query, string $creatorColumn = 'created_by')
     {
+        $this->ensureReportsAllowed($request);
+
         // Диапазон дат и поле даты
         // created_at | updated_at | sold_at
         $dateField = $request->input('date_field', null);
