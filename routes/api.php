@@ -66,6 +66,9 @@ Route::get('/properties/{property}/reels', [ReelController::class, 'propertyInde
 Route::get('/reels', [ReelController::class, 'index']);
 Route::get('/reels/{id}', [ReelController::class, 'show'])->whereNumber('id');
 Route::post('/reels/{reel}/view', [ReelController::class, 'trackView'])->middleware('throttle:30,1');
+Route::post('/reels/{reel}/like', [ReelController::class, 'like'])->middleware('throttle:60,1');
+Route::delete('/reels/{reel}/like', [ReelController::class, 'unlike'])->middleware('throttle:60,1');
+Route::get('/reels/{reel}/like-status', [ReelController::class, 'likeStatus'])->middleware('throttle:60,1');
 
 Route::get('/property-types', [PropertyTypeController::class, 'index']);
 Route::get('/property-statuses', [PropertyStatusController::class, 'index']);

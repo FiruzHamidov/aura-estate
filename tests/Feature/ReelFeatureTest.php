@@ -134,6 +134,17 @@ class ReelFeatureTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('reel_likes', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('reel_id');
+            $table->unsignedBigInteger('user_id')->nullable();
+            $table->string('guest_token', 100)->nullable();
+            $table->timestamps();
+
+            $table->unique(['reel_id', 'user_id']);
+            $table->unique(['reel_id', 'guest_token']);
+        });
+
         Schema::create('personal_access_tokens', function (Blueprint $table) {
             $table->id();
             $table->morphs('tokenable');
@@ -264,6 +275,141 @@ class ReelFeatureTest extends TestCase
         $response->assertJsonPath('transcode_status', Reel::TRANSCODE_QUEUED);
 
         Queue::assertPushed(ProcessReelVideo::class);
+    }
+
+    public function test_authenticated_user_can_like_and_unlike_published_reel(): void
+    {
+        $agent = $this->createUser('agent', '930100014');
+        $viewer = $this->createUser('client', '930100016');
+
+        $reel = Reel::create([
+            'created_by' => $agent->id,
+            'title' => 'Popular reel',
+            'video_url' => 'reels/originals/popular.mp4',
+            'mp4_url' => 'reels/originals/popular.mp4',
+            'status' => Reel::STATUS_PUBLISHED,
+            'transcode_status' => Reel::TRANSCODE_COMPLETED,
+            'published_at' => now(),
+        ]);
+
+        Sanctum::actingAs($viewer);
+
+        $this->postJson('/api/reels/'.$reel->id.'/like')
+            ->assertCreated()
+            ->assertJsonPath('likes_count', 1)
+            ->assertJsonPath('is_liked', true);
+
+        $this->assertDatabaseHas('reel_likes', [
+            'reel_id' => $reel->id,
+            'user_id' => $viewer->id,
+        ]);
+        $this->assertSame(1, $reel->fresh()->likes_count);
+
+        $this->getJson('/api/reels/'.$reel->id.'/like-status')
+            ->assertOk()
+            ->assertJsonPath('likes_count', 1)
+            ->assertJsonPath('is_liked', true);
+
+        $this->getJson('/api/reels/'.$reel->id)
+            ->assertOk()
+            ->assertJsonPath('is_liked', true)
+            ->assertJsonPath('likes_count', 1);
+
+        $this->deleteJson('/api/reels/'.$reel->id.'/like')
+            ->assertOk()
+            ->assertJsonPath('likes_count', 0)
+            ->assertJsonPath('is_liked', false);
+
+        $this->assertDatabaseMissing('reel_likes', [
+            'reel_id' => $reel->id,
+            'user_id' => $viewer->id,
+        ]);
+        $this->assertSame(0, $reel->fresh()->likes_count);
+    }
+
+    public function test_user_cannot_like_unpublished_reel(): void
+    {
+        $agent = $this->createUser('agent', '930100017');
+        $viewer = $this->createUser('client', '930100018');
+
+        $reel = Reel::create([
+            'created_by' => $agent->id,
+            'title' => 'Draft reel',
+            'video_url' => 'reels/originals/draft-like.mp4',
+            'status' => Reel::STATUS_DRAFT,
+            'transcode_status' => Reel::TRANSCODE_PENDING,
+        ]);
+
+        Sanctum::actingAs($viewer);
+
+        $this->postJson('/api/reels/'.$reel->id.'/like')
+            ->assertNotFound();
+
+        $this->assertDatabaseCount('reel_likes', 0);
+    }
+
+    public function test_guest_can_like_and_unlike_published_reel_with_guest_token(): void
+    {
+        $agent = $this->createUser('agent', '930100019');
+
+        $reel = Reel::create([
+            'created_by' => $agent->id,
+            'title' => 'Guest reel',
+            'video_url' => 'reels/originals/guest.mp4',
+            'mp4_url' => 'reels/originals/guest.mp4',
+            'status' => Reel::STATUS_PUBLISHED,
+            'transcode_status' => Reel::TRANSCODE_COMPLETED,
+            'published_at' => now(),
+        ]);
+
+        $guestToken = 'guest-device-token-1';
+
+        $this->withHeader('X-Guest-Token', $guestToken)
+            ->postJson('/api/reels/'.$reel->id.'/like')
+            ->assertCreated()
+            ->assertJsonPath('likes_count', 1)
+            ->assertJsonPath('is_liked', true);
+
+        $this->assertDatabaseHas('reel_likes', [
+            'reel_id' => $reel->id,
+            'guest_token' => $guestToken,
+        ]);
+
+        $this->withHeader('X-Guest-Token', $guestToken)
+            ->getJson('/api/reels/'.$reel->id.'/like-status')
+            ->assertOk()
+            ->assertJsonPath('likes_count', 1)
+            ->assertJsonPath('is_liked', true);
+
+        $this->withHeader('X-Guest-Token', $guestToken)
+            ->getJson('/api/reels/'.$reel->id)
+            ->assertOk()
+            ->assertJsonPath('is_liked', true)
+            ->assertJsonPath('likes_count', 1);
+
+        $this->withHeader('X-Guest-Token', $guestToken)
+            ->deleteJson('/api/reels/'.$reel->id.'/like')
+            ->assertOk()
+            ->assertJsonPath('likes_count', 0)
+            ->assertJsonPath('is_liked', false);
+    }
+
+    public function test_guest_like_requires_guest_token(): void
+    {
+        $agent = $this->createUser('agent', '930100020');
+
+        $reel = Reel::create([
+            'created_by' => $agent->id,
+            'title' => 'Token required',
+            'video_url' => 'reels/originals/token-required.mp4',
+            'mp4_url' => 'reels/originals/token-required.mp4',
+            'status' => Reel::STATUS_PUBLISHED,
+            'transcode_status' => Reel::TRANSCODE_COMPLETED,
+            'published_at' => now(),
+        ]);
+
+        $this->postJson('/api/reels/'.$reel->id.'/like')
+            ->assertStatus(422);
     }
 
     public function test_public_reels_feed_returns_published_property_and_standalone_reels_only(): void

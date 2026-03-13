@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Jobs\ProcessReelVideo;
 use App\Models\Property;
 use App\Models\Reel;
+use App\Models\ReelLike;
 use App\Models\User;
 use App\Services\Reels\ReelUploadService;
 use Illuminate\Http\JsonResponse;
@@ -146,6 +147,7 @@ class ReelController extends Controller
     {
         $payload = $reel->toArray();
         $payload['can_publish'] = $reel->canBePublished();
+        $payload['is_liked'] = $this->isLikedByAuthUser($reel);
         $payload['playback'] = [
             'hls_url' => $reel->hls_url,
             'mp4_url' => $reel->mp4_url,
@@ -158,6 +160,70 @@ class ReelController extends Controller
         ];
 
         return $payload;
+    }
+
+    private function isLikedByAuthUser(Reel $reel): bool
+    {
+        $user = $this->authUser();
+        $guestToken = $this->guestToken();
+
+        $query = ReelLike::query()->where('reel_id', $reel->id);
+
+        if ($user) {
+            return (clone $query)
+                ->where('user_id', $user->id)
+                ->exists();
+        }
+
+        if (!$guestToken) {
+            return false;
+        }
+
+        return (clone $query)
+            ->where('guest_token', $guestToken)
+            ->exists();
+    }
+
+    private function ensureLikeableReel(Reel $reel): void
+    {
+        abort_unless(
+            Reel::query()->published()->whereKey($reel->id)->exists(),
+            404
+        );
+    }
+
+    private function guestToken(): ?string
+    {
+        $token = request()->header('X-Guest-Token', request()->input('guest_token'));
+        $token = is_string($token) ? trim($token) : '';
+
+        return $token !== '' ? $token : null;
+    }
+
+    private function likeActor(Request $request): array
+    {
+        $user = $this->authUser();
+
+        if ($user) {
+            return [
+                'user_id' => $user->id,
+                'guest_token' => null,
+            ];
+        }
+
+        $validated = $request->validate([
+            'guest_token' => 'nullable|string|max:100',
+        ]);
+
+        $guestToken = $request->header('X-Guest-Token', $validated['guest_token'] ?? null);
+        $guestToken = is_string($guestToken) ? trim($guestToken) : '';
+
+        abort_if($guestToken === '', 422, 'Guest token is required for unauthenticated likes.');
+
+        return [
+            'user_id' => null,
+            'guest_token' => $guestToken,
+        ];
     }
 
     private function storeMediaFile($file, string $directory): string
@@ -504,16 +570,69 @@ class ReelController extends Controller
 
     public function trackView(Reel $reel): JsonResponse
     {
-        abort_unless(
-            Reel::query()->published()->whereKey($reel->id)->exists(),
-            404
-        );
+        $this->ensureLikeableReel($reel);
 
         $reel->increment('views_count');
 
         return response()->json([
             'id' => $reel->id,
             'views_count' => $reel->fresh()->views_count,
+        ]);
+    }
+
+    public function like(Request $request, Reel $reel): JsonResponse
+    {
+        $this->ensureLikeableReel($reel);
+        $actor = $this->likeActor($request);
+
+        ReelLike::firstOrCreate([
+            'reel_id' => $reel->id,
+            'user_id' => $actor['user_id'],
+            'guest_token' => $actor['guest_token'],
+        ]);
+
+        $likesCount = ReelLike::query()->where('reel_id', $reel->id)->count();
+        $reel->update(['likes_count' => $likesCount]);
+
+        return response()->json([
+            'id' => $reel->id,
+            'likes_count' => $likesCount,
+            'is_liked' => true,
+        ], 201);
+    }
+
+    public function unlike(Request $request, Reel $reel): JsonResponse
+    {
+        $this->ensureLikeableReel($reel);
+        $actor = $this->likeActor($request);
+
+        ReelLike::query()
+            ->where('reel_id', $reel->id)
+            ->when(
+                $actor['user_id'],
+                fn ($query, $userId) => $query->where('user_id', $userId),
+                fn ($query) => $query->where('guest_token', $actor['guest_token'])
+            )
+            ->delete();
+
+        $likesCount = ReelLike::query()->where('reel_id', $reel->id)->count();
+        $reel->update(['likes_count' => $likesCount]);
+
+        return response()->json([
+            'id' => $reel->id,
+            'likes_count' => $likesCount,
+            'is_liked' => false,
+        ]);
+    }
+
+    public function likeStatus(Reel $reel): JsonResponse
+    {
+        $this->ensureLikeableReel($reel);
+
+        return response()->json([
+            'id' => $reel->id,
+            'likes_count' => $reel->fresh()->likes_count,
+            'is_liked' => $this->isLikedByAuthUser($reel),
         ]);
     }
 }

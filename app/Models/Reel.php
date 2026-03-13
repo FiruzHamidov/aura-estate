@@ -65,6 +65,16 @@ class Reel extends Model
         return $this->belongsTo(User::class, 'created_by');
     }
 
+    public function likes()
+    {
+        return $this->hasMany(ReelLike::class);
+    }
+
+    public function likedByUsers()
+    {
+        return $this->belongsToMany(User::class, 'reel_likes')->withTimestamps();
+    }
+
     public function scopeStandalone(Builder $query): Builder
     {
         return $query->whereNull('property_id');
