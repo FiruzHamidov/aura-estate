@@ -169,6 +169,31 @@ class ReelFeatureTest extends TestCase
         Queue::assertPushed(ProcessReelVideo::class);
     }
 
+    public function test_agent_can_create_reel_with_duration_up_to_five_minutes(): void
+    {
+        Storage::fake('public');
+        Queue::fake();
+
+        $agent = $this->createUser('agent', '9301000015');
+        Sanctum::actingAs($agent);
+
+        $response = $this->postJson('/api/reels', [
+            'title' => 'Long reel',
+            'duration' => 300,
+            'poster_second' => 300,
+            'video' => UploadedFile::fake()->create('long-clip.mp4', 2048, 'video/mp4'),
+        ]);
+
+        $response->assertCreated();
+        $response->assertJsonPath('duration', 300);
+
+        $this->assertDatabaseHas('reels', [
+            'title' => 'Long reel',
+            'duration' => 300,
+            'poster_second' => 300,
+        ]);
+    }
+
     public function test_agent_can_initialize_direct_upload_for_standalone_reel(): void
     {
         $agent = $this->createUser('agent', '930100012');
