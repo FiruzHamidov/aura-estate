@@ -12,6 +12,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Intervention\Image\Drivers\Gd\Driver;
 use Intervention\Image\Encoders\JpegEncoder;
 use Intervention\Image\ImageManager;
@@ -831,6 +832,12 @@ class PropertyController extends Controller
 
         $property->load($this->propertyDetailRelations());
 
+        if (Schema::hasTable('reels')) {
+            $property->load([
+                'reels' => fn ($query) => $query->published()->ordered(),
+            ]);
+        }
+
         return response()->json(
             $this->serializePropertyShow($property, $authUser !== null)
         );
@@ -843,6 +850,14 @@ class PropertyController extends Controller
         }
 
         $property->update(['moderation_status' => 'deleted']);
+
+        if (Schema::hasTable('reels')) {
+            $property->reels()->update([
+                'status' => \App\Models\Reel::STATUS_ARCHIVED,
+                'published_at' => null,
+            ]);
+        }
+
         return response()->json(['message' => 'Объект помечен как удалён']);
     }
 

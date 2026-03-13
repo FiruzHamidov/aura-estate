@@ -41,6 +41,7 @@ use App\Http\Controllers\PropertyStatusController;
 use App\Http\Controllers\PropertyTypeController;
 use App\Http\Controllers\PublicRealtorController;
 use App\Http\Controllers\RepairTypeController;
+use App\Http\Controllers\ReelController;
 use App\Http\Controllers\ReviewController;
 use App\Http\Controllers\RoleController;
 use App\Http\Controllers\SelectionController;
@@ -61,6 +62,10 @@ Route::get('/properties/map', [PropertyController::class, 'map']);
 Route::get('/properties/{property}', [PropertyController::class, 'show']);
 Route::get('/properties/{property}/similar', [PropertyController::class, 'similar']);
 Route::post('/properties/{property}/view', [PropertyController::class, 'trackView'])->middleware('throttle:30,1');
+Route::get('/properties/{property}/reels', [ReelController::class, 'propertyIndex']);
+Route::get('/reels', [ReelController::class, 'index']);
+Route::get('/reels/{id}', [ReelController::class, 'show'])->whereNumber('id');
+Route::post('/reels/{reel}/view', [ReelController::class, 'trackView'])->middleware('throttle:30,1');
 
 Route::get('/property-types', [PropertyTypeController::class, 'index']);
 Route::get('/property-statuses', [PropertyStatusController::class, 'index']);
@@ -119,6 +124,13 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::post('properties/{property}/photos', [PropertyPhotoController::class, 'store']);
     Route::put('properties/{property}/photos/reorder', [PropertyPhotoController::class, 'reorder']);
     Route::delete('properties/{property}/photos/{photo}', [PropertyPhotoController::class, 'destroy'])->whereNumber('photo');
+    Route::post('/reels/direct-upload', [ReelController::class, 'initDirectUpload']);
+    Route::post('/reels/{reel}/complete-upload', [ReelController::class, 'completeDirectUpload']);
+    Route::post('/reels', [ReelController::class, 'store']);
+    Route::put('/reels/{reel}', [ReelController::class, 'update']);
+    Route::patch('/reels/{reel}', [ReelController::class, 'update']);
+    Route::patch('/reels/{reel}/publish', [ReelController::class, 'publish']);
+    Route::delete('/reels/{reel}', [ReelController::class, 'destroy']);
 
     // Справочники (админ)
     Route::apiResource('property-types', PropertyTypeController::class)->except(['index']);

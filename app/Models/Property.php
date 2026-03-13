@@ -119,6 +119,11 @@ class Property extends Model
         return $this->hasMany(PropertyPhoto::class)->orderBy('position');
     }
 
+    public function reels()
+    {
+        return $this->hasMany(Reel::class)->orderBy('sort_order')->orderByDesc('id');
+    }
+
     public function creator()
     {
         return $this->belongsTo(User::class, 'created_by');
