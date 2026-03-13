@@ -23,7 +23,7 @@ class ReelController extends Controller
 
     private function authUser(): ?User
     {
-        $user = auth()->user();
+        $user = request()->user() ?? request()->user('sanctum') ?? auth('sanctum')->user();
         $user?->loadMissing('role');
 
         return $user;
