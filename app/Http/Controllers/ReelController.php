@@ -10,6 +10,7 @@ use App\Models\User;
 use App\Services\Reels\ReelUploadService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
@@ -234,6 +235,20 @@ class ReelController extends Controller
         Storage::disk('public')->putFileAs($directory, $file, basename($filename));
 
         return $filename;
+    }
+
+    private function deleteMediaFiles(array $paths): void
+    {
+        $paths = collect($paths)
+            ->filter(fn ($path) => is_string($path) && trim($path) !== '')
+            ->unique()
+            ->values();
+
+        if ($paths->isEmpty()) {
+            return;
+        }
+
+        Storage::disk('public')->delete($paths->all());
     }
 
     public function index(Request $request): JsonResponse
@@ -500,6 +515,7 @@ class ReelController extends Controller
             'duration' => 'sometimes|nullable|integer|min:0|max:300',
             'aspect_ratio' => 'sometimes|nullable|string|max:16',
             'status' => ['sometimes', Rule::in([Reel::STATUS_DRAFT, Reel::STATUS_ARCHIVED, Reel::STATUS_PROCESSING, Reel::STATUS_PUBLISHED])],
+            'video' => 'sometimes|file|mimetypes:video/mp4,video/quicktime|max:102400',
             'preview_image' => 'sometimes|nullable|image|mimes:jpg,jpeg,png,webp|max:8192',
             'thumbnail' => 'sometimes|nullable|image|mimes:jpg,jpeg,png,webp|max:4096',
         ]);
@@ -517,16 +533,48 @@ class ReelController extends Controller
             }
         }
 
+        $filesToDelete = [];
         $data = collect($validated)
-            ->except(['preview_image', 'thumbnail'])
+            ->except(['video', 'preview_image', 'thumbnail'])
             ->all();
+
+        if ($request->hasFile('video')) {
+            /** @var UploadedFile $video */
+            $video = $request->file('video');
+            $data['video_url'] = $this->storeMediaFile($video, 'reels/originals');
+            $data['mp4_url'] = null;
+            $data['hls_url'] = null;
+            $data['preview_image'] = null;
+            $data['thumbnail_url'] = null;
+            $data['video_size'] = $video->getSize();
+            $data['mime_type'] = $video->getMimeType();
+            $data['status'] = Reel::STATUS_PROCESSING;
+            $data['transcode_status'] = Reel::TRANSCODE_QUEUED;
+            $data['published_at'] = null;
+
+            $processingMeta = $reel->processing_meta ?? [];
+            $processingMeta['original_name'] = $video->getClientOriginalName();
+            $processingMeta['queued_at'] = now()->toIso8601String();
+            unset($processingMeta['processed_at'], $processingMeta['preview_generation']);
+            $data['processing_meta'] = $processingMeta;
+
+            $filesToDelete = array_merge($filesToDelete, [
+                $reel->video_url,
+                $reel->mp4_url,
+                $reel->hls_url,
+                $reel->preview_image,
+                $reel->thumbnail_url,
+            ]);
+        }
 
         if ($request->hasFile('preview_image')) {
             $data['preview_image'] = $this->storeMediaFile($request->file('preview_image'), 'reels/previews');
+            $filesToDelete[] = $reel->preview_image;
         }
 
         if ($request->hasFile('thumbnail')) {
             $data['thumbnail_url'] = $this->storeMediaFile($request->file('thumbnail'), 'reels/thumbnails');
+            $filesToDelete[] = $reel->thumbnail_url;
         }
 
         if (($data['status'] ?? null) !== Reel::STATUS_PUBLISHED && array_key_exists('status', $data)) {
@@ -534,6 +582,12 @@ class ReelController extends Controller
         }
 
         $reel->update($data);
+
+        $this->deleteMediaFiles($filesToDelete);
+
+        if ($request->hasFile('video')) {
+            ProcessReelVideo::dispatch($reel->id);
+        }
 
         return response()->json($this->serializeReel($reel->fresh('property')));
     }
@@ -563,7 +617,17 @@ class ReelController extends Controller
     public function destroy(Reel $reel): JsonResponse
     {
         $this->ensureCanManageReel($reel);
+
+        $filesToDelete = [
+            $reel->video_url,
+            $reel->mp4_url,
+            $reel->hls_url,
+            $reel->preview_image,
+            $reel->thumbnail_url,
+        ];
+
         $reel->delete();
+        $this->deleteMediaFiles($filesToDelete);
 
         return response()->json(['message' => 'Reel deleted.']);
     }

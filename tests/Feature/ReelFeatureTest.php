@@ -9,6 +9,7 @@ use App\Models\PropertyType;
 use App\Models\Reel;
 use App\Models\Role;
 use App\Models\User;
+use App\Services\Reels\ReelThumbnailGenerator;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Queue;
@@ -275,6 +276,46 @@ class ReelFeatureTest extends TestCase
         $response->assertJsonPath('transcode_status', Reel::TRANSCODE_QUEUED);
 
         Queue::assertPushed(ProcessReelVideo::class);
+    }
+
+    public function test_process_job_generates_preview_and_thumbnail_when_missing(): void
+    {
+        Storage::fake('public');
+
+        $agent = $this->createUser('agent', '9301000131');
+        $reel = Reel::create([
+            'created_by' => $agent->id,
+            'title' => 'Needs preview',
+            'video_url' => 'reels/originals/generated.mp4',
+            'status' => Reel::STATUS_PROCESSING,
+            'mime_type' => 'video/mp4',
+            'transcode_status' => Reel::TRANSCODE_QUEUED,
+            'processing_meta' => [
+                'queued_at' => now()->toIso8601String(),
+            ],
+        ]);
+
+        $generator = Mockery::mock(ReelThumbnailGenerator::class);
+        $generator->shouldReceive('generate')
+            ->once()
+            ->with(Mockery::on(fn (Reel $jobReel) => $jobReel->is($reel)))
+            ->andReturn([
+                'preview_image' => 'reels/previews/2026/03/generated-preview.jpg',
+                'thumbnail_url' => 'reels/thumbnails/2026/03/generated-thumb.jpg',
+            ]);
+
+        $this->app->instance(ReelThumbnailGenerator::class, $generator);
+
+        app(ProcessReelVideo::class, ['reelId' => $reel->id])->handle($generator);
+
+        $processed = $reel->fresh();
+
+        $this->assertSame(Reel::TRANSCODE_COMPLETED, $processed->transcode_status);
+        $this->assertSame(Reel::STATUS_PUBLISHED, $processed->status);
+        $this->assertSame('reels/previews/2026/03/generated-preview.jpg', $processed->preview_image);
+        $this->assertSame('reels/thumbnails/2026/03/generated-thumb.jpg', $processed->thumbnail_url);
+        $this->assertSame('generated', $processed->processing_meta['preview_generation']['status']);
+        $this->assertSame('ffmpeg', $processed->processing_meta['pipeline']);
     }
 
     public function test_authenticated_user_can_like_and_unlike_published_reel(): void
@@ -550,6 +591,120 @@ class ReelFeatureTest extends TestCase
             'status' => Reel::STATUS_ARCHIVED,
         ]);
         $this->assertNull($reel->fresh()->published_at);
+    }
+
+    public function test_destroy_deletes_reel_media_files(): void
+    {
+        Storage::fake('public');
+
+        Storage::disk('public')->put('reels/originals/delete-me.mp4', 'video');
+        Storage::disk('public')->put('reels/previews/delete-me.jpg', 'preview');
+        Storage::disk('public')->put('reels/thumbnails/delete-me.jpg', 'thumb');
+
+        $agent = $this->createUser('agent', '9301000051');
+        $reel = Reel::create([
+            'created_by' => $agent->id,
+            'title' => 'Delete files',
+            'video_url' => 'reels/originals/delete-me.mp4',
+            'mp4_url' => 'reels/originals/delete-me.mp4',
+            'preview_image' => 'reels/previews/delete-me.jpg',
+            'thumbnail_url' => 'reels/thumbnails/delete-me.jpg',
+            'status' => Reel::STATUS_PUBLISHED,
+            'transcode_status' => Reel::TRANSCODE_COMPLETED,
+            'published_at' => now(),
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $this->deleteJson('/api/reels/'.$reel->id)->assertOk();
+
+        Storage::disk('public')->assertMissing('reels/originals/delete-me.mp4');
+        Storage::disk('public')->assertMissing('reels/previews/delete-me.jpg');
+        Storage::disk('public')->assertMissing('reels/thumbnails/delete-me.jpg');
+    }
+
+    public function test_update_preview_replaces_old_preview_file(): void
+    {
+        Storage::fake('public');
+
+        Storage::disk('public')->put('reels/originals/keep-video.mp4', 'video');
+        Storage::disk('public')->put('reels/previews/old-preview.jpg', 'old-preview');
+
+        $agent = $this->createUser('agent', '9301000052');
+        $reel = Reel::create([
+            'created_by' => $agent->id,
+            'title' => 'Replace preview',
+            'video_url' => 'reels/originals/keep-video.mp4',
+            'preview_image' => 'reels/previews/old-preview.jpg',
+            'status' => Reel::STATUS_PUBLISHED,
+            'transcode_status' => Reel::TRANSCODE_COMPLETED,
+            'published_at' => now(),
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $response = $this->patch('/api/reels/'.$reel->id, [
+            'preview_image' => UploadedFile::fake()->image('new-preview.jpg'),
+        ]);
+
+        $response->assertOk();
+        $newPreview = $response->json('preview_image');
+
+        $this->assertNotSame('reels/previews/old-preview.jpg', $newPreview);
+        Storage::disk('public')->assertMissing('reels/previews/old-preview.jpg');
+        Storage::disk('public')->assertExists($newPreview);
+    }
+
+    public function test_update_video_replaces_old_media_and_requeues_processing(): void
+    {
+        Storage::fake('public');
+        Queue::fake();
+
+        Storage::disk('public')->put('reels/originals/old-video.mp4', 'old-video');
+        Storage::disk('public')->put('reels/previews/old-preview.jpg', 'old-preview');
+        Storage::disk('public')->put('reels/thumbnails/old-thumb.jpg', 'old-thumb');
+
+        $agent = $this->createUser('agent', '9301000053');
+        $reel = Reel::create([
+            'created_by' => $agent->id,
+            'title' => 'Replace video',
+            'video_url' => 'reels/originals/old-video.mp4',
+            'mp4_url' => 'reels/originals/old-video.mp4',
+            'preview_image' => 'reels/previews/old-preview.jpg',
+            'thumbnail_url' => 'reels/thumbnails/old-thumb.jpg',
+            'status' => Reel::STATUS_PUBLISHED,
+            'transcode_status' => Reel::TRANSCODE_COMPLETED,
+            'published_at' => now(),
+            'processing_meta' => [
+                'processed_at' => now()->toIso8601String(),
+                'preview_generation' => ['status' => 'generated'],
+            ],
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $response = $this->patch('/api/reels/'.$reel->id, [
+            'video' => UploadedFile::fake()->create('replacement.mp4', 2048, 'video/mp4'),
+        ]);
+
+        $response->assertOk();
+        $updated = $reel->fresh();
+
+        $this->assertNotSame('reels/originals/old-video.mp4', $updated->video_url);
+        $this->assertNull($updated->preview_image);
+        $this->assertNull($updated->thumbnail_url);
+        $this->assertSame(Reel::STATUS_PROCESSING, $updated->status);
+        $this->assertSame(Reel::TRANSCODE_QUEUED, $updated->transcode_status);
+        $this->assertNull($updated->published_at);
+        $this->assertArrayNotHasKey('processed_at', $updated->processing_meta);
+        $this->assertArrayNotHasKey('preview_generation', $updated->processing_meta);
+
+        Storage::disk('public')->assertMissing('reels/originals/old-video.mp4');
+        Storage::disk('public')->assertMissing('reels/previews/old-preview.jpg');
+        Storage::disk('public')->assertMissing('reels/thumbnails/old-thumb.jpg');
+        Storage::disk('public')->assertExists($updated->video_url);
+
+        Queue::assertPushed(ProcessReelVideo::class);
     }
 
     public function test_rop_can_create_reel_for_agent_property_from_same_branch(): void
