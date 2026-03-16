@@ -31,6 +31,19 @@ class ReelController extends Controller
         return $user;
     }
 
+    private function normalizeBooleanQuery(Request $request, string $key): void
+    {
+        if (!$request->has($key)) {
+            return;
+        }
+
+        $normalized = filter_var($request->query($key), FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE);
+
+        if ($normalized !== null) {
+            $request->merge([$key => $normalized]);
+        }
+    }
+
     private function canManageProperty(?User $user, Property $property): bool
     {
         if (!$user) {
@@ -253,6 +266,8 @@ class ReelController extends Controller
 
     public function index(Request $request): JsonResponse
     {
+        $this->normalizeBooleanQuery($request, 'featured');
+
         $validated = $request->validate([
             'property_id' => 'nullable|integer|exists:properties,id',
             'per_page' => 'nullable|integer|min:1|max:50',
@@ -278,6 +293,8 @@ class ReelController extends Controller
 
     public function propertyIndex(Request $request, Property $property): JsonResponse
     {
+        $this->normalizeBooleanQuery($request, 'include_unpublished');
+
         $validated = $request->validate([
             'include_unpublished' => 'nullable|boolean',
         ]);

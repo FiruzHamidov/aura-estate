@@ -566,6 +566,41 @@ class ReelFeatureTest extends TestCase
         $response->assertJsonFragment(['id' => $draft->id]);
     }
 
+    public function test_property_reels_endpoint_accepts_true_string_for_include_unpublished(): void
+    {
+        $agent = $this->createUser('agent', '930100004');
+        $property = $this->createProperty($agent, 'Managed property');
+
+        $published = Reel::create([
+            'property_id' => $property->id,
+            'created_by' => $agent->id,
+            'title' => 'Published',
+            'video_url' => 'reels/originals/published.mp4',
+            'mp4_url' => 'reels/originals/published.mp4',
+            'status' => Reel::STATUS_PUBLISHED,
+            'transcode_status' => Reel::TRANSCODE_COMPLETED,
+            'published_at' => now(),
+        ]);
+
+        $draft = Reel::create([
+            'property_id' => $property->id,
+            'created_by' => $agent->id,
+            'title' => 'Draft',
+            'video_url' => 'reels/originals/draft.mp4',
+            'status' => Reel::STATUS_DRAFT,
+            'transcode_status' => Reel::TRANSCODE_PENDING,
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $response = $this->getJson('/api/properties/'.$property->id.'/reels?include_unpublished=true');
+
+        $response->assertOk();
+        $response->assertJsonCount(2);
+        $response->assertJsonFragment(['id' => $published->id]);
+        $response->assertJsonFragment(['id' => $draft->id]);
+    }
+
     public function test_deleting_property_archives_related_reels(): void
     {
         $agent = $this->createUser('agent', '930100005');
