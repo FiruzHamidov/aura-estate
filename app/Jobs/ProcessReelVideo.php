@@ -33,16 +33,18 @@ class ProcessReelVideo implements ShouldQueue
         $meta['pipeline'] = $meta['pipeline'] ?? 'stub';
 
         $generatedAssets = [];
+        $generationFailed = false;
 
         if (!$reel->preview_image || !$reel->thumbnail_url) {
             try {
                 $generatedAssets = $thumbnailGenerator->generate($reel);
-                $meta['pipeline'] = 'ffmpeg';
+                $meta['pipeline'] = $reel->preview_image && !$reel->thumbnail_url ? 'image' : 'ffmpeg';
                 $meta['preview_generation'] = [
                     'status' => 'generated',
                     'generated_at' => now()->toIso8601String(),
                 ];
             } catch (Throwable $exception) {
+                $generationFailed = true;
                 $meta['preview_generation'] = [
                     'status' => 'failed',
                     'generated_at' => now()->toIso8601String(),
@@ -52,9 +54,9 @@ class ProcessReelVideo implements ShouldQueue
         }
 
         $reel->forceFill([
-            'transcode_status' => Reel::TRANSCODE_COMPLETED,
-            'status' => Reel::STATUS_PUBLISHED,
-            'published_at' => $reel->published_at ?? now(),
+            'transcode_status' => $generationFailed ? Reel::TRANSCODE_FAILED : Reel::TRANSCODE_COMPLETED,
+            'status' => $generationFailed ? Reel::STATUS_PROCESSING : Reel::STATUS_PUBLISHED,
+            'published_at' => $generationFailed ? null : ($reel->published_at ?? now()),
             'mp4_url' => $reel->mp4_url ?: $reel->video_url,
             'preview_image' => $reel->preview_image ?: ($generatedAssets['preview_image'] ?? null),
             'thumbnail_url' => $reel->thumbnail_url ?: ($generatedAssets['thumbnail_url'] ?? null),

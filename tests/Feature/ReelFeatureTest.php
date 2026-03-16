@@ -336,6 +336,41 @@ class ReelFeatureTest extends TestCase
         $this->assertSame('ffmpeg', $processed->processing_meta['pipeline']);
     }
 
+    public function test_process_job_marks_reel_as_failed_when_preview_generation_fails(): void
+    {
+        $agent = $this->createUser('agent', '9301000132');
+        $reel = Reel::create([
+            'created_by' => $agent->id,
+            'title' => 'Broken preview',
+            'video_url' => 'reels/originals/broken.mp4',
+            'status' => Reel::STATUS_PROCESSING,
+            'mime_type' => 'video/mp4',
+            'transcode_status' => Reel::TRANSCODE_QUEUED,
+            'processing_meta' => [
+                'queued_at' => now()->toIso8601String(),
+            ],
+        ]);
+
+        $generator = Mockery::mock(ReelThumbnailGenerator::class);
+        $generator->shouldReceive('generate')
+            ->once()
+            ->andThrow(new \RuntimeException('ffmpeg binary is not configured'));
+
+        $this->app->instance(ReelThumbnailGenerator::class, $generator);
+
+        app(ProcessReelVideo::class, ['reelId' => $reel->id])->handle($generator);
+
+        $processed = $reel->fresh();
+
+        $this->assertSame(Reel::TRANSCODE_FAILED, $processed->transcode_status);
+        $this->assertSame(Reel::STATUS_PROCESSING, $processed->status);
+        $this->assertNull($processed->published_at);
+        $this->assertNull($processed->preview_image);
+        $this->assertNull($processed->thumbnail_url);
+        $this->assertSame('failed', $processed->processing_meta['preview_generation']['status']);
+        $this->assertSame('ffmpeg binary is not configured', $processed->processing_meta['preview_generation']['message']);
+    }
+
     public function test_authenticated_user_can_like_and_unlike_published_reel(): void
     {
         $agent = $this->createUser('agent', '930100014');

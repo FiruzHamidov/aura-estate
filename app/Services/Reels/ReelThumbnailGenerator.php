@@ -13,6 +13,12 @@ class ReelThumbnailGenerator
 {
     public function generate(Reel $reel): array
     {
+        if ($reel->preview_image && !$reel->thumbnail_url) {
+            return [
+                'thumbnail_url' => $this->generateThumbnailFromStoredImage($reel->preview_image),
+            ];
+        }
+
         $disk = Storage::disk(config('filesystems.reels_disk', config('filesystems.default', 'public')));
         $sourceStream = $disk->readStream($reel->video_url);
 
@@ -66,6 +72,55 @@ class ReelThumbnailGenerator
             @unlink($tempThumbnail);
             @unlink($previewJpeg);
             @unlink($thumbnailJpeg);
+        }
+    }
+
+    protected function generateThumbnailFromStoredImage(string $imagePath): string
+    {
+        $disk = Storage::disk(config('filesystems.reels_disk', config('filesystems.default', 'public')));
+        $sourceStream = $disk->readStream($imagePath);
+
+        if (!is_resource($sourceStream)) {
+            throw new RuntimeException('Unable to read reel preview image from storage.');
+        }
+
+        $tempPreview = tempnam(sys_get_temp_dir(), 'reel-preview-');
+        $tempThumbnail = tempnam(sys_get_temp_dir(), 'reel-thumb-');
+
+        if ($tempPreview === false || $tempThumbnail === false) {
+            if (is_resource($sourceStream)) {
+                fclose($sourceStream);
+            }
+
+            throw new RuntimeException('Unable to allocate temporary files for reel thumbnail generation.');
+        }
+
+        $previewFile = $tempPreview.'.jpg';
+        $thumbnailFile = $tempThumbnail.'.jpg';
+
+        try {
+            $target = fopen($previewFile, 'wb');
+
+            if (!is_resource($target)) {
+                throw new RuntimeException('Unable to create temporary preview image file.');
+            }
+
+            stream_copy_to_stream($sourceStream, $target);
+            fclose($target);
+            fclose($sourceStream);
+
+            $this->makeThumbnail($previewFile, $thumbnailFile);
+
+            return $this->storeGeneratedImage($thumbnailFile, 'reels/thumbnails');
+        } finally {
+            if (is_resource($sourceStream)) {
+                fclose($sourceStream);
+            }
+
+            @unlink($tempPreview);
+            @unlink($tempThumbnail);
+            @unlink($previewFile);
+            @unlink($thumbnailFile);
         }
     }
 

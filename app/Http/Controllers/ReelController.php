@@ -422,7 +422,7 @@ class ReelController extends Controller
             ],
         ]);
 
-        ProcessReelVideo::dispatch($reel->id);
+        ProcessReelVideo::dispatchAfterResponse($reel->id);
 
         return response()->json(
             $this->serializeReel($reel->load('property')),
@@ -523,7 +523,7 @@ class ReelController extends Controller
             'processing_meta' => $meta,
         ]);
 
-        ProcessReelVideo::dispatch($reel->id);
+        ProcessReelVideo::dispatchAfterResponse($reel->id);
 
         return response()->json($this->serializeReel($reel->fresh('property')));
     }
@@ -613,7 +613,7 @@ class ReelController extends Controller
         $this->deleteMediaFiles($filesToDelete);
 
         if ($request->hasFile('video')) {
-            ProcessReelVideo::dispatch($reel->id);
+            ProcessReelVideo::dispatchAfterResponse($reel->id);
         }
 
         return response()->json($this->serializeReel($reel->fresh('property')));
