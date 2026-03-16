@@ -18,6 +18,18 @@ use RuntimeException;
 
 class ReelController extends Controller
 {
+    private const GLOBAL_REEL_MANAGER_ROLES = [
+        'admin',
+        'superadmin',
+        'marketing',
+        'reels_manager',
+    ];
+
+    private const BRANCH_REEL_MANAGER_ROLES = [
+        'rop',
+        'branch_director',
+    ];
+
     public function __construct(
         private readonly ReelUploadService $uploadService
     ) {
@@ -50,11 +62,11 @@ class ReelController extends Controller
             return false;
         }
 
-        if ($user->hasRole('admin') || $user->hasRole('superadmin')) {
+        if ($this->userHasAnyRole($user, self::GLOBAL_REEL_MANAGER_ROLES)) {
             return true;
         }
 
-        if ($user->hasRole('rop') || $user->hasRole('branch_director')) {
+        if ($this->userHasAnyRole($user, self::BRANCH_REEL_MANAGER_ROLES)) {
             $property->loadMissing(['agent.role', 'creator.role']);
 
             $propertyBranchId = $property->agent?->branch_id ?: $property->creator?->branch_id;
@@ -62,11 +74,6 @@ class ReelController extends Controller
             return !empty($user->branch_id)
                 && !empty($propertyBranchId)
                 && (int) $propertyBranchId === (int) $user->branch_id;
-        }
-
-        if ($user->hasRole('agent') || $user->hasRole('client')) {
-            return (int) $property->created_by === (int) $user->id
-                || (int) $property->agent_id === (int) $user->id;
         }
 
         return false;
@@ -78,11 +85,11 @@ class ReelController extends Controller
             return false;
         }
 
-        if ($user->hasRole('admin') || $user->hasRole('superadmin')) {
+        if ($this->userHasAnyRole($user, self::GLOBAL_REEL_MANAGER_ROLES)) {
             return true;
         }
 
-        if ($user->hasRole('rop') || $user->hasRole('branch_director')) {
+        if ($this->userHasAnyRole($user, self::BRANCH_REEL_MANAGER_ROLES)) {
             if (!$reel) {
                 return !empty($user->branch_id);
             }
@@ -94,15 +101,18 @@ class ReelController extends Controller
                 && (int) $reel->creator->branch_id === (int) $user->branch_id;
         }
 
-        if (!$user->hasRole('agent') && !$user->hasRole('client')) {
-            return false;
+        return false;
+    }
+
+    private function userHasAnyRole(User $user, array $slugs): bool
+    {
+        foreach ($slugs as $slug) {
+            if ($user->hasRole($slug)) {
+                return true;
+            }
         }
 
-        if (!$reel) {
-            return true;
-        }
-
-        return (int) $reel->created_by === (int) $user->id;
+        return false;
     }
 
     private function ensureCanManageProperty(Property $property): User

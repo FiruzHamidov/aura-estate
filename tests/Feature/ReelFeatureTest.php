@@ -158,13 +158,13 @@ class ReelFeatureTest extends TestCase
         });
     }
 
-    public function test_agent_can_create_standalone_reel_and_queue_processing(): void
+    public function test_reels_manager_can_create_standalone_reel_and_queue_processing(): void
     {
         Storage::fake('public');
         Queue::fake();
 
-        $agent = $this->createUser('agent', '930100001');
-        Sanctum::actingAs($agent);
+        $manager = $this->createUser('reels_manager', '930100001');
+        Sanctum::actingAs($manager);
 
         $response = $this->postJson('/api/reels', [
             'title' => 'Standalone reel',
@@ -181,13 +181,13 @@ class ReelFeatureTest extends TestCase
         Queue::assertPushed(ProcessReelVideo::class);
     }
 
-    public function test_agent_can_create_reel_with_duration_up_to_five_minutes(): void
+    public function test_marketing_can_create_reel_with_duration_up_to_five_minutes(): void
     {
         Storage::fake('public');
         Queue::fake();
 
-        $agent = $this->createUser('agent', '9301000015');
-        Sanctum::actingAs($agent);
+        $marketing = $this->createUser('marketing', '9301000015');
+        Sanctum::actingAs($marketing);
 
         $response = $this->postJson('/api/reels', [
             'title' => 'Long reel',
@@ -206,10 +206,28 @@ class ReelFeatureTest extends TestCase
         ]);
     }
 
-    public function test_agent_can_initialize_direct_upload_for_standalone_reel(): void
+    public function test_agent_cannot_create_standalone_reel(): void
     {
-        $agent = $this->createUser('agent', '930100012');
+        Storage::fake('public');
+        Queue::fake();
+
+        $agent = $this->createUser('agent', '9301000016');
         Sanctum::actingAs($agent);
+
+        $response = $this->postJson('/api/reels', [
+            'title' => 'Blocked reel',
+            'video' => UploadedFile::fake()->create('clip.mp4', 2048, 'video/mp4'),
+        ]);
+
+        $response->assertForbidden();
+        $this->assertDatabaseCount('reels', 0);
+        Queue::assertNothingPushed();
+    }
+
+    public function test_reels_manager_can_initialize_direct_upload_for_standalone_reel(): void
+    {
+        $manager = $this->createUser('reels_manager', '930100012');
+        Sanctum::actingAs($manager);
 
         $service = Mockery::mock(\App\Services\Reels\ReelUploadService::class);
         $service->shouldReceive('diskName')->andReturn('s3');
@@ -242,11 +260,11 @@ class ReelFeatureTest extends TestCase
         $response->assertJsonPath('upload.disk', 's3');
     }
 
-    public function test_agent_can_complete_direct_upload_and_queue_processing(): void
+    public function test_reels_manager_can_complete_direct_upload_and_queue_processing(): void
     {
         Queue::fake();
 
-        $agent = $this->createUser('agent', '930100013');
+        $agent = $this->createUser('reels_manager', '930100013');
         $reel = Reel::create([
             'created_by' => $agent->id,
             'title' => 'Upload pending',
@@ -531,9 +549,10 @@ class ReelFeatureTest extends TestCase
         $response->assertJsonMissing(['title' => 'Draft Reel']);
     }
 
-    public function test_property_reels_endpoint_can_include_unpublished_for_owner(): void
+    public function test_reels_manager_can_include_unpublished_property_reels(): void
     {
         $agent = $this->createUser('agent', '930100004');
+        $manager = $this->createUser('reels_manager', '9301000041');
         $property = $this->createProperty($agent, 'Managed property');
 
         $published = Reel::create([
@@ -556,7 +575,7 @@ class ReelFeatureTest extends TestCase
             'transcode_status' => Reel::TRANSCODE_PENDING,
         ]);
 
-        Sanctum::actingAs($agent);
+        Sanctum::actingAs($manager);
 
         $response = $this->getJson('/api/properties/'.$property->id.'/reels?include_unpublished=1');
 
@@ -566,9 +585,10 @@ class ReelFeatureTest extends TestCase
         $response->assertJsonFragment(['id' => $draft->id]);
     }
 
-    public function test_property_reels_endpoint_accepts_true_string_for_include_unpublished(): void
+    public function test_reels_manager_can_include_unpublished_property_reels_with_true_string(): void
     {
         $agent = $this->createUser('agent', '930100004');
+        $manager = $this->createUser('reels_manager', '9301000042');
         $property = $this->createProperty($agent, 'Managed property');
 
         $published = Reel::create([
@@ -591,7 +611,7 @@ class ReelFeatureTest extends TestCase
             'transcode_status' => Reel::TRANSCODE_PENDING,
         ]);
 
-        Sanctum::actingAs($agent);
+        Sanctum::actingAs($manager);
 
         $response = $this->getJson('/api/properties/'.$property->id.'/reels?include_unpublished=true');
 
@@ -636,7 +656,7 @@ class ReelFeatureTest extends TestCase
         Storage::disk('public')->put('reels/previews/delete-me.jpg', 'preview');
         Storage::disk('public')->put('reels/thumbnails/delete-me.jpg', 'thumb');
 
-        $agent = $this->createUser('agent', '9301000051');
+        $agent = $this->createUser('reels_manager', '9301000051');
         $reel = Reel::create([
             'created_by' => $agent->id,
             'title' => 'Delete files',
@@ -665,7 +685,7 @@ class ReelFeatureTest extends TestCase
         Storage::disk('public')->put('reels/originals/keep-video.mp4', 'video');
         Storage::disk('public')->put('reels/previews/old-preview.jpg', 'old-preview');
 
-        $agent = $this->createUser('agent', '9301000052');
+        $agent = $this->createUser('reels_manager', '9301000052');
         $reel = Reel::create([
             'created_by' => $agent->id,
             'title' => 'Replace preview',
@@ -699,7 +719,7 @@ class ReelFeatureTest extends TestCase
         Storage::disk('public')->put('reels/previews/old-preview.jpg', 'old-preview');
         Storage::disk('public')->put('reels/thumbnails/old-thumb.jpg', 'old-thumb');
 
-        $agent = $this->createUser('agent', '9301000053');
+        $agent = $this->createUser('reels_manager', '9301000053');
         $reel = Reel::create([
             'created_by' => $agent->id,
             'title' => 'Replace video',
@@ -805,6 +825,27 @@ class ReelFeatureTest extends TestCase
         ]);
 
         Sanctum::actingAs($rop);
+
+        $this->patchJson('/api/reels/'.$reel->id, [
+            'title' => 'Blocked update',
+        ])->assertForbidden();
+    }
+
+    public function test_agent_cannot_update_own_standalone_reel(): void
+    {
+        $agent = $this->createUser('agent', '9301000101');
+
+        $reel = Reel::create([
+            'created_by' => $agent->id,
+            'title' => 'Own reel',
+            'video_url' => 'reels/originals/own.mp4',
+            'mp4_url' => 'reels/originals/own.mp4',
+            'status' => Reel::STATUS_PUBLISHED,
+            'transcode_status' => Reel::TRANSCODE_COMPLETED,
+            'published_at' => now(),
+        ]);
+
+        Sanctum::actingAs($agent);
 
         $this->patchJson('/api/reels/'.$reel->id, [
             'title' => 'Blocked update',
