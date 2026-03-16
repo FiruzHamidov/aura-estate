@@ -11,8 +11,10 @@ class UserSeeder extends Seeder
 {
     public function run(): void
     {
+        Role::upsertSystemRoles();
+
         // Находим роль администратора
-        $adminRole = Role::where('slug', 'admin')->first();
+        $adminRole = Role::where('slug', 'admin')->firstOrFail();
 
         // Создаем администратора
         User::updateOrCreate(
@@ -28,7 +30,7 @@ class UserSeeder extends Seeder
         );
 
         // При желании можно сразу создать и тестового агента, например:
-        $agentRole = Role::where('slug', 'agent')->first();
+        $agentRole = Role::where('slug', 'agent')->firstOrFail();
 
         User::updateOrCreate(
             ['phone' => '938080888'],
@@ -43,7 +45,7 @@ class UserSeeder extends Seeder
         );
 
         // И клиента:
-        $clientRole = Role::where('slug', 'client')->first();
+        $clientRole = Role::where('slug', 'client')->firstOrFail();
 
         User::updateOrCreate(
             ['phone' => '918555583'],
