@@ -95,6 +95,16 @@ class ClientIntegrationTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('client_collaborators', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('client_id');
+            $table->unsignedBigInteger('user_id');
+            $table->string('role', 32)->default(Client::COLLABORATOR_ROLE_COLLABORATOR);
+            $table->unsignedBigInteger('granted_by')->nullable();
+            $table->timestamps();
+            $table->unique(['client_id', 'user_id']);
+        });
+
         Schema::create('client_needs', function (Blueprint $table) {
             $table->id();
             $table->unsignedBigInteger('client_id');
@@ -224,6 +234,19 @@ class ClientIntegrationTest extends TestCase
             $table->string('status')->default('pending');
             $table->string('client_name')->nullable();
             $table->string('client_phone')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('crm_audit_logs', function (Blueprint $table) {
+            $table->id();
+            $table->string('auditable_type');
+            $table->unsignedBigInteger('auditable_id');
+            $table->unsignedBigInteger('actor_id')->nullable();
+            $table->string('event');
+            $table->json('old_values')->nullable();
+            $table->json('new_values')->nullable();
+            $table->json('context')->nullable();
+            $table->text('message')->nullable();
             $table->timestamps();
         });
 
@@ -362,6 +385,35 @@ class ClientIntegrationTest extends TestCase
         $this->assertSame($client->full_name, $property->buyer_full_name);
         $this->assertSame($client->phone, $property->buyer_phone);
         $this->assertSame('sold', $property->moderation_status);
+    }
+
+    public function test_save_deal_allows_deposit_with_buyer_client_only(): void
+    {
+        [$agent, $client, $property] = $this->seedClientContext();
+
+        Sanctum::actingAs($agent);
+
+        $response = $this->postJson('/api/properties/'.$property->id.'/deal', [
+            'moderation_status' => 'deposit',
+            'buyer_client_id' => $client->id,
+            'deposit_amount' => 10000,
+            'deposit_currency' => 'TJS',
+            'deposit_received_at' => '2026-03-17',
+            'deposit_taken_at' => null,
+            'planned_contract_signed_at' => '2026-03-17',
+            'company_expected_income' => 1231231,
+            'company_expected_income_currency' => 'TJS',
+            'money_holder' => 'company',
+        ]);
+
+        $response->assertOk();
+
+        $property->refresh();
+
+        $this->assertSame('deposit', $property->moderation_status);
+        $this->assertSame($client->id, $property->buyer_client_id);
+        $this->assertSame($client->full_name, $property->buyer_full_name);
+        $this->assertSame($client->phone, $property->buyer_phone);
     }
 
     public function test_same_contact_becomes_both_when_used_as_owner_and_buyer(): void

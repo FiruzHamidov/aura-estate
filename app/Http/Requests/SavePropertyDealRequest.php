@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class SavePropertyDealRequest extends FormRequest
 {
@@ -21,8 +22,18 @@ class SavePropertyDealRequest extends FormRequest
              * 🟡 ЭТАП: ЗАЛОГ (deposit)
              * =========================
              */
-            'buyer_full_name' => 'required_if:moderation_status,deposit|string|min:3',
-            'buyer_phone'     => 'required_if:moderation_status,deposit|string|min:6',
+            'buyer_full_name' => [
+                'nullable',
+                'string',
+                'min:3',
+                Rule::requiredIf(fn () => $this->input('moderation_status') === 'deposit' && empty($this->input('buyer_client_id'))),
+            ],
+            'buyer_phone' => [
+                'nullable',
+                'string',
+                'min:6',
+                Rule::requiredIf(fn () => $this->input('moderation_status') === 'deposit' && empty($this->input('buyer_client_id'))),
+            ],
             'buyer_client_id' => 'nullable|exists:clients,id',
 
             'deposit_amount'       => 'required_if:moderation_status,deposit|numeric|min:0.01',
