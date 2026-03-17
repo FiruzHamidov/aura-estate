@@ -1504,8 +1504,10 @@ class PropertyController extends Controller
                 'deposit_currency' => $request->deposit_currency ?? 'TJS',
                 'deposit_received_at' => $request->deposit_received_at,
                 'deposit_taken_at' => $request->deposit_taken_at,
-                'moderation_status' => 'sold',
-                'sold_at' => now(),
+                'moderation_status' => $request->moderation_status,
+                'sold_at' => in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true)
+                    ? now()
+                    : $property->sold_at,
             ];
 
             $this->ensureVisibleClientsForProperty($payload, $property);
@@ -1514,16 +1516,21 @@ class PropertyController extends Controller
             // 1️⃣ Обновляем сам объект
             $property->update($payload);
 
-            // 2️⃣ Агенты — очищаем и записываем заново
-            $property->saleAgents()->detach();
-
-            foreach ($request->agents as $agent) {
-                $property->saleAgents()->attach($agent['agent_id'], [
-                    'role' => $agent['role'] ?? 'assistant',
-                    'agent_commission_amount' => $agent['commission_amount'] ?? null,
-                    'agent_commission_currency' => $agent['commission_currency'] ?? 'TJS',
-                    'agent_paid_at' => $agent['paid_at'] ?? null,
-                ]);
+            // 2️⃣ Агенты — заменяем только если клиент прислал список
+            if ($request->has('agents')) {
+                $property->saleAgents()->sync(
+                    collect($request->input('agents', []))
+                        ->filter(fn ($agent) => !empty($agent['agent_id']))
+                        ->mapWithKeys(fn ($agent) => [
+                            $agent['agent_id'] => [
+                                'role' => $agent['role'] ?? 'assistant',
+                                'agent_commission_amount' => $agent['commission_amount'] ?? null,
+                                'agent_commission_currency' => $agent['commission_currency'] ?? 'TJS',
+                                'agent_paid_at' => $agent['paid_at'] ?? null,
+                            ],
+                        ])
+                        ->toArray()
+                );
             }
         });
 
