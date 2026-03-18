@@ -309,6 +309,23 @@ class UserController extends Controller
         );
     }
 
+    public function updateProfile(Request $request)
+    {
+        $user = $this->authUser();
+
+        $data = $request->validate([
+            'name' => 'sometimes|string',
+            'description' => 'nullable|string',
+            'birthday' => 'nullable|date',
+            'phone' => 'sometimes|string|unique:users,phone,'.$user->id,
+            'email' => 'sometimes|email|unique:users,email,'.$user->id,
+        ]);
+
+        $user->update($data);
+
+        return response()->json($user->fresh(['role', 'branch', 'branchGroup']));
+    }
+
     // Обновление пользователя
     public function update(Request $request, User $user)
     {

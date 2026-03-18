@@ -116,6 +116,8 @@ Route::get('/chat/history', [ChatController::class, 'history']);
 Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::get('/my-properties', [PropertyController::class, 'myProperties']);
     Route::get('/user/profile', [UserController::class, 'profile']);
+    Route::put('/user/profile', [UserController::class, 'updateProfile']);
+    Route::patch('/user/profile', [UserController::class, 'updateProfile']);
     Route::post('/logout', [AuthController::class, 'logout']);
 
     // Properties CRUD + photos
