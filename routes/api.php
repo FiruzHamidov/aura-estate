@@ -40,6 +40,7 @@ use App\Http\Controllers\PropertyReportController;
 use App\Http\Controllers\PropertyStatusController;
 use App\Http\Controllers\PropertyTypeController;
 use App\Http\Controllers\PublicRealtorController;
+use App\Http\Controllers\PublicTeamController;
 use App\Http\Controllers\RepairTypeController;
 use App\Http\Controllers\ReelController;
 use App\Http\Controllers\ReviewController;
@@ -85,6 +86,7 @@ Route::get('/client-need-statuses', [ClientNeedStatusController::class, 'index']
 
 Route::get('/user/agents', [UserController::class, 'agents']);
 Route::get('/public/realtors/{id}', [PublicRealtorController::class, 'show'])->whereNumber('id');
+Route::get('/public/team/hall-of-fame', [PublicTeamController::class, 'hallOfFame']);
 Route::post('/reviews/request-code', [ReviewController::class, 'requestCode'])->middleware('throttle:10,1');
 Route::get('/agents/{agent}/reviews', [ReviewController::class, 'index'])->whereNumber('agent');
 Route::post('/agents/{agent}/reviews', [ReviewController::class, 'store'])->middleware('throttle:10,1')->whereNumber('agent');
