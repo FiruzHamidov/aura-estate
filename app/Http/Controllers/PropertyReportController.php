@@ -8,6 +8,7 @@ use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 
 class PropertyReportController extends Controller
 {
@@ -439,6 +440,301 @@ class PropertyReportController extends Controller
         return [$expr, $alias, $metric];
     }
 
+    private function makeClientIdentity($clientId = null, $phone = null, $name = null, $legacyId = null): ?string
+    {
+        if ($clientId !== null && $clientId !== '') {
+            return 'client:'.$clientId;
+        }
+
+        $phone = trim((string) $phone);
+        if ($phone !== '') {
+            return 'phone:'.$phone;
+        }
+
+        if ($legacyId !== null && $legacyId !== '') {
+            return 'legacy:'.$legacyId;
+        }
+
+        $name = trim((string) $name);
+        if ($name !== '') {
+            return 'name:'.$name;
+        }
+
+        return null;
+    }
+
+    private function pushUniqueClient(array &$managerClients, $managerId, ?string $clientIdentity): void
+    {
+        if (empty($managerId) || empty($clientIdentity)) {
+            return;
+        }
+
+        $managerId = (int) $managerId;
+
+        if (!isset($managerClients[$managerId])) {
+            $managerClients[$managerId] = [];
+        }
+
+        $managerClients[$managerId][$clientIdentity] = true;
+    }
+
+    private function buildManagerUniqueClientsMap(Request $request, string $groupBy, array $soldStatuses): array
+    {
+        $managerClients = [];
+
+        $base = Property::query();
+        [$q] = $this->applyCommonFilters($request, $base);
+
+        $soldRequest = $request->except(['date_from', 'date_to']);
+        $soldRequest['sold_at_from'] = $request->input('date_from');
+        $soldRequest['sold_at_to'] = $request->input('date_to');
+
+        $soldBase = Property::query()->whereIn('moderation_status', $soldStatuses);
+        [$soldQ] = $this->applyCommonFilters(new Request($soldRequest), $soldBase);
+
+        $propertyRows = (clone $q)
+            ->whereNotIn('moderation_status', $soldStatuses)
+            ->select([
+                'id',
+                $groupBy,
+                'owner_client_id',
+                'owner_phone',
+                'owner_name',
+                'buyer_client_id',
+                'buyer_phone',
+                'buyer_full_name',
+            ])
+            ->get()
+            ->concat(
+                (clone $soldQ)
+                    ->select([
+                        'id',
+                        $groupBy,
+                        'owner_client_id',
+                        'owner_phone',
+                        'owner_name',
+                        'buyer_client_id',
+                        'buyer_phone',
+                        'buyer_full_name',
+                    ])
+                    ->get()
+            );
+
+        $propertyIds = [];
+
+        foreach ($propertyRows as $row) {
+            $managerId = $row->{$groupBy} ?? null;
+            $propertyIds[] = (int) $row->id;
+
+            $this->pushUniqueClient(
+                $managerClients,
+                $managerId,
+                $this->makeClientIdentity($row->owner_client_id, $row->owner_phone, $row->owner_name)
+            );
+
+            $this->pushUniqueClient(
+                $managerClients,
+                $managerId,
+                $this->makeClientIdentity($row->buyer_client_id, $row->buyer_phone, $row->buyer_full_name)
+            );
+        }
+
+        $propertyIds = array_values(array_unique(array_filter($propertyIds)));
+
+        if (!empty($propertyIds)) {
+            $bookingsQ = Booking::query()
+                ->select([
+                    'bookings.agent_id',
+                    'bookings.crm_client_id',
+                    'bookings.client_id',
+                    'bookings.client_phone',
+                    'bookings.client_name',
+                ])
+                ->whereIn('bookings.property_id', $propertyIds);
+
+            $this->applyBranchAccessByUserColumn($request, $bookingsQ, 'bookings.agent_id');
+
+            if ($request->filled('agent_id')) {
+                $bookingsQ->whereIn('bookings.agent_id', $this->toArray($request->input('agent_id')));
+            }
+
+            if ($request->input('date_from')) {
+                $bookingsQ->whereDate('bookings.created_at', '>=', $request->input('date_from'));
+            }
+
+            if ($request->input('date_to')) {
+                $bookingsQ->whereDate('bookings.created_at', '<=', $request->input('date_to'));
+            }
+
+            foreach ($bookingsQ->get() as $booking) {
+                $this->pushUniqueClient(
+                    $managerClients,
+                    $booking->agent_id,
+                    $this->makeClientIdentity(
+                        $booking->crm_client_id,
+                        $booking->client_phone,
+                        $booking->client_name,
+                        $booking->client_id ? 'booking-user:'.$booking->client_id : null
+                    )
+                );
+            }
+
+            if (Schema::hasTable('crm_deals')) {
+                $dealsQ = DB::table('crm_deals')
+                    ->select([
+                        'responsible_agent_id',
+                        'client_id',
+                    ])
+                    ->whereIn('primary_property_id', $propertyIds);
+
+                $this->applyBranchAccessByUserColumn($request, $dealsQ, 'responsible_agent_id');
+
+                if ($request->filled('agent_id')) {
+                    $dealsQ->whereIn('responsible_agent_id', $this->toArray($request->input('agent_id')));
+                }
+
+                if ($request->input('date_from')) {
+                    $dealsQ->whereDate('created_at', '>=', $request->input('date_from'));
+                }
+
+                if ($request->input('date_to')) {
+                    $dealsQ->whereDate('created_at', '<=', $request->input('date_to'));
+                }
+
+                foreach ($dealsQ->get() as $deal) {
+                    $this->pushUniqueClient(
+                        $managerClients,
+                        $deal->responsible_agent_id,
+                        $this->makeClientIdentity($deal->client_id)
+                    );
+                }
+            }
+        }
+
+        $clientsQ = DB::table('clients')
+            ->select(['id', 'responsible_agent_id'])
+            ->whereNotNull('responsible_agent_id');
+
+        $this->applyBranchAccessByUserColumn($request, $clientsQ, 'responsible_agent_id');
+
+        if ($request->filled('agent_id')) {
+            $clientsQ->whereIn('responsible_agent_id', $this->toArray($request->input('agent_id')));
+        }
+
+        if ($request->input('date_from')) {
+            $clientsQ->whereDate('created_at', '>=', $request->input('date_from'));
+        }
+
+        if ($request->input('date_to')) {
+            $clientsQ->whereDate('created_at', '<=', $request->input('date_to'));
+        }
+
+        foreach ($clientsQ->get() as $client) {
+            $this->pushUniqueClient(
+                $managerClients,
+                $client->responsible_agent_id,
+                $this->makeClientIdentity($client->id)
+            );
+        }
+
+        return collect($managerClients)
+            ->map(fn (array $clients) => count($clients))
+            ->all();
+    }
+
+    private function applyPropertyAgentReportFilters(Request $request, $query)
+    {
+        $filterRequest = new Request($request->except([
+            'from',
+            'to',
+            'sold_at_from',
+            'sold_at_to',
+            'date_from',
+            'date_to',
+            'date_field',
+            'deposit_received_at_from',
+            'deposit_received_at_to',
+        ]));
+
+        [$query] = $this->applyCommonFilters($filterRequest, $query);
+
+        return $query;
+    }
+
+    private function applyAgentPropertiesPeriodFilter(Request $request, $query, array $soldStatuses)
+    {
+        $from = $request->input('from', $request->input('date_from'));
+        $to = $request->input('to', $request->input('date_to'));
+        $soldFrom = $request->input('sold_at_from', $from);
+        $soldTo = $request->input('sold_at_to', $to);
+
+        if (!$from && !$to && !$soldFrom && !$soldTo) {
+            return $query;
+        }
+
+        $query->where(function ($periodQ) use ($from, $to, $soldFrom, $soldTo, $soldStatuses) {
+            $periodQ->where(function ($openQ) use ($from, $to, $soldStatuses) {
+                $openQ->whereNotIn('moderation_status', $soldStatuses);
+
+                if ($from) {
+                    $openQ->whereDate('created_at', '>=', $from);
+                }
+
+                if ($to) {
+                    $openQ->whereDate('created_at', '<=', $to);
+                }
+            })->orWhere(function ($closedQ) use ($soldFrom, $soldTo, $soldStatuses) {
+                $closedQ->whereIn('moderation_status', $soldStatuses);
+
+                if ($soldFrom) {
+                    $closedQ->whereDate('sold_at', '>=', $soldFrom);
+                }
+
+                if ($soldTo) {
+                    $closedQ->whereDate('sold_at', '<=', $soldTo);
+                }
+            });
+        });
+
+        return $query;
+    }
+
+    private function contractSummaryFromProperties($properties): array
+    {
+        $contractKeys = [
+            1 => 'alternative',
+            2 => 'exclusive',
+            3 => 'none',
+        ];
+
+        $summary = [];
+
+        foreach ($properties as $property) {
+            $key = $contractKeys[(int) $property->contract_type_id] ?? null;
+
+            if ($key === null) {
+                if ($property->contract_type_id === null) {
+                    continue;
+                }
+
+                $key = 'contract_type_'.$property->contract_type_id;
+            }
+
+            $summary[$key] = (int) ($summary[$key] ?? 0) + 1;
+        }
+
+        return $summary;
+    }
+
+    private function statusSummaryFromProperties($properties): array
+    {
+        return $properties
+            ->filter(fn ($property) => $property->moderation_status !== 'deleted')
+            ->groupBy('moderation_status')
+            ->map(fn ($group) => $group->count())
+            ->toArray();
+    }
+
     // --- 1) Сводка
     public function summary(Request $request)
     {
@@ -553,6 +849,7 @@ class PropertyReportController extends Controller
         [$expr, $alias] = $this->priceExpr($request);
 
         $soldStatuses = ['sold', 'rented', 'sold_by_owner'];
+        $uniqueClientsMap = $this->buildManagerUniqueClientsMap($request, $groupBy, $soldStatuses);
 
         // --- 1) Основной запрос (created_at)
         $base = Property::query();
@@ -619,6 +916,7 @@ class PropertyReportController extends Controller
                 'sold' => $sold,
                 'rented' => $rented,
                 'sold_by_owner' => $soldByOwner,
+                'unique_clients_count' => (int) ($uniqueClientsMap[(int) $key] ?? 0),
                 'closed' => $closed,
                 'close_rate' => $total ? round($closed / $total * 100, 2) : 0,
                 $alias => round((float)($baseRow->$alias ?? 0), 2),
@@ -1005,8 +1303,9 @@ class PropertyReportController extends Controller
     public function agentPropertiesReport(Request $request, $agentId = null)
     {
         try {
-            $from = $request->input('from'); // optional, for bookings
-            $to   = $request->input('to');   // optional, for bookings
+            $from = $request->input('from', $request->input('date_from'));
+            $to   = $request->input('to', $request->input('date_to'));
+            $soldStatuses = ['sold', 'sold_by_owner', 'rented'];
 
             // Build base properties query (we'll refine below)
             $propsQ = Property::query()
@@ -1027,17 +1326,8 @@ class PropertyReportController extends Controller
                     $q->select(['id','slug']);
                 }]);
 
-            // Optional property filters
-            if ($request->filled('type_id')) {
-                $typeIds = array_map('intval', explode(',', (string)$request->input('type_id')));
-                $propsQ->whereIn('type_id', $typeIds);
-            }
-            if ($request->filled('location_id')) {
-                $locIds = array_map('intval', explode(',', (string)$request->input('location_id')));
-                $propsQ->whereIn('location_id', $locIds);
-            }
-
-            $this->applyBranchAccessFilter($request, $propsQ, 'created_by');
+            $propsQ = $this->applyPropertyAgentReportFilters($request, $propsQ);
+            $propsQ = $this->applyAgentPropertiesPeriodFilter($request, $propsQ, $soldStatuses);
 
             // If single-agent mode: restrict properties to that agent (agent_id OR created_by)
             if ($agentId !== null) {
@@ -1093,20 +1383,8 @@ class PropertyReportController extends Controller
 
                 $totalProps = $properties->count();
                 $totalShows = (int)$bookings->sum('shows_count');
-                $byStatus = $properties->groupBy('moderation_status')->map(fn($g) => $g->count())->toArray();
-
-                // contract types mapping (id => label)
-                $contractNames = [
-                    1 => 'Контракт: Альтернативный',
-                    2 => 'Контракт: Эксклюзив',
-                    3 => 'Контракт: Без договора',
-                ];
-
-                // counts of properties per contract type for this agent (single-agent mode)
-                $contractCounts = [];
-                foreach ($contractNames as $ctId => $ctName) {
-                    $contractCounts[$ctId] = (int)$properties->where('contract_type_id', $ctId)->count();
-                }
+                $byStatus = $this->statusSummaryFromProperties($properties);
+                $contracts = $this->contractSummaryFromProperties($properties);
 
                 $agent = User::find($agentId);
                 $agentName = $agent ? $agent->name : '—';
@@ -1118,13 +1396,7 @@ class PropertyReportController extends Controller
                         'total_properties' => $totalProps,
                         'total_shows' => $totalShows,
                         'by_status' => $byStatus,
-                        'contracts' => array_map(function($id, $count) use ($contractNames) {
-                            return [
-                                'id' => (int)$id,
-                                'name' => $contractNames[$id] ?? (string)$id,
-                                'count' => (int)$count,
-                            ];
-                        }, array_keys($contractCounts), $contractCounts),
+                        'contracts' => $contracts,
                     ],
                     'properties' => $propsOut,
                 ]);
@@ -1207,20 +1479,8 @@ class PropertyReportController extends Controller
 
                 $totalProps = $propsForAgent->count();
                 $totalShows = (int)$propsOut->sum('shows_count');
-                $byStatus = $propsForAgent->groupBy('moderation_status')->map(fn($g) => $g->count())->toArray();
-
-                // contract types mapping (id => label)
-                $contractNames = [
-                    1 => 'Контракт: Альтернативный',
-                    2 => 'Контракт: Эксклюзив',
-                    3 => 'Контракт: Без договора',
-                ];
-
-                // counts of properties per contract type for this agent (aggregated mode)
-                $contractCounts = [];
-                foreach ($contractNames as $ctId => $ctName) {
-                    $contractCounts[$ctId] = (int)$propsForAgent->where('contract_type_id', $ctId)->count();
-                }
+                $byStatus = $this->statusSummaryFromProperties($propsForAgent);
+                $contracts = $this->contractSummaryFromProperties($propsForAgent);
 
                 $agentName = $users[$agentKey]->name ?? '—';
 
@@ -1231,13 +1491,7 @@ class PropertyReportController extends Controller
                         'total_properties' => $totalProps,
                         'total_shows' => $totalShows,
                         'by_status' => $byStatus,
-                        'contracts' => array_map(function($id, $count) use ($contractNames) {
-                            return [
-                                'id' => (int)$id,
-                                'name' => $contractNames[$id] ?? (string)$id,
-                                'count' => (int)$count,
-                            ];
-                        }, array_keys($contractCounts), $contractCounts),
+                        'contracts' => $contracts,
                     ],
 
                 ]);

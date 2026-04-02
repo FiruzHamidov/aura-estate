@@ -237,6 +237,14 @@ class ClientIntegrationTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('crm_deals', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('client_id')->nullable();
+            $table->unsignedBigInteger('responsible_agent_id')->nullable();
+            $table->unsignedBigInteger('primary_property_id')->nullable();
+            $table->timestamps();
+        });
+
         Schema::create('crm_audit_logs', function (Blueprint $table) {
             $table->id();
             $table->string('auditable_type');
@@ -511,6 +519,251 @@ class ClientIntegrationTest extends TestCase
         $response->assertOk();
         $response->assertJsonPath('unique_clients', 2);
         $response->assertJsonPath('business_clients', 2);
+    }
+
+    public function test_manager_efficiency_returns_unique_clients_count_with_filters(): void
+    {
+        [$agent, $assignedClient] = $this->seedClientContext(withProperty: false);
+
+        $property = Property::create([
+            'title' => 'March property',
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 150000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+            'owner_client_id' => $assignedClient->id,
+            'buyer_full_name' => 'Legacy Buyer',
+            'buyer_phone' => '+992 90 555 3001',
+            'listing_type' => 'regular',
+            'moderation_status' => 'approved',
+            'created_at' => '2026-03-10 09:00:00',
+            'updated_at' => '2026-03-10 09:00:00',
+        ]);
+
+        $soldClient = Client::create([
+            'full_name' => 'Sold Client',
+            'phone' => '+992 90 555 3002',
+            'phone_normalized' => '992905553002',
+            'branch_id' => $agent->branch_id,
+            'created_by' => $agent->id,
+            'responsible_agent_id' => $agent->id,
+            'client_type_id' => 1,
+            'contact_kind' => Client::CONTACT_KIND_BUYER,
+            'status' => 'active',
+            'created_at' => '2026-03-11 09:00:00',
+            'updated_at' => '2026-03-11 09:00:00',
+        ]);
+
+        Property::create([
+            'title' => 'Sold in March',
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 175000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+            'buyer_client_id' => $soldClient->id,
+            'listing_type' => 'regular',
+            'moderation_status' => 'sold',
+            'created_at' => '2026-02-15 09:00:00',
+            'updated_at' => '2026-03-12 09:00:00',
+            'sold_at' => '2026-03-12 10:00:00',
+        ]);
+
+        $showClient = Client::create([
+            'full_name' => 'Show Client',
+            'phone' => '+992 90 555 3003',
+            'phone_normalized' => '992905553003',
+            'branch_id' => $agent->branch_id,
+            'created_by' => $agent->id,
+            'responsible_agent_id' => null,
+            'client_type_id' => 1,
+            'contact_kind' => Client::CONTACT_KIND_BUYER,
+            'status' => 'active',
+            'created_at' => '2026-03-13 09:00:00',
+            'updated_at' => '2026-03-13 09:00:00',
+        ]);
+
+        DB::table('bookings')->insert([
+            'property_id' => $property->id,
+            'agent_id' => $agent->id,
+            'client_id' => null,
+            'crm_client_id' => $showClient->id,
+            'start_time' => '2026-03-13 10:00:00',
+            'end_time' => '2026-03-13 11:00:00',
+            'status' => 'confirmed',
+            'client_name' => $showClient->full_name,
+            'client_phone' => $showClient->phone,
+            'created_at' => '2026-03-13 09:00:00',
+            'updated_at' => '2026-03-13 09:00:00',
+        ]);
+
+        DB::table('bookings')->insert([
+            'property_id' => $property->id,
+            'agent_id' => $agent->id,
+            'client_id' => null,
+            'crm_client_id' => $showClient->id,
+            'start_time' => '2026-03-14 10:00:00',
+            'end_time' => '2026-03-14 11:00:00',
+            'status' => 'confirmed',
+            'client_name' => $showClient->full_name,
+            'client_phone' => $showClient->phone,
+            'created_at' => '2026-03-14 09:00:00',
+            'updated_at' => '2026-03-14 09:00:00',
+        ]);
+
+        $dealClient = Client::create([
+            'full_name' => 'Deal Client',
+            'phone' => '+992 90 555 3004',
+            'phone_normalized' => '992905553004',
+            'branch_id' => $agent->branch_id,
+            'created_by' => $agent->id,
+            'responsible_agent_id' => null,
+            'client_type_id' => 1,
+            'contact_kind' => Client::CONTACT_KIND_BUYER,
+            'status' => 'active',
+            'created_at' => '2026-03-15 09:00:00',
+            'updated_at' => '2026-03-15 09:00:00',
+        ]);
+
+        DB::table('crm_deals')->insert([
+            'client_id' => $dealClient->id,
+            'responsible_agent_id' => $agent->id,
+            'primary_property_id' => $property->id,
+            'created_at' => '2026-03-15 09:00:00',
+            'updated_at' => '2026-03-15 09:00:00',
+        ]);
+
+        $outsideClient = Client::create([
+            'full_name' => 'Outside Period Client',
+            'phone' => '+992 90 555 3999',
+            'phone_normalized' => '992905553999',
+            'branch_id' => $agent->branch_id,
+            'created_by' => $agent->id,
+            'responsible_agent_id' => $agent->id,
+            'client_type_id' => 1,
+            'contact_kind' => Client::CONTACT_KIND_BUYER,
+            'status' => 'active',
+            'created_at' => '2026-02-10 09:00:00',
+            'updated_at' => '2026-02-10 09:00:00',
+        ]);
+
+        Property::create([
+            'title' => 'Outside property',
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 90000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+            'buyer_client_id' => $outsideClient->id,
+            'listing_type' => 'regular',
+            'moderation_status' => 'approved',
+            'created_at' => '2026-02-10 09:00:00',
+            'updated_at' => '2026-02-10 09:00:00',
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $response = $this->getJson('/api/reports/properties/manager-efficiency?agent_id='.$agent->id.'&date_from=2026-03-01&date_to=2026-03-31&branch_id='.$agent->branch_id);
+
+        $response->assertOk();
+        $response->assertJsonPath('0.agent_id', $agent->id);
+        $response->assertJsonPath('0.unique_clients_count', 5);
+    }
+
+    public function test_agent_properties_report_returns_contracts_object_and_period_aware_statuses(): void
+    {
+        [$agent] = $this->seedClientContext(withProperty: false);
+
+        Property::create([
+            'title' => 'Approved March',
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 110000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+            'contract_type_id' => 2,
+            'listing_type' => 'regular',
+            'moderation_status' => 'approved',
+            'created_at' => '2026-03-05 09:00:00',
+            'updated_at' => '2026-03-05 09:00:00',
+        ]);
+
+        Property::create([
+            'title' => 'Sold by sold_at in March',
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 120000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+            'contract_type_id' => 3,
+            'listing_type' => 'regular',
+            'moderation_status' => 'sold',
+            'created_at' => '2026-02-05 09:00:00',
+            'updated_at' => '2026-03-20 09:00:00',
+            'sold_at' => '2026-03-20 09:00:00',
+        ]);
+
+        Property::create([
+            'title' => 'Deleted March',
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 130000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+            'contract_type_id' => 1,
+            'listing_type' => 'regular',
+            'moderation_status' => 'deleted',
+            'created_at' => '2026-03-08 09:00:00',
+            'updated_at' => '2026-03-08 09:00:00',
+        ]);
+
+        Property::create([
+            'title' => 'Sold outside sold_at period',
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 140000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+            'contract_type_id' => 1,
+            'listing_type' => 'regular',
+            'moderation_status' => 'sold',
+            'created_at' => '2026-03-09 09:00:00',
+            'updated_at' => '2026-04-02 09:00:00',
+            'sold_at' => '2026-04-02 09:00:00',
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $single = $this->getJson('/api/reports/agents/'.$agent->id.'/properties?from=2026-03-01&to=2026-03-31');
+        $single->assertOk();
+        $single->assertJsonPath('summary.by_status.approved', 1);
+        $single->assertJsonPath('summary.by_status.sold', 1);
+        $single->assertJsonMissingPath('summary.by_status.deleted');
+        $single->assertJsonPath('summary.contracts.exclusive', 1);
+        $single->assertJsonPath('summary.contracts.none', 1);
+
+        $list = $this->getJson('/api/reports/agents/properties?from=2026-03-01&to=2026-03-31&agent_id='.$agent->id);
+        $list->assertOk();
+        $list->assertJsonPath('0.summary.by_status.approved', 1);
+        $list->assertJsonPath('0.summary.by_status.sold', 1);
+        $list->assertJsonMissingPath('0.summary.by_status.deleted');
+        $list->assertJsonPath('0.summary.contracts.exclusive', 1);
+        $list->assertJsonPath('0.summary.contracts.none', 1);
     }
 
     public function test_marketing_cannot_access_agent_reports(): void
