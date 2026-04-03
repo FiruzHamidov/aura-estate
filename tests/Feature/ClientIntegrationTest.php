@@ -677,6 +677,66 @@ class ClientIntegrationTest extends TestCase
         $response->assertJsonPath('0.unique_clients_count', 5);
     }
 
+    public function test_agent_earnings_report_filters_by_agent_id_not_creator(): void
+    {
+        [$agent] = $this->seedClientContext(withProperty: false);
+
+        $creator = User::create([
+            'name' => 'Different Creator',
+            'phone' => (string) ++$this->phoneCounter,
+            'password' => bcrypt('password'),
+            'role_id' => $agent->role_id,
+            'branch_id' => $agent->branch_id,
+            'status' => 'active',
+        ]);
+
+        Property::create([
+            'title' => 'Agent owned deal',
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 100000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'created_by' => $creator->id,
+            'agent_id' => $agent->id,
+            'listing_type' => 'regular',
+            'moderation_status' => 'sold',
+            'created_at' => '2026-02-20 09:00:00',
+            'updated_at' => '2026-03-10 09:00:00',
+            'sold_at' => '2026-03-10 09:00:00',
+        ]);
+
+        Property::create([
+            'title' => 'Creator owned deal',
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 999999,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'created_by' => $agent->id,
+            'agent_id' => $creator->id,
+            'listing_type' => 'regular',
+            'moderation_status' => 'sold',
+            'created_at' => '2026-02-20 09:00:00',
+            'updated_at' => '2026-03-11 09:00:00',
+            'sold_at' => '2026-03-11 09:00:00',
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $response = $this->getJson('/api/reports/agent/earnings?agent_id='.$agent->id.'&date_from=2026-03-01&date_to=2026-03-31&branch_id='.$agent->branch_id);
+
+        $response->assertOk();
+        $response->assertJsonPath('sum_price', 100000);
+        $response->assertJsonPath('total_amount', 100000);
+        $response->assertJsonPath('closed_count', 1);
+        $response->assertJsonPath('deals_count', 1);
+        $response->assertJsonPath('earnings', 3000);
+        $response->assertJsonPath('sold_count', 1);
+        $response->assertJsonPath('rented_count', 0);
+        $response->assertJsonPath('sold_by_owner_count', 0);
+    }
+
     public function test_agent_properties_report_returns_contracts_object_and_period_aware_statuses(): void
     {
         [$agent] = $this->seedClientContext(withProperty: false);

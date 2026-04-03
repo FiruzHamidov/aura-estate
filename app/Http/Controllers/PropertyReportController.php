@@ -480,23 +480,162 @@ class PropertyReportController extends Controller
 
     private function buildManagerUniqueClientsMap(Request $request, string $groupBy, array $soldStatuses): array
     {
-        $clientsQ = DB::table('clients')
+        $managerClients = [];
+
+        $propertyClientCollector = function ($row) use (&$managerClients, $groupBy): void {
+            $managerId = $row->{$groupBy} ?? null;
+
+            $this->pushUniqueClient(
+                $managerClients,
+                $managerId,
+                $this->makeClientIdentity(
+                    $row->owner_client_id ?? null,
+                    $row->owner_phone ?? null,
+                    $row->owner_name ?? null
+                )
+            );
+
+            $this->pushUniqueClient(
+                $managerClients,
+                $managerId,
+                $this->makeClientIdentity(
+                    $row->buyer_client_id ?? null,
+                    $row->buyer_phone ?? null,
+                    $row->buyer_full_name ?? null
+                )
+            );
+        };
+
+        $basePropertiesQ = Property::query()->select([
+            $groupBy,
+            'owner_client_id',
+            'owner_phone',
+            'owner_name',
+            'buyer_client_id',
+            'buyer_phone',
+            'buyer_full_name',
+        ]);
+        [$basePropertiesQ] = $this->applyCommonFilters($request, $basePropertiesQ);
+        $basePropertiesQ
+            ->whereNotIn('moderation_status', $soldStatuses)
+            ->whereNotNull($groupBy)
+            ->get()
+            ->each($propertyClientCollector);
+
+        $soldRequest = $request->except(['date_from', 'date_to']);
+        $soldRequest['sold_at_from'] = $request->input('date_from');
+        $soldRequest['sold_at_to'] = $request->input('date_to');
+
+        $soldPropertiesQ = Property::query()
+            ->whereIn('moderation_status', $soldStatuses)
             ->select([
-                DB::raw($groupBy === 'agent_id' ? 'responsible_agent_id as agent_group_id' : 'responsible_agent_id as agent_group_id'),
-                DB::raw('COUNT(DISTINCT id) as unique_clients_count'),
-            ])
-            ->whereNotNull('responsible_agent_id');
+                $groupBy,
+                'owner_client_id',
+                'owner_phone',
+                'owner_name',
+                'buyer_client_id',
+                'buyer_phone',
+                'buyer_full_name',
+            ]);
+        [$soldPropertiesQ] = $this->applyCommonFilters(new Request($soldRequest), $soldPropertiesQ);
+        $soldPropertiesQ
+            ->whereNotNull($groupBy)
+            ->get()
+            ->each($propertyClientCollector);
 
-        $this->applyBranchAccessByUserColumn($request, $clientsQ, 'responsible_agent_id');
+        $bookingsRequest = clone $request;
+        $bookingsRequest->merge([
+            'date_field' => 'bookings.created_at',
+        ]);
 
-        if ($request->filled('agent_id')) {
-            $clientsQ->whereIn('responsible_agent_id', $this->toArray($request->input('agent_id')));
+        $bookingManagerExpr = $groupBy === 'agent_id'
+            ? 'bookings.agent_id'
+            : 'properties.created_by';
+
+        $bookingsQ = Booking::query()
+            ->join('properties', 'properties.id', '=', 'bookings.property_id')
+            ->selectRaw($bookingManagerExpr.' as manager_group_id')
+            ->addSelect([
+                'bookings.crm_client_id',
+                'bookings.client_id',
+                'bookings.client_phone',
+                'bookings.client_name',
+            ]);
+        [$bookingsQ] = $this->applyCommonFilters($bookingsRequest, $bookingsQ, 'properties.created_by');
+
+        if ($groupBy === 'agent_id') {
+            $this->applyBranchAccessByUserColumn($request, $bookingsQ, 'bookings.agent_id');
+
+            if ($request->filled('agent_id')) {
+                $bookingsQ->whereIn('bookings.agent_id', $this->toArray($request->input('agent_id')));
+            }
         }
 
-        return $clientsQ
-            ->groupBy('responsible_agent_id')
+        $bookingsQ
+            ->whereNotNull('manager_group_id')
             ->get()
-            ->mapWithKeys(fn ($row) => [(int) $row->agent_group_id => (int) $row->unique_clients_count])
+            ->each(function ($row) use (&$managerClients): void {
+                $this->pushUniqueClient(
+                    $managerClients,
+                    $row->manager_group_id,
+                    $this->makeClientIdentity(
+                        $row->crm_client_id ?? $row->client_id ?? null,
+                        $row->client_phone ?? null,
+                        $row->client_name ?? null
+                    )
+                );
+            });
+
+        $dealManagerExpr = $groupBy === 'agent_id'
+            ? 'crm_deals.responsible_agent_id'
+            : 'properties.created_by';
+
+        $dealsQ = DB::table('crm_deals')
+            ->leftJoin('properties', 'properties.id', '=', 'crm_deals.primary_property_id')
+            ->selectRaw($dealManagerExpr.' as manager_group_id')
+            ->addSelect([
+                'crm_deals.client_id',
+            ]);
+
+        if (Schema::hasColumn('crm_deals', 'deleted_at')) {
+            $dealsQ->whereNull('crm_deals.deleted_at');
+        }
+
+        if ($request->filled('date_from')) {
+            $dealsQ->whereDate('crm_deals.created_at', '>=', $request->input('date_from'));
+        }
+
+        if ($request->filled('date_to')) {
+            $dealsQ->whereDate('crm_deals.created_at', '<=', $request->input('date_to'));
+        }
+
+        if ($groupBy === 'agent_id') {
+            $this->applyBranchAccessByUserColumn($request, $dealsQ, 'crm_deals.responsible_agent_id');
+
+            if ($request->filled('agent_id')) {
+                $dealsQ->whereIn('crm_deals.responsible_agent_id', $this->toArray($request->input('agent_id')));
+            }
+        } else {
+            $this->applyBranchAccessFilter($request, $dealsQ, 'properties.created_by');
+
+            if ($request->filled('agent_id')) {
+                $dealsQ->whereIn('properties.created_by', $this->toArray($request->input('agent_id')));
+            }
+        }
+
+        $dealsQ
+            ->whereNotNull('manager_group_id')
+            ->get()
+            ->each(function ($row) use (&$managerClients): void {
+                $this->pushUniqueClient(
+                    $managerClients,
+                    $row->manager_group_id,
+                    $this->makeClientIdentity($row->client_id ?? null)
+                );
+            });
+
+        return collect($managerClients)
+            ->map(fn (array $clients) => count($clients))
             ->all();
     }
 
@@ -1509,17 +1648,20 @@ class PropertyReportController extends Controller
         $base = Property::query()
             ->whereIn('moderation_status', $soldStatuses);
 
-        [$q] = $this->applyCommonFilters($request, $base);
+        $soldRequest = $request->except(['date_from', 'date_to']);
+        $soldRequest['sold_at_from'] = $request->input('date_from');
+        $soldRequest['sold_at_to'] = $request->input('date_to');
 
-        if ($request->filled('agent_id')) {
-            $agentIds = $this->toArray($request->input('agent_id'));
-            $q->whereIn('created_by', $agentIds);
-        }
+        // For the agent report we must filter by the assigned agent, not by the listing creator.
+        [$q] = $this->applyCommonFilters(new Request($soldRequest), $base, 'agent_id');
 
         $rows = (clone $q)
             ->select([
-                DB::raw('SUM(price) as sum_price'),
+                DB::raw('SUM(COALESCE(price, 0)) as sum_price'),
                 DB::raw('COUNT(*) as closed_count'),
+                DB::raw("SUM(CASE WHEN moderation_status = 'sold' THEN 1 ELSE 0 END) as sold_count"),
+                DB::raw("SUM(CASE WHEN moderation_status = 'rented' THEN 1 ELSE 0 END) as rented_count"),
+                DB::raw("SUM(CASE WHEN moderation_status = 'sold_by_owner' THEN 1 ELSE 0 END) as sold_by_owner_count"),
             ])
             ->first();
 
@@ -1528,9 +1670,14 @@ class PropertyReportController extends Controller
 
         return response()->json([
             'sum_price' => round($sumPrice, 2),
+            'total_amount' => round($sumPrice, 2),
             'commission_pct' => $commissionPct,
             'earnings' => $commission,
             'closed_count' => (int)($rows->closed_count ?? 0),
+            'deals_count' => (int)($rows->closed_count ?? 0),
+            'sold_count' => (int)($rows->sold_count ?? 0),
+            'rented_count' => (int)($rows->rented_count ?? 0),
+            'sold_by_owner_count' => (int)($rows->sold_by_owner_count ?? 0),
         ]);
     }
 
