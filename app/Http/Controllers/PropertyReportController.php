@@ -543,10 +543,9 @@ class PropertyReportController extends Controller
             ->get()
             ->each($propertyClientCollector);
 
-        $bookingsRequest = clone $request;
-        $bookingsRequest->merge([
+        $bookingsRequest = new Request(array_merge($request->all(), [
             'date_field' => 'bookings.created_at',
-        ]);
+        ]));
 
         $bookingManagerExpr = $groupBy === 'agent_id'
             ? 'bookings.agent_id'
@@ -572,7 +571,7 @@ class PropertyReportController extends Controller
         }
 
         $bookingsQ
-            ->whereNotNull('manager_group_id')
+            ->whereNotNull($bookingManagerExpr)
             ->get()
             ->each(function ($row) use (&$managerClients): void {
                 $this->pushUniqueClient(
@@ -624,7 +623,7 @@ class PropertyReportController extends Controller
         }
 
         $dealsQ
-            ->whereNotNull('manager_group_id')
+            ->whereNotNull($dealManagerExpr)
             ->get()
             ->each(function ($row) use (&$managerClients): void {
                 $this->pushUniqueClient(
