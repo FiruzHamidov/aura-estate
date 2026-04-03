@@ -480,161 +480,25 @@ class PropertyReportController extends Controller
 
     private function buildManagerUniqueClientsMap(Request $request, string $groupBy, array $soldStatuses): array
     {
-        $managerClients = [];
+        $clientOwnerColumn = $groupBy === 'agent_id'
+            ? 'responsible_agent_id'
+            : 'created_by';
 
-        $propertyClientCollector = function ($row) use (&$managerClients, $groupBy): void {
-            $managerId = $row->{$groupBy} ?? null;
+        $clientsQ = DB::table('clients')
+            ->selectRaw($clientOwnerColumn.' as agent_group_id')
+            ->selectRaw('COUNT(DISTINCT id) as unique_clients_count')
+            ->whereNotNull($clientOwnerColumn);
 
-            $this->pushUniqueClient(
-                $managerClients,
-                $managerId,
-                $this->makeClientIdentity(
-                    $row->owner_client_id ?? null,
-                    $row->owner_phone ?? null,
-                    $row->owner_name ?? null
-                )
-            );
+        $this->applyBranchAccessByUserColumn($request, $clientsQ, $clientOwnerColumn);
 
-            $this->pushUniqueClient(
-                $managerClients,
-                $managerId,
-                $this->makeClientIdentity(
-                    $row->buyer_client_id ?? null,
-                    $row->buyer_phone ?? null,
-                    $row->buyer_full_name ?? null
-                )
-            );
-        };
+        if ($request->filled('agent_id')) {
+            $clientsQ->whereIn($clientOwnerColumn, $this->toArray($request->input('agent_id')));
+        }
 
-        $basePropertiesQ = Property::query()->select([
-            $groupBy,
-            'owner_client_id',
-            'owner_phone',
-            'owner_name',
-            'buyer_client_id',
-            'buyer_phone',
-            'buyer_full_name',
-        ]);
-        [$basePropertiesQ] = $this->applyCommonFilters($request, $basePropertiesQ);
-        $basePropertiesQ
-            ->whereNotIn('moderation_status', $soldStatuses)
-            ->whereNotNull($groupBy)
+        return $clientsQ
+            ->groupBy($clientOwnerColumn)
             ->get()
-            ->each($propertyClientCollector);
-
-        $soldRequest = $request->except(['date_from', 'date_to']);
-        $soldRequest['sold_at_from'] = $request->input('date_from');
-        $soldRequest['sold_at_to'] = $request->input('date_to');
-
-        $soldPropertiesQ = Property::query()
-            ->whereIn('moderation_status', $soldStatuses)
-            ->select([
-                $groupBy,
-                'owner_client_id',
-                'owner_phone',
-                'owner_name',
-                'buyer_client_id',
-                'buyer_phone',
-                'buyer_full_name',
-            ]);
-        [$soldPropertiesQ] = $this->applyCommonFilters(new Request($soldRequest), $soldPropertiesQ);
-        $soldPropertiesQ
-            ->whereNotNull($groupBy)
-            ->get()
-            ->each($propertyClientCollector);
-
-        $bookingsRequest = new Request(array_merge($request->all(), [
-            'date_field' => 'bookings.created_at',
-        ]));
-
-        $bookingManagerExpr = $groupBy === 'agent_id'
-            ? 'bookings.agent_id'
-            : 'properties.created_by';
-
-        $bookingsQ = Booking::query()
-            ->join('properties', 'properties.id', '=', 'bookings.property_id')
-            ->selectRaw($bookingManagerExpr.' as manager_group_id')
-            ->addSelect([
-                'bookings.crm_client_id',
-                'bookings.client_id',
-                'bookings.client_phone',
-                'bookings.client_name',
-            ]);
-        [$bookingsQ] = $this->applyCommonFilters($bookingsRequest, $bookingsQ, 'properties.created_by');
-
-        if ($groupBy === 'agent_id') {
-            $this->applyBranchAccessByUserColumn($request, $bookingsQ, 'bookings.agent_id');
-
-            if ($request->filled('agent_id')) {
-                $bookingsQ->whereIn('bookings.agent_id', $this->toArray($request->input('agent_id')));
-            }
-        }
-
-        $bookingsQ
-            ->whereNotNull($bookingManagerExpr)
-            ->get()
-            ->each(function ($row) use (&$managerClients): void {
-                $this->pushUniqueClient(
-                    $managerClients,
-                    $row->manager_group_id,
-                    $this->makeClientIdentity(
-                        $row->crm_client_id ?? $row->client_id ?? null,
-                        $row->client_phone ?? null,
-                        $row->client_name ?? null
-                    )
-                );
-            });
-
-        $dealManagerExpr = $groupBy === 'agent_id'
-            ? 'crm_deals.responsible_agent_id'
-            : 'properties.created_by';
-
-        $dealsQ = DB::table('crm_deals')
-            ->leftJoin('properties', 'properties.id', '=', 'crm_deals.primary_property_id')
-            ->selectRaw($dealManagerExpr.' as manager_group_id')
-            ->addSelect([
-                'crm_deals.client_id',
-            ]);
-
-        if (Schema::hasColumn('crm_deals', 'deleted_at')) {
-            $dealsQ->whereNull('crm_deals.deleted_at');
-        }
-
-        if ($request->filled('date_from')) {
-            $dealsQ->whereDate('crm_deals.created_at', '>=', $request->input('date_from'));
-        }
-
-        if ($request->filled('date_to')) {
-            $dealsQ->whereDate('crm_deals.created_at', '<=', $request->input('date_to'));
-        }
-
-        if ($groupBy === 'agent_id') {
-            $this->applyBranchAccessByUserColumn($request, $dealsQ, 'crm_deals.responsible_agent_id');
-
-            if ($request->filled('agent_id')) {
-                $dealsQ->whereIn('crm_deals.responsible_agent_id', $this->toArray($request->input('agent_id')));
-            }
-        } else {
-            $this->applyBranchAccessFilter($request, $dealsQ, 'properties.created_by');
-
-            if ($request->filled('agent_id')) {
-                $dealsQ->whereIn('properties.created_by', $this->toArray($request->input('agent_id')));
-            }
-        }
-
-        $dealsQ
-            ->whereNotNull($dealManagerExpr)
-            ->get()
-            ->each(function ($row) use (&$managerClients): void {
-                $this->pushUniqueClient(
-                    $managerClients,
-                    $row->manager_group_id,
-                    $this->makeClientIdentity($row->client_id ?? null)
-                );
-            });
-
-        return collect($managerClients)
-            ->map(fn (array $clients) => count($clients))
+            ->mapWithKeys(fn ($row) => [(int) $row->agent_group_id => (int) $row->unique_clients_count])
             ->all();
     }
 
