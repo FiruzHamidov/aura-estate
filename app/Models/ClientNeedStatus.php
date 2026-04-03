@@ -9,6 +9,8 @@ class ClientNeedStatus extends Model
 {
     use HasFactory;
 
+    public const SLUG_NEW = 'new';
+
     protected $fillable = [
         'name',
         'slug',
@@ -25,5 +27,16 @@ class ClientNeedStatus extends Model
     public function needs()
     {
         return $this->hasMany(ClientNeed::class, 'status_id');
+    }
+
+    public static function defaultId(): int
+    {
+        $id = static::query()
+            ->where('slug', static::SLUG_NEW)
+            ->value('id');
+
+        abort_unless($id, 500, 'Default client need status is not configured.');
+
+        return (int) $id;
     }
 }

@@ -12,8 +12,15 @@ class Location extends Model
 
     protected $fillable = ['city', 'district', 'latitude', 'longitude'];
 
+    protected $appends = ['name'];
+
     public function properties()
     {
         return $this->hasMany(Property::class);
+    }
+
+    public function getNameAttribute(): string
+    {
+        return (string) $this->city;
     }
 }

@@ -76,6 +76,7 @@ Route::get('/reels/{reel}/like-status', [ReelController::class, 'likeStatus'])->
 Route::get('/property-types', [PropertyTypeController::class, 'index']);
 Route::get('/property-statuses', [PropertyStatusController::class, 'index']);
 Route::get('/locations', [LocationController::class, 'index']);
+Route::get('/locations/{location}/districts', [LocationController::class, 'districts'])->whereNumber('location');
 Route::get('/building-types', [BuildingTypeController::class, 'index']);
 Route::get('/parking-types', [ParkingTypeController::class, 'index']);
 Route::get('/heating-types', [HeatingTypeController::class, 'index']);

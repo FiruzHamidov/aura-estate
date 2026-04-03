@@ -10,6 +10,10 @@ class ClientNeed extends Model
 {
     use HasFactory, SoftDeletes;
 
+    protected $appends = [
+        'property_type_ids',
+    ];
+
     protected $fillable = [
         'client_id',
         'type_id',
@@ -73,5 +77,34 @@ class ClientNeed extends Model
     public function propertyType()
     {
         return $this->belongsTo(PropertyType::class, 'property_type_id');
+    }
+
+    public function propertyTypes()
+    {
+        return $this->belongsToMany(PropertyType::class, 'client_need_property_type')
+            ->withTimestamps();
+    }
+
+    public function getPropertyTypeIdsAttribute(): array
+    {
+        if ($this->relationLoaded('propertyTypes')) {
+            return $this->propertyTypes
+                ->pluck('id')
+                ->map(fn ($id) => (int) $id)
+                ->values()
+                ->all();
+        }
+
+        $ids = $this->propertyTypes()
+            ->pluck('property_types.id')
+            ->map(fn ($id) => (int) $id)
+            ->values()
+            ->all();
+
+        if ($ids !== []) {
+            return $ids;
+        }
+
+        return $this->property_type_id ? [(int) $this->property_type_id] : [];
     }
 }
