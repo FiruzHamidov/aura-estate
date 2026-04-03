@@ -58,6 +58,51 @@ class PropertyController extends Controller
         return $user;
     }
 
+    private function canMutateProperty(User $user, Property $property): bool
+    {
+        if ($user->hasRole('admin') || $user->hasRole('superadmin')) {
+            return true;
+        }
+
+        if ($property->created_by === $user->id || $property->agent_id === $user->id) {
+            return true;
+        }
+
+        if ($user->hasRole('client')) {
+            return false;
+        }
+
+        if (!$user->hasRole('branch_director') && !$user->hasRole('rop')) {
+            return false;
+        }
+
+        if (empty($user->branch_id)) {
+            return false;
+        }
+
+        $property->loadMissing(['agent', 'creator']);
+
+        $propertyBranchId = $property->agent?->branch_id
+            ?: $property->creator?->branch_id;
+
+        return !empty($propertyBranchId) && (int) $propertyBranchId === (int) $user->branch_id;
+    }
+
+    private function authorizePropertyMutation(Property $property): User
+    {
+        /** @var User|null $user */
+        $user = auth()->user();
+
+        abort_unless($user, 401, 'Unauthenticated.');
+        $user->loadMissing('role');
+
+        if (!$this->canMutateProperty($user, $property)) {
+            abort(403, 'Доступ запрещён');
+        }
+
+        return $user;
+    }
+
     private function serializePropertyShow(Property $property, bool $includeAuthContacts): array
     {
         if ($includeAuthContacts) {
@@ -734,9 +779,7 @@ class PropertyController extends Controller
 
     public function update(Request $request, Property $property)
     {
-        if (auth()->user()->hasRole('client') && $property->created_by !== auth()->id()) {
-            return response()->json(['message' => 'Доступ запрещён'], 403);
-        }
+        $this->authorizePropertyMutation($property);
 
         $validated = $this->validateProperty($request, isUpdate: true, property: $property);
         $this->ensureVisibleClientsForProperty($validated, $property);
@@ -845,9 +888,7 @@ class PropertyController extends Controller
 
     public function destroy(Property $property)
     {
-        if (auth()->user()->hasRole('client') && $property->created_by !== auth()->id()) {
-            return response()->json(['message' => 'Доступ запрещён'], 403);
-        }
+        $this->authorizePropertyMutation($property);
 
         $property->update(['moderation_status' => 'deleted']);
 
@@ -894,18 +935,7 @@ class PropertyController extends Controller
         SavePropertyDealRequest $request,
         Property $property
     ) {
-        $user = auth()->user();
-
-        if (
-            !$user ||
-            !(
-                $user->hasRole('admin') ||
-                $user->hasRole('superadmin') ||
-                $user->hasRole('agent')
-            )
-        ) {
-            return response()->json(['message' => 'Доступ запрещён'], 403);
-        }
+        $this->authorizePropertyMutation($property);
 
         DB::transaction(function () use ($request, $property) {
 
@@ -1488,6 +1518,8 @@ class PropertyController extends Controller
         SavePropertyDealRequest $request,
         Property                $property
     ) {
+        $this->authorizePropertyMutation($property);
+
         DB::transaction(function () use ($request, $property) {
             $payload = [
                 'buyer_client_id' => $request->buyer_client_id,

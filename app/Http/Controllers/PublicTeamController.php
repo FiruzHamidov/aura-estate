@@ -63,17 +63,10 @@ class PublicTeamController extends Controller
                 ],
                 'nominations' => [
                     'best_sales_by_count' => $this->buildNomination(
-                        'Лучший продажник по количеству',
+                        'Лучший продажник',
                         'sold_count',
                         $salesByCountRows,
                         $users
-                    ),
-                    'best_sales_by_amount' => $this->buildNomination(
-                        'Лучший продажник по сумме',
-                        'sale_amount',
-                        $salesByAmountRows,
-                        $users,
-                        ['currency' => $saleCurrency]
                     ),
                     'most_showings_added' => $this->buildNomination(
                         'Лидер по добавленным показам',

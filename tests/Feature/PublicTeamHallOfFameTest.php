@@ -261,9 +261,8 @@ class PublicTeamHallOfFameTest extends TestCase
         $this->assertStringContainsString('public', (string) $response->headers->get('Cache-Control'));
         $response->assertJsonPath('nominations.best_sales_by_count.winner.agent.id', $agentOne->id);
         $response->assertJsonPath('nominations.best_sales_by_count.winner.sold_count', 2);
-        $response->assertJsonPath('nominations.best_sales_by_amount.winner.agent.id', $agentTwo->id);
-        $response->assertJsonPath('nominations.best_sales_by_amount.winner.sale_amount', 500000);
-        $response->assertJsonPath('nominations.best_sales_by_amount.meta.currency', 'TJS');
+        $response->assertJsonPath('nominations.best_sales_by_count.title', 'Лучший продажник');
+        $response->assertJsonMissingPath('nominations.best_sales_by_amount');
         $response->assertJsonPath('nominations.most_showings_added.winner.agent.id', $agentTwo->id);
         $response->assertJsonPath('nominations.most_showings_added.winner.shows_count', 3);
         $response->assertJsonPath('nominations.most_properties_added.winner.agent.id', $agentOne->id);

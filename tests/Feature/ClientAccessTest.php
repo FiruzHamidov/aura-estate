@@ -417,6 +417,150 @@ class ClientAccessTest extends TestCase
         $response->assertJsonMissing(['full_name' => 'Client B']);
     }
 
+    public function test_branch_director_can_update_agent_property_from_own_branch_but_not_foreign_branch(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $directorRole = Role::create(['name' => 'Director', 'slug' => 'branch_director']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $director = $this->createUser($directorRole, $branchA, 'Director A');
+        $agentA = $this->createUser($agentRole, $branchA, 'Agent A');
+        $agentB = $this->createUser($agentRole, $branchB, 'Agent B');
+
+        $propertyType = PropertyType::create(['name' => 'Apartment']);
+        $propertyStatus = PropertyStatus::create(['name' => 'Available']);
+
+        $propertyA = $this->createProperty($propertyType, $propertyStatus, $agentA);
+        $propertyB = $this->createProperty($propertyType, $propertyStatus, $agentB);
+
+        Sanctum::actingAs($director);
+
+        $this->putJson('/api/properties/' . $propertyA->id, [
+            'title' => 'Director updated property',
+            'type_id' => $propertyType->id,
+            'status_id' => $propertyStatus->id,
+            'price' => 270000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ])->assertOk()
+            ->assertJsonPath('title', 'Director updated property');
+
+        $this->putJson('/api/properties/' . $propertyB->id, [
+            'title' => 'Foreign property',
+            'type_id' => $propertyType->id,
+            'status_id' => $propertyStatus->id,
+            'price' => 280000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ])->assertForbidden();
+    }
+
+    public function test_rop_can_update_agent_property_from_own_branch_but_not_foreign_branch(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $rop = $this->createUser($ropRole, $branchA, 'ROP A');
+        $agentA = $this->createUser($agentRole, $branchA, 'Agent A');
+        $agentB = $this->createUser($agentRole, $branchB, 'Agent B');
+
+        $propertyType = PropertyType::create(['name' => 'Apartment']);
+        $propertyStatus = PropertyStatus::create(['name' => 'Available']);
+
+        $propertyA = $this->createProperty($propertyType, $propertyStatus, $agentA);
+        $propertyB = $this->createProperty($propertyType, $propertyStatus, $agentB);
+
+        Sanctum::actingAs($rop);
+
+        $this->putJson('/api/properties/' . $propertyA->id, [
+            'title' => 'ROP updated property',
+            'type_id' => $propertyType->id,
+            'status_id' => $propertyStatus->id,
+            'price' => 270000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ])->assertOk()
+            ->assertJsonPath('title', 'ROP updated property');
+
+        $this->putJson('/api/properties/' . $propertyB->id, [
+            'title' => 'Foreign property',
+            'type_id' => $propertyType->id,
+            'status_id' => $propertyStatus->id,
+            'price' => 280000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ])->assertForbidden();
+    }
+
+    public function test_branch_director_can_update_client_from_own_branch_but_not_foreign_branch(): void
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_OWN_ONLY,
+        ]);
+
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $directorRole = Role::create(['name' => 'Director', 'slug' => 'branch_director']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $director = $this->createUser($directorRole, $branchA, 'Director A');
+        $agentA = $this->createUser($agentRole, $branchA, 'Agent A');
+        $agentB = $this->createUser($agentRole, $branchB, 'Agent B');
+
+        $clientA = $this->createClient($branchA, $agentA, $agentA, 'Client A');
+        $clientB = $this->createClient($branchB, $agentB, $agentB, 'Client B');
+
+        Sanctum::actingAs($director);
+
+        $this->putJson('/api/clients/' . $clientA->id, [
+            'full_name' => 'Director updated client',
+        ])->assertOk()
+            ->assertJsonPath('full_name', 'Director updated client');
+
+        $this->putJson('/api/clients/' . $clientB->id, [
+            'full_name' => 'Foreign client',
+        ])->assertForbidden();
+    }
+
+    public function test_rop_can_update_client_from_own_branch_but_not_foreign_branch(): void
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_OWN_ONLY,
+        ]);
+
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $rop = $this->createUser($ropRole, $branchA, 'ROP A');
+        $agentA = $this->createUser($agentRole, $branchA, 'Agent A');
+        $agentB = $this->createUser($agentRole, $branchB, 'Agent B');
+
+        $clientA = $this->createClient($branchA, $agentA, $agentA, 'Client A');
+        $clientB = $this->createClient($branchB, $agentB, $agentB, 'Client B');
+
+        Sanctum::actingAs($rop);
+
+        $this->putJson('/api/clients/' . $clientA->id, [
+            'full_name' => 'ROP updated client',
+        ])->assertOk()
+            ->assertJsonPath('full_name', 'ROP updated client');
+
+        $this->putJson('/api/clients/' . $clientB->id, [
+            'full_name' => 'Foreign client',
+        ])->assertForbidden();
+    }
+
     public function test_agent_sees_branch_buyers_but_only_own_sellers_in_all_branch_mode(): void
     {
         Setting::create([
