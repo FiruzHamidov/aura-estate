@@ -17,12 +17,18 @@ class User extends Authenticatable
     public const STATUS_INACTIVE = 'inactive';
 
     protected $fillable = [
-        'name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'password', 'photo', 'description', 'birthday'
+        'name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'password', 'photo', 'description', 'birthday',
+        'telegram_id', 'telegram_username', 'telegram_chat_id', 'telegram_linked_at'
     ];
 
     protected $hidden = [
         'password',
         'remember_token',
+    ];
+
+    protected $casts = [
+        'birthday' => 'date',
+        'telegram_linked_at' => 'datetime',
     ];
 
     public function getStatusAttribute($value): string

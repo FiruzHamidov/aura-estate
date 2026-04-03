@@ -46,6 +46,7 @@ use App\Http\Controllers\ReelController;
 use App\Http\Controllers\ReviewController;
 use App\Http\Controllers\RoleController;
 use App\Http\Controllers\SelectionController;
+use App\Http\Controllers\TelegramAuthController;
 use App\Http\Controllers\UserController;
 use Illuminate\Support\Facades\Route;
 
@@ -56,6 +57,8 @@ Route::get('/ping', fn () => response()->json(['message' => 'API works']));
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/sms/request', [AuthController::class, 'requestSmsCode']);
 Route::post('/sms/verify', [AuthController::class, 'verifySmsCode']);
+Route::post('/telegram/auth/request', [TelegramAuthController::class, 'requestLogin']);
+Route::post('/telegram/auth/confirm', [TelegramAuthController::class, 'confirmLogin']);
 Route::post('/lead-requests', [LeadRequestController::class, 'store'])->middleware('throttle:20,1');
 
 Route::get('/properties', [PropertyController::class, 'index']);
@@ -269,6 +272,7 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
 Route::middleware(['api'])->group(function () {
     Route::post('/chat', [ChatController::class, 'handle']);
     Route::post('/chat/feedback', [ChatController::class, 'feedback'])->middleware(['auth:sanctum', 'active.user']);
+    Route::post('/telegram/webhook', [TelegramAuthController::class, 'webhook']);
 });
 
 // --- Публичная подборка по hash ---
