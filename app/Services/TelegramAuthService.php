@@ -2,57 +2,50 @@
 
 namespace App\Services;
 
-use App\Models\TelegramLoginToken;
 use App\Models\User;
-use Illuminate\Support\Str;
+use Illuminate\Support\Carbon;
 use RuntimeException;
 
 class TelegramAuthService
 {
-    public function issueForUser(User $user): TelegramLoginToken
+    public function authenticateWidgetUser(array $payload): array
     {
-        TelegramLoginToken::query()
-            ->where('user_id', $user->id)
-            ->whereNull('confirmed_at')
-            ->whereNull('used_at')
-            ->delete();
+        $data = $this->validateWidgetPayload($payload);
 
-        return TelegramLoginToken::create([
-            'user_id' => $user->id,
-            'phone' => $user->phone,
-            'token' => 'auth_'.Str::random(40),
-            'expires_at' => now()->addMinutes(10),
-        ]);
-    }
-
-    public function confirmByTelegram(string $tokenValue, int|string $telegramUserId, ?string $telegramUsername, int|string $telegramChatId): TelegramLoginToken
-    {
-        /** @var TelegramLoginToken|null $token */
-        $token = TelegramLoginToken::query()
-            ->where('token', $tokenValue)
-            ->with('user.role')
+        /** @var User|null $user */
+        $user = User::query()
+            ->where('telegram_id', $data['id'])
+            ->with('role')
             ->first();
 
-        if (! $token) {
-            throw new RuntimeException('Ссылка авторизации не найдена.');
-        }
-
-        if ($token->used_at) {
-            throw new RuntimeException('Ссылка авторизации уже использована.');
-        }
-
-        if ($token->expires_at === null || $token->expires_at->isPast()) {
-            throw new RuntimeException('Ссылка авторизации истекла.');
-        }
-
-        $user = $token->user;
-
         if (! $user) {
-            throw new RuntimeException('Пользователь для авторизации не найден.');
+            throw new RuntimeException('Telegram account is not linked to any user.');
         }
+
+        if ($user->status !== User::STATUS_ACTIVE) {
+            throw new RuntimeException('Пользователь деактивирован');
+        }
+
+        $this->syncTelegramProfile($user, $data);
+
+        $plainTextToken = $user->createToken(
+            'telegram-widget-token',
+            ['*'],
+            now()->addHours(24)
+        )->plainTextToken;
+
+        return [
+            'token' => $plainTextToken,
+            'user' => $user->fresh('role'),
+        ];
+    }
+
+    public function linkWidgetUser(User $user, array $payload): User
+    {
+        $data = $this->validateWidgetPayload($payload);
 
         $linkedUser = User::query()
-            ->where('telegram_id', (string) $telegramUserId)
+            ->where('telegram_id', $data['id'])
             ->where('id', '!=', $user->id)
             ->first();
 
@@ -60,67 +53,92 @@ class TelegramAuthService
             throw new RuntimeException('Этот Telegram уже привязан к другому пользователю.');
         }
 
-        $user->forceFill([
-            'telegram_id' => (string) $telegramUserId,
-            'telegram_username' => $telegramUsername,
-            'telegram_chat_id' => (string) $telegramChatId,
-            'telegram_linked_at' => now(),
-        ])->save();
+        if ($user->status !== User::STATUS_ACTIVE) {
+            throw new RuntimeException('Пользователь деактивирован');
+        }
 
-        $token->forceFill([
-            'telegram_user_id' => (string) $telegramUserId,
-            'telegram_username' => $telegramUsername,
-            'telegram_chat_id' => (string) $telegramChatId,
-            'confirmed_at' => now(),
-        ])->save();
+        $this->syncTelegramProfile($user, $data);
 
-        return $token->fresh(['user.role']);
+        return $user->fresh('role');
     }
 
-    public function complete(string $tokenValue): array
+    public function attachChatFromStart(int|string $telegramUserId, ?string $telegramUsername, ?string $photoUrl, int|string $chatId): ?User
     {
-        /** @var TelegramLoginToken|null $token */
-        $token = TelegramLoginToken::query()
-            ->where('token', $tokenValue)
-            ->with('user.role')
-            ->first();
-
-        if (! $token) {
-            throw new RuntimeException('Ссылка авторизации не найдена.');
-        }
-
-        if ($token->expires_at === null || $token->expires_at->isPast()) {
-            throw new RuntimeException('Ссылка авторизации истекла.');
-        }
-
-        if (! $token->confirmed_at) {
-            return ['status' => 'pending'];
-        }
-
-        if ($token->used_at) {
-            throw new RuntimeException('Ссылка авторизации уже использована.');
-        }
-
-        $user = $token->user;
+        /** @var User|null $user */
+        $user = User::query()->where('telegram_id', (string) $telegramUserId)->first();
 
         if (! $user) {
-            throw new RuntimeException('Пользователь для авторизации не найден.');
+            return null;
         }
 
-        $token->forceFill([
-            'used_at' => now(),
+        $user->forceFill([
+            'telegram_username' => $telegramUsername ?: $user->telegram_username,
+            'telegram_photo_url' => $photoUrl ?: $user->telegram_photo_url,
+            'telegram_chat_id' => (string) $chatId,
+            'telegram_linked_at' => $user->telegram_linked_at ?? now(),
         ])->save();
 
-        $plainTextToken = $user->createToken(
-            'telegram-api-token',
-            ['*'],
-            now()->addHours(24)
-        )->plainTextToken;
+        return $user->fresh();
+    }
+
+    public function validateWidgetPayload(array $payload): array
+    {
+        $required = ['id', 'auth_date', 'hash'];
+
+        foreach ($required as $field) {
+            if (! array_key_exists($field, $payload) || $payload[$field] === null || $payload[$field] === '') {
+                throw new RuntimeException(sprintf('Missing required Telegram field: %s.', $field));
+            }
+        }
+
+        $botToken = config('services.telegram.bot_token');
+
+        if (! $botToken) {
+            throw new RuntimeException('Telegram bot token is not configured.');
+        }
+
+        $authDate = Carbon::createFromTimestampUTC((int) $payload['auth_date']);
+        $ttl = (int) config('services.telegram.auth_ttl_seconds', 300);
+
+        if ($authDate->lt(now()->subSeconds($ttl))) {
+            throw new RuntimeException('Telegram authorization payload expired.');
+        }
+
+        $receivedHash = (string) $payload['hash'];
+        $checkData = $payload;
+        unset($checkData['hash']);
+
+        ksort($checkData);
+
+        $dataCheckString = collect($checkData)
+            ->filter(fn ($value) => $value !== null && $value !== '')
+            ->map(fn ($value, $key) => sprintf('%s=%s', $key, $value))
+            ->implode("\n");
+
+        $secretKey = hash('sha256', $botToken, true);
+        $expectedHash = hash_hmac('sha256', $dataCheckString, $secretKey);
+
+        if (! hash_equals($expectedHash, $receivedHash)) {
+            throw new RuntimeException('Invalid Telegram authorization hash.');
+        }
 
         return [
-            'status' => 'authorized',
-            'token' => $plainTextToken,
-            'user' => $user->fresh('role'),
+            'id' => (string) $payload['id'],
+            'first_name' => (string) ($payload['first_name'] ?? ''),
+            'last_name' => (string) ($payload['last_name'] ?? ''),
+            'username' => isset($payload['username']) ? (string) $payload['username'] : null,
+            'photo_url' => isset($payload['photo_url']) ? (string) $payload['photo_url'] : null,
+            'auth_date' => (int) $payload['auth_date'],
         ];
+    }
+
+    private function syncTelegramProfile(User $user, array $data): void
+    {
+        $user->forceFill([
+            'telegram_id' => $data['id'],
+            'telegram_username' => $data['username'],
+            'telegram_photo_url' => $data['photo_url'],
+            'telegram_linked_at' => $user->telegram_linked_at ?? now(),
+        ])->save();
     }
 }

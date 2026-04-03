@@ -3,11 +3,12 @@
 namespace Tests\Feature;
 
 use App\Models\Role;
-use App\Models\TelegramLoginToken;
 use App\Models\User;
+use App\Services\TelegramBotService;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
+use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
 class TelegramAuthTest extends TestCase
@@ -37,23 +38,10 @@ class TelegramAuthTest extends TestCase
             $table->string('auth_method')->default('password');
             $table->string('telegram_id')->nullable()->unique();
             $table->string('telegram_username')->nullable();
+            $table->text('telegram_photo_url')->nullable();
             $table->string('telegram_chat_id')->nullable();
             $table->timestamp('telegram_linked_at')->nullable();
             $table->rememberToken()->nullable();
-            $table->timestamps();
-        });
-
-        Schema::create('telegram_login_tokens', function (Blueprint $table) {
-            $table->id();
-            $table->foreignId('user_id')->constrained('users')->cascadeOnDelete();
-            $table->string('phone');
-            $table->string('token')->unique();
-            $table->string('telegram_user_id')->nullable();
-            $table->string('telegram_username')->nullable();
-            $table->string('telegram_chat_id')->nullable();
-            $table->timestamp('expires_at');
-            $table->timestamp('confirmed_at')->nullable();
-            $table->timestamp('used_at')->nullable();
             $table->timestamps();
         });
 
@@ -68,12 +56,13 @@ class TelegramAuthTest extends TestCase
             $table->timestamps();
         });
 
-        config()->set('services.telegram.bot_token', 'test-token');
+        config()->set('services.telegram.bot_token', '123456:TEST_BOT_TOKEN');
         config()->set('services.telegram.bot_username', 'AuraEstateTestBot');
         config()->set('services.telegram.webhook_secret', 'secret-123');
+        config()->set('services.telegram.auth_ttl_seconds', 300);
     }
 
-    public function test_it_issues_telegram_login_token_for_active_user(): void
+    public function test_widget_login_authorizes_linked_user_and_returns_sanctum_token(): void
     {
         $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
         $user = User::create([
@@ -82,26 +71,88 @@ class TelegramAuthTest extends TestCase
             'password' => bcrypt('password'),
             'role_id' => $role->id,
             'status' => 'active',
+            'telegram_id' => '100001',
         ]);
 
-        $response = $this->postJson('/api/telegram/auth/request', [
-            'phone' => $user->phone,
+        $payload = $this->makeTelegramPayload([
+            'id' => '100001',
+            'first_name' => 'Aru',
+            'last_name' => 'Estate',
+            'username' => 'aura_agent',
+            'photo_url' => 'https://t.me/i/userpic/320/test.jpg',
         ]);
+
+        $response = $this->postJson('/api/telegram/auth/login', $payload);
 
         $response->assertOk();
-        $response->assertJsonPath('status', 'pending');
-        $response->assertJsonPath('bot_username', 'AuraEstateTestBot');
+        $response->assertJsonPath('status', 'authorized');
+        $response->assertJsonPath('user.id', $user->id);
+        $this->assertNotEmpty($response->json('token'));
 
-        $issuedToken = $response->json('token');
-
-        $this->assertNotEmpty($issuedToken);
-        $this->assertDatabaseHas('telegram_login_tokens', [
-            'user_id' => $user->id,
-            'token' => $issuedToken,
-        ]);
+        $user->refresh();
+        $this->assertSame('aura_agent', $user->telegram_username);
+        $this->assertSame('https://t.me/i/userpic/320/test.jpg', $user->telegram_photo_url);
     }
 
-    public function test_it_confirms_telegram_login_via_webhook_and_returns_api_token(): void
+    public function test_widget_login_rejects_invalid_hash(): void
+    {
+        $payload = $this->makeTelegramPayload([
+            'id' => '100002',
+            'first_name' => 'Bad',
+        ]);
+        $payload['hash'] = str_repeat('a', 64);
+
+        $response = $this->postJson('/api/telegram/auth/login', $payload);
+
+        $response->assertStatus(422);
+        $response->assertJsonPath('message', 'Invalid Telegram authorization hash.');
+    }
+
+    public function test_widget_login_rejects_expired_auth_date(): void
+    {
+        $payload = $this->makeTelegramPayload([
+            'id' => '100003',
+            'first_name' => 'Late',
+            'auth_date' => now()->subMinutes(20)->timestamp,
+        ]);
+
+        $response = $this->postJson('/api/telegram/auth/login', $payload);
+
+        $response->assertStatus(422);
+        $response->assertJsonPath('message', 'Telegram authorization payload expired.');
+    }
+
+    public function test_authenticated_user_can_link_telegram_widget_account(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent',
+            'phone' => '992900000004',
+            'password' => bcrypt('password'),
+            'role_id' => $role->id,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $payload = $this->makeTelegramPayload([
+            'id' => '100004',
+            'first_name' => 'Link',
+            'username' => 'linked_agent',
+        ]);
+
+        $response = $this->postJson('/api/telegram/auth/link', $payload);
+
+        $response->assertOk();
+        $response->assertJsonPath('user.id', $user->id);
+        $response->assertJsonPath('user.telegram_id', '100004');
+
+        $user->refresh();
+        $this->assertSame('100004', $user->telegram_id);
+        $this->assertSame('linked_agent', $user->telegram_username);
+    }
+
+    public function test_webhook_requires_secret_token_and_links_chat_id_via_start(): void
     {
         Http::fake([
             'https://api.telegram.org/*' => Http::response(['ok' => true], 200),
@@ -110,52 +161,87 @@ class TelegramAuthTest extends TestCase
         $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
         $user = User::create([
             'name' => 'Agent',
-            'phone' => '992900000002',
+            'phone' => '992900000005',
             'password' => bcrypt('password'),
             'role_id' => $role->id,
             'status' => 'active',
+            'telegram_id' => '100005',
+            'telegram_username' => 'notify_agent',
         ]);
 
-        /** @var TelegramLoginToken $loginToken */
-        $loginToken = TelegramLoginToken::create([
-            'user_id' => $user->id,
-            'phone' => $user->phone,
-            'token' => 'auth_test_token_123',
-            'expires_at' => now()->addMinutes(10),
-        ]);
+        $payload = [
+            'message' => [
+                'text' => '/start',
+                'chat' => ['id' => '555000111'],
+                'from' => ['id' => '100005', 'username' => 'notify_agent'],
+            ],
+        ];
+
+        $this->postJson('/api/telegram/webhook', $payload)->assertForbidden();
 
         $this->postJson(
             '/api/telegram/webhook',
-            [
-                'message' => [
-                    'text' => '/start '.$loginToken->token,
-                    'chat' => ['id' => '555000111'],
-                    'from' => ['id' => '777888999', 'username' => 'tg_agent'],
-                ],
-            ],
+            $payload,
             ['X-Telegram-Bot-Api-Secret-Token' => 'secret-123']
         )->assertOk();
 
-        $loginToken->refresh();
         $user->refresh();
-
-        $this->assertNotNull($loginToken->confirmed_at);
-        $this->assertSame('777888999', $user->telegram_id);
         $this->assertSame('555000111', $user->telegram_chat_id);
+    }
 
-        $confirmResponse = $this->postJson('/api/telegram/auth/confirm', [
-            'token' => $loginToken->token,
+    public function test_telegram_bot_service_sends_notification(): void
+    {
+        Http::fake([
+            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 1]], 200),
         ]);
 
-        $confirmResponse->assertOk();
-        $confirmResponse->assertJsonPath('status', 'authorized');
-        $confirmResponse->assertJsonPath('user.id', $user->id);
-        $this->assertNotEmpty($confirmResponse->json('token'));
-        $this->assertDatabaseHas('telegram_login_tokens', [
-            'id' => $loginToken->id,
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent',
+            'phone' => '992900000006',
+            'password' => bcrypt('password'),
+            'role_id' => $role->id,
+            'status' => 'active',
+            'telegram_id' => '100006',
+            'telegram_chat_id' => '555000222',
         ]);
 
-        $loginToken->refresh();
-        $this->assertNotNull($loginToken->used_at);
+        $response = app(TelegramBotService::class)->sendUserMessage($user, 'Тестовое уведомление');
+
+        $this->assertTrue($response['ok']);
+
+        Http::assertSent(function ($request) {
+            return str_contains($request->url(), '/sendMessage')
+                && $request['chat_id'] === '555000222'
+                && $request['text'] === 'Тестовое уведомление';
+        });
+    }
+
+    private function makeTelegramPayload(array $overrides = []): array
+    {
+        $payload = array_merge([
+            'id' => '999001',
+            'first_name' => 'Aura',
+            'last_name' => 'Estate',
+            'username' => 'aura_user',
+            'photo_url' => 'https://t.me/i/userpic/320/default.jpg',
+            'auth_date' => now()->timestamp,
+        ], $overrides);
+
+        $hashSource = $payload;
+        ksort($hashSource);
+
+        $dataCheckString = collect($hashSource)
+            ->filter(fn ($value, $key) => $key !== 'hash' && $value !== null && $value !== '')
+            ->map(fn ($value, $key) => sprintf('%s=%s', $key, $value))
+            ->implode("\n");
+
+        $payload['hash'] = hash_hmac(
+            'sha256',
+            $dataCheckString,
+            hash('sha256', (string) config('services.telegram.bot_token'), true)
+        );
+
+        return $payload;
     }
 }

@@ -10,7 +10,8 @@ return new class extends Migration {
         Schema::table('users', function (Blueprint $table) {
             $table->string('telegram_id')->nullable()->unique()->after('auth_method');
             $table->string('telegram_username')->nullable()->after('telegram_id');
-            $table->string('telegram_chat_id')->nullable()->after('telegram_username');
+            $table->text('telegram_photo_url')->nullable()->after('telegram_username');
+            $table->string('telegram_chat_id')->nullable()->after('telegram_photo_url');
             $table->timestamp('telegram_linked_at')->nullable()->after('telegram_chat_id');
         });
     }
@@ -22,6 +23,7 @@ return new class extends Migration {
             $table->dropColumn([
                 'telegram_id',
                 'telegram_username',
+                'telegram_photo_url',
                 'telegram_chat_id',
                 'telegram_linked_at',
             ]);

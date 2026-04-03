@@ -57,8 +57,7 @@ Route::get('/ping', fn () => response()->json(['message' => 'API works']));
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/sms/request', [AuthController::class, 'requestSmsCode']);
 Route::post('/sms/verify', [AuthController::class, 'verifySmsCode']);
-Route::post('/telegram/auth/request', [TelegramAuthController::class, 'requestLogin']);
-Route::post('/telegram/auth/confirm', [TelegramAuthController::class, 'confirmLogin']);
+Route::post('/telegram/auth/login', [TelegramAuthController::class, 'login']);
 Route::post('/lead-requests', [LeadRequestController::class, 'store'])->middleware('throttle:20,1');
 
 Route::get('/properties', [PropertyController::class, 'index']);
@@ -124,6 +123,7 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::put('/user/profile', [UserController::class, 'updateProfile']);
     Route::patch('/user/profile', [UserController::class, 'updateProfile']);
     Route::post('/logout', [AuthController::class, 'logout']);
+    Route::post('/telegram/auth/link', [TelegramAuthController::class, 'link']);
 
     // Properties CRUD + photos
     Route::post('/properties', [PropertyController::class, 'store']);

@@ -6,6 +6,7 @@ use App\Models\User;
 use App\Services\TelegramAuthService;
 use App\Services\TelegramBotService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use RuntimeException;
 
 class TelegramAuthController extends Controller
@@ -25,52 +26,60 @@ class TelegramAuthController extends Controller
         );
     }
 
-    public function requestLogin(Request $request, TelegramAuthService $telegramAuthService, TelegramBotService $telegramBotService)
+    public function login(Request $request, TelegramAuthService $telegramAuthService)
     {
-        $request->validate([
-            'phone' => 'required|string',
-        ]);
-
-        abort_unless($telegramBotService->isEnabled(), 503, 'Telegram login is not configured.');
-
-        $user = User::query()->where('phone', $request->string('phone'))->with('role')->first();
-
-        if (! $user) {
-            return response()->json(['message' => 'Пользователь не найден'], 404);
-        }
-
-        if ($user->status !== User::STATUS_ACTIVE) {
-            return response()->json(['message' => 'Пользователь деактивирован'], 403);
-        }
-
-        $loginToken = $telegramAuthService->issueForUser($user);
-
-        return response()->json([
-            'status' => 'pending',
-            'token' => $loginToken->token,
-            'expires_at' => $loginToken->expires_at,
-            'bot_username' => $telegramBotService->username(),
-            'telegram_link' => $telegramBotService->deepLink($loginToken->token),
-        ]);
-    }
-
-    public function confirmLogin(Request $request, TelegramAuthService $telegramAuthService)
-    {
-        $request->validate([
-            'token' => 'required|string',
+        $payload = $request->validate([
+            'id' => 'required',
+            'first_name' => 'nullable|string',
+            'last_name' => 'nullable|string',
+            'username' => 'nullable|string',
+            'photo_url' => 'nullable|string',
+            'auth_date' => 'required',
+            'hash' => 'required|string',
         ]);
 
         try {
-            $result = $telegramAuthService->complete($request->string('token')->toString());
+            $result = $telegramAuthService->authenticateWidgetUser($payload);
+        } catch (RuntimeException $e) {
+            $status = $e->getMessage() === 'Telegram account is not linked to any user.' ? 404 : 422;
+
+            return response()->json(['message' => $e->getMessage()], $status);
+        }
+
+        return response()->json([
+            'status' => 'authorized',
+            'token' => $result['token'],
+            'user' => $result['user'],
+        ]);
+    }
+
+    public function link(Request $request, TelegramAuthService $telegramAuthService)
+    {
+        $payload = $request->validate([
+            'id' => 'required',
+            'first_name' => 'nullable|string',
+            'last_name' => 'nullable|string',
+            'username' => 'nullable|string',
+            'photo_url' => 'nullable|string',
+            'auth_date' => 'required',
+            'hash' => 'required|string',
+        ]);
+
+        /** @var User|null $user */
+        $user = Auth::user();
+
+        abort_unless($user, 401, 'Unauthenticated.');
+
+        try {
+            $linkedUser = $telegramAuthService->linkWidgetUser($user, $payload);
         } catch (RuntimeException $e) {
             return response()->json(['message' => $e->getMessage()], 422);
         }
 
-        if (($result['status'] ?? null) === 'pending') {
-            return response()->json(['status' => 'pending']);
-        }
-
-        return response()->json($result);
+        return response()->json([
+            'message' => 'Telegram account linked successfully.',
+            'user' => $linkedUser,
+        ]);
     }
 
     public function webhook(Request $request, TelegramAuthService $telegramAuthService, TelegramBotService $telegramBotService)
@@ -82,6 +91,7 @@ class TelegramAuthController extends Controller
         $chatId = data_get($message, 'chat.id');
         $telegramUserId = data_get($message, 'from.id');
         $telegramUsername = data_get($message, 'from.username');
+        $photoUrl = null;
 
         if (! $chatId || ! $telegramUserId || $text === '') {
             return response()->json(['ok' => true]);
@@ -91,25 +101,21 @@ class TelegramAuthController extends Controller
             return response()->json(['ok' => true]);
         }
 
-        $parts = preg_split('/\s+/', $text);
-        $payload = $parts[1] ?? null;
+        $user = $telegramAuthService->attachChatFromStart($telegramUserId, $telegramUsername, $photoUrl, $chatId);
 
-        if (! $payload || ! str_starts_with($payload, 'auth_')) {
-            $telegramBotService->sendMessage($chatId, 'Откройте ссылку авторизации из приложения, чтобы привязать Telegram.');
+        if (! $user) {
+            $telegramBotService->sendMessage(
+                $chatId,
+                'Ваш Telegram пока не привязан к аккаунту на сайте. Сначала войдите через Telegram Login Widget в личном кабинете.'
+            );
 
             return response()->json(['ok' => true]);
         }
 
-        try {
-            $telegramAuthService->confirmByTelegram($payload, $telegramUserId, $telegramUsername, $chatId);
-
-            $telegramBotService->sendMessage(
-                $chatId,
-                'Telegram успешно привязан. Вернитесь в приложение и завершите вход.'
-            );
-        } catch (RuntimeException $e) {
-            $telegramBotService->sendMessage($chatId, $e->getMessage());
-        }
+        $telegramBotService->sendMessage(
+            $chatId,
+            'Уведомления подключены. Теперь бот может присылать вам сообщения по событиям из системы.'
+        );
 
         return response()->json(['ok' => true]);
     }
