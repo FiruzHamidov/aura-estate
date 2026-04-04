@@ -188,6 +188,10 @@ class PublicTeamController extends Controller
                 fn ($join) => $join->on('agents.id', '=', 'properties.created_by')
             )
             ->whereBetween('properties.created_at', [$from, $to])
+            ->where(function ($query) {
+                $query->whereNull('properties.moderation_status')
+                    ->orWhere('properties.moderation_status', '!=', 'deleted');
+            })
             ->selectRaw('properties.created_by as agent_id, COUNT(*) as added_count')
             ->groupBy('properties.created_by')
             ->orderByDesc('added_count')

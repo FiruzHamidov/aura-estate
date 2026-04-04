@@ -180,6 +180,16 @@ class PublicTeamHallOfFameTest extends TestCase
                 'updated_at' => '2026-04-06 10:00:00',
             ],
             [
+                'title' => 'P6 deleted',
+                'created_by' => $agentTwo->id,
+                'moderation_status' => 'deleted',
+                'actual_sale_price' => null,
+                'actual_sale_currency' => null,
+                'sold_at' => null,
+                'created_at' => '2026-04-06 11:00:00',
+                'updated_at' => '2026-04-06 11:00:00',
+            ],
+            [
                 'title' => 'P7',
                 'created_by' => $inactiveAgent->id,
                 'moderation_status' => 'sold',
@@ -267,6 +277,8 @@ class PublicTeamHallOfFameTest extends TestCase
         $response->assertJsonPath('nominations.most_showings_added.winner.shows_count', 3);
         $response->assertJsonPath('nominations.most_properties_added.winner.agent.id', $agentOne->id);
         $response->assertJsonPath('nominations.most_properties_added.winner.added_count', 4);
+        $response->assertJsonPath('nominations.most_properties_added.leaders.1.agent.id', $agentTwo->id);
+        $response->assertJsonPath('nominations.most_properties_added.leaders.1.added_count', 2);
 
         $leaderIds = collect($response->json('nominations.best_sales_by_count.leaders'))
             ->pluck('agent.id')
