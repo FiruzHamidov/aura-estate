@@ -21,10 +21,14 @@ class ClientNeed extends Model
         'status_id',
         'budget_from',
         'budget_to',
+        'budget_total',
+        'budget_cash',
+        'budget_mortgage',
         'currency',
         'location_id',
         'district',
         'property_type_id',
+        'repair_type_id',
         'rooms_from',
         'rooms_to',
         'area_from',
@@ -33,15 +37,20 @@ class ClientNeed extends Model
         'created_by',
         'responsible_agent_id',
         'closed_at',
+        'wants_mortgage',
         'meta',
     ];
 
     protected $casts = [
         'budget_from' => 'decimal:2',
         'budget_to' => 'decimal:2',
+        'budget_total' => 'decimal:2',
+        'budget_cash' => 'decimal:2',
+        'budget_mortgage' => 'decimal:2',
         'area_from' => 'decimal:2',
         'area_to' => 'decimal:2',
         'closed_at' => 'datetime',
+        'wants_mortgage' => 'boolean',
         'meta' => 'array',
     ];
 
@@ -78,6 +87,11 @@ class ClientNeed extends Model
     public function propertyType()
     {
         return $this->belongsTo(PropertyType::class, 'property_type_id');
+    }
+
+    public function repairType()
+    {
+        return $this->belongsTo(RepairType::class, 'repair_type_id');
     }
 
     public function propertyTypes()

@@ -69,6 +69,7 @@ class ClientController extends Controller
             'needs.location',
             'needs.propertyType',
             'needs.propertyTypes',
+            'needs.repairType',
         ];
     }
 
@@ -266,6 +267,14 @@ class ClientController extends Controller
             'has_open_needs' => 'nullable|boolean',
             'need_status_id' => 'nullable|integer|exists:client_need_statuses,id',
             'need_type_id' => 'nullable|integer|exists:client_need_types,id',
+            'repair_type_id' => 'nullable|integer|exists:repair_types,id',
+            'wants_mortgage' => 'nullable|boolean',
+            'budget_total_from' => 'nullable|numeric|min:0',
+            'budget_total_to' => 'nullable|numeric|min:0',
+            'budget_cash_from' => 'nullable|numeric|min:0',
+            'budget_cash_to' => 'nullable|numeric|min:0',
+            'budget_mortgage_from' => 'nullable|numeric|min:0',
+            'budget_mortgage_to' => 'nullable|numeric|min:0',
             'status' => ['nullable', Rule::in(['active', 'inactive'])],
             'per_page' => 'nullable|integer|min:1|max:100',
         ]);
@@ -328,12 +337,60 @@ class ClientController extends Controller
             }
         }
 
-        if (!empty($validated['need_status_id'])) {
-            $query->whereHas('needs', fn ($builder) => $builder->where('status_id', $validated['need_status_id']));
-        }
+        $hasNeedFilters =
+            !empty($validated['need_status_id'])
+            || !empty($validated['need_type_id'])
+            || !empty($validated['repair_type_id'])
+            || (array_key_exists('wants_mortgage', $validated) && $validated['wants_mortgage'] !== null)
+            || (array_key_exists('budget_total_from', $validated) && $validated['budget_total_from'] !== null)
+            || (array_key_exists('budget_total_to', $validated) && $validated['budget_total_to'] !== null)
+            || (array_key_exists('budget_cash_from', $validated) && $validated['budget_cash_from'] !== null)
+            || (array_key_exists('budget_cash_to', $validated) && $validated['budget_cash_to'] !== null)
+            || (array_key_exists('budget_mortgage_from', $validated) && $validated['budget_mortgage_from'] !== null)
+            || (array_key_exists('budget_mortgage_to', $validated) && $validated['budget_mortgage_to'] !== null);
 
-        if (!empty($validated['need_type_id'])) {
-            $query->whereHas('needs', fn ($builder) => $builder->where('type_id', $validated['need_type_id']));
+        if ($hasNeedFilters) {
+            $query->whereHas('needs', function ($builder) use ($validated, $request) {
+                if (!empty($validated['need_status_id'])) {
+                    $builder->where('status_id', $validated['need_status_id']);
+                }
+
+                if (!empty($validated['need_type_id'])) {
+                    $builder->where('type_id', $validated['need_type_id']);
+                }
+
+                if (!empty($validated['repair_type_id'])) {
+                    $builder->where('repair_type_id', $validated['repair_type_id']);
+                }
+
+                if (array_key_exists('wants_mortgage', $validated) && $validated['wants_mortgage'] !== null) {
+                    $builder->where('wants_mortgage', $request->boolean('wants_mortgage'));
+                }
+
+                if (array_key_exists('budget_total_from', $validated) && $validated['budget_total_from'] !== null) {
+                    $builder->where('budget_total', '>=', $validated['budget_total_from']);
+                }
+
+                if (array_key_exists('budget_total_to', $validated) && $validated['budget_total_to'] !== null) {
+                    $builder->where('budget_total', '<=', $validated['budget_total_to']);
+                }
+
+                if (array_key_exists('budget_cash_from', $validated) && $validated['budget_cash_from'] !== null) {
+                    $builder->where('budget_cash', '>=', $validated['budget_cash_from']);
+                }
+
+                if (array_key_exists('budget_cash_to', $validated) && $validated['budget_cash_to'] !== null) {
+                    $builder->where('budget_cash', '<=', $validated['budget_cash_to']);
+                }
+
+                if (array_key_exists('budget_mortgage_from', $validated) && $validated['budget_mortgage_from'] !== null) {
+                    $builder->where('budget_mortgage', '>=', $validated['budget_mortgage_from']);
+                }
+
+                if (array_key_exists('budget_mortgage_to', $validated) && $validated['budget_mortgage_to'] !== null) {
+                    $builder->where('budget_mortgage', '<=', $validated['budget_mortgage_to']);
+                }
+            });
         }
 
         if (!empty($validated['status'])) {

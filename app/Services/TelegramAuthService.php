@@ -3,6 +3,8 @@
 namespace App\Services;
 
 use App\Models\User;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Carbon;
 use RuntimeException;
 
@@ -139,6 +141,53 @@ class TelegramAuthService
             'telegram_username' => $data['username'],
             'telegram_photo_url' => $data['photo_url'],
             'telegram_linked_at' => $user->telegram_linked_at ?? now(),
-        ])->save();
+        ]);
+
+        if (blank($user->photo) && filled($data['photo_url'])) {
+            $photoPath = $this->storeTelegramPhoto((string) $data['photo_url']);
+
+            if ($photoPath) {
+                $user->photo = $photoPath;
+            }
+        }
+
+        $user->save();
+    }
+
+    private function storeTelegramPhoto(string $photoUrl): ?string
+    {
+        try {
+            $response = Http::timeout(10)->get($photoUrl);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        if (! $response->successful() || $response->body() === '') {
+            return null;
+        }
+
+        $extension = $this->detectPhotoExtension($photoUrl, (string) $response->header('Content-Type', ''));
+        $filename = 'users/'.uniqid('telegram_', true).'.'.$extension;
+
+        Storage::disk('public')->put($filename, $response->body());
+
+        return $filename;
+    }
+
+    private function detectPhotoExtension(string $photoUrl, string $contentType): string
+    {
+        $path = parse_url($photoUrl, PHP_URL_PATH);
+        $extension = $path ? pathinfo($path, PATHINFO_EXTENSION) : '';
+        $extension = strtolower((string) $extension);
+
+        if (in_array($extension, ['jpg', 'jpeg', 'png', 'webp'], true)) {
+            return $extension;
+        }
+
+        return match (strtolower(trim(strtok($contentType, ';')))) {
+            'image/png' => 'png',
+            'image/webp' => 'webp',
+            default => 'jpg',
+        };
     }
 }

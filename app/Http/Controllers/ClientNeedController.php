@@ -33,7 +33,7 @@ class ClientNeedController extends Controller
 
     private function relations(): array
     {
-        return ['client.type', 'type', 'status', 'creator', 'responsibleAgent', 'location', 'propertyType', 'propertyTypes'];
+        return ['client.type', 'type', 'status', 'creator', 'responsibleAgent', 'location', 'propertyType', 'propertyTypes', 'repairType'];
     }
 
     private function validatePayload(Request $request, ?ClientNeed $clientNeed = null): array
@@ -43,12 +43,16 @@ class ClientNeedController extends Controller
             'status_id' => ($clientNeed ? 'sometimes|' : '') . 'nullable|exists:client_need_statuses,id',
             'budget_from' => 'nullable|numeric|min:0',
             'budget_to' => 'nullable|numeric|min:0',
+            'budget_total' => 'nullable|numeric|min:0',
+            'budget_cash' => 'nullable|numeric|min:0',
+            'budget_mortgage' => 'nullable|numeric|min:0',
             'currency' => 'nullable|in:TJS,USD',
             'location_id' => 'nullable|exists:locations,id',
             'district' => 'nullable|string|max:255',
             'property_type_id' => 'nullable|exists:property_types,id',
             'property_type_ids' => 'sometimes|array',
             'property_type_ids.*' => ['integer', 'distinct', Rule::exists('property_types', 'id')],
+            'repair_type_id' => 'nullable|exists:repair_types,id',
             'rooms_from' => 'nullable|integer|min:0',
             'rooms_to' => 'nullable|integer|min:0',
             'area_from' => 'nullable|numeric|min:0',
@@ -56,6 +60,7 @@ class ClientNeedController extends Controller
             'comment' => 'nullable|string',
             'created_by' => 'nullable|integer|exists:users,id',
             'responsible_agent_id' => 'nullable|integer|exists:users,id',
+            'wants_mortgage' => 'nullable|boolean',
             'meta' => 'nullable|array',
         ]);
 
@@ -81,6 +86,31 @@ class ClientNeedController extends Controller
         }
 
         return $validated;
+    }
+
+    private function normalizeFinance(array $data, ?ClientNeed $clientNeed = null): array
+    {
+        $budgetCash = array_key_exists('budget_cash', $data)
+            ? $data['budget_cash']
+            : $clientNeed?->budget_cash;
+
+        $budgetMortgage = array_key_exists('budget_mortgage', $data)
+            ? $data['budget_mortgage']
+            : $clientNeed?->budget_mortgage;
+
+        if (
+            !array_key_exists('budget_total', $data)
+            && $budgetCash !== null
+            && $budgetMortgage !== null
+        ) {
+            $data['budget_total'] = (float) $budgetCash + (float) $budgetMortgage;
+        }
+
+        if (array_key_exists('wants_mortgage', $data) && $data['wants_mortgage'] !== null) {
+            $data['wants_mortgage'] = filter_var($data['wants_mortgage'], FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE);
+        }
+
+        return $data;
     }
 
     private function normalizePropertyTypes(array $data, ?ClientNeed $clientNeed = null): array
@@ -170,6 +200,7 @@ class ClientNeedController extends Controller
 
         $validated = $this->validatePayload($request);
         $validated = $this->normalizePropertyTypes($validated);
+        $validated = $this->normalizeFinance($validated);
         $validated['status_id'] ??= ClientNeedStatus::defaultId();
         $validated = $this->clientAccess->normalizeNeedMutationData($validated, $authUser, $client);
         $this->clientAccess->validateNeedMutationTargets($authUser, $client, $validated);
@@ -200,6 +231,7 @@ class ClientNeedController extends Controller
 
         $validated = $this->validatePayload($request, $clientNeed);
         $validated = $this->normalizePropertyTypes($validated, $clientNeed);
+        $validated = $this->normalizeFinance($validated, $clientNeed);
         $validated = $this->clientAccess->normalizeNeedMutationData($validated, $authUser, $clientNeed->client);
         $this->clientAccess->validateNeedMutationTargets($authUser, $clientNeed->client, $validated);
         $validated = $this->applyClosedState($validated, $clientNeed);
