@@ -12,6 +12,7 @@ use App\Models\User;
 use App\Services\Crm\ActivityService;
 use App\Services\Crm\AuditLogger;
 use App\Services\Crm\DealBoardService;
+use App\Services\NotificationService;
 use App\Support\DealAccess;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
@@ -26,7 +27,8 @@ class DealController extends Controller
         private readonly DealAccess $dealAccess,
         private readonly DealBoardService $boardService,
         private readonly AuditLogger $auditLogger,
-        private readonly ActivityService $activityService
+        private readonly ActivityService $activityService,
+        private readonly NotificationService $notifications
     ) {}
 
     private function authUser(): User
@@ -580,6 +582,8 @@ class DealController extends Controller
             );
         }
 
+        $this->notifications->handleDealCreated($deal->fresh($this->relations()), $authUser);
+
         return response()->json($deal->load($this->relations()), 201);
     }
 
@@ -644,6 +648,7 @@ class DealController extends Controller
             }
 
             $this->logTypedUpdates($deal, $authUser, $oldValues, $dirty, $oldStageSnapshot);
+            $this->notifications->handleDealUpdated($deal->fresh($this->relations()), $authUser, $oldValues, $dirty);
         }
 
         return response()->json($deal->fresh($this->relations()));
@@ -716,6 +721,13 @@ class DealController extends Controller
             ]),
             ['deal_id' => $movedDeal->id],
             'Deal moved on board.'
+        );
+
+        $this->notifications->handleDealUpdated(
+            $movedDeal->fresh($this->relations()),
+            $authUser,
+            $oldValues,
+            ['stage_id' => $movedDeal->stage_id, 'pipeline_id' => $movedDeal->pipeline_id]
         );
 
         return response()->json($movedDeal);

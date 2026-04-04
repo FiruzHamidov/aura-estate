@@ -3,10 +3,15 @@
 namespace App\Http\Controllers;
 
 use App\Models\Favorite;
+use App\Services\NotificationService;
 use Illuminate\Http\Request;
 
 class FavoriteController extends Controller
 {
+    public function __construct(
+        private readonly NotificationService $notifications
+    ) {}
+
     // Получить список избранных текущего пользователя
     public function index()
     {
@@ -28,6 +33,10 @@ class FavoriteController extends Controller
             'user_id' => auth()->id(),
             'property_id' => $request->property_id,
         ]);
+
+        if ($favorite->wasRecentlyCreated) {
+            $this->notifications->handleFavoriteAdded($favorite->fresh(['property.agent.role', 'property.creator.role', 'user.role']));
+        }
 
         return response()->json($favorite, 201);
     }

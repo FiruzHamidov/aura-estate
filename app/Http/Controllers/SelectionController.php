@@ -9,10 +9,15 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\URL;
 use Illuminate\Validation\Rule;
 use App\Services\Bitrix24Client;
+use App\Services\NotificationService;
 use App\Models\Selection;
 
 class SelectionController extends Controller
 {
+    public function __construct(
+        private readonly NotificationService $notifications
+    ) {}
+
     // Список моих подборок (для личного кабинета агента)
     public function index(Request $request)
     {
@@ -135,6 +140,8 @@ class SelectionController extends Controller
         ];
         $sel->meta = $meta;
         $sel->save();
+
+        $this->notifications->handleSelectionEvent($sel, $validated['type'], $validated['payload'] ?? null);
 
         // при необходимости — отправим отметку в таймлайн сделки
         if (!empty($sel->deal_id)) {

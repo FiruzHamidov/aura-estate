@@ -8,6 +8,7 @@ use App\Services\Crm\ActivityService;
 use App\Services\Crm\AuditLogger;
 use App\Services\Crm\LeadConversionService;
 use App\Services\Crm\LeadDeduplicator;
+use App\Services\NotificationService;
 use App\Support\ClientPhone;
 use App\Support\LeadAccess;
 use Illuminate\Database\Eloquent\Model;
@@ -25,7 +26,8 @@ class LeadController extends Controller
         private readonly LeadDeduplicator $deduplicator,
         private readonly LeadConversionService $conversionService,
         private readonly AuditLogger $auditLogger,
-        private readonly ActivityService $activityService
+        private readonly ActivityService $activityService,
+        private readonly NotificationService $notifications
     ) {}
 
     private function authUser(): User
@@ -471,6 +473,8 @@ class LeadController extends Controller
             'Lead created.'
         );
 
+        $this->notifications->handleLeadCreated($lead->fresh($this->relations()), $authUser);
+
         return response()->json(
             $this->attachDuplicateSummary($lead->load($this->relations())),
             201
@@ -509,6 +513,7 @@ class LeadController extends Controller
             $oldValues = Arr::only($lead->getOriginal(), array_keys($dirty));
             $lead->save();
             $this->logTypedUpdates($lead, $authUser, $oldValues, $dirty);
+            $this->notifications->handleLeadUpdated($lead->fresh($this->relations()), $authUser, $oldValues, $dirty);
         }
 
         return response()->json(
@@ -550,6 +555,7 @@ class LeadController extends Controller
         $this->leadAccess->ensureVisible($authUser, $lead);
 
         $convertedLead = $this->conversionService->convert($lead, $authUser);
+        $this->notifications->handleLeadConverted($convertedLead, $authUser);
 
         return response()->json(
             $this->attachDuplicateSummary($convertedLead)

@@ -7,6 +7,7 @@ use App\Models\ConversationMessage;
 use App\Models\User;
 use App\Services\Messaging\ConversationService;
 use App\Services\Messaging\MessageAccessService;
+use App\Services\NotificationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 
@@ -14,7 +15,8 @@ class ConversationMessageController extends Controller
 {
     public function __construct(
         private readonly MessageAccessService $access,
-        private readonly ConversationService $conversations
+        private readonly ConversationService $conversations,
+        private readonly NotificationService $notifications
     ) {}
 
     private function authUser(): User
@@ -81,6 +83,8 @@ class ConversationMessageController extends Controller
             $authUser,
             $validated['body']
         );
+
+        $this->notifications->handleConversationMessageCreated($message);
 
         return response()->json($this->serializeMessage($message), 201);
     }

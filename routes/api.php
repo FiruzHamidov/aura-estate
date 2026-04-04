@@ -36,6 +36,7 @@ use App\Http\Controllers\NewBuildingBlockController;
 use App\Http\Controllers\NewBuildingController;
 use App\Http\Controllers\NewBuildingPhotoController;
 use App\Http\Controllers\NewBuildingPlanController;
+use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\ParkingTypeController;
 use App\Http\Controllers\PropertyController;
 use App\Http\Controllers\PropertyPhotoController;
@@ -130,6 +131,10 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::post('/telegram/auth/link', [TelegramAuthController::class, 'link']);
     Route::delete('/user/photo', [UserController::class, 'deleteMyPhoto']);
     Route::post('/user/update-password', [UserController::class, 'updatePassword']);
+    Route::get('/notifications', [NotificationController::class, 'index']);
+    Route::get('/notifications/unread-count', [NotificationController::class, 'unreadCount']);
+    Route::patch('/notifications/read-all', [NotificationController::class, 'markAllRead']);
+    Route::patch('/notifications/{notification}/read', [NotificationController::class, 'markRead']);
 
     // Messaging
     Route::get('/conversations', [ConversationController::class, 'index']);
@@ -159,6 +164,7 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         // Properties CRUD + photos
         Route::post('/properties', [PropertyController::class, 'store']);
         Route::get('/properties/{property}/logs', [PropertyController::class, 'logs']);
+        Route::get('/properties/{property}/matching-clients', [PropertyController::class, 'matchingClients']);
         Route::put('/properties/{property}', [PropertyController::class, 'update']);
         Route::delete('/properties/{property}', [PropertyController::class, 'destroy']);
         Route::patch('/properties/{property}/moderation-listing', [PropertyController::class, 'updateModerationAndListingType']);
@@ -212,6 +218,7 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         Route::post('/clients/duplicate-check', [ClientController::class, 'duplicateCheck']);
         Route::post('/clients/attach-existing', [ClientController::class, 'attachExisting']);
         Route::get('/clients/{client}/activities', [ClientController::class, 'activities']);
+        Route::get('/clients/{client}/matching-properties', [ClientController::class, 'matchingProperties']);
         Route::get('/clients/{client}/collaborators', [ClientController::class, 'collaborators']);
         Route::post('/clients/{client}/collaborators', [ClientController::class, 'storeCollaborator']);
         Route::delete('/clients/{client}/collaborators/{user}', [ClientController::class, 'destroyCollaborator']);

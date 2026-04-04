@@ -6,6 +6,7 @@ use App\Http\Requests\SavePropertyDealRequest;
 use App\Models\Client;
 use App\Models\Property;
 use App\Services\Crm\ClientAttachService;
+use App\Services\Crm\Matching\ClientPropertyMatcher;
 use App\Models\User;
 use App\Support\ClientAccess;
 use Illuminate\Database\Eloquent\Builder;
@@ -23,12 +24,14 @@ class PropertyController extends Controller
     protected ImageManager $imageManager;
     protected ClientAccess $clientAccess;
     protected ClientAttachService $clientAttachService;
+    protected ClientPropertyMatcher $clientPropertyMatcher;
 
     public function __construct()
     {
         $this->imageManager = new ImageManager(new Driver());
         $this->clientAccess = app(ClientAccess::class);
         $this->clientAttachService = app(ClientAttachService::class);
+        $this->clientPropertyMatcher = app(ClientPropertyMatcher::class);
     }
 
     private function propertyDetailRelations(): array
@@ -54,6 +57,18 @@ class PropertyController extends Controller
     {
         $user = $request->user() ?? $request->user('sanctum');
         $user?->loadMissing('role');
+
+        return $user;
+    }
+
+    private function crmAuthUser(): User
+    {
+        /** @var User|null $user */
+        $user = auth()->user();
+
+        abort_unless($user, 401, 'Unauthenticated.');
+
+        $user->loadMissing('role');
 
         return $user;
     }
@@ -884,6 +899,33 @@ class PropertyController extends Controller
         return response()->json(
             $this->serializePropertyShow($property, $authUser !== null)
         );
+    }
+
+    public function matchingClients(Request $request, Property $property)
+    {
+        $authUser = $this->crmAuthUser();
+        $validated = $request->validate([
+            'limit' => 'nullable|integer|min:1|max:20',
+        ]);
+
+        return response()->json([
+            'property' => [
+                'id' => $property->id,
+                'title' => $property->title,
+                'price' => $property->price,
+                'currency' => $property->currency,
+                'offer_type' => $property->offer_type,
+                'district' => $property->district,
+                'rooms' => $property->rooms,
+                'total_area' => $property->total_area,
+                'moderation_status' => $property->moderation_status,
+            ],
+            'matches' => $this->clientPropertyMatcher->forProperty(
+                $authUser,
+                $property,
+                (int) ($validated['limit'] ?? 10)
+            ),
+        ]);
     }
 
     public function destroy(Property $property)

@@ -7,6 +7,7 @@ use App\Models\Client;
 use App\Models\User;
 use App\Services\Bitrix24Client;
 use App\Services\Crm\AuditLogger;
+use App\Services\NotificationService;
 use App\Support\ClientAccess;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
@@ -20,6 +21,7 @@ class BookingController extends Controller
     public function __construct(
         private readonly ClientAccess $clientAccess,
         private readonly AuditLogger $auditLogger,
+        private readonly NotificationService $notifications,
     ) {
     }
 
@@ -390,6 +392,7 @@ class BookingController extends Controller
         // Ensure relations are available for subject/description
         $booking->load(['property', 'agent', 'client.type']);
         $this->transformBookingForResponse($booking);
+        $this->notifications->handleBookingCreated($booking, $authUser);
 
         $bitrixResult = null;
         if ($request->boolean('sync_to_b24')) {
@@ -527,6 +530,7 @@ class BookingController extends Controller
         $booking->load(['property', 'agent', 'client.type']);
         $this->transformBookingForResponse($booking);
         $this->logClientBookingUpdated($currentClient, $authUser, $booking, $auditOldValues);
+        $this->notifications->handleBookingUpdated($booking, $authUser, $auditOldValues);
 
         return response()->json($booking);
     }

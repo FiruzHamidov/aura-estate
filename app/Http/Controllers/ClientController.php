@@ -7,6 +7,7 @@ use App\Models\User;
 use App\Services\Crm\AuditLogger;
 use App\Services\Crm\ClientAttachService;
 use App\Services\Crm\ClientDeduplicator;
+use App\Services\Crm\Matching\ClientPropertyMatcher;
 use App\Support\ClientAccess;
 use App\Support\ClientPhone;
 use Illuminate\Http\Request;
@@ -21,6 +22,7 @@ class ClientController extends Controller
         private readonly ClientDeduplicator $deduplicator,
         private readonly ClientAttachService $attachService,
         private readonly AuditLogger $auditLogger,
+        private readonly ClientPropertyMatcher $matcher,
     ) {
     }
 
@@ -479,6 +481,26 @@ class ClientController extends Controller
         }
 
         return response()->json($client);
+    }
+
+    public function matchingProperties(Request $request, Client $client)
+    {
+        $authUser = $this->authUser();
+        $this->clientAccess->ensureVisible($authUser, $client);
+
+        $validated = $request->validate([
+            'limit' => 'nullable|integer|min:1|max:20',
+        ]);
+
+        return response()->json([
+            'client' => [
+                'id' => $client->id,
+                'full_name' => $client->full_name,
+                'phone' => $client->phone,
+                'contact_kind' => $client->contact_kind,
+            ],
+            'needs' => $this->matcher->forClient($client, (int) ($validated['limit'] ?? 10)),
+        ]);
     }
 
     public function update(Request $request, Client $client)
