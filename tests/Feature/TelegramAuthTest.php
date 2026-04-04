@@ -8,6 +8,7 @@ use App\Services\TelegramBotService;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Storage;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
@@ -36,6 +37,7 @@ class TelegramAuthTest extends TestCase
             $table->foreignId('role_id')->constrained('roles')->cascadeOnDelete();
             $table->string('status')->default('active');
             $table->string('auth_method')->default('password');
+            $table->string('photo')->nullable();
             $table->string('telegram_id')->nullable()->unique();
             $table->string('telegram_username')->nullable();
             $table->text('telegram_photo_url')->nullable();
@@ -64,6 +66,11 @@ class TelegramAuthTest extends TestCase
 
     public function test_widget_login_authorizes_linked_user_and_returns_sanctum_token(): void
     {
+        Storage::fake('public');
+        Http::fake([
+            'https://t.me/*' => Http::response('telegram-image', 200, ['Content-Type' => 'image/jpeg']),
+        ]);
+
         $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
         $user = User::create([
             'name' => 'Agent',
@@ -92,6 +99,8 @@ class TelegramAuthTest extends TestCase
         $user->refresh();
         $this->assertSame('aura_agent', $user->telegram_username);
         $this->assertSame('https://t.me/i/userpic/320/test.jpg', $user->telegram_photo_url);
+        $this->assertNotNull($user->photo);
+        Storage::disk('public')->assertExists($user->photo);
     }
 
     public function test_widget_login_rejects_invalid_hash(): void
@@ -124,6 +133,11 @@ class TelegramAuthTest extends TestCase
 
     public function test_authenticated_user_can_link_telegram_widget_account(): void
     {
+        Storage::fake('public');
+        Http::fake([
+            'https://t.me/*' => Http::response('telegram-image', 200, ['Content-Type' => 'image/jpeg']),
+        ]);
+
         $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
         $user = User::create([
             'name' => 'Agent',
@@ -150,6 +164,43 @@ class TelegramAuthTest extends TestCase
         $user->refresh();
         $this->assertSame('100004', $user->telegram_id);
         $this->assertSame('linked_agent', $user->telegram_username);
+        $this->assertNotNull($user->photo);
+        Storage::disk('public')->assertExists($user->photo);
+    }
+
+    public function test_link_keeps_existing_user_photo_when_telegram_is_attached(): void
+    {
+        Storage::fake('public');
+        Http::fake([
+            'https://t.me/*' => Http::response('telegram-image', 200, ['Content-Type' => 'image/jpeg']),
+        ]);
+
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent',
+            'phone' => '992900000014',
+            'password' => bcrypt('password'),
+            'role_id' => $role->id,
+            'status' => 'active',
+            'photo' => 'users/existing-photo.jpg',
+        ]);
+
+        Storage::disk('public')->put('users/existing-photo.jpg', 'existing-image');
+
+        Sanctum::actingAs($user);
+
+        $payload = $this->makeTelegramPayload([
+            'id' => '100014',
+            'first_name' => 'Keep',
+            'username' => 'existing_photo_agent',
+            'photo_url' => 'https://t.me/i/userpic/320/existing.jpg',
+        ]);
+
+        $this->postJson('/api/telegram/auth/link', $payload)->assertOk();
+
+        $user->refresh();
+        $this->assertSame('users/existing-photo.jpg', $user->photo);
+        Storage::disk('public')->assertExists('users/existing-photo.jpg');
     }
 
     public function test_webhook_requires_secret_token_and_links_chat_id_via_start(): void
