@@ -12,6 +12,9 @@ use App\Http\Controllers\ClientNeedController;
 use App\Http\Controllers\ClientNeedStatusController;
 use App\Http\Controllers\ClientNeedTypeController;
 use App\Http\Controllers\ClientTypeController;
+use App\Http\Controllers\ConversationController;
+use App\Http\Controllers\ConversationMessageController;
+use App\Http\Controllers\ConversationParticipantController;
 use App\Http\Controllers\ConstructionStageController;
 use App\Http\Controllers\ContractTypeController;
 use App\Http\Controllers\CrmActivityController;
@@ -46,6 +49,7 @@ use App\Http\Controllers\ReelController;
 use App\Http\Controllers\ReviewController;
 use App\Http\Controllers\RoleController;
 use App\Http\Controllers\SelectionController;
+use App\Http\Controllers\SupportConversationController;
 use App\Http\Controllers\TelegramAuthController;
 use App\Http\Controllers\UserController;
 use Illuminate\Support\Facades\Route;
@@ -119,154 +123,172 @@ Route::get('/chat/history', [ChatController::class, 'history']);
 
 // --- ЗАЩИЩЁННЫЕ ---
 Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
-    Route::get('/my-properties', [PropertyController::class, 'myProperties']);
     Route::get('/user/profile', [UserController::class, 'profile']);
     Route::put('/user/profile', [UserController::class, 'updateProfile']);
     Route::patch('/user/profile', [UserController::class, 'updateProfile']);
     Route::post('/logout', [AuthController::class, 'logout']);
     Route::post('/telegram/auth/link', [TelegramAuthController::class, 'link']);
-
-    // Properties CRUD + photos
-    Route::post('/properties', [PropertyController::class, 'store']);
-    Route::get('/properties/{property}/logs', [PropertyController::class, 'logs']);
-    Route::put('/properties/{property}', [PropertyController::class, 'update']);
-    Route::delete('/properties/{property}', [PropertyController::class, 'destroy']);
-    Route::patch('/properties/{property}/moderation-listing', [PropertyController::class, 'updateModerationAndListingType']);
-    Route::post('properties/{property}/photos', [PropertyPhotoController::class, 'store']);
-    Route::put('properties/{property}/photos/reorder', [PropertyPhotoController::class, 'reorder']);
-    Route::delete('properties/{property}/photos/{photo}', [PropertyPhotoController::class, 'destroy'])->whereNumber('photo');
-    Route::post('/reels/direct-upload', [ReelController::class, 'initDirectUpload']);
-    Route::post('/reels/{reel}/complete-upload', [ReelController::class, 'completeDirectUpload']);
-    Route::post('/reels', [ReelController::class, 'store']);
-    Route::put('/reels/{reel}', [ReelController::class, 'update']);
-    Route::patch('/reels/{reel}', [ReelController::class, 'update']);
-    Route::patch('/reels/{reel}/publish', [ReelController::class, 'publish']);
-    Route::delete('/reels/{reel}', [ReelController::class, 'destroy']);
-
-    // Справочники (админ)
-    Route::apiResource('property-types', PropertyTypeController::class)->except(['index']);
-    Route::apiResource('property-statuses', PropertyStatusController::class)->except(['index']);
-    Route::apiResource('locations', LocationController::class)->except(['index']);
-    Route::apiResource('building-types', BuildingTypeController::class)->except(['index']);
-    Route::apiResource('parking-types', ParkingTypeController::class)->except(['index']);
-    Route::apiResource('heating-types', HeatingTypeController::class)->except(['index']);
-    Route::apiResource('contract-types', ContractTypeController::class)->except(['index']);
-    Route::apiResource('repair-types', RepairTypeController::class)->except(['index']);
-    Route::apiResource('branches', BranchController::class)->except(['index']);
-    Route::apiResource('branch-groups', BranchGroupController::class);
-    Route::apiResource('developers', DeveloperController::class)->except(['index', 'show']);
-    Route::apiResource('features', FeatureController::class)->except(['index', 'show']);
-    Route::apiResource('materials', MaterialController::class)->except(['index', 'show']);
-    Route::apiResource('construction-stages', ConstructionStageController::class)->except(['index', 'show']);
-
-    Route::apiResource('roles', RoleController::class);
-    Route::post('/user/{user}/photo', [UserController::class, 'updatePhoto']);
     Route::delete('/user/photo', [UserController::class, 'deleteMyPhoto']);
     Route::post('/user/update-password', [UserController::class, 'updatePassword']);
-    Route::apiResource('user', UserController::class);
-    Route::get('/clients/settings', [ClientController::class, 'settings']);
-    Route::put('/clients/settings', [ClientController::class, 'updateSettings']);
-    Route::patch('/clients/settings', [ClientController::class, 'updateSettings']);
-    Route::get('/deal-pipelines/{dealPipeline}/board', [DealPipelineController::class, 'board']);
-    Route::patch('/deal-pipelines/{dealPipeline}/stages/reorder', [DealStageController::class, 'reorder']);
-    Route::post('/deal-pipelines/{dealPipeline}/stages', [DealStageController::class, 'store']);
-    Route::apiResource('deal-pipelines', DealPipelineController::class);
-    Route::apiResource('deal-stages', DealStageController::class)->only(['show', 'update', 'destroy']);
-    Route::patch('/deals/{deal}/move', [DealController::class, 'move']);
-    Route::apiResource('deals', DealController::class);
-    Route::post('/leads/{lead}/convert', [LeadController::class, 'convert']);
-    Route::apiResource('leads', LeadController::class);
-    Route::get('/crm/leads/{lead}/activities', [CrmActivityController::class, 'leadIndex']);
-    Route::post('/crm/leads/{lead}/activities', [CrmActivityController::class, 'leadStore']);
-    Route::get('/crm/deals/{deal}/activities', [CrmActivityController::class, 'dealIndex']);
-    Route::post('/crm/deals/{deal}/activities', [CrmActivityController::class, 'dealStore']);
-    Route::get('/crm/reports/performance', [CrmReportController::class, 'performance']);
-    Route::post('/clients/duplicate-check', [ClientController::class, 'duplicateCheck']);
-    Route::post('/clients/attach-existing', [ClientController::class, 'attachExisting']);
-    Route::get('/clients/{client}/activities', [ClientController::class, 'activities']);
-    Route::get('/clients/{client}/collaborators', [ClientController::class, 'collaborators']);
-    Route::post('/clients/{client}/collaborators', [ClientController::class, 'storeCollaborator']);
-    Route::delete('/clients/{client}/collaborators/{user}', [ClientController::class, 'destroyCollaborator']);
-    Route::apiResource('clients', ClientController::class);
-    Route::apiResource('clients.needs', ClientNeedController::class)->only(['index', 'store']);
-    Route::apiResource('client-needs', ClientNeedController::class)->only(['show', 'update', 'destroy']);
-    Route::apiResource('client-types', ClientTypeController::class)->except(['index']);
-    Route::apiResource('client-need-types', ClientNeedTypeController::class)->except(['index']);
-    Route::apiResource('client-need-statuses', ClientNeedStatusController::class)->except(['index']);
+
+    // Messaging
+    Route::get('/conversations', [ConversationController::class, 'index']);
+    Route::post('/conversations', [ConversationController::class, 'store']);
+    Route::post('/conversations/direct', [ConversationController::class, 'storeDirect']);
+    Route::get('/conversations/{conversation}', [ConversationController::class, 'show']);
+    Route::get('/conversations/{conversation}/messages', [ConversationMessageController::class, 'index']);
+    Route::post('/conversations/{conversation}/messages', [ConversationMessageController::class, 'store']);
+    Route::get('/conversations/{conversation}/participants', [ConversationParticipantController::class, 'index']);
+    Route::post('/conversations/{conversation}/participants', [ConversationParticipantController::class, 'store']);
+    Route::delete('/conversations/{conversation}/participants/{user}', [ConversationParticipantController::class, 'destroy']);
+    Route::get('/support/conversations', [SupportConversationController::class, 'index']);
+    Route::post('/support/conversations', [SupportConversationController::class, 'store']);
+    Route::get('/support/conversations/{conversation}', [SupportConversationController::class, 'show']);
+    Route::post('/chat/escalate', [SupportConversationController::class, 'store']);
 
     // Избранное
     Route::get('/favorites', [FavoriteController::class, 'index']);
     Route::post('/favorites', [FavoriteController::class, 'store']);
     Route::delete('/favorites/{property_id}', [FavoriteController::class, 'destroy']);
 
-    // Показы
     Route::get('/bookings', [BookingController::class, 'index']);
-    Route::post('/bookings', [BookingController::class, 'store']);
-    Route::put('/bookings/{id}', [BookingController::class, 'update']);
-    Route::patch('/bookings/{id}', [BookingController::class, 'update']);
-    Route::get('/bookings/agents-report', [BookingController::class, 'agentsReport']);
     Route::get('/bookings/{id}', [BookingController::class, 'show'])->whereNumber('id');
+    Route::middleware('non.client')->group(function () {
+        Route::get('/my-properties', [PropertyController::class, 'myProperties']);
 
-    // Отчёты
-    // --- Агентские отчёты (дополнительно) ---
-    Route::get('/reports/agent/contracts', [PropertyReportController::class, 'agentContractsStats']);
-    Route::get('/reports/agent/clients', [PropertyReportController::class, 'agentClientsStats']);
-    Route::get('/reports/agent/shows', [PropertyReportController::class, 'agentShowsStats']);
-    Route::get('/reports/agent/earnings', [PropertyReportController::class, 'agentEarningsReport']);
-    Route::get('/reports/properties/summary', [PropertyReportController::class, 'summary']);
-    Route::get('/reports/properties/manager-efficiency', [PropertyReportController::class, 'managerEfficiency']);
-    Route::get('/reports/properties/by-status', [PropertyReportController::class, 'byStatus']);
-    Route::get('/reports/properties/by-type', [PropertyReportController::class, 'byType']);
-    Route::get('/reports/properties/by-location', [PropertyReportController::class, 'byLocation']);
-    Route::get('/reports/properties/monthly-comparison', [PropertyReportController::class, 'monthlyComparison']);
-    Route::get('/reports/properties/monthly-comparison-range', [PropertyReportController::class, 'monthlyComparisonRange']);
-    Route::get('/reports/properties/time-series', [PropertyReportController::class, 'timeSeries']);
-    Route::get('/reports/properties/price-buckets', [PropertyReportController::class, 'priceBuckets']);
-    Route::get('/reports/properties/rooms-hist', [PropertyReportController::class, 'roomsHistogram']);
-    Route::get('/reports/properties/agents-leaderboard', [PropertyReportController::class, 'agentsLeaderboard']);
-    Route::get('/reports/properties/conversion', [PropertyReportController::class, 'conversionFunnel']);
-    Route::get('/reports/missing-phone/agents-by-status', [PropertyReportController::class, 'missingPhoneAgentsByStatus']);
-    Route::get('/reports/missing-phone/list', [PropertyReportController::class, 'missingPhoneList']);
-    // детализированный (по одному агенту) — уже есть
-    Route::get('/reports/agents/{agent}/properties', [PropertyReportController::class, 'agentPropertiesReport']);
+        // Properties CRUD + photos
+        Route::post('/properties', [PropertyController::class, 'store']);
+        Route::get('/properties/{property}/logs', [PropertyController::class, 'logs']);
+        Route::put('/properties/{property}', [PropertyController::class, 'update']);
+        Route::delete('/properties/{property}', [PropertyController::class, 'destroy']);
+        Route::patch('/properties/{property}/moderation-listing', [PropertyController::class, 'updateModerationAndListingType']);
+        Route::post('properties/{property}/photos', [PropertyPhotoController::class, 'store']);
+        Route::put('properties/{property}/photos/reorder', [PropertyPhotoController::class, 'reorder']);
+        Route::delete('properties/{property}/photos/{photo}', [PropertyPhotoController::class, 'destroy'])->whereNumber('photo');
+        Route::post('/reels/direct-upload', [ReelController::class, 'initDirectUpload']);
+        Route::post('/reels/{reel}/complete-upload', [ReelController::class, 'completeDirectUpload']);
+        Route::post('/reels', [ReelController::class, 'store']);
+        Route::put('/reels/{reel}', [ReelController::class, 'update']);
+        Route::patch('/reels/{reel}', [ReelController::class, 'update']);
+        Route::patch('/reels/{reel}/publish', [ReelController::class, 'publish']);
+        Route::delete('/reels/{reel}', [ReelController::class, 'destroy']);
 
-    Route::post(
-        '/properties/{property}/deal',
-        [PropertyController::class, 'saveDeal']
-    );
+        // Справочники (админ)
+        Route::apiResource('property-types', PropertyTypeController::class)->except(['index']);
+        Route::apiResource('property-statuses', PropertyStatusController::class)->except(['index']);
+        Route::apiResource('locations', LocationController::class)->except(['index']);
+        Route::apiResource('building-types', BuildingTypeController::class)->except(['index']);
+        Route::apiResource('parking-types', ParkingTypeController::class)->except(['index']);
+        Route::apiResource('heating-types', HeatingTypeController::class)->except(['index']);
+        Route::apiResource('contract-types', ContractTypeController::class)->except(['index']);
+        Route::apiResource('repair-types', RepairTypeController::class)->except(['index']);
+        Route::apiResource('branches', BranchController::class)->except(['index']);
+        Route::apiResource('branch-groups', BranchGroupController::class);
+        Route::apiResource('developers', DeveloperController::class)->except(['index', 'show']);
+        Route::apiResource('features', FeatureController::class)->except(['index', 'show']);
+        Route::apiResource('materials', MaterialController::class)->except(['index', 'show']);
+        Route::apiResource('construction-stages', ConstructionStageController::class)->except(['index', 'show']);
 
-    // агрегированный — новый (без параметра agent)
-    Route::get('/reports/agents/properties', [PropertyReportController::class, 'agentPropertiesReport']);
+        Route::apiResource('roles', RoleController::class);
+        Route::post('/user/{user}/photo', [UserController::class, 'updatePhoto']);
+        Route::apiResource('user', UserController::class);
+        Route::get('/clients/settings', [ClientController::class, 'settings']);
+        Route::put('/clients/settings', [ClientController::class, 'updateSettings']);
+        Route::patch('/clients/settings', [ClientController::class, 'updateSettings']);
+        Route::get('/deal-pipelines/{dealPipeline}/board', [DealPipelineController::class, 'board']);
+        Route::patch('/deal-pipelines/{dealPipeline}/stages/reorder', [DealStageController::class, 'reorder']);
+        Route::post('/deal-pipelines/{dealPipeline}/stages', [DealStageController::class, 'store']);
+        Route::apiResource('deal-pipelines', DealPipelineController::class);
+        Route::apiResource('deal-stages', DealStageController::class)->only(['show', 'update', 'destroy']);
+        Route::patch('/deals/{deal}/move', [DealController::class, 'move']);
+        Route::apiResource('deals', DealController::class);
+        Route::post('/leads/{lead}/convert', [LeadController::class, 'convert']);
+        Route::apiResource('leads', LeadController::class);
+        Route::get('/crm/leads/{lead}/activities', [CrmActivityController::class, 'leadIndex']);
+        Route::post('/crm/leads/{lead}/activities', [CrmActivityController::class, 'leadStore']);
+        Route::get('/crm/deals/{deal}/activities', [CrmActivityController::class, 'dealIndex']);
+        Route::post('/crm/deals/{deal}/activities', [CrmActivityController::class, 'dealStore']);
+        Route::get('/crm/reports/performance', [CrmReportController::class, 'performance']);
+        Route::post('/clients/duplicate-check', [ClientController::class, 'duplicateCheck']);
+        Route::post('/clients/attach-existing', [ClientController::class, 'attachExisting']);
+        Route::get('/clients/{client}/activities', [ClientController::class, 'activities']);
+        Route::get('/clients/{client}/collaborators', [ClientController::class, 'collaborators']);
+        Route::post('/clients/{client}/collaborators', [ClientController::class, 'storeCollaborator']);
+        Route::delete('/clients/{client}/collaborators/{user}', [ClientController::class, 'destroyCollaborator']);
+        Route::apiResource('clients', ClientController::class);
+        Route::apiResource('clients.needs', ClientNeedController::class)->only(['index', 'store']);
+        Route::apiResource('client-needs', ClientNeedController::class)->only(['show', 'update', 'destroy']);
+        Route::apiResource('client-types', ClientTypeController::class)->except(['index']);
+        Route::apiResource('client-need-types', ClientNeedTypeController::class)->except(['index']);
+        Route::apiResource('client-need-statuses', ClientNeedStatusController::class)->except(['index']);
 
-    // Новостройки (админ) + полностью ВЛОЖЕННЫЕ blocks/units c CRUD
-    Route::apiResource('new-buildings', NewBuildingController::class)->except(['index', 'show']);
+        // Показы
+        Route::post('/bookings', [BookingController::class, 'store']);
+        Route::put('/bookings/{id}', [BookingController::class, 'update']);
+        Route::patch('/bookings/{id}', [BookingController::class, 'update']);
+        Route::get('/bookings/agents-report', [BookingController::class, 'agentsReport']);
 
-    Route::scopeBindings()->group(function () {
-        Route::apiResource('new-buildings.blocks', NewBuildingBlockController::class)->except(['index', 'show']);
-        Route::apiResource('new-buildings.units', DeveloperUnitController::class)->except(['index', 'show']);
+        // Отчёты
+        // --- Агентские отчёты (дополнительно) ---
+        Route::get('/reports/agent/contracts', [PropertyReportController::class, 'agentContractsStats']);
+        Route::get('/reports/agent/clients', [PropertyReportController::class, 'agentClientsStats']);
+        Route::get('/reports/agent/shows', [PropertyReportController::class, 'agentShowsStats']);
+        Route::get('/reports/agent/earnings', [PropertyReportController::class, 'agentEarningsReport']);
+        Route::get('/reports/properties/summary', [PropertyReportController::class, 'summary']);
+        Route::get('/reports/properties/manager-efficiency', [PropertyReportController::class, 'managerEfficiency']);
+        Route::get('/reports/properties/by-status', [PropertyReportController::class, 'byStatus']);
+        Route::get('/reports/properties/by-type', [PropertyReportController::class, 'byType']);
+        Route::get('/reports/properties/by-location', [PropertyReportController::class, 'byLocation']);
+        Route::get('/reports/properties/monthly-comparison', [PropertyReportController::class, 'monthlyComparison']);
+        Route::get('/reports/properties/monthly-comparison-range', [PropertyReportController::class, 'monthlyComparisonRange']);
+        Route::get('/reports/properties/time-series', [PropertyReportController::class, 'timeSeries']);
+        Route::get('/reports/properties/price-buckets', [PropertyReportController::class, 'priceBuckets']);
+        Route::get('/reports/properties/rooms-hist', [PropertyReportController::class, 'roomsHistogram']);
+        Route::get('/reports/properties/agents-leaderboard', [PropertyReportController::class, 'agentsLeaderboard']);
+        Route::get('/reports/properties/conversion', [PropertyReportController::class, 'conversionFunnel']);
+        Route::get('/reports/missing-phone/agents-by-status', [PropertyReportController::class, 'missingPhoneAgentsByStatus']);
+        Route::get('/reports/missing-phone/list', [PropertyReportController::class, 'missingPhoneList']);
+        // детализированный (по одному агенту) — уже есть
+        Route::get('/reports/agents/{agent}/properties', [PropertyReportController::class, 'agentPropertiesReport']);
 
-        // ФОТО новостройки — полностью вложенные
-        Route::post('new-buildings/{new_building}/photos', [NewBuildingPhotoController::class, 'store']);
-        Route::delete('new-buildings/{new_building}/photos/{photo}', [NewBuildingPhotoController::class, 'destroy']);
-        Route::post('new-buildings/{new_building}/photos/{photo}/cover', [NewBuildingPhotoController::class, 'setCover']);
-        Route::put('new-buildings/{new_building}/photos/reorder', [NewBuildingPhotoController::class, 'reorder']);
+        Route::post(
+            '/properties/{property}/deal',
+            [PropertyController::class, 'saveDeal']
+        );
 
-        // ФОТО юнита — полностью вложенные
-        Route::get('new-buildings/{new_building}/units/{unit}/photos', [DeveloperUnitPhotoController::class, 'index']);
-        Route::post('new-buildings/{new_building}/units/{unit}/photos', [DeveloperUnitPhotoController::class, 'store']);
-        Route::delete('new-buildings/{new_building}/units/{unit}/photos/{photo}', [DeveloperUnitPhotoController::class, 'destroy']);
-        Route::put('new-buildings/{new_building}/units/{unit}/photos/reorder', [DeveloperUnitPhotoController::class, 'reorder']);
-        Route::post('new-buildings/{new_building}/units/{unit}/photos/{photo}/cover', [DeveloperUnitPhotoController::class, 'setCover']);
+        // агрегированный — новый (без параметра agent)
+        Route::get('/reports/agents/properties', [PropertyReportController::class, 'agentPropertiesReport']);
 
-        // Фичи (как было)
-        Route::post('new-buildings/{new_building}/features/{feature}', [NewBuildingController::class, 'attachFeature']);
-        Route::delete('new-buildings/{new_building}/features/{feature}', [NewBuildingController::class, 'detachFeature']);
+        // Новостройки (админ) + полностью ВЛОЖЕННЫЕ blocks/units c CRUD
+        Route::apiResource('new-buildings', NewBuildingController::class)->except(['index', 'show']);
+
+        Route::scopeBindings()->group(function () {
+            Route::apiResource('new-buildings.blocks', NewBuildingBlockController::class)->except(['index', 'show']);
+            Route::apiResource('new-buildings.units', DeveloperUnitController::class)->except(['index', 'show']);
+
+            // ФОТО новостройки — полностью вложенные
+            Route::post('new-buildings/{new_building}/photos', [NewBuildingPhotoController::class, 'store']);
+            Route::delete('new-buildings/{new_building}/photos/{photo}', [NewBuildingPhotoController::class, 'destroy']);
+            Route::post('new-buildings/{new_building}/photos/{photo}/cover', [NewBuildingPhotoController::class, 'setCover']);
+            Route::put('new-buildings/{new_building}/photos/reorder', [NewBuildingPhotoController::class, 'reorder']);
+
+            // ФОТО юнита — полностью вложенные
+            Route::get('new-buildings/{new_building}/units/{unit}/photos', [DeveloperUnitPhotoController::class, 'index']);
+            Route::post('new-buildings/{new_building}/units/{unit}/photos', [DeveloperUnitPhotoController::class, 'store']);
+            Route::delete('new-buildings/{new_building}/units/{unit}/photos/{photo}', [DeveloperUnitPhotoController::class, 'destroy']);
+            Route::put('new-buildings/{new_building}/units/{unit}/photos/reorder', [DeveloperUnitPhotoController::class, 'reorder']);
+            Route::post('new-buildings/{new_building}/units/{unit}/photos/{photo}/cover', [DeveloperUnitPhotoController::class, 'setCover']);
+
+            // Фичи (как было)
+            Route::post('new-buildings/{new_building}/features/{feature}', [NewBuildingController::class, 'attachFeature']);
+            Route::delete('new-buildings/{new_building}/features/{feature}', [NewBuildingController::class, 'detachFeature']);
+        });
+
+        // Bitrix selections (auth зона для админки/лички)
+        Route::get('/selections', [SelectionController::class, 'index']);
+        Route::post('/selections', [SelectionController::class, 'store']);
+        Route::get('/selections/{id}', [SelectionController::class, 'show']);
     });
-
-    // Bitrix selections (auth зона для админки/лички)
-    Route::get('/selections', [SelectionController::class, 'index']);
-    Route::post('/selections', [SelectionController::class, 'store']);
-    Route::get('/selections/{id}', [SelectionController::class, 'show']);
 });
 
 // --- CHAT (вне sanctum для бота/вебхуков) ---

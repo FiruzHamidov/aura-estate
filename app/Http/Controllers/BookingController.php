@@ -41,6 +41,11 @@ class BookingController extends Controller
         return in_array($roleSlug, ['admin', 'superadmin', 'marketing'], true);
     }
 
+    private function isClientRole(?string $roleSlug): bool
+    {
+        return $roleSlug === 'client';
+    }
+
     private function ensureReportsAllowed(Request $request): void
     {
         abort_if($this->roleSlug($this->authUser($request)) === 'marketing', 403, 'Forbidden');
@@ -210,6 +215,12 @@ class BookingController extends Controller
     {
         $authUser = $this->authUser($request);
         $roleSlug = $this->roleSlug($authUser);
+
+        if ($this->isClientRole($roleSlug)) {
+            $query->where('client_id', $authUser->id);
+
+            return;
+        }
 
         if ($this->isPrivilegedRole($roleSlug) && $request->filled('branch_id')) {
             $branchIds = array_values(array_filter(array_map('trim', explode(',', (string)$request->input('branch_id'))), fn($v) => $v !== ''));

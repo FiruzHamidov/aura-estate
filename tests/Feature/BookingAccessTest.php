@@ -247,4 +247,77 @@ class BookingAccessTest extends TestCase
         $filtered->assertJsonCount(1);
         $filtered->assertJsonPath('0.id', $bookingB->id);
     }
+
+    public function test_client_only_sees_own_bookings_and_cannot_open_foreign_booking(): void
+    {
+        $branch = Branch::create(['name' => 'Main Branch']);
+
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $clientRole = Role::create(['name' => 'Client', 'slug' => 'client']);
+
+        $agent = User::create([
+            'name' => 'Agent',
+            'phone' => '910000021',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $clientA = User::create([
+            'name' => 'Client A',
+            'phone' => '910000022',
+            'password' => bcrypt('password'),
+            'role_id' => $clientRole->id,
+            'status' => 'active',
+        ]);
+
+        $clientB = User::create([
+            'name' => 'Client B',
+            'phone' => '910000023',
+            'password' => bcrypt('password'),
+            'role_id' => $clientRole->id,
+            'status' => 'active',
+        ]);
+
+        $property = Property::create([
+            'title' => 'Property',
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+        ]);
+
+        $bookingA = Booking::create([
+            'property_id' => $property->id,
+            'agent_id' => $agent->id,
+            'client_id' => $clientA->id,
+            'start_time' => now()->toDateTimeString(),
+            'end_time' => now()->addHour()->toDateTimeString(),
+            'client_name' => 'Client A',
+            'client_phone' => '920000021',
+        ]);
+
+        $bookingB = Booking::create([
+            'property_id' => $property->id,
+            'agent_id' => $agent->id,
+            'client_id' => $clientB->id,
+            'start_time' => now()->addDay()->toDateTimeString(),
+            'end_time' => now()->addDay()->addHour()->toDateTimeString(),
+            'client_name' => 'Client B',
+            'client_phone' => '920000022',
+        ]);
+
+        Sanctum::actingAs($clientA);
+
+        $index = $this->getJson('/api/bookings');
+        $index->assertOk();
+        $index->assertJsonCount(1);
+        $index->assertJsonPath('0.id', $bookingA->id);
+
+        $ownShow = $this->getJson('/api/bookings/'.$bookingA->id);
+        $ownShow->assertOk();
+        $ownShow->assertJsonPath('id', $bookingA->id);
+
+        $foreignShow = $this->getJson('/api/bookings/'.$bookingB->id);
+        $foreignShow->assertForbidden();
+    }
 }

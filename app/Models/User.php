@@ -6,6 +6,7 @@ use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 
 class User extends Authenticatable
@@ -116,5 +117,27 @@ class User extends Authenticatable
     public function reviewsReceived(): MorphMany
     {
         return $this->morphMany(Review::class, 'reviewable');
+    }
+
+    public function conversations(): BelongsToMany
+    {
+        return $this->belongsToMany(Conversation::class, 'conversation_participants')
+            ->withPivot(['role', 'last_read_message_id', 'last_read_at', 'joined_at', 'meta'])
+            ->withTimestamps();
+    }
+
+    public function conversationParticipants()
+    {
+        return $this->hasMany(ConversationParticipant::class);
+    }
+
+    public function authoredConversationMessages()
+    {
+        return $this->hasMany(ConversationMessage::class, 'author_id');
+    }
+
+    public function requestedSupportThreads()
+    {
+        return $this->hasMany(SupportThread::class, 'requester_user_id');
     }
 }

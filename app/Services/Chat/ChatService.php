@@ -5,6 +5,7 @@ namespace App\Services\Chat;
 use App\Models\ChatMessage;
 use App\Models\ChatSession;
 use App\Services\Bitrix24Client;
+use App\Services\Messaging\SupportConversationService;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\DB;
 
@@ -12,7 +13,8 @@ class ChatService
 {
     public function __construct(
         private PropertyRepository $props,
-        private Bitrix24Client $b24
+        private Bitrix24Client $b24,
+        private SupportConversationService $support
     ) {}
 
     public function reply(string $userMessage, ?string $sessionUuid, ?int $userId, array $context = []): array
@@ -52,6 +54,7 @@ class ChatService
                     "- If no properties are found, ask clarifying questions.\n".
                     "- If user wants to leave an application/request after finding a suitable option, collect name and phone, then call tool `create_lead_request`.\n".
                     "- Before calling `create_lead_request`, make sure you have: name, phone. Email/comment/property_id are optional.\n".
+                    "- If the user asks to speak with a human manager, operator, or support, call the tool `escalate_to_support` when user_id is available.\n".
                     "- Always represent Aura Estate as the source.\n".
                     "- Use ONLY the exact filter parameter names defined in search_properties.\n".
                     "- For ranges, ALWAYS use From/To suffixes (priceFrom, roomsTo, etc).\n".
@@ -173,6 +176,16 @@ class ChatService
                     'property_url' => ['type' => 'string'],
                 ],
                 'required' => ['name', 'phone'],
+            ],
+        ], [
+            'type'        => 'function',
+            'name'        => 'escalate_to_support',
+            'description' => 'Create or reuse a live support conversation for a signed-in user and hand off the request to managers/operators.',
+            'parameters'  => [
+                'type'       => 'object',
+                'properties' => [
+                    'summary' => ['type' => 'string'],
+                ],
             ],
         ]];
 
@@ -337,6 +350,53 @@ class ChatService
                     'locale'     => $locale,
                 ];
             }
+
+            if (($call['name'] ?? '') === 'escalate_to_support') {
+                $args = json_decode($call['arguments'] ?? '{}', true) ?: [];
+
+                $supportResult = $this->escalateToSupport(
+                    $session,
+                    $userId,
+                    trim((string) ($args['summary'] ?? $userMessage))
+                );
+
+                $this->storeMessage($session->id, 'tool', null, [
+                    'tool_name' => 'escalate_to_support',
+                    'tool_args' => $args,
+                    'items' => $supportResult,
+                ]);
+
+                $messages[] = [
+                    'role' => 'assistant',
+                    'content' =>
+                        "Here is the support escalation result in JSON format. ".
+                        "Explain the result concisely in the user's language.\n".
+                        json_encode($supportResult, JSON_UNESCAPED_UNICODE),
+                ];
+
+                $res2 = $this->openai([
+                    'model' => env('OPENAI_MODEL', 'gpt-5-mini'),
+                    'input' => $messages,
+                    'store' => false,
+                ]);
+
+                $assistantText = $this->extractAssistantText($res2);
+
+                $this->storeMessage($session->id, 'assistant', $assistantText, ['items' => []]);
+
+                $session->update([
+                    'last_user_message_at' => now(),
+                    'last_assistant_message_at' => now(),
+                ]);
+
+                return [
+                    'session_id' => $session->session_uuid,
+                    'answer' => $assistantText ?? '',
+                    'items' => [],
+                    'locale' => $locale,
+                    'support' => $supportResult,
+                ];
+            }
         }
 
         // === 3) Tool не понадобился — просто логируем ответ ассистента ===
@@ -452,6 +512,42 @@ class ChatService
         return [
             'ok' => true,
             'lead_id' => $result['result'] ?? null,
+        ];
+    }
+
+    private function escalateToSupport(ChatSession $session, ?int $userId, string $summary): array
+    {
+        if (! $userId) {
+            return [
+                'ok' => false,
+                'error' => 'authentication_required',
+            ];
+        }
+
+        $user = \App\Models\User::query()->find($userId);
+
+        if (! $user) {
+            return [
+                'ok' => false,
+                'error' => 'user_not_found',
+            ];
+        }
+
+        $thread = $this->support->createOrGetSupportConversation(
+            $user,
+            $session,
+            $user,
+            $summary,
+            [
+                'source' => 'ai_chat',
+            ]
+        );
+
+        return [
+            'ok' => true,
+            'support_thread_id' => $thread->id,
+            'conversation_id' => $thread->conversation_id,
+            'status' => $thread->status,
         ];
     }
 

@@ -3,6 +3,7 @@
 use App\Http\Middleware\B24Jwt;
 use App\Http\Middleware\DetectClientLocale;
 use App\Http\Middleware\EnsureUserIsActive;
+use App\Http\Middleware\EnsureUserIsNotClient;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -30,6 +31,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'b24.jwt' => B24Jwt::class,
             'active.user' => EnsureUserIsActive::class,
+            'non.client' => EnsureUserIsNotClient::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions) {

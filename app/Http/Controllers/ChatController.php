@@ -25,7 +25,7 @@ class ChatController extends Controller
         ]);
 
         // Если есть авторизация — перезапишем user_id
-        $userId = auth()->id() ?: ($validated['user_id'] ?? null);
+        $userId = $request->user('sanctum')?->id ?: auth()->id() ?: ($validated['user_id'] ?? null);
 
         $reply = $this->chat->reply(
             $validated['message'],
