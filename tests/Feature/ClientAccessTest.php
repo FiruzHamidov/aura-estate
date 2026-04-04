@@ -164,6 +164,14 @@ class ClientAccessTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('client_need_property_type', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('client_need_id');
+            $table->unsignedBigInteger('property_type_id');
+            $table->timestamps();
+            $table->unique(['client_need_id', 'property_type_id']);
+        });
+
         Schema::create('property_statuses', function (Blueprint $table) {
             $table->id();
             $table->string('name');
@@ -358,6 +366,58 @@ class ClientAccessTest extends TestCase
         $response->assertJsonFragment(['id' => $clientA1->id]);
         $response->assertJsonFragment(['id' => $clientA2->id]);
         $response->assertJsonMissing(['full_name' => 'Client B1']);
+    }
+
+    public function test_clients_index_returns_normalized_needs_with_legacy_property_type_fallback(): void
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_ALL_BRANCH,
+        ]);
+
+        $branch = Branch::create(['name' => 'Branch A']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = $this->createUser($agentRole, $branch, 'Agent A');
+        $client = $this->createClient($branch, $agent, $agent, 'Client With Need');
+
+        $propertyTypeId = DB::table('property_types')->insertGetId([
+            'name' => 'Apartment',
+            'slug' => 'apartment',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        DB::table('client_needs')->insert([
+            'client_id' => $client->id,
+            'type_id' => 1,
+            'status_id' => 1,
+            'property_type_id' => $propertyTypeId,
+            'budget_from' => 100000,
+            'budget_to' => 150000,
+            'district' => 'Center',
+            'comment' => 'Urgent need',
+            'created_by' => $agent->id,
+            'responsible_agent_id' => $agent->id,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $this->getJson('/api/clients')
+            ->assertOk()
+            ->assertJsonPath('data.0.id', $client->id)
+            ->assertJsonCount(1, 'data.0.needs')
+            ->assertJsonPath('data.0.needs.0.type_id', 1)
+            ->assertJsonPath('data.0.needs.0.type.id', 1)
+            ->assertJsonPath('data.0.needs.0.type.name', 'Покупка')
+            ->assertJsonPath('data.0.needs.0.status.id', 1)
+            ->assertJsonPath('data.0.needs.0.status.slug', 'new')
+            ->assertJsonPath('data.0.needs.0.property_type_id', $propertyTypeId)
+            ->assertJsonPath('data.0.needs.0.property_type_ids.0', $propertyTypeId)
+            ->assertJsonPath('data.0.needs.0.property_types', [])
+            ->assertJsonPath('data.0.needs.0.responsible_agent.id', $agent->id)
+            ->assertJsonPath('data.0.needs.0.comment', 'Urgent need');
     }
 
     public function test_agent_in_own_only_mode_sees_only_own_clients_and_cannot_open_foreign_one(): void

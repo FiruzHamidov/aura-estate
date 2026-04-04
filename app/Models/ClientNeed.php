@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Facades\Schema;
 
 class ClientNeed extends Model
 {
@@ -88,11 +89,24 @@ class ClientNeed extends Model
     public function getPropertyTypeIdsAttribute(): array
     {
         if ($this->relationLoaded('propertyTypes')) {
-            return $this->propertyTypes
+            $ids = $this->propertyTypes
                 ->pluck('id')
                 ->map(fn ($id) => (int) $id)
                 ->values()
                 ->all();
+
+            if ($ids !== []) {
+                return $ids;
+            }
+
+            return $this->property_type_id ? [(int) $this->property_type_id] : [];
+        }
+
+        static $hasPropertyTypePivotTable;
+        $hasPropertyTypePivotTable ??= Schema::hasTable('client_need_property_type');
+
+        if (!$hasPropertyTypePivotTable) {
+            return $this->property_type_id ? [(int) $this->property_type_id] : [];
         }
 
         $ids = $this->propertyTypes()

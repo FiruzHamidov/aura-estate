@@ -68,6 +68,7 @@ class ClientController extends Controller
             'needs.responsibleAgent',
             'needs.location',
             'needs.propertyType',
+            'needs.propertyTypes',
         ];
     }
 
@@ -270,6 +271,7 @@ class ClientController extends Controller
         ]);
 
         $query = $this->clientAccess->visibleQuery($authUser)
+            ->with($this->showRelations())
             ->withCount(['needs', 'openNeeds']);
 
         if (!empty($validated['search'])) {
