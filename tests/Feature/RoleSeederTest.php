@@ -64,5 +64,6 @@ class RoleSeederTest extends TestCase
             Role::query()->whereIn('slug', collect(Role::systemRoles())->pluck('slug'))->count()
         );
         $this->assertSame('Работа с недвижимостью', $agentRole->description);
+        $this->assertTrue(Role::query()->where('slug', 'intern')->exists());
     }
 }

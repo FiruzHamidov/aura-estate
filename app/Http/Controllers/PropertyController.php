@@ -73,6 +73,11 @@ class PropertyController extends Controller
         return $user;
     }
 
+    private function hasOwnPropertyScope(User $user): bool
+    {
+        return $user->hasRole('agent') || $user->hasRole('intern');
+    }
+
     private function canMutateProperty(User $user, Property $property): bool
     {
         if ($user->hasRole('admin') || $user->hasRole('superadmin')) {
@@ -264,7 +269,7 @@ class PropertyController extends Controller
             // без ограничений
         } elseif (!$user) {
             $query->where('moderation_status', 'approved');
-        } elseif ($user->hasRole('agent')) {
+        } elseif ($this->hasOwnPropertyScope($user)) {
             $query->where('created_by', $user->id);
             if (!$hasStatusFilter) {
                 $query->where('moderation_status', '!=', 'deleted');
@@ -290,7 +295,7 @@ class PropertyController extends Controller
             // без ограничений
         } elseif (!$user) {
             $query->where('moderation_status', 'approved');
-        } elseif ($user->hasRole('agent')) {
+        } elseif ($this->hasOwnPropertyScope($user)) {
             $query->where('created_by', $user->id);
             if (!$hasStatusFilter) {
                 $query->where('moderation_status', '!=', 'deleted');
@@ -713,6 +718,10 @@ class PropertyController extends Controller
 
     public function store(Request $request)
     {
+        $user = $this->crmAuthUser();
+
+        abort_if($user->hasRole('intern'), 403, 'Стажер не может добавлять объекты.');
+
         $validated = $this->validateProperty($request);
         $this->ensureVisibleClientsForProperty($validated);
         $validated = $this->syncPropertyClientSnapshots($validated);
@@ -731,7 +740,7 @@ class PropertyController extends Controller
             }
         }
 
-        $validated['created_by'] = auth()->id();
+        $validated['created_by'] = $user->id;
 //        $validated['moderation_status'] = auth()->user()->hasRole('client') ? 'pending' : 'approved';
         $validated['listing_type'] = $request->input('listing_type', 'regular');
 

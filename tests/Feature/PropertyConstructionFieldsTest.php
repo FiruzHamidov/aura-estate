@@ -160,4 +160,77 @@ class PropertyConstructionFieldsTest extends TestCase
         $response->assertJsonPath('construction_status', 'commissioned');
         $response->assertJsonPath('renovation_permission_status', 'allowed');
     }
+
+    public function test_intern_cannot_create_properties_and_sees_only_own_in_index(): void
+    {
+        $internRole = Role::create([
+            'name' => 'Intern',
+            'slug' => 'intern',
+        ]);
+
+        $agentRole = Role::create([
+            'name' => 'Agent',
+            'slug' => 'agent',
+        ]);
+
+        $intern = User::create([
+            'name' => 'Intern User',
+            'phone' => '930000010',
+            'password' => bcrypt('password'),
+            'role_id' => $internRole->id,
+            'status' => 'active',
+        ]);
+
+        $otherUser = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000011',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $status = \App\Models\PropertyStatus::create(['name' => 'Available']);
+
+        \App\Models\Property::query()->create([
+            'title' => 'Intern Property',
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 100000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'moderation_status' => 'approved',
+            'created_by' => $intern->id,
+            'agent_id' => $intern->id,
+        ]);
+
+        \App\Models\Property::query()->create([
+            'title' => 'Foreign Property',
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 120000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'moderation_status' => 'approved',
+            'created_by' => $otherUser->id,
+            'agent_id' => $otherUser->id,
+        ]);
+
+        Sanctum::actingAs($intern);
+
+        $this->postJson('/api/properties', [
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ])->assertForbidden();
+
+        $response = $this->getJson('/api/properties');
+
+        $response->assertOk();
+        $response->assertJsonCount(1, 'data');
+        $response->assertJsonPath('data.0.title', 'Intern Property');
+        $response->assertJsonMissing(['title' => 'Foreign Property']);
+    }
 }

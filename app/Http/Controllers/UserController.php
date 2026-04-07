@@ -45,7 +45,7 @@ class UserController extends Controller
 
     private function isBranchScopedRole(?string $roleSlug): bool
     {
-        return in_array($roleSlug, ['branch_director', 'rop', 'agent', 'manager', 'operator'], true);
+        return in_array($roleSlug, ['branch_director', 'rop', 'agent', 'manager', 'operator', 'intern'], true);
     }
 
     private function visibleUsersQuery(User $authUser)
@@ -139,9 +139,9 @@ class UserController extends Controller
     {
         return match ($this->roleSlug($authUser)) {
             'superadmin', 'admin' => null,
-            'marketing' => ['marketing', 'branch_director', 'rop', 'agent', 'manager', 'operator', 'client'],
-            'rop' => ['agent', 'manager', 'operator', 'client'],
-            'branch_director' => ['agent', 'manager', 'operator', 'client'],
+            'marketing' => ['marketing', 'branch_director', 'rop', 'agent', 'manager', 'operator', 'intern', 'client'],
+            'rop' => ['agent', 'manager', 'operator', 'intern', 'client'],
+            'branch_director' => ['agent', 'manager', 'operator', 'intern', 'client'],
             default => [],
         };
     }
