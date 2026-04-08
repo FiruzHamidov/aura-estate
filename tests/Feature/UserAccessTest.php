@@ -368,6 +368,65 @@ class UserAccessTest extends TestCase
         ])->assertStatus(422);
     }
 
+    public function test_hr_can_manage_users_globally_but_cannot_assign_admin_or_superadmin_roles(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $hrRole = Role::create(['name' => 'HR', 'slug' => 'hr']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $superadminRole = Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']);
+
+        $hr = User::create([
+            'name' => 'HR User',
+            'phone' => '900000154',
+            'password' => bcrypt('password'),
+            'role_id' => $hrRole->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+
+        $agentB = User::create([
+            'name' => 'Agent B',
+            'phone' => '900000155',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branchB->id,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($hr);
+
+        $this->getJson('/api/user?branch_id='.$branchB->id.'&role=agent&status=active')
+            ->assertOk()
+            ->assertJsonFragment(['id' => $agentB->id]);
+
+        $this->getJson('/api/user/'.$agentB->id)
+            ->assertOk()
+            ->assertJsonPath('id', $agentB->id);
+
+        $this->postJson('/api/user', [
+            'name' => 'HR Created Agent',
+            'phone' => '900000156',
+            'role_id' => $agentRole->id,
+            'branch_id' => $branchB->id,
+        ])->assertCreated()
+            ->assertJsonPath('branch_id', $branchB->id);
+
+        $this->postJson('/api/user', [
+            'name' => 'Blocked Admin',
+            'phone' => '900000157',
+            'role_id' => $adminRole->id,
+        ])->assertStatus(422);
+
+        $this->postJson('/api/user', [
+            'name' => 'Blocked Superadmin',
+            'phone' => '900000158',
+            'role_id' => $superadminRole->id,
+        ])->assertStatus(422);
+    }
+
     public function test_branch_director_cannot_assign_admin_role(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);

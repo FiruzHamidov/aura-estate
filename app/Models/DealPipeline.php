@@ -15,6 +15,8 @@ class DealPipeline extends Model
 
     public const CODE_PROPERTY_CONTROL = 'property_control';
 
+    public const CODE_HR_RECRUITMENT = 'hr_recruitment';
+
     protected $table = 'crm_deal_pipelines';
 
     protected $fillable = [
@@ -39,6 +41,11 @@ class DealPipeline extends Model
     {
         return $this->code === self::CODE_PROPERTY_CONTROL
             || $this->type === self::TYPE_PROPERTY_CONTROL;
+    }
+
+    public function isHrRecruitment(): bool
+    {
+        return $this->code === self::CODE_HR_RECRUITMENT;
     }
 
     public function branch()

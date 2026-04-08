@@ -35,7 +35,7 @@ class UserController extends Controller
 
     private function isPrivilegedRole(?string $roleSlug): bool
     {
-        return in_array($roleSlug, ['superadmin', 'admin', 'marketing'], true);
+        return in_array($roleSlug, ['superadmin', 'admin', 'marketing', 'hr'], true);
     }
 
     private function isBranchScopedManager(?string $roleSlug): bool
@@ -136,6 +136,7 @@ class UserController extends Controller
         return match ($this->roleSlug($authUser)) {
             'superadmin', 'admin' => null,
             'marketing' => ['marketing', 'branch_director', 'rop', 'agent', 'manager', 'operator', 'intern', 'client'],
+            'hr' => ['hr', 'marketing', 'branch_director', 'rop', 'agent', 'manager', 'operator', 'intern', 'client', 'reels_manager'],
             'rop' => ['agent', 'manager', 'operator', 'intern', 'client'],
             'branch_director' => ['agent', 'manager', 'operator', 'intern', 'client'],
             default => [],

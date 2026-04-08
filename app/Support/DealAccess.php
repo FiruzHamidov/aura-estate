@@ -5,6 +5,7 @@ namespace App\Support;
 use App\Models\Client;
 use App\Models\Deal;
 use App\Models\DealPipeline;
+use App\Models\DealStage;
 use App\Models\Lead;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
@@ -42,6 +43,11 @@ class DealAccess
         return $this->pipelineAccess->isBranchScopedRole($roleSlug);
     }
 
+    public function isHrRole(?string $roleSlug): bool
+    {
+        return $this->pipelineAccess->isHrRole($roleSlug);
+    }
+
     public function visibleQuery(User $authUser): Builder
     {
         $roleSlug = $this->roleSlug($authUser);
@@ -59,6 +65,10 @@ class DealAccess
 
         if ($this->isPrivilegedRole($roleSlug)) {
             return $query;
+        }
+
+        if ($this->isHrRole($roleSlug)) {
+            return $query->whereHas('pipeline', fn (Builder $builder) => $builder->where('code', DealPipeline::CODE_HR_RECRUITMENT));
         }
 
         if (! $this->isBranchScopedRole($roleSlug) || empty($authUser->branch_id)) {
@@ -96,6 +106,10 @@ class DealAccess
             $data['branch_id'] = $authUser->branch_id;
         }
 
+        if ($this->isHrRole($roleSlug)) {
+            $data['branch_id'] = null;
+        }
+
         $data['created_by'] ??= $authUser->id;
 
         if (
@@ -113,6 +127,27 @@ class DealAccess
         $roleSlug = $this->roleSlug($authUser);
 
         if (! $this->isBranchScopedRole($roleSlug)) {
+            if ($this->isHrRole($roleSlug)) {
+                $pipelineId = $data['pipeline_id'] ?? null;
+                $stageId = $data['stage_id'] ?? null;
+
+                if ($pipelineId) {
+                    $pipeline = DealPipeline::query()->find($pipelineId);
+
+                    if (! $this->pipelineAccess->isHrPipeline($pipeline)) {
+                        abort(422, 'HR can work only with the HR recruitment pipeline.');
+                    }
+                }
+
+                if ($stageId) {
+                    $stage = DealStage::query()->with('pipeline')->find($stageId);
+
+                    if (! $stage || ! $this->pipelineAccess->isHrPipeline($stage->pipeline)) {
+                        abort(422, 'HR can work only with stages of the HR recruitment pipeline.');
+                    }
+                }
+            }
+
             return;
         }
 

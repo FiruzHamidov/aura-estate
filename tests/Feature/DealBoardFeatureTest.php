@@ -369,6 +369,55 @@ class DealBoardFeatureTest extends TestCase
             ->assertJsonMissing(['title' => $foreignBranchDeal->title]);
     }
 
+    public function test_hr_sees_only_hr_pipeline_and_can_work_with_hr_cards(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $hrRole = Role::create(['name' => 'HR', 'slug' => 'hr']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $hr = $this->createUser($hrRole, $branch, 'HR A');
+        $agent = $this->createUser($agentRole, $branch, 'Agent A');
+
+        [$salesPipeline] = $this->createPipelineWithStages($branch);
+        [$hrPipeline, $hrNewStage, $hrOfferStage] = $this->createHrPipelineWithStages();
+
+        Sanctum::actingAs($hr);
+
+        $this->getJson('/api/deal-pipelines')
+            ->assertOk()
+            ->assertJsonCount(1)
+            ->assertJsonPath('0.id', $hrPipeline->id)
+            ->assertJsonMissing(['id' => $salesPipeline->id]);
+
+        $createdDeal = $this->postJson('/api/deals', [
+            'pipeline_id' => $hrPipeline->id,
+            'stage_id' => $hrNewStage->id,
+            'title' => 'Backend Developer',
+            'responsible_agent_id' => $agent->id,
+        ])->assertCreated()
+            ->assertJsonPath('pipeline_id', $hrPipeline->id)
+            ->assertJsonPath('branch_id', null)
+            ->json();
+
+        $this->postJson('/api/deals', [
+            'pipeline_id' => $salesPipeline->id,
+            'title' => 'Forbidden Sales Deal',
+        ])->assertStatus(422);
+
+        $this->patchJson('/api/deals/'.$createdDeal['id'].'/move', [
+            'stage_id' => $hrOfferStage->id,
+            'position' => 0,
+        ])->assertOk()
+            ->assertJsonPath('stage_id', $hrOfferStage->id);
+
+        $this->getJson('/api/deal-pipelines/'.$hrPipeline->id.'/board')
+            ->assertOk()
+            ->assertJsonFragment(['id' => $createdDeal['id']]);
+
+        $this->getJson('/api/deal-pipelines/'.$salesPipeline->id.'/board')
+            ->assertForbidden();
+    }
+
     public function test_stage_cannot_be_deleted_when_it_has_deals(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);
@@ -460,6 +509,55 @@ class DealBoardFeatureTest extends TestCase
         ]);
 
         return [$pipeline, $newStage, $negotiationStage, $wonStage];
+    }
+
+    private function createHrPipelineWithStages(): array
+    {
+        $pipeline = DealPipeline::create([
+            'name' => 'HR: Найм',
+            'slug' => 'hr_pipeline_'.$this->nextPhone(),
+            'code' => DealPipeline::CODE_HR_RECRUITMENT,
+            'type' => DealPipeline::TYPE_SALES,
+            'branch_id' => null,
+            'sort_order' => 10,
+            'is_default' => false,
+            'is_active' => true,
+        ]);
+
+        $newStage = DealStage::create([
+            'pipeline_id' => $pipeline->id,
+            'name' => 'Новый отклик',
+            'slug' => 'new_application',
+            'sort_order' => 10,
+            'is_default' => true,
+            'is_closed' => false,
+            'is_lost' => false,
+            'is_active' => true,
+        ]);
+
+        $offerStage = DealStage::create([
+            'pipeline_id' => $pipeline->id,
+            'name' => 'Оффер',
+            'slug' => 'offer',
+            'sort_order' => 20,
+            'is_default' => false,
+            'is_closed' => false,
+            'is_lost' => false,
+            'is_active' => true,
+        ]);
+
+        $hiredStage = DealStage::create([
+            'pipeline_id' => $pipeline->id,
+            'name' => 'Нанят',
+            'slug' => 'hired',
+            'sort_order' => 30,
+            'is_default' => false,
+            'is_closed' => true,
+            'is_lost' => false,
+            'is_active' => true,
+        ]);
+
+        return [$pipeline, $newStage, $offerStage, $hiredStage];
     }
 
     private function createDeal(DealPipeline $pipeline, DealStage $stage, Branch $branch, User $agent, Client $client, string $title): Deal

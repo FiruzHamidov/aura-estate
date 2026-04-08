@@ -20,6 +20,11 @@ class DealPipelineAccess
         return in_array($roleSlug, ['superadmin', 'admin', 'marketing'], true);
     }
 
+    public function isHrRole(?string $roleSlug): bool
+    {
+        return $roleSlug === 'hr';
+    }
+
     public function isBranchManager(?string $roleSlug): bool
     {
         return in_array($roleSlug, ['branch_director', 'rop'], true);
@@ -30,12 +35,21 @@ class DealPipelineAccess
         return in_array($roleSlug, ['branch_director', 'rop', 'agent', 'manager', 'operator'], true);
     }
 
+    public function isHrPipeline(?DealPipeline $pipeline): bool
+    {
+        return (bool) ($pipeline?->code === DealPipeline::CODE_HR_RECRUITMENT);
+    }
+
     public function canManage(?User $user, ?DealPipeline $pipeline = null): bool
     {
         $roleSlug = $this->roleSlug($user);
 
         if ($this->isPrivilegedRole($roleSlug)) {
             return true;
+        }
+
+        if ($this->isHrRole($roleSlug)) {
+            return $pipeline ? $this->isHrPipeline($pipeline) : false;
         }
 
         if (! $this->isBranchManager($roleSlug) || empty($user?->branch_id)) {
@@ -57,6 +71,10 @@ class DealPipelineAccess
 
         if ($this->isPrivilegedRole($roleSlug)) {
             return $query;
+        }
+
+        if ($this->isHrRole($roleSlug)) {
+            return $query->where('code', DealPipeline::CODE_HR_RECRUITMENT);
         }
 
         if (! $this->isBranchScopedRole($roleSlug) || empty($authUser->branch_id)) {
@@ -95,6 +113,11 @@ class DealPipelineAccess
             $data['branch_id'] = $authUser->branch_id;
         }
 
+        if ($this->isHrRole($roleSlug)) {
+            $data['branch_id'] = null;
+            $data['code'] = DealPipeline::CODE_HR_RECRUITMENT;
+        }
+
         return $data;
     }
 
@@ -103,6 +126,18 @@ class DealPipelineAccess
         $roleSlug = $this->roleSlug($authUser);
 
         if ($this->isPrivilegedRole($roleSlug)) {
+            return;
+        }
+
+        if ($this->isHrRole($roleSlug)) {
+            if (($data['code'] ?? null) !== DealPipeline::CODE_HR_RECRUITMENT) {
+                abort(422, 'HR can manage only the HR recruitment pipeline.');
+            }
+
+            if (! empty($data['branch_id'])) {
+                abort(422, 'HR pipeline must be global.');
+            }
+
             return;
         }
 

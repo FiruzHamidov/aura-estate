@@ -65,5 +65,6 @@ class RoleSeederTest extends TestCase
         );
         $this->assertSame('Работа с недвижимостью', $agentRole->description);
         $this->assertTrue(Role::query()->where('slug', 'intern')->exists());
+        $this->assertTrue(Role::query()->where('slug', 'hr')->exists());
     }
 }
