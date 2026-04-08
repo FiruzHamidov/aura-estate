@@ -3,9 +3,12 @@
 namespace Tests\Feature;
 
 use App\Models\Role;
+use App\Models\SmsVerificationCode;
 use App\Models\User;
+use App\Services\SmsAuthService;
 use App\Services\TelegramBotService;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
@@ -56,6 +59,16 @@ class TelegramAuthTest extends TestCase
             $table->timestamp('last_used_at')->nullable();
             $table->timestamp('expires_at')->nullable();
             $table->timestamps();
+        });
+
+        Schema::create('sms_verification_codes', function (Blueprint $table) {
+            $table->id();
+            $table->string('phone');
+            $table->string('purpose')->default('login');
+            $table->string('code');
+            $table->timestamp('expires_at');
+            $table->timestamps();
+            $table->unique(['phone', 'purpose']);
         });
 
         config()->set('services.telegram.bot_token', '123456:TEST_BOT_TOKEN');
@@ -266,6 +279,106 @@ class TelegramAuthTest extends TestCase
                 && $request['chat_id'] === '555000222'
                 && $request['text'] === 'Тестовое уведомление';
         });
+    }
+
+    public function test_password_reset_code_can_be_requested_via_telegram_and_used_to_set_new_password(): void
+    {
+        Http::fake([
+            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 99]], 200),
+        ]);
+
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent',
+            'phone' => '992900000101',
+            'password' => bcrypt('old-password'),
+            'role_id' => $role->id,
+            'status' => 'active',
+            'telegram_id' => '701001',
+            'telegram_chat_id' => '880011',
+        ]);
+
+        $this->postJson('/api/password/reset/request', [
+            'phone' => $user->phone,
+            'channel' => 'telegram',
+        ])->assertOk()->assertJsonPath('message', 'Код для сброса пароля отправлен в Telegram');
+
+        $record = SmsVerificationCode::query()
+            ->where('phone', $user->phone)
+            ->where('purpose', SmsVerificationCode::PURPOSE_PASSWORD_RESET)
+            ->first();
+
+        $this->assertNotNull($record);
+
+        $this->postJson('/api/password/reset/confirm', [
+            'phone' => $user->phone,
+            'code' => $record->code,
+            'new_password' => 'new-secret',
+            'new_password_confirmation' => 'new-secret',
+        ])->assertOk()->assertJsonPath('message', 'Пароль успешно сброшен');
+
+        $user->refresh();
+        $this->assertTrue(Hash::check('new-secret', (string) $user->password));
+        $this->assertDatabaseMissing('sms_verification_codes', [
+            'phone' => $user->phone,
+            'purpose' => SmsVerificationCode::PURPOSE_PASSWORD_RESET,
+        ]);
+    }
+
+    public function test_password_reset_code_can_be_requested_via_sms(): void
+    {
+        $smsAuthService = $this->createMock(SmsAuthService::class);
+        $smsAuthService->expects($this->once())
+            ->method('sendVerificationCode')
+            ->with('992900000102', SmsVerificationCode::PURPOSE_PASSWORD_RESET)
+            ->willReturn('123456');
+
+        $this->app->instance(SmsAuthService::class, $smsAuthService);
+
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent',
+            'phone' => '992900000102',
+            'password' => bcrypt('old-password'),
+            'role_id' => $role->id,
+            'status' => 'active',
+        ]);
+
+        $this->postJson('/api/password/reset/request', [
+            'phone' => $user->phone,
+            'channel' => 'sms',
+        ])->assertOk()->assertJsonPath('message', 'Код для сброса пароля отправлен по SMS');
+    }
+
+    public function test_widget_login_fails_after_telegram_link_is_removed_from_deleted_user(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Deleted Agent',
+            'phone' => '992900000103',
+            'password' => bcrypt('password'),
+            'role_id' => $role->id,
+            'status' => 'inactive',
+            'telegram_id' => '701003',
+            'telegram_chat_id' => '880013',
+        ]);
+
+        $user->forceFill([
+            'telegram_id' => null,
+            'telegram_username' => null,
+            'telegram_photo_url' => null,
+            'telegram_chat_id' => null,
+            'telegram_linked_at' => null,
+        ])->save();
+
+        $payload = $this->makeTelegramPayload([
+            'id' => '701003',
+            'first_name' => 'Deleted',
+        ]);
+
+        $this->postJson('/api/telegram/auth/login', $payload)
+            ->assertStatus(404)
+            ->assertJsonPath('message', 'Telegram account is not linked to any user.');
     }
 
     private function makeTelegramPayload(array $overrides = []): array

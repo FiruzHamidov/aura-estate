@@ -62,6 +62,8 @@ Route::get('/ping', fn () => response()->json(['message' => 'API works']));
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/sms/request', [AuthController::class, 'requestSmsCode']);
 Route::post('/sms/verify', [AuthController::class, 'verifySmsCode']);
+Route::post('/password/reset/request', [AuthController::class, 'requestPasswordResetCode']);
+Route::post('/password/reset/confirm', [AuthController::class, 'resetPassword']);
 Route::post('/telegram/auth/login', [TelegramAuthController::class, 'login']);
 Route::post('/lead-requests', [LeadRequestController::class, 'store'])->middleware('throttle:20,1');
 

@@ -524,6 +524,11 @@ class UserController extends Controller
             $user->status = 'inactive';
             $user->remember_token = null;
             $user->password = Hash::make(Str::random(40));
+            $user->telegram_id = null;
+            $user->telegram_username = null;
+            $user->telegram_photo_url = null;
+            $user->telegram_chat_id = null;
+            $user->telegram_linked_at = null;
             $user->save();
             $user->tokens()->delete();
         });

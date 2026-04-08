@@ -2,11 +2,14 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\SmsVerificationCode;
 use App\Models\User;
 use App\Services\SmsAuthService;
+use App\Services\TelegramBotService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
+use RuntimeException;
 
 class AuthController extends Controller
 {
@@ -78,6 +81,96 @@ class AuthController extends Controller
         } catch (\RuntimeException $e) {
             return response()->json(['message' => $e->getMessage()], 500);
         }
+    }
+
+    public function requestPasswordResetCode(
+        Request $request,
+        SmsAuthService $smsAuthService,
+        TelegramBotService $telegramBotService
+    ) {
+        $validated = $request->validate([
+            'phone' => 'required|string',
+            'channel' => 'required|string|in:sms,telegram',
+        ]);
+
+        $user = User::where('phone', $validated['phone'])->first();
+
+        if (! $user) {
+            return response()->json(['message' => 'Пользователь не найден'], 404);
+        }
+
+        if ($inactiveResponse = $this->ensureUserIsActive($user)) {
+            return $inactiveResponse;
+        }
+
+        try {
+            if ($validated['channel'] === 'telegram') {
+                if (! $user->telegram_id || ! $user->telegram_chat_id) {
+                    return response()->json([
+                        'message' => 'Для этого пользователя не подключён Telegram для получения кода.',
+                    ], 422);
+                }
+
+                $code = $smsAuthService->storeVerificationCode(
+                    $validated['phone'],
+                    SmsVerificationCode::PURPOSE_PASSWORD_RESET
+                );
+
+                $telegramBotService->sendUserMessage(
+                    $user,
+                    "Код для сброса пароля: {$code}\nКод действует 5 минут."
+                );
+
+                return response()->json(['message' => 'Код для сброса пароля отправлен в Telegram']);
+            }
+
+            $smsAuthService->sendVerificationCode(
+                $validated['phone'],
+                SmsVerificationCode::PURPOSE_PASSWORD_RESET
+            );
+
+            return response()->json(['message' => 'Код для сброса пароля отправлен по SMS']);
+        } catch (RuntimeException $e) {
+            return response()->json(['message' => $e->getMessage()], 500);
+        }
+    }
+
+    public function resetPassword(Request $request, SmsAuthService $smsAuthService)
+    {
+        $validated = $request->validate([
+            'phone' => 'required|string',
+            'code' => 'required|string',
+            'new_password' => 'required|string|min:6|confirmed',
+        ]);
+
+        $user = User::where('phone', $validated['phone'])->first();
+
+        if (! $user) {
+            return response()->json(['message' => 'Пользователь не найден'], 404);
+        }
+
+        if ($inactiveResponse = $this->ensureUserIsActive($user)) {
+            return $inactiveResponse;
+        }
+
+        if (! $smsAuthService->verifyCode(
+            $validated['phone'],
+            $validated['code'],
+            SmsVerificationCode::PURPOSE_PASSWORD_RESET,
+            true
+        )) {
+            return response()->json(['message' => 'Неверный код'], 401);
+        }
+
+        $user->password = Hash::make($validated['new_password']);
+        $user->remember_token = null;
+        $user->save();
+
+        if (method_exists($user, 'tokens')) {
+            $user->tokens()->delete();
+        }
+
+        return response()->json(['message' => 'Пароль успешно сброшен']);
     }
 
     // Проверка кода из SMS
