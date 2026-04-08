@@ -206,6 +206,42 @@ class LeadFeatureTest extends TestCase
             ->assertJsonMissing(['full_name' => $foreignBranchLead->full_name]);
     }
 
+    public function test_manager_sees_and_updates_all_branch_leads(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $managerRole = Role::create(['name' => 'Manager', 'slug' => 'manager']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $manager = $this->createUser($managerRole, $branchA, 'Manager A');
+        $agentA = $this->createUser($agentRole, $branchA, 'Agent A');
+        $agentB = $this->createUser($agentRole, $branchA, 'Agent B');
+        $agentForeign = $this->createUser($agentRole, $branchB, 'Agent C');
+
+        $leadA = $this->createLead($branchA, $agentA, $agentA, 'Lead A', '992950000110');
+        $leadB = $this->createLead($branchA, $agentB, $agentB, 'Lead B', '992950000111');
+        $leadForeign = $this->createLead($branchB, $agentForeign, $agentForeign, 'Lead C', '992950000112');
+
+        Sanctum::actingAs($manager);
+
+        $this->getJson('/api/leads')
+            ->assertOk()
+            ->assertJsonCount(2, 'data')
+            ->assertJsonFragment(['id' => $leadA->id])
+            ->assertJsonFragment(['id' => $leadB->id])
+            ->assertJsonMissing(['full_name' => $leadForeign->full_name]);
+
+        $this->patchJson('/api/leads/'.$leadB->id, [
+            'full_name' => 'Lead B Updated',
+            'responsible_agent_id' => $agentA->id,
+        ])->assertOk()
+            ->assertJsonPath('full_name', 'Lead B Updated')
+            ->assertJsonPath('responsible_agent_id', $agentA->id);
+
+        $this->getJson('/api/leads/'.$leadForeign->id)->assertForbidden();
+    }
+
     public function test_converting_lead_reuses_existing_client_and_writes_audit_log(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);

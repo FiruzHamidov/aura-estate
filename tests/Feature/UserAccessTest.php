@@ -7,6 +7,7 @@ use App\Models\BranchGroup;
 use App\Models\Role;
 use App\Models\User;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
@@ -69,6 +70,23 @@ class UserAccessTest extends TestCase
             $table->text('abilities')->nullable();
             $table->timestamp('last_used_at')->nullable();
             $table->timestamp('expires_at')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('property_statuses', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->unique();
+            $table->timestamps();
+        });
+
+        Schema::create('properties', function (Blueprint $table) {
+            $table->id();
+            $table->string('title');
+            $table->unsignedBigInteger('status_id')->nullable();
+            $table->string('moderation_status')->nullable();
+            $table->unsignedBigInteger('created_by')->nullable();
+            $table->unsignedBigInteger('agent_id')->nullable();
             $table->timestamps();
         });
     }
@@ -582,5 +600,105 @@ class UserAccessTest extends TestCase
         $this->getJson('/api/user/' . $createdUserId)
             ->assertOk()
             ->assertJsonPath('branch_group.id', $groupA->id);
+    }
+
+    public function test_destroy_user_does_not_transfer_closed_properties(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+
+        $superadminRole = Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $superadmin = User::create([
+            'name' => 'Superadmin',
+            'phone' => '900000081',
+            'password' => bcrypt('password'),
+            'role_id' => $superadminRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $dismissedAgent = User::create([
+            'name' => 'Dismissed Agent',
+            'phone' => '900000082',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $targetAgent = User::create([
+            'name' => 'Target Agent',
+            'phone' => '900000083',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $availableStatusId = DB::table('property_statuses')->insertGetId([
+            'name' => 'Доступен',
+            'slug' => 'available',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $soldStatusId = DB::table('property_statuses')->insertGetId([
+            'name' => 'Продан',
+            'slug' => 'sold',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $openPropertyId = DB::table('properties')->insertGetId([
+            'title' => 'Open property',
+            'status_id' => $availableStatusId,
+            'moderation_status' => 'approved',
+            'created_by' => $dismissedAgent->id,
+            'agent_id' => $dismissedAgent->id,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $closedByStatusPropertyId = DB::table('properties')->insertGetId([
+            'title' => 'Closed by status',
+            'status_id' => $soldStatusId,
+            'moderation_status' => 'approved',
+            'created_by' => $dismissedAgent->id,
+            'agent_id' => $dismissedAgent->id,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $closedByModerationPropertyId = DB::table('properties')->insertGetId([
+            'title' => 'Closed by moderation',
+            'status_id' => $availableStatusId,
+            'moderation_status' => 'sold',
+            'created_by' => $dismissedAgent->id,
+            'agent_id' => $dismissedAgent->id,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        Sanctum::actingAs($superadmin);
+
+        $this->deleteJson('/api/user/'.$dismissedAgent->id, [
+            'agent_id' => $targetAgent->id,
+        ])->assertOk();
+
+        $openProperty = DB::table('properties')->where('id', $openPropertyId)->first();
+        $closedByStatusProperty = DB::table('properties')->where('id', $closedByStatusPropertyId)->first();
+        $closedByModerationProperty = DB::table('properties')->where('id', $closedByModerationPropertyId)->first();
+
+        $this->assertSame($targetAgent->id, $openProperty->created_by);
+        $this->assertSame($targetAgent->id, $openProperty->agent_id);
+
+        $this->assertSame($dismissedAgent->id, $closedByStatusProperty->created_by);
+        $this->assertSame($dismissedAgent->id, $closedByStatusProperty->agent_id);
+
+        $this->assertSame($dismissedAgent->id, $closedByModerationProperty->created_by);
+        $this->assertSame($dismissedAgent->id, $closedByModerationProperty->agent_id);
+
+        $this->assertSame('inactive', $dismissedAgent->fresh()->status);
     }
 }

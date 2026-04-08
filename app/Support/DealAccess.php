@@ -32,9 +32,9 @@ class DealAccess
         return $this->pipelineAccess->isBranchManager($roleSlug);
     }
 
-    public function isManagerScopedRole(?string $roleSlug): bool
+    public function isBranchWideDealRole(?string $roleSlug): bool
     {
-        return $roleSlug === 'manager';
+        return in_array($roleSlug, ['branch_director', 'rop', 'manager'], true);
     }
 
     public function isBranchScopedRole(?string $roleSlug): bool
@@ -67,11 +67,7 @@ class DealAccess
 
         $query->where('branch_id', $authUser->branch_id);
 
-        if ($this->isManagerScopedRole($roleSlug)) {
-            return $query->whereHas('pipeline', fn (Builder $builder) => $builder->where('code', DealPipeline::CODE_PROPERTY_CONTROL));
-        }
-
-        if ($this->isBranchManager($roleSlug)) {
+        if ($this->isBranchWideDealRole($roleSlug)) {
             return $query;
         }
 

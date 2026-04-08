@@ -64,10 +64,6 @@ class UserController extends Controller
 
         $query->where('branch_id', $authUser->branch_id);
 
-        if ($roleSlug === 'rop') {
-            $query->whereHas('role', fn ($q) => $q->where('slug', '!=', 'branch_director'));
-        }
-
         return $query;
     }
 
@@ -146,7 +142,7 @@ class UserController extends Controller
         };
     }
 
-    private function resolveTargetRole(Request $request, ?User $targetUser = null): ?Role
+    private function resolveRequestedRole(Request $request, ?User $targetUser = null): ?Role
     {
         if ($request->filled('role_id')) {
             return Role::find($request->integer('role_id'));
@@ -222,6 +218,28 @@ class UserController extends Controller
         return $data;
     }
 
+    private function transferablePropertiesQuery(User $user): Builder
+    {
+        $closedModerationStatuses = ['sold', 'rented', 'sold_by_owner'];
+        $closedStatusIds = DB::table('property_statuses')
+            ->whereIn('slug', ['sold', 'rented'])
+            ->pluck('id')
+            ->all();
+
+        return Property::query()
+            ->where('created_by', $user->id)
+            ->where(function (Builder $query) use ($closedModerationStatuses) {
+                $query->whereNull('moderation_status')
+                    ->orWhereNotIn('moderation_status', $closedModerationStatuses);
+            })
+            ->when(! empty($closedStatusIds), function (Builder $query) use ($closedStatusIds) {
+                $query->where(function (Builder $statusQuery) use ($closedStatusIds) {
+                    $statusQuery->whereNull('status_id')
+                        ->orWhereNotIn('status_id', $closedStatusIds);
+                });
+            });
+    }
+
     // Список всех пользователей
     public function index(Request $request)
     {
@@ -274,7 +292,7 @@ class UserController extends Controller
             'password' => 'nullable|string|min:6',
         ]);
 
-        $targetRole = $this->resolveTargetRole($request);
+        $targetRole = $this->resolveRequestedRole($request);
         $this->authorizeAssignedRole($authUser, $targetRole);
 
         $data = $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'birthday', 'description']);
@@ -346,8 +364,11 @@ class UserController extends Controller
             'password' => 'nullable|string|min:6',
         ]);
 
-        $targetRole = $this->resolveTargetRole($request, $user);
-        $this->authorizeAssignedRole($authUser, $targetRole);
+        $targetRole = $this->resolveRequestedRole($request, $user);
+
+        if ($request->filled('role_id')) {
+            $this->authorizeAssignedRole($authUser, $targetRole);
+        }
 
         $data = array_merge([
             'branch_id' => $user->branch_id,
@@ -462,8 +483,8 @@ class UserController extends Controller
         }
 
         DB::transaction(function () use ($user, $distribute, $agentId) {
-            // Блокируем набор properties пользователя на время операции
-            $props = Property::where('created_by', $user->id)
+            // Передаём только активные объекты; закрытые остаются у уволенного пользователя.
+            $props = $this->transferablePropertiesQuery($user)
                 ->lockForUpdate()
                 ->get(['id', 'created_by']);
 
@@ -493,8 +514,8 @@ class UserController extends Controller
                         $i++;
                     }
                 } else {
-                    // Передаём все объекты одному агенту
-                    Property::where('created_by', $user->id)->update(['agent_id' => $agentId, 'created_by' => $agentId]);
+                    Property::whereKey($props->pluck('id')->all())
+                        ->update(['agent_id' => $agentId, 'created_by' => $agentId]);
                 }
             }
 

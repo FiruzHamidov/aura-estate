@@ -10,6 +10,7 @@ use App\Services\Messaging\MessageAccessService;
 use App\Services\NotificationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Log;
 
 class ConversationMessageController extends Controller
 {
@@ -83,6 +84,13 @@ class ConversationMessageController extends Controller
             $authUser,
             $validated['body']
         );
+
+        Log::info('Conversation message created, starting notification pipeline.', [
+            'conversation_id' => $conversation->id,
+            'message_id' => $message->id,
+            'author_id' => $authUser->id,
+            'body_preview' => mb_strimwidth((string) $validated['body'], 0, 80, '...'),
+        ]);
 
         $this->notifications->handleConversationMessageCreated($message);
 

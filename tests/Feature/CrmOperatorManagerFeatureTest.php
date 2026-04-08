@@ -13,6 +13,7 @@ use App\Models\Lead;
 use App\Models\Property;
 use App\Models\Role;
 use App\Models\User;
+use App\Support\ClientAccess;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
@@ -64,6 +65,12 @@ class CrmOperatorManagerFeatureTest extends TestCase
             $table->boolean('is_business')->default(false);
             $table->unsignedInteger('sort_order')->default(0);
             $table->boolean('is_active')->default(true);
+            $table->timestamps();
+        });
+
+        Schema::create('settings', function (Blueprint $table) {
+            $table->string('key')->primary();
+            $table->text('value')->nullable();
             $table->timestamps();
         });
 
@@ -266,6 +273,13 @@ class CrmOperatorManagerFeatureTest extends TestCase
             'is_active' => true,
         ]);
 
+        \DB::table('settings')->insert([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_ALL_BRANCH,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
         \DB::table('client_need_types')->insert([
             'id' => 1,
             'name' => 'Продажа',
@@ -305,7 +319,7 @@ class CrmOperatorManagerFeatureTest extends TestCase
         $this->getJson('/api/leads/'.$leadForeign->id)->assertForbidden();
     }
 
-    public function test_manager_sees_only_branch_property_control_cards_and_property_status_reopens_same_card(): void
+    public function test_manager_sees_all_branch_deals_and_property_status_reopens_same_card(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
         $branchB = Branch::create(['name' => 'Branch B']);
@@ -381,9 +395,10 @@ class CrmOperatorManagerFeatureTest extends TestCase
 
         $this->getJson('/api/deals')
             ->assertOk()
-            ->assertJsonCount(1, 'data')
-            ->assertJsonPath('data.0.id', $createdCard->id)
-            ->assertJsonPath('data.0.pipeline.code', DealPipeline::CODE_PROPERTY_CONTROL);
+            ->assertJsonCount(2, 'data')
+            ->assertJsonFragment(['id' => $createdCard->id])
+            ->assertJsonFragment(['title' => 'Regular Sales Deal'])
+            ->assertJsonMissing(['title' => 'Foreign Property Control Deal']);
 
         Sanctum::actingAs($agentA);
         $property->update(['moderation_status' => 'approved']);
@@ -397,6 +412,18 @@ class CrmOperatorManagerFeatureTest extends TestCase
         $this->assertSame('new', $reopenedCard->stage?->slug);
         $this->assertSame(1, Deal::query()->where('primary_property_id', $property->id)->count());
         $this->assertSame($propertyControlPipeline->id, $reopenedCard->pipeline_id);
+
+        Sanctum::actingAs($manager);
+
+        $this->postJson('/api/deals', [
+            'title' => 'Manager Sales Deal',
+            'responsible_agent_id' => $agentA->id,
+            'pipeline_id' => $salesPipeline->id,
+            'stage_id' => $salesStage->id,
+        ])->assertCreated()
+            ->assertJsonPath('pipeline_id', $salesPipeline->id)
+            ->assertJsonPath('responsible_agent_id', $agentA->id)
+            ->assertJsonPath('branch_id', $branchA->id);
     }
 
     public function test_branch_director_report_is_limited_to_own_branch_operators(): void

@@ -11,11 +11,13 @@ use App\Models\Notification;
 use App\Models\Selection;
 use App\Models\User;
 use App\Support\Notifications\NotificationCategory;
+use App\Support\Notifications\NotificationChannel;
 use App\Support\Notifications\NotificationStatus;
 use App\Support\Notifications\NotificationType;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 
 class NotificationService
@@ -358,8 +360,29 @@ class NotificationService
     {
         $message->loadMissing('conversation', 'author.role');
 
+        $recipients = $this->recipients->conversationParticipants($message->conversation, $message->author_id);
+        $channels = NotificationType::defaultChannels(NotificationType::CHAT_NEW_MESSAGE);
+
+        Log::info('Handling chat_new_message notification.', [
+            'conversation_id' => $message->conversation_id,
+            'message_id' => $message->id,
+            'author_id' => $message->author_id,
+            'recipient_ids' => $recipients->pluck('id')->values()->all(),
+            'channels' => $channels,
+            'notifications_table_exists' => $this->notificationsTableExists(),
+        ]);
+
+        if (! in_array(NotificationChannel::TELEGRAM, $channels, true)) {
+            Log::warning('Telegram delivery is not configured for chat_new_message notifications.', [
+                'conversation_id' => $message->conversation_id,
+                'message_id' => $message->id,
+                'configured_channels' => $channels,
+                'reason' => 'NotificationType::defaultChannels(chat_new_message) does not include telegram.',
+            ]);
+        }
+
         $this->notifyUsers(
-            $this->recipients->conversationParticipants($message->conversation, $message->author_id),
+            $recipients,
             NotificationType::CHAT_NEW_MESSAGE,
             'Новое сообщение от клиента',
             mb_strimwidth((string) $message->body, 0, 120, '...'),
@@ -528,6 +551,15 @@ class NotificationService
             ->reject(fn (User $user) => $actor && (int) $user->id === (int) $actor->id)
             ->values();
 
+        Log::info('Notification recipients resolved.', [
+            'type' => $type,
+            'actor_id' => $actor?->id,
+            'recipient_ids' => $recipients->pluck('id')->values()->all(),
+            'subject_type' => $subject?->getMorphClass(),
+            'subject_id' => $subject?->getKey(),
+            'channels' => array_values($options['channels'] ?? NotificationType::defaultChannels($type)),
+        ]);
+
         foreach ($recipients as $recipient) {
             $this->createOrAggregate($recipient, $type, $title, $body, $subject, $actor, $options);
         }
@@ -543,13 +575,30 @@ class NotificationService
         array $options
     ): Notification {
         if (! $this->notificationsTableExists()) {
+            Log::warning('Notification skipped because notifications table does not exist.', [
+                'recipient_user_id' => $recipient->id,
+                'type' => $type,
+            ]);
+
             return new Notification();
         }
 
         $now = now();
         $dedupeKey = $options['dedupe_key'] ?? $type.':'.$recipient->id.':'.($subject?->getMorphClass() ?? 'none').':'.($subject?->getKey() ?? 'none');
+        $channels = array_values($options['channels'] ?? NotificationType::defaultChannels($type));
         $quietWindowMinutes = (int) ($options['quiet_window_minutes'] ?? NotificationType::defaultQuietWindowMinutes($type));
         $windowStart = $now->copy()->subMinutes($quietWindowMinutes);
+
+        Log::info('Preparing notification record.', [
+            'recipient_user_id' => $recipient->id,
+            'recipient_telegram_chat_id' => $recipient->telegram_chat_id,
+            'type' => $type,
+            'channels' => $channels,
+            'dedupe_key' => $dedupeKey,
+            'quiet_window_minutes' => $quietWindowMinutes,
+            'subject_type' => $subject?->getMorphClass(),
+            'subject_id' => $subject?->getKey(),
+        ]);
 
         $existing = Notification::query()
             ->where('user_id', $recipient->id)
@@ -567,7 +616,7 @@ class NotificationService
             'category' => $options['category'] ?? NotificationType::category($type),
             'status' => NotificationStatus::UNREAD,
             'priority' => $options['priority'] ?? NotificationType::defaultPriority($type),
-            'channels' => array_values($options['channels'] ?? NotificationType::defaultChannels($type)),
+            'channels' => $channels,
             'title' => $title,
             'body' => $body,
             'action_url' => $options['action_url'] ?? null,
@@ -590,13 +639,39 @@ class NotificationService
                 'occurrences_count' => (int) $existing->occurrences_count + 1,
             ])->save();
 
+            Log::info('Notification aggregated into existing record.', [
+                'notification_id' => $existing->id,
+                'recipient_user_id' => $recipient->id,
+                'type' => $type,
+                'occurrences_count' => $existing->occurrences_count,
+            ]);
+
             return $existing;
         }
 
-        return Notification::query()->create([
+        $notification = Notification::query()->create([
             ...$payload,
             'occurrences_count' => 1,
         ]);
+
+        Log::info('Notification record created.', [
+            'notification_id' => $notification->id,
+            'recipient_user_id' => $recipient->id,
+            'type' => $type,
+            'channels' => $channels,
+            'telegram_chat_id' => $recipient->telegram_chat_id,
+        ]);
+
+        if (in_array(NotificationChannel::TELEGRAM, $channels, true)) {
+            Log::info('Notification is marked for telegram delivery, but no delivery worker is implemented in NotificationService yet.', [
+                'notification_id' => $notification->id,
+                'recipient_user_id' => $recipient->id,
+                'type' => $type,
+                'telegram_chat_id' => $recipient->telegram_chat_id,
+            ]);
+        }
+
+        return $notification;
     }
 
     private function dispatchLeadSlaDueSoon(): int

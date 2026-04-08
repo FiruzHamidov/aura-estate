@@ -22,7 +22,7 @@ class LeadAccess
 
     public function isBranchWideLeadRole(?string $roleSlug): bool
     {
-        return in_array($roleSlug, ['branch_director', 'rop', 'operator'], true);
+        return in_array($roleSlug, ['branch_director', 'rop', 'operator', 'manager'], true);
     }
 
     public function isBranchScopedRole(?string $roleSlug): bool

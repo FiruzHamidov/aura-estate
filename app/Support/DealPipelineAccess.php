@@ -25,11 +25,6 @@ class DealPipelineAccess
         return in_array($roleSlug, ['branch_director', 'rop'], true);
     }
 
-    public function isManagerScopedRole(?string $roleSlug): bool
-    {
-        return $roleSlug === 'manager';
-    }
-
     public function isBranchScopedRole(?string $roleSlug): bool
     {
         return in_array($roleSlug, ['branch_director', 'rop', 'agent', 'manager', 'operator'], true);
@@ -73,10 +68,6 @@ class DealPipelineAccess
                 ->whereNull('branch_id')
                 ->orWhere('branch_id', $authUser->branch_id);
         });
-
-        if ($this->isManagerScopedRole($roleSlug)) {
-            $query->where('code', DealPipeline::CODE_PROPERTY_CONTROL);
-        }
 
         return $query;
     }
