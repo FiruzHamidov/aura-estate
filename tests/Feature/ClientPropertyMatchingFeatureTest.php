@@ -329,6 +329,76 @@ class ClientPropertyMatchingFeatureTest extends TestCase
         $this->assertSame([$visibleClient->id], collect($response->json('matches'))->pluck('client_id')->all());
     }
 
+    public function test_property_matching_clients_limits_agents_to_their_own_clients_even_with_branch_visibility(): void
+    {
+        [$agentA, $agentB, $propertyTypeId, $repairTypeId, $locationId] = $this->seedBaseContext();
+
+        Setting::query()->updateOrCreate(
+            ['key' => ClientAccess::VISIBILITY_SETTING_KEY],
+            ['value' => ClientAccess::VISIBILITY_ALL_BRANCH]
+        );
+
+        $ownClient = $this->createClient($agentA, 'Own Buyer');
+        $branchClient = $this->createClient($agentB, 'Branch Buyer');
+
+        $ownNeed = $this->createNeed($ownClient, $agentA, [
+            'location_id' => $locationId,
+            'district' => 'Center',
+            'property_type_id' => $propertyTypeId,
+            'repair_type_id' => $repairTypeId,
+            'budget_from' => 100000,
+            'budget_to' => 120000,
+            'budget_total' => 120000,
+            'rooms_from' => 2,
+            'rooms_to' => 3,
+            'area_from' => 70,
+            'area_to' => 90,
+        ]);
+
+        $this->createNeed($branchClient, $agentB, [
+            'location_id' => $locationId,
+            'district' => 'Center',
+            'property_type_id' => $propertyTypeId,
+            'repair_type_id' => $repairTypeId,
+            'budget_from' => 100000,
+            'budget_to' => 120000,
+            'budget_total' => 120000,
+            'rooms_from' => 2,
+            'rooms_to' => 3,
+            'area_from' => 70,
+            'area_to' => 90,
+        ]);
+
+        $property = Property::create([
+            'title' => 'Center apartment',
+            'type_id' => $propertyTypeId,
+            'location_id' => $locationId,
+            'repair_type_id' => $repairTypeId,
+            'price' => 110000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'rooms' => 3,
+            'total_area' => 82,
+            'district' => 'Center',
+            'moderation_status' => 'approved',
+            'created_by' => $agentA->id,
+            'agent_id' => $agentA->id,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        Sanctum::actingAs($agentA);
+
+        $response = $this->getJson('/api/properties/' . $property->id . '/matching-clients');
+
+        $response->assertOk()
+            ->assertJsonCount(1, 'matches')
+            ->assertJsonPath('matches.0.client_id', $ownClient->id)
+            ->assertJsonPath('matches.0.need_id', $ownNeed->id);
+
+        $this->assertSame([$ownClient->id], collect($response->json('matches'))->pluck('client_id')->all());
+    }
+
     public function test_client_matching_properties_groups_results_by_open_need_and_skips_irrelevant_objects(): void
     {
         [$agentA, $agentB, $propertyTypeId, $repairTypeId, $locationId] = $this->seedBaseContext();

@@ -160,13 +160,13 @@ class BookingAccessTest extends TestCase
         $response = $this->getJson('/api/bookings?branch_id=' . $branchB->id . '&agent_id=' . $agentB->id);
 
         $response->assertOk();
-        $response->assertJsonCount(0);
+        $response->assertJsonCount(0, 'data');
 
         $response = $this->getJson('/api/bookings');
 
         $response->assertOk();
-        $response->assertJsonCount(1);
-        $response->assertJsonPath('0.id', $bookingA->id);
+        $response->assertJsonCount(1, 'data');
+        $response->assertJsonPath('data.0.id', $bookingA->id);
     }
 
     public function test_superadmin_sees_all_bookings_and_can_filter_any_branch_globally(): void
@@ -238,14 +238,14 @@ class BookingAccessTest extends TestCase
 
         $all = $this->getJson('/api/bookings');
         $all->assertOk();
-        $all->assertJsonCount(2);
+        $all->assertJsonCount(2, 'data');
         $all->assertJsonFragment(['id' => $bookingA->id]);
         $all->assertJsonFragment(['id' => $bookingB->id]);
 
         $filtered = $this->getJson('/api/bookings?branch_id=' . $branchB->id);
         $filtered->assertOk();
-        $filtered->assertJsonCount(1);
-        $filtered->assertJsonPath('0.id', $bookingB->id);
+        $filtered->assertJsonCount(1, 'data');
+        $filtered->assertJsonPath('data.0.id', $bookingB->id);
     }
 
     public function test_client_only_sees_own_bookings_and_cannot_open_foreign_booking(): void
@@ -310,8 +310,8 @@ class BookingAccessTest extends TestCase
 
         $index = $this->getJson('/api/bookings');
         $index->assertOk();
-        $index->assertJsonCount(1);
-        $index->assertJsonPath('0.id', $bookingA->id);
+        $index->assertJsonCount(1, 'data');
+        $index->assertJsonPath('data.0.id', $bookingA->id);
 
         $ownShow = $this->getJson('/api/bookings/'.$bookingA->id);
         $ownShow->assertOk();
@@ -319,5 +319,66 @@ class BookingAccessTest extends TestCase
 
         $foreignShow = $this->getJson('/api/bookings/'.$bookingB->id);
         $foreignShow->assertForbidden();
+    }
+
+    public function test_bookings_index_is_paginated(): void
+    {
+        $branch = Branch::create(['name' => 'Main Branch']);
+
+        $superadminRole = Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $superadmin = User::create([
+            'name' => 'Superadmin',
+            'phone' => '910000031',
+            'password' => bcrypt('password'),
+            'role_id' => $superadminRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $agent = User::create([
+            'name' => 'Agent',
+            'phone' => '910000032',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $property = Property::create([
+            'title' => 'Property',
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+        ]);
+
+        Booking::create([
+            'property_id' => $property->id,
+            'agent_id' => $agent->id,
+            'start_time' => now()->toDateTimeString(),
+            'end_time' => now()->addHour()->toDateTimeString(),
+            'client_name' => 'Client A',
+            'client_phone' => '920000031',
+        ]);
+
+        Booking::create([
+            'property_id' => $property->id,
+            'agent_id' => $agent->id,
+            'start_time' => now()->addDay()->toDateTimeString(),
+            'end_time' => now()->addDay()->addHour()->toDateTimeString(),
+            'client_name' => 'Client B',
+            'client_phone' => '920000032',
+        ]);
+
+        Sanctum::actingAs($superadmin);
+
+        $response = $this->getJson('/api/bookings?per_page=1');
+
+        $response->assertOk();
+        $response->assertJsonCount(1, 'data');
+        $response->assertJsonPath('per_page', 1);
+        $response->assertJsonPath('total', 2);
+        $response->assertJsonPath('current_page', 1);
+        $response->assertJsonPath('last_page', 2);
     }
 }

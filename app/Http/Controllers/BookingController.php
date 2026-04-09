@@ -314,6 +314,10 @@ class BookingController extends Controller
 
     public function index(Request $request)
     {
+        $validated = $request->validate([
+            'per_page' => 'nullable|integer|min:1|max:100',
+        ]);
+
         $q = Booking::query()->with(['property', 'agent', 'client.type']);
 
         // from / to: convert to UTC for DB comparison
@@ -339,10 +343,14 @@ class BookingController extends Controller
 
         $this->applyBranchAccessForAgents($request, $q, 'agent_id');
 
-        $bookings = $q->orderBy('start_time')->get();
-        $bookings->transform(fn (Booking $booking) => $this->transformBookingForResponse($booking));
+        $bookings = $q->orderBy('start_time')
+            ->paginate((int) ($validated['per_page'] ?? 20))
+            ->withQueryString();
 
-        return $bookings;
+        $bookings->getCollection()
+            ->transform(fn (Booking $booking) => $this->transformBookingForResponse($booking));
+
+        return response()->json($bookings);
     }
 
     public function store(Request $request)

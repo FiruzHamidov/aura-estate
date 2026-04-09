@@ -20,6 +20,8 @@ class ClientPropertyMatcher
 
     public function forProperty(User $authUser, Property $property, int $limit = 10): array
     {
+        $roleSlug = $this->clientAccess->roleSlug($authUser);
+
         $clients = $this->clientAccess->visibleQuery($authUser)
             ->where('clients.status', 'active')
             ->whereIn('clients.contact_kind', Client::kindsMatchingFilter(Client::CONTACT_KIND_BUYER))
@@ -35,8 +37,16 @@ class ClientPropertyMatcher
                 },
             ])
             ->orderByDesc('clients.id')
-            ->limit(max($limit * 5, 50))
-            ->get();
+            ->limit(max($limit * 5, 50));
+
+        if ($roleSlug === 'agent') {
+            $clients->where(function (Builder $query) use ($authUser) {
+                $query->where('clients.responsible_agent_id', $authUser->id)
+                    ->orWhere('clients.created_by', $authUser->id);
+            });
+        }
+
+        $clients = $clients->get();
 
         return $clients
             ->flatMap(function (Client $client) use ($property) {
