@@ -1282,10 +1282,26 @@ class PropertyController extends Controller
         // ограничимся первыми 3-4 токенами, чтобы не раздувать запрос
         $tokens = array_slice($tokens, 0, 4);
 
-        // Нужны совпадения хотя бы двух токенов
+        if (count($tokens) === 1) {
+            $q->where('address', 'like', '%' . $tokens[0] . '%');
+            return;
+        }
+
+        // Нужны совпадения хотя бы двух токенов.
         $q->where(function ($qq) use ($tokens) {
-            foreach ($tokens as $i => $t) {
-                $qq->orWhere('address', 'like', '%' . $t . '%');
+            $tokenCount = count($tokens);
+
+            for ($i = 0; $i < $tokenCount; $i++) {
+                for ($j = $i + 1; $j < $tokenCount; $j++) {
+                    $first = $tokens[$i];
+                    $second = $tokens[$j];
+
+                    $qq->orWhere(function ($pairQuery) use ($first, $second) {
+                        $pairQuery
+                            ->where('address', 'like', '%' . $first . '%')
+                            ->where('address', 'like', '%' . $second . '%');
+                    });
+                }
             }
         });
     }
@@ -1304,6 +1320,11 @@ class PropertyController extends Controller
         $dLat = 0.0015; // ~ 167 м
         $dLng = 0.0015 * max(0.2, cos(deg2rad(max(1e-6, $lat))));
         return abs($lat - $candLat) <= $dLat && abs($lng - $candLng) <= $dLng;
+    }
+
+    private function hasSupportingDuplicateSignal(bool $floorMatch, bool $areaMatch, bool $geoNear, float $addrScore): bool
+    {
+        return $floorMatch || $areaMatch || $geoNear || $addrScore >= 85.0;
     }
 
     /**
@@ -1329,7 +1350,8 @@ class PropertyController extends Controller
                 'id','title','address','owner_name','owner_phone',
                 'total_area','floor','price','currency','created_at','moderation_status',
                 'latitude','longitude'
-            ]);
+            ])
+            ->whereNotIn('moderation_status', ['deleted', 'rejected', 'denied', 'draft', 'sold', 'rented', 'sold_by_owner']);
 
         // --- Грубая SQL-фаза: сильно сузим кандидатов ---
         $q->where(function ($qq) use ($phoneNorm, $addrNormNew, $floor, $area, $latNew, $lngNew) {
@@ -1382,6 +1404,7 @@ class PropertyController extends Controller
             $addrScore    = $this->addressSimilarity($addrNormNew, $pAddrNorm); // 0..100
             $geoNear      = ($latNew !== null && $lngNew !== null && $p->latitude !== null && $p->longitude !== null)
                 ? $this->withinGeoBox($latNew, $lngNew, (float)$p->latitude, (float)$p->longitude) : false;
+            $hasSupportingSignal = $this->hasSupportingDuplicateSignal($floorMatch, $areaMatch, $geoNear, $addrScore);
 
             // Композитный скор:
             // телефон — самый сильный сигнал; затем адрес; затем гео; бонусы за этаж/площадь
@@ -1393,8 +1416,9 @@ class PropertyController extends Controller
             if ($areaMatch)  $score += 8;               // +8
             $score = min(100.0, $score);
 
-            // Порог: либо телефон совпал, либо общий скор >= 50
-            if ($phoneMatch || $score >= 50.0) {
+            // Телефон сам по себе не должен блокировать новое объявление:
+            // у одного владельца может быть несколько объектов.
+            if (($phoneMatch && $hasSupportingSignal) || $score >= 60.0) {
                 $result[] = [
                     'id' => (int)$p->id,
                     'title' => $p->title,

@@ -161,6 +161,114 @@ class PropertyConstructionFieldsTest extends TestCase
         $response->assertJsonPath('renovation_permission_status', 'allowed');
     }
 
+    public function test_property_store_does_not_flag_duplicate_by_phone_only(): void
+    {
+        $agentRole = Role::create([
+            'name' => 'Agent',
+            'slug' => 'agent',
+        ]);
+
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000101',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $status = \App\Models\PropertyStatus::create(['name' => 'Available']);
+
+        \App\Models\Property::query()->create([
+            'title' => 'Existing property',
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 100000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'moderation_status' => 'approved',
+            'created_by' => $user->id,
+            'agent_id' => $user->id,
+            'owner_phone' => '+992 90 111 2233',
+            'address' => 'улица Айни, 10',
+            'floor' => 2,
+            'total_area' => 60,
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $response = $this->postJson('/api/properties', [
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'owner_phone' => '901112233',
+            'address' => 'проспект Рудаки, 55',
+            'floor' => 9,
+            'total_area' => 120,
+        ]);
+
+        $response->assertOk();
+        $this->assertDatabaseCount('properties', 2);
+    }
+
+    public function test_property_store_ignores_closed_or_deleted_duplicates(): void
+    {
+        $agentRole = Role::create([
+            'name' => 'Agent',
+            'slug' => 'agent',
+        ]);
+
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000102',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $status = \App\Models\PropertyStatus::create(['name' => 'Available']);
+
+        \App\Models\Property::query()->create([
+            'title' => 'Sold property',
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 100000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'moderation_status' => 'sold',
+            'created_by' => $user->id,
+            'agent_id' => $user->id,
+            'owner_phone' => '+992 90 111 2244',
+            'address' => 'улица Бохтар, 12',
+            'floor' => 4,
+            'total_area' => 75,
+            'latitude' => 38.5598,
+            'longitude' => 68.7870,
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $response = $this->postJson('/api/properties', [
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 155000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'owner_phone' => '901112244',
+            'address' => 'улица Бохтар, 12',
+            'floor' => 4,
+            'total_area' => 75,
+            'latitude' => 38.5598,
+            'longitude' => 68.7870,
+        ]);
+
+        $response->assertOk();
+        $this->assertDatabaseCount('properties', 2);
+    }
+
     public function test_intern_cannot_create_properties_and_sees_only_own_in_index(): void
     {
         $internRole = Role::create([
