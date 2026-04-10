@@ -811,6 +811,63 @@ class ClientAccessTest extends TestCase
         $response->assertJsonPath('contact_kind', Client::CONTACT_KIND_BUYER);
     }
 
+    public function test_intern_sees_only_own_clients_even_when_agent_visibility_is_all_branch(): void
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_ALL_BRANCH,
+        ]);
+
+        $branch = Branch::create(['name' => 'Branch A']);
+        $group = $this->createBranchGroup($branch, 'Group A');
+
+        $internRole = Role::create(['name' => 'Intern', 'slug' => 'intern']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $intern = $this->createUser($internRole, $branch, 'Intern A', $group);
+        $agent = $this->createUser($agentRole, $branch, 'Agent A', $group);
+
+        $ownClient = $this->createClient($branch, $intern, $intern, 'Intern Client', 1, Client::CONTACT_KIND_BUYER, $group);
+        $this->createClient($branch, $agent, $agent, 'Agent Client', 1, Client::CONTACT_KIND_BUYER, $group);
+
+        Sanctum::actingAs($intern);
+
+        $this->getJson('/api/clients')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $ownClient->id)
+            ->assertJsonMissing(['full_name' => 'Agent Client']);
+    }
+
+    public function test_intern_create_forces_client_ownership_to_self(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $group = $this->createBranchGroup($branch, 'Group A');
+
+        $internRole = Role::create(['name' => 'Intern', 'slug' => 'intern']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $intern = $this->createUser($internRole, $branch, 'Intern A', $group);
+        $agent = $this->createUser($agentRole, $branch, 'Agent A', $group);
+
+        Sanctum::actingAs($intern);
+
+        $response = $this->postJson('/api/clients', [
+            'full_name' => 'Intern New Client',
+            'phone' => '+992 90 000 0101',
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'created_by' => $agent->id,
+            'responsible_agent_id' => $agent->id,
+        ]);
+
+        $response->assertCreated();
+        $response->assertJsonPath('branch_id', $branch->id);
+        $response->assertJsonPath('branch_group_id', $group->id);
+        $response->assertJsonPath('created_by', $intern->id);
+        $response->assertJsonPath('responsible_agent_id', $intern->id);
+    }
+
     public function test_admin_can_update_client_settings_independently(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);

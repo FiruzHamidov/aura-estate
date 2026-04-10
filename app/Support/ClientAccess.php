@@ -36,12 +36,17 @@ class ClientAccess
 
     public function isBranchScopedRole(?string $roleSlug): bool
     {
-        return in_array($roleSlug, ['branch_director', 'rop', 'agent', 'manager', 'operator'], true);
+        return in_array($roleSlug, ['branch_director', 'rop', 'agent', 'manager', 'operator', 'intern'], true);
     }
 
     public function isAgentScopedRole(?string $roleSlug): bool
     {
         return in_array($roleSlug, ['agent', 'manager', 'operator'], true);
+    }
+
+    public function isInternRole(?string $roleSlug): bool
+    {
+        return $roleSlug === 'intern';
     }
 
     public function visibilityMode(): string
@@ -125,6 +130,17 @@ class ClientAccess
             return $query->where('branch_id', $authUser->branch_id);
         }
 
+        if ($this->isInternRole($roleSlug)) {
+            if (empty($authUser->branch_id)) {
+                return $query->whereRaw('1 = 0');
+            }
+
+            return $this->restrictToOwnContacts(
+                $query->where('branch_id', $authUser->branch_id),
+                $authUser
+            );
+        }
+
         return $query->where(function (Builder $builder) use ($authUser, $roleSlug) {
             $this->applyCollaboratorVisibility($builder, $authUser);
 
@@ -186,6 +202,11 @@ class ClientAccess
         $authUser->loadMissing('branchGroup');
 
         $data['created_by'] ??= $authUser->id;
+
+        if ($this->isInternRole($roleSlug)) {
+            $data['created_by'] = $authUser->id;
+            $data['responsible_agent_id'] = $authUser->id;
+        }
 
         if (
             $this->isAgentScopedRole($roleSlug)
@@ -334,18 +355,10 @@ class ClientAccess
         }
 
         return $query->where(function (Builder $builder) use ($authUser) {
-            $builder->where(function (Builder $nonSellerQuery) {
-                $this->applyNonSellerConstraint($nonSellerQuery);
-            })->orWhere(function (Builder $sellerQuery) use ($authUser) {
-                $this->applySellerConstraint($sellerQuery);
-
-                $sellerQuery->where(function (Builder $groupedOrOwnQuery) use ($authUser) {
-                    $groupedOrOwnQuery->where('branch_group_id', $authUser->branch_group_id)
-                        ->orWhere(function (Builder $ownContactQuery) use ($authUser) {
-                            $this->applyOwnContactConstraint($ownContactQuery, $authUser);
-                        });
+            $builder->where('branch_group_id', $authUser->branch_group_id)
+                ->orWhere(function (Builder $ownContactQuery) use ($authUser) {
+                    $this->applyOwnContactConstraint($ownContactQuery, $authUser);
                 });
-            });
         });
     }
 
