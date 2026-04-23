@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\Booking;
 use App\Models\Branch;
+use App\Models\BranchGroup;
 use App\Models\Property;
 use App\Models\Role;
 use App\Models\User;
@@ -34,6 +35,15 @@ class BookingAccessTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('branch_groups', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('branch_id')->nullable()->constrained('branches')->nullOnDelete();
+            $table->string('name');
+            $table->string('description')->nullable();
+            $table->string('contact_visibility_mode')->default('branch');
+            $table->timestamps();
+        });
+
         Schema::create('users', function (Blueprint $table) {
             $table->id();
             $table->string('name');
@@ -42,6 +52,7 @@ class BookingAccessTest extends TestCase
             $table->string('password')->nullable();
             $table->foreignId('role_id')->constrained('roles')->cascadeOnDelete();
             $table->foreignId('branch_id')->nullable()->constrained('branches')->nullOnDelete();
+            $table->foreignId('branch_group_id')->nullable()->constrained('branch_groups')->nullOnDelete();
             $table->enum('status', ['active', 'inactive'])->default('active');
             $table->enum('auth_method', ['password', 'sms'])->default('password');
             $table->rememberToken()->nullable();
@@ -380,5 +391,168 @@ class BookingAccessTest extends TestCase
         $response->assertJsonPath('total', 2);
         $response->assertJsonPath('current_page', 1);
         $response->assertJsonPath('last_page', 2);
+    }
+
+    public function test_agent_only_sees_own_bookings_even_with_foreign_agent_filter(): void
+    {
+        $branch = Branch::create(['name' => 'Main Branch']);
+
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $agentA = User::create([
+            'name' => 'Agent A',
+            'phone' => '910000041',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $agentB = User::create([
+            'name' => 'Agent B',
+            'phone' => '910000042',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $propertyA = Property::create([
+            'title' => 'Property A',
+            'created_by' => $agentA->id,
+            'agent_id' => $agentA->id,
+        ]);
+
+        $propertyB = Property::create([
+            'title' => 'Property B',
+            'created_by' => $agentB->id,
+            'agent_id' => $agentB->id,
+        ]);
+
+        $bookingA = Booking::create([
+            'property_id' => $propertyA->id,
+            'agent_id' => $agentA->id,
+            'start_time' => '2026-04-15 09:00:00',
+            'end_time' => '2026-04-15 10:00:00',
+            'client_name' => 'Client A',
+            'client_phone' => '920000041',
+        ]);
+
+        Booking::create([
+            'property_id' => $propertyB->id,
+            'agent_id' => $agentB->id,
+            'start_time' => '2026-04-15 11:00:00',
+            'end_time' => '2026-04-15 12:00:00',
+            'client_name' => 'Client B',
+            'client_phone' => '920000042',
+        ]);
+
+        Sanctum::actingAs($agentA);
+
+        $response = $this->getJson('/api/bookings?agent_id=' . $agentB->id);
+
+        $response->assertOk();
+        $response->assertJsonCount(0, 'data');
+
+        $ownOnly = $this->getJson('/api/bookings');
+
+        $ownOnly->assertOk();
+        $ownOnly->assertJsonCount(1, 'data');
+        $ownOnly->assertJsonPath('data.0.id', $bookingA->id);
+    }
+
+    public function test_superadmin_can_filter_bookings_by_branch_group_and_date_range(): void
+    {
+        $branch = Branch::create(['name' => 'Main Branch']);
+        $groupA = BranchGroup::create([
+            'branch_id' => $branch->id,
+            'name' => 'Group A',
+            'contact_visibility_mode' => BranchGroup::CONTACT_VISIBILITY_BRANCH,
+        ]);
+        $groupB = BranchGroup::create([
+            'branch_id' => $branch->id,
+            'name' => 'Group B',
+            'contact_visibility_mode' => BranchGroup::CONTACT_VISIBILITY_BRANCH,
+        ]);
+
+        $superadminRole = Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $superadmin = User::create([
+            'name' => 'Superadmin',
+            'phone' => '910000051',
+            'password' => bcrypt('password'),
+            'role_id' => $superadminRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $agentA = User::create([
+            'name' => 'Agent A',
+            'phone' => '910000052',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'branch_group_id' => $groupA->id,
+            'status' => 'active',
+        ]);
+
+        $agentB = User::create([
+            'name' => 'Agent B',
+            'phone' => '910000053',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'branch_group_id' => $groupB->id,
+            'status' => 'active',
+        ]);
+
+        $propertyA = Property::create([
+            'title' => 'Property A',
+            'created_by' => $agentA->id,
+            'agent_id' => $agentA->id,
+        ]);
+
+        $propertyB = Property::create([
+            'title' => 'Property B',
+            'created_by' => $agentB->id,
+            'agent_id' => $agentB->id,
+        ]);
+
+        $matchingBooking = Booking::create([
+            'property_id' => $propertyA->id,
+            'agent_id' => $agentA->id,
+            'start_time' => '2026-04-10 09:00:00',
+            'end_time' => '2026-04-10 10:00:00',
+            'client_name' => 'Client A',
+            'client_phone' => '920000051',
+        ]);
+
+        Booking::create([
+            'property_id' => $propertyA->id,
+            'agent_id' => $agentA->id,
+            'start_time' => '2026-05-10 09:00:00',
+            'end_time' => '2026-05-10 10:00:00',
+            'client_name' => 'Client A2',
+            'client_phone' => '920000052',
+        ]);
+
+        Booking::create([
+            'property_id' => $propertyB->id,
+            'agent_id' => $agentB->id,
+            'start_time' => '2026-04-12 09:00:00',
+            'end_time' => '2026-04-12 10:00:00',
+            'client_name' => 'Client B',
+            'client_phone' => '920000053',
+        ]);
+
+        Sanctum::actingAs($superadmin);
+
+        $response = $this->getJson('/api/bookings?branch_group_id=' . $groupA->id . '&date_from=2026-04-01&date_to=2026-04-30');
+
+        $response->assertOk();
+        $response->assertJsonCount(1, 'data');
+        $response->assertJsonPath('data.0.id', $matchingBooking->id);
+        $response->assertJsonPath('total', 1);
     }
 }

@@ -13,6 +13,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
@@ -46,6 +47,29 @@ class BookingController extends Controller
     private function isClientRole(?string $roleSlug): bool
     {
         return $roleSlug === 'client';
+    }
+
+    private function isBranchScopedRole(?string $roleSlug): bool
+    {
+        return in_array($roleSlug, ['rop', 'branch_director'], true);
+    }
+
+    private function isBranchGroupScopedRole(?string $roleSlug): bool
+    {
+        return in_array($roleSlug, ['mop'], true);
+    }
+
+    private function toArray(mixed $value): array
+    {
+        if ($value === null || $value === '') {
+            return [];
+        }
+
+        if (is_array($value)) {
+            return array_values(array_filter($value, fn ($item) => $item !== '' && $item !== null));
+        }
+
+        return array_values(array_filter(array_map('trim', explode(',', (string) $value)), fn ($item) => $item !== ''));
     }
 
     private function ensureReportsAllowed(Request $request): void
@@ -224,20 +248,49 @@ class BookingController extends Controller
             return;
         }
 
+        if ($roleSlug === 'agent') {
+            $query->where($agentColumn, $authUser?->id);
+
+            return;
+        }
+
+        if ($request->filled('branch_group_id')) {
+            $branchGroupIds = array_values(array_filter(array_map('intval', $this->toArray($request->input('branch_group_id')))));
+
+            if (!empty($branchGroupIds)) {
+                if (!Schema::hasColumn('users', 'branch_group_id')) {
+                    $query->whereRaw('1 = 0');
+                    return;
+                }
+
+                $query->whereIn($agentColumn, User::query()->whereIn('branch_group_id', $branchGroupIds)->select('id'));
+            }
+        }
+
         if ($this->isPrivilegedRole($roleSlug) && $request->filled('branch_id')) {
-            $branchIds = array_values(array_filter(array_map('trim', explode(',', (string)$request->input('branch_id'))), fn($v) => $v !== ''));
+            $branchIds = $this->toArray($request->input('branch_id'));
+
             if (!empty($branchIds)) {
                 $query->whereIn($agentColumn, User::query()->whereIn('branch_id', $branchIds)->select('id'));
             }
         }
 
-        if (in_array($roleSlug, ['rop', 'branch_director'], true)) {
+        if ($this->isBranchScopedRole($roleSlug)) {
             if (empty($authUser->branch_id)) {
                 $query->whereRaw('1 = 0');
                 return;
             }
 
             $query->whereIn($agentColumn, User::query()->where('branch_id', $authUser->branch_id)->select('id'));
+        }
+
+        if ($this->isBranchGroupScopedRole($roleSlug)) {
+            if (empty($authUser->branch_group_id) || !Schema::hasColumn('users', 'branch_group_id')) {
+                $query->whereRaw('1 = 0');
+                return;
+            }
+
+            $query->whereIn($agentColumn, User::query()->where('branch_group_id', $authUser->branch_group_id)->select('id'));
         }
     }
 
@@ -315,7 +368,15 @@ class BookingController extends Controller
     public function index(Request $request)
     {
         $validated = $request->validate([
+            'agent_id' => 'nullable|integer',
+            'branch_id' => 'nullable',
+            'branch_group_id' => 'nullable',
+            'date_from' => 'nullable|string',
+            'date_to' => 'nullable|string',
+            'from' => 'nullable|string',
+            'to' => 'nullable|string',
             'per_page' => 'nullable|integer|min:1|max:100',
+            'page' => 'nullable|integer|min:1',
         ]);
 
         $q = Booking::query()->with(['property', 'agent', 'client.type']);
