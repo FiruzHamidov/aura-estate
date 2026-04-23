@@ -36,6 +36,7 @@ class PropertyShowAuthContactsTest extends TestCase
             $table->string('phone')->unique();
             $table->string('password')->nullable();
             $table->foreignId('role_id')->constrained('roles')->cascadeOnDelete();
+            $table->unsignedBigInteger('branch_id')->nullable();
             $table->string('status')->default('active');
             $table->string('auth_method')->default('password');
             $table->rememberToken()->nullable();
@@ -126,6 +127,7 @@ class PropertyShowAuthContactsTest extends TestCase
             $table->decimal('longitude', 11, 8)->nullable();
             $table->unsignedBigInteger('created_by');
             $table->unsignedBigInteger('agent_id')->nullable();
+            $table->unsignedBigInteger('branch_id')->nullable();
             $table->string('district')->nullable();
             $table->string('address')->nullable();
             $table->string('owner_phone')->nullable();
@@ -274,5 +276,76 @@ class PropertyShowAuthContactsTest extends TestCase
         $response->assertJsonPath('buyer_client.id', $buyerClient->id);
         $response->assertJsonPath('buyer_client.full_name', 'Buyer Client');
         $response->assertJsonPath('buyerClient.id', $buyerClient->id);
+    }
+
+    public function test_property_show_returns_stable_branch_ids_for_property_and_creator(): void
+    {
+        $agentRole = Role::create([
+            'name' => 'Agent',
+            'slug' => 'agent',
+        ]);
+
+        $creator = User::create([
+            'name' => 'Creator User',
+            'phone' => '930000301',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => 10,
+            'status' => 'active',
+        ]);
+
+        $agent = User::create([
+            'name' => 'Responsible Agent',
+            'phone' => '930000302',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => 20,
+            'status' => 'active',
+        ]);
+
+        $propertyType = PropertyType::create(['name' => 'Apartment']);
+        $propertyStatus = PropertyStatus::create(['name' => 'Available']);
+
+        $propertyWithOwnBranch = Property::create([
+            'title' => 'Property with own branch',
+            'type_id' => $propertyType->id,
+            'status_id' => $propertyStatus->id,
+            'price' => 250000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'moderation_status' => 'approved',
+            'created_by' => $creator->id,
+            'agent_id' => $agent->id,
+            'branch_id' => 30,
+        ]);
+
+        $propertyWithAgentBranch = Property::create([
+            'title' => 'Property with agent branch',
+            'type_id' => $propertyType->id,
+            'status_id' => $propertyStatus->id,
+            'price' => 260000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'moderation_status' => 'approved',
+            'created_by' => $creator->id,
+            'agent_id' => $agent->id,
+            'branch_id' => null,
+        ]);
+
+        $this->getJson('/api/properties/'.$propertyWithOwnBranch->id)
+            ->assertOk()
+            ->assertJsonPath('created_by', $creator->id)
+            ->assertJsonPath('agent_id', $agent->id)
+            ->assertJsonPath('branch_id', 30)
+            ->assertJsonPath('creator.id', $creator->id)
+            ->assertJsonPath('creator.branch_id', 10);
+
+        $this->getJson('/api/properties/'.$propertyWithAgentBranch->id)
+            ->assertOk()
+            ->assertJsonPath('created_by', $creator->id)
+            ->assertJsonPath('agent_id', $agent->id)
+            ->assertJsonPath('branch_id', 20)
+            ->assertJsonPath('creator.id', $creator->id)
+            ->assertJsonPath('creator.branch_id', 10);
     }
 }

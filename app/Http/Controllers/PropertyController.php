@@ -137,6 +137,14 @@ class PropertyController extends Controller
         }
 
         $payload = $property->toArray();
+        $payload['branch_id'] = $this->resolvePropertyBranchId($property);
+
+        if (isset($payload['creator']) && is_array($payload['creator'])) {
+            $payload['creator']['branch_id'] = $this->resolveUserBranchId(
+                $property->created_by ?: ($payload['creator']['id'] ?? null),
+                $property->relationLoaded('creator') ? $property->creator : null
+            );
+        }
 
         if ($includeAuthContacts) {
             $payload['ownerClient'] = $payload['owner_client'] ?? null;
@@ -144,6 +152,56 @@ class PropertyController extends Controller
         }
 
         return $payload;
+    }
+
+    private function resolvePropertyBranchId(Property $property): ?int
+    {
+        $ownBranchId = $this->normalizeBranchId($property->getAttributes()['branch_id'] ?? null);
+
+        if ($ownBranchId !== null) {
+            return $ownBranchId;
+        }
+
+        return $this->resolveUserBranchId(
+            $property->agent_id,
+            $property->relationLoaded('agent') ? $property->agent : null
+        )
+            ?? $this->resolveUserBranchId(
+                $property->created_by,
+                $property->relationLoaded('creator') ? $property->creator : null
+            )
+            ?? $this->resolveUserBranchId(
+                $property->relationLoaded('creator') ? $property->creator?->id : null,
+                $property->relationLoaded('creator') ? $property->creator : null
+            );
+    }
+
+    private function resolveUserBranchId($userId, ?User $loadedUser = null): ?int
+    {
+        if ($loadedUser && (int) $loadedUser->id === (int) $userId) {
+            $branchId = $this->normalizeBranchId($loadedUser->getAttributes()['branch_id'] ?? null);
+
+            if ($branchId !== null) {
+                return $branchId;
+            }
+        }
+
+        if (empty($userId) || !Schema::hasColumn('users', 'branch_id')) {
+            return null;
+        }
+
+        return $this->normalizeBranchId(
+            User::query()->whereKey($userId)->value('branch_id')
+        );
+    }
+
+    private function normalizeBranchId($branchId): ?int
+    {
+        if ($branchId === null || $branchId === '') {
+            return null;
+        }
+
+        return (int) $branchId;
     }
 
     private function syncClientContactKind(?Client $client, string $contactKind): void
