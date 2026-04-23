@@ -92,6 +92,17 @@ class PropertyController extends Controller
             return false;
         }
 
+        if ($user->hasRole('mop')) {
+            if (empty($user->branch_group_id)) {
+                return false;
+            }
+
+            $propertyBranchGroupId = $this->resolvePropertyBranchGroupId($property);
+
+            return !empty($propertyBranchGroupId)
+                && (int) $propertyBranchGroupId === (int) $user->branch_group_id;
+        }
+
         if (!$user->hasRole('branch_director') && !$user->hasRole('rop')) {
             return false;
         }
@@ -138,9 +149,14 @@ class PropertyController extends Controller
 
         $payload = $property->toArray();
         $payload['branch_id'] = $this->resolvePropertyBranchId($property);
+        $payload['branch_group_id'] = $this->resolvePropertyBranchGroupId($property);
 
         if (isset($payload['creator']) && is_array($payload['creator'])) {
             $payload['creator']['branch_id'] = $this->resolveUserBranchId(
+                $property->created_by ?: ($payload['creator']['id'] ?? null),
+                $property->relationLoaded('creator') ? $property->creator : null
+            );
+            $payload['creator']['branch_group_id'] = $this->resolveUserBranchGroupId(
                 $property->created_by ?: ($payload['creator']['id'] ?? null),
                 $property->relationLoaded('creator') ? $property->creator : null
             );
@@ -176,6 +192,28 @@ class PropertyController extends Controller
             );
     }
 
+    private function resolvePropertyBranchGroupId(Property $property): ?int
+    {
+        $ownBranchGroupId = $this->normalizeBranchId($property->getAttributes()['branch_group_id'] ?? null);
+
+        if ($ownBranchGroupId !== null) {
+            return $ownBranchGroupId;
+        }
+
+        return $this->resolveUserBranchGroupId(
+            $property->agent_id,
+            $property->relationLoaded('agent') ? $property->agent : null
+        )
+            ?? $this->resolveUserBranchGroupId(
+                $property->created_by,
+                $property->relationLoaded('creator') ? $property->creator : null
+            )
+            ?? $this->resolveUserBranchGroupId(
+                $property->relationLoaded('creator') ? $property->creator?->id : null,
+                $property->relationLoaded('creator') ? $property->creator : null
+            );
+    }
+
     private function resolveUserBranchId($userId, ?User $loadedUser = null): ?int
     {
         if ($loadedUser && (int) $loadedUser->id === (int) $userId) {
@@ -195,6 +233,25 @@ class PropertyController extends Controller
         );
     }
 
+    private function resolveUserBranchGroupId($userId, ?User $loadedUser = null): ?int
+    {
+        if ($loadedUser && (int) $loadedUser->id === (int) $userId) {
+            $branchGroupId = $this->normalizeBranchId($loadedUser->getAttributes()['branch_group_id'] ?? null);
+
+            if ($branchGroupId !== null) {
+                return $branchGroupId;
+            }
+        }
+
+        if (empty($userId) || !Schema::hasColumn('users', 'branch_group_id')) {
+            return null;
+        }
+
+        return $this->normalizeBranchId(
+            User::query()->whereKey($userId)->value('branch_group_id')
+        );
+    }
+
     private function normalizeBranchId($branchId): ?int
     {
         if ($branchId === null || $branchId === '') {
@@ -202,6 +259,32 @@ class PropertyController extends Controller
         }
 
         return (int) $branchId;
+    }
+
+    private function normalizeMopBranchGroupPayload(User $user, array $data): array
+    {
+        if (!$user->hasRole('mop')) {
+            return $data;
+        }
+
+        if (empty($user->branch_group_id)) {
+            abort(403, 'Доступ запрещён');
+        }
+
+        if (
+            array_key_exists('branch_group_id', $data)
+            && $data['branch_group_id'] !== null
+            && $data['branch_group_id'] !== ''
+            && (int) $data['branch_group_id'] !== (int) $user->branch_group_id
+        ) {
+            abort(403, 'Доступ запрещён');
+        }
+
+        if (Schema::hasColumn('properties', 'branch_group_id')) {
+            $data['branch_group_id'] = $user->branch_group_id;
+        }
+
+        return $data;
     }
 
     private function syncClientContactKind(?Client $client, string $contactKind): void
@@ -332,6 +415,16 @@ class PropertyController extends Controller
             if (!$hasStatusFilter) {
                 $query->where('moderation_status', '!=', 'deleted');
             }
+        } elseif ($user->hasRole('mop')) {
+            if (empty($user->branch_group_id)) {
+                $query->whereRaw('1 = 0');
+            } else {
+                $this->applyBranchGroupFilter($query, [$user->branch_group_id]);
+            }
+
+            if (!$hasStatusFilter) {
+                $query->where('moderation_status', '!=', 'deleted');
+            }
         } elseif ($user->hasRole('client')) {
             if (!$hasStatusFilter) {
                 $query->where('moderation_status', '!=', 'deleted');
@@ -355,6 +448,16 @@ class PropertyController extends Controller
             $query->where('moderation_status', 'approved');
         } elseif ($this->hasOwnPropertyScope($user)) {
             $query->where('created_by', $user->id);
+            if (!$hasStatusFilter) {
+                $query->where('moderation_status', '!=', 'deleted');
+            }
+        } elseif ($user->hasRole('mop')) {
+            if (empty($user->branch_group_id)) {
+                $query->whereRaw('1 = 0');
+            } else {
+                $this->applyBranchGroupFilter($query, [$user->branch_group_id]);
+            }
+
             if (!$hasStatusFilter) {
                 $query->where('moderation_status', '!=', 'deleted');
             }
@@ -562,6 +665,16 @@ class PropertyController extends Controller
             if (is_array($value)) return array_values(array_filter($value, fn($v) => $v !== '' && $v !== null));
             return array_values(array_filter(array_map('trim', explode(',', $value)), fn($v) => $v !== ''));
         };
+
+        if ($request->filled('branch_group_id')) {
+            $branchGroupIds = array_values(array_filter(
+                array_map('intval', $toArray($request->input('branch_group_id')))
+            ));
+
+            if (!empty($branchGroupIds)) {
+                $this->applyBranchGroupFilter($query, $branchGroupIds);
+            }
+        }
 
         // Статусы (мульти)
         if ($request->filled('moderation_status')) {
@@ -774,6 +887,55 @@ class PropertyController extends Controller
         }
     }
 
+    private function applyBranchGroupFilter(Builder $query, array $branchGroupIds): void
+    {
+        $branchGroupIds = array_values(array_filter(array_map('intval', $branchGroupIds)));
+
+        if (empty($branchGroupIds) || !Schema::hasColumn('users', 'branch_group_id')) {
+            $query->whereRaw('1 = 0');
+            return;
+        }
+
+        $query->where(function (Builder $branchGroupQuery) use ($branchGroupIds) {
+            $hasPropertyBranchGroupId = Schema::hasColumn('properties', 'branch_group_id');
+
+            if ($hasPropertyBranchGroupId) {
+                $branchGroupQuery->whereIn('branch_group_id', $branchGroupIds);
+            }
+
+            $branchGroupQuery->orWhere(function (Builder $agentQuery) use ($branchGroupIds, $hasPropertyBranchGroupId) {
+                if ($hasPropertyBranchGroupId) {
+                    $agentQuery->whereNull('branch_group_id');
+                }
+
+                $agentQuery
+                    ->whereNotNull('agent_id')
+                    ->whereIn('agent_id', User::query()
+                        ->whereIn('branch_group_id', $branchGroupIds)
+                        ->select('id'));
+            });
+
+            $branchGroupQuery->orWhere(function (Builder $creatorQuery) use ($branchGroupIds, $hasPropertyBranchGroupId) {
+                if ($hasPropertyBranchGroupId) {
+                    $creatorQuery->whereNull('branch_group_id');
+                }
+
+                $creatorQuery
+                    ->whereNotNull('created_by')
+                    ->where(function (Builder $agentFallbackQuery) {
+                        $agentFallbackQuery
+                            ->whereNull('agent_id')
+                            ->orWhereNotIn('agent_id', User::query()
+                                ->whereNotNull('branch_group_id')
+                                ->select('id'));
+                    })
+                    ->whereIn('created_by', User::query()
+                        ->whereIn('branch_group_id', $branchGroupIds)
+                        ->select('id'));
+            });
+        });
+    }
+
     public function store(Request $request)
     {
         $user = $this->crmAuthUser();
@@ -781,6 +943,7 @@ class PropertyController extends Controller
         abort_if($user->hasRole('intern'), 403, 'Стажер не может добавлять объекты.');
 
         $validated = $this->validateProperty($request);
+        $validated = $this->normalizeMopBranchGroupPayload($user, $validated);
         $this->ensureVisibleClientsForProperty($validated);
         $validated = $this->syncPropertyClientSnapshots($validated);
 
@@ -861,9 +1024,10 @@ class PropertyController extends Controller
 
     public function update(Request $request, Property $property)
     {
-        $this->authorizePropertyMutation($property);
+        $user = $this->authorizePropertyMutation($property);
 
         $validated = $this->validateProperty($request, isUpdate: true, property: $property);
+        $validated = $this->normalizeMopBranchGroupPayload($user, $validated);
         $this->ensureVisibleClientsForProperty($validated, $property);
         $validated = $this->syncPropertyClientSnapshots($validated);
 
@@ -1169,6 +1333,7 @@ class PropertyController extends Controller
             'latitude' => 'nullable|numeric|between:-90,90',
             'longitude' => 'nullable|numeric|between:-180,180',
             'agent_id' => 'nullable|exists:users,id',
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'owner_phone' => 'nullable|string|max:30',
             'listing_type' => 'sometimes|in:regular,vip,urgent',
             'owner_name' => 'nullable|string|max:255',

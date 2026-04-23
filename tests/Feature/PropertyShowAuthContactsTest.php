@@ -37,6 +37,7 @@ class PropertyShowAuthContactsTest extends TestCase
             $table->string('password')->nullable();
             $table->foreignId('role_id')->constrained('roles')->cascadeOnDelete();
             $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('branch_group_id')->nullable();
             $table->string('status')->default('active');
             $table->string('auth_method')->default('password');
             $table->rememberToken()->nullable();
@@ -128,6 +129,7 @@ class PropertyShowAuthContactsTest extends TestCase
             $table->unsignedBigInteger('created_by');
             $table->unsignedBigInteger('agent_id')->nullable();
             $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('branch_group_id')->nullable();
             $table->string('district')->nullable();
             $table->string('address')->nullable();
             $table->string('owner_phone')->nullable();
@@ -291,6 +293,7 @@ class PropertyShowAuthContactsTest extends TestCase
             'password' => bcrypt('password'),
             'role_id' => $agentRole->id,
             'branch_id' => 10,
+            'branch_group_id' => 100,
             'status' => 'active',
         ]);
 
@@ -300,6 +303,7 @@ class PropertyShowAuthContactsTest extends TestCase
             'password' => bcrypt('password'),
             'role_id' => $agentRole->id,
             'branch_id' => 20,
+            'branch_group_id' => 200,
             'status' => 'active',
         ]);
 
@@ -317,6 +321,7 @@ class PropertyShowAuthContactsTest extends TestCase
             'created_by' => $creator->id,
             'agent_id' => $agent->id,
             'branch_id' => 30,
+            'branch_group_id' => 300,
         ]);
 
         $propertyWithAgentBranch = Property::create([
@@ -330,6 +335,7 @@ class PropertyShowAuthContactsTest extends TestCase
             'created_by' => $creator->id,
             'agent_id' => $agent->id,
             'branch_id' => null,
+            'branch_group_id' => null,
         ]);
 
         $this->getJson('/api/properties/'.$propertyWithOwnBranch->id)
@@ -337,15 +343,19 @@ class PropertyShowAuthContactsTest extends TestCase
             ->assertJsonPath('created_by', $creator->id)
             ->assertJsonPath('agent_id', $agent->id)
             ->assertJsonPath('branch_id', 30)
+            ->assertJsonPath('branch_group_id', 300)
             ->assertJsonPath('creator.id', $creator->id)
-            ->assertJsonPath('creator.branch_id', 10);
+            ->assertJsonPath('creator.branch_id', 10)
+            ->assertJsonPath('creator.branch_group_id', 100);
 
         $this->getJson('/api/properties/'.$propertyWithAgentBranch->id)
             ->assertOk()
             ->assertJsonPath('created_by', $creator->id)
             ->assertJsonPath('agent_id', $agent->id)
             ->assertJsonPath('branch_id', 20)
+            ->assertJsonPath('branch_group_id', 200)
             ->assertJsonPath('creator.id', $creator->id)
-            ->assertJsonPath('creator.branch_id', 10);
+            ->assertJsonPath('creator.branch_id', 10)
+            ->assertJsonPath('creator.branch_group_id', 100);
     }
 }

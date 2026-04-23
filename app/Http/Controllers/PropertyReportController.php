@@ -24,6 +24,11 @@ class PropertyReportController extends Controller
         return in_array($roleSlug, ['rop', 'branch_director'], true);
     }
 
+    private function isBranchGroupScopedRole(?string $roleSlug): bool
+    {
+        return in_array($roleSlug, ['mop'], true);
+    }
+
     // --- Helper: нормализация входа (array или "1,2,3")
     private function toArray($value): array
     {
@@ -37,6 +42,16 @@ class PropertyReportController extends Controller
         $authUser = auth()->user();
         $authUser?->loadMissing('role');
         $roleSlug = $authUser->role->slug ?? null;
+
+        if ($request->filled('branch_group_id')) {
+            $branchGroupIds = array_values(array_filter(
+                array_map('intval', $this->toArray($request->input('branch_group_id')))
+            ));
+
+            if (!empty($branchGroupIds)) {
+                $this->applyPropertyBranchGroupFilter($query, $branchGroupIds);
+            }
+        }
 
         // Явный фильтр по филиалу для админских/общих отчётов
         if ($request->filled('branch_id')) {
@@ -55,6 +70,15 @@ class PropertyReportController extends Controller
 
             $query->whereIn($creatorColumn, User::query()->where('branch_id', $authUser->branch_id)->select('id'));
         }
+
+        if ($this->isBranchGroupScopedRole($roleSlug)) {
+            if (empty($authUser->branch_group_id)) {
+                $query->whereRaw('1 = 0');
+                return;
+            }
+
+            $this->applyPropertyBranchGroupFilter($query, [(int) $authUser->branch_group_id]);
+        }
     }
 
     private function applyBranchAccessByUserColumn(Request $request, $query, string $userColumn): void
@@ -62,6 +86,18 @@ class PropertyReportController extends Controller
         $authUser = auth()->user();
         $authUser?->loadMissing('role');
         $roleSlug = $authUser->role->slug ?? null;
+
+        if ($request->filled('branch_group_id')) {
+            $branchGroupIds = $this->toArray($request->input('branch_group_id'));
+            if (!empty($branchGroupIds)) {
+                if (!Schema::hasColumn('users', 'branch_group_id')) {
+                    $query->whereRaw('1 = 0');
+                    return;
+                }
+
+                $query->whereIn($userColumn, User::query()->whereIn('branch_group_id', $branchGroupIds)->select('id'));
+            }
+        }
 
         if ($request->filled('branch_id')) {
             $branchIds = $this->toArray($request->input('branch_id'));
@@ -78,6 +114,69 @@ class PropertyReportController extends Controller
 
             $query->whereIn($userColumn, User::query()->where('branch_id', $authUser->branch_id)->select('id'));
         }
+
+        if ($this->isBranchGroupScopedRole($roleSlug)) {
+            if (empty($authUser->branch_group_id)) {
+                $query->whereRaw('1 = 0');
+                return;
+            }
+
+            if (!Schema::hasColumn('users', 'branch_group_id')) {
+                $query->whereRaw('1 = 0');
+                return;
+            }
+
+            $query->whereIn($userColumn, User::query()->where('branch_group_id', $authUser->branch_group_id)->select('id'));
+        }
+    }
+
+    private function applyPropertyBranchGroupFilter($query, array $branchGroupIds): void
+    {
+        $branchGroupIds = array_values(array_filter(array_map('intval', $branchGroupIds)));
+
+        if (empty($branchGroupIds) || !Schema::hasColumn('users', 'branch_group_id')) {
+            $query->whereRaw('1 = 0');
+            return;
+        }
+
+        $query->where(function ($branchGroupQuery) use ($branchGroupIds) {
+            $hasPropertyBranchGroupId = Schema::hasColumn('properties', 'branch_group_id');
+
+            if ($hasPropertyBranchGroupId) {
+                $branchGroupQuery->whereIn('properties.branch_group_id', $branchGroupIds);
+            }
+
+            $branchGroupQuery->orWhere(function ($agentQuery) use ($branchGroupIds, $hasPropertyBranchGroupId) {
+                if ($hasPropertyBranchGroupId) {
+                    $agentQuery->whereNull('properties.branch_group_id');
+                }
+
+                $agentQuery
+                    ->whereNotNull('properties.agent_id')
+                    ->whereIn('properties.agent_id', User::query()
+                        ->whereIn('branch_group_id', $branchGroupIds)
+                        ->select('id'));
+            });
+
+            $branchGroupQuery->orWhere(function ($creatorQuery) use ($branchGroupIds, $hasPropertyBranchGroupId) {
+                if ($hasPropertyBranchGroupId) {
+                    $creatorQuery->whereNull('properties.branch_group_id');
+                }
+
+                $creatorQuery
+                    ->whereNotNull('properties.created_by')
+                    ->where(function ($agentFallbackQuery) {
+                        $agentFallbackQuery
+                            ->whereNull('properties.agent_id')
+                            ->orWhereNotIn('properties.agent_id', User::query()
+                                ->whereNotNull('branch_group_id')
+                                ->select('id'));
+                    })
+                    ->whereIn('properties.created_by', User::query()
+                        ->whereIn('branch_group_id', $branchGroupIds)
+                        ->select('id'));
+            });
+        });
     }
 
     private function monthRange(Request $request): array
@@ -1050,21 +1149,27 @@ class PropertyReportController extends Controller
 
     public function missingPhoneList(Request $request)
     {
+        $select = [
+            'properties.id',
+            'properties.title',
+            'properties.address',
+            'properties.moderation_status',
+            'properties.created_by',
+            'properties.agent_id',
+            'properties.created_at',
+            'properties.updated_at',
+            'properties.price',
+            'properties.currency',
+            'properties.owner_name',
+            'properties.owner_phone',
+        ];
+
+        if (Schema::hasColumn('properties', 'branch_group_id')) {
+            $select[] = 'properties.branch_group_id';
+        }
+
         $base = Property::query()
-            ->select([
-                'properties.id',
-                'properties.title',
-                'properties.address',
-                'properties.moderation_status',
-                'properties.created_by',
-                'properties.agent_id',
-                'properties.created_at',
-                'properties.updated_at',
-                'properties.price',
-                'properties.currency',
-                'properties.owner_name',
-                'properties.owner_phone',
-            ]);
+            ->select($select);
 
         [$q] = $this->applyCommonFilters($request, $base);
 
@@ -1095,6 +1200,7 @@ class PropertyReportController extends Controller
                 'currency'          => $p->currency,
                 'owner_name'        => $p->owner_name,
                 'owner_phone'       => $p->owner_phone,
+                'branch_group_id'   => $p->branch_group_id,
             ];
         });
 
@@ -1168,20 +1274,26 @@ class PropertyReportController extends Controller
             $soldStatuses = ['sold', 'sold_by_owner', 'rented'];
 
             // Build base properties query (we'll refine below)
+            $propertySelect = [
+                'id','title','price','currency','moderation_status','created_at','agent_id','created_by',
+                // fields required to generate title on the frontend
+                'type_id',
+                'apartment_type',
+                'rooms',
+                'total_area',
+                'living_area',
+                'land_size',
+                'floor',
+                'total_floors',
+                'contract_type_id'
+            ];
+
+            if (Schema::hasColumn('properties', 'branch_group_id')) {
+                $propertySelect[] = 'branch_group_id';
+            }
+
             $propsQ = Property::query()
-                ->select([
-                    'id','title','price','currency','moderation_status','created_at','agent_id','created_by',
-                    // fields required to generate title on the frontend
-                    'type_id',
-                    'apartment_type',
-                    'rooms',
-                    'total_area',
-                    'living_area',
-                    'land_size',
-                    'floor',
-                    'total_floors',
-                    'contract_type_id'
-                ])
+                ->select($propertySelect)
                 ->with(['type' => function ($q) {
                     $q->select(['id','slug']);
                 }]);
@@ -1222,6 +1334,7 @@ class PropertyReportController extends Controller
                         'price' => $p->price,
                         'currency' => $p->currency,
                         'moderation_status' => $p->moderation_status,
+                        'branch_group_id' => $p->branch_group_id,
                         'created_at' => $p->created_at ? (string)$p->created_at : null,
                         'shows_count' => $b ? (int)$b->shows_count : 0,
                         'first_show' => $b && $b->first_show ? (string)$b->first_show : null,
@@ -1316,6 +1429,7 @@ class PropertyReportController extends Controller
                         'price' => $p->price,
                         'currency' => $p->currency,
                         'moderation_status' => $p->moderation_status,
+                        'branch_group_id' => $p->branch_group_id,
                         'created_at' => $p->created_at ? (string)$p->created_at : null,
                         'shows_count' => $b ? (int)$b->shows_count : 0,
                         'first_show' => $b && $b->first_show ? (string)$b->first_show : null,

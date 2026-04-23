@@ -213,6 +213,7 @@ class ClientAccessTest extends TestCase
             $table->decimal('longitude', 11, 8)->nullable();
             $table->unsignedBigInteger('created_by');
             $table->unsignedBigInteger('agent_id')->nullable();
+            $table->unsignedBigInteger('branch_group_id')->nullable();
             $table->string('district')->nullable();
             $table->string('address')->nullable();
             $table->string('owner_phone')->nullable();
@@ -1225,6 +1226,115 @@ class ClientAccessTest extends TestCase
             'user_id' => $agentA->id,
             'role' => Client::COLLABORATOR_ROLE_VIEWER,
         ]);
+    }
+
+    public function test_mop_can_manage_only_properties_from_own_branch_group(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+        $groupA = $this->createBranchGroup($branchA, 'Group A');
+        $groupB = $this->createBranchGroup($branchB, 'Group B');
+
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $mop = $this->createUser($mopRole, $branchA, 'MOP A', $groupA);
+        $agentA = $this->createUser($agentRole, $branchA, 'Agent A', $groupA);
+        $agentB = $this->createUser($agentRole, $branchB, 'Agent B', $groupB);
+
+        $propertyType = PropertyType::create(['name' => 'Apartment']);
+        $propertyStatus = PropertyStatus::create(['name' => 'Available']);
+        $propertyA = $this->createProperty($propertyType, $propertyStatus, $agentA, [
+            'branch_group_id' => $groupA->id,
+        ]);
+        $propertyB = $this->createProperty($propertyType, $propertyStatus, $agentB, [
+            'branch_group_id' => $groupB->id,
+        ]);
+
+        Sanctum::actingAs($mop);
+
+        $this->putJson('/api/properties/' . $propertyA->id, [
+            'title' => 'MOP updated',
+            'type_id' => $propertyType->id,
+            'status_id' => $propertyStatus->id,
+            'price' => 260000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ])
+            ->assertOk()
+            ->assertJsonPath('title', 'MOP updated');
+
+        $this->putJson('/api/properties/' . $propertyB->id, [
+            'title' => 'Forbidden update',
+            'type_id' => $propertyType->id,
+            'status_id' => $propertyStatus->id,
+            'price' => 260000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ])->assertForbidden();
+    }
+
+    public function test_mop_without_branch_group_cannot_manage_property(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $group = $this->createBranchGroup($branch, 'Group A');
+
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $mop = $this->createUser($mopRole, $branch, 'MOP without group');
+        $agent = $this->createUser($agentRole, $branch, 'Agent A', $group);
+
+        $propertyType = PropertyType::create(['name' => 'Apartment']);
+        $propertyStatus = PropertyStatus::create(['name' => 'Available']);
+        $property = $this->createProperty($propertyType, $propertyStatus, $agent, [
+            'branch_group_id' => $group->id,
+        ]);
+
+        Sanctum::actingAs($mop);
+
+        $this->deleteJson('/api/properties/' . $property->id)->assertForbidden();
+    }
+
+    public function test_properties_branch_group_filter_uses_property_group_and_user_fallback(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+        $groupA = $this->createBranchGroup($branchA, 'Group A');
+        $groupB = $this->createBranchGroup($branchB, 'Group B');
+
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $admin = $this->createUser($adminRole, $branchA, 'Admin');
+        $agentA = $this->createUser($agentRole, $branchA, 'Agent A', $groupA);
+        $agentB = $this->createUser($agentRole, $branchB, 'Agent B', $groupB);
+
+        $propertyType = PropertyType::create(['name' => 'Apartment']);
+        $propertyStatus = PropertyStatus::create(['name' => 'Available']);
+        $ownGroupProperty = $this->createProperty($propertyType, $propertyStatus, $agentB, [
+            'title' => 'Own group wins',
+            'branch_group_id' => $groupA->id,
+        ]);
+        $fallbackProperty = $this->createProperty($propertyType, $propertyStatus, $agentA, [
+            'title' => 'Fallback group',
+            'branch_group_id' => null,
+        ]);
+        $otherProperty = $this->createProperty($propertyType, $propertyStatus, $agentB, [
+            'title' => 'Other group',
+            'branch_group_id' => $groupB->id,
+        ]);
+
+        Sanctum::actingAs($admin);
+
+        $response = $this->getJson('/api/properties?branch_group_id=' . $groupA->id);
+
+        $response->assertOk();
+        $ids = collect($response->json('data'))->pluck('id')->all();
+
+        $this->assertContains($ownGroupProperty->id, $ids);
+        $this->assertContains($fallbackProperty->id, $ids);
+        $this->assertNotContains($otherProperty->id, $ids);
     }
 
     private function createUser(Role $role, Branch $branch, string $name, ?BranchGroup $branchGroup = null): User

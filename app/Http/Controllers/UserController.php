@@ -48,6 +48,11 @@ class UserController extends Controller
         return in_array($roleSlug, ['branch_director', 'rop', 'agent', 'manager', 'operator', 'intern'], true);
     }
 
+    private function isBranchGroupScopedRole(?string $roleSlug): bool
+    {
+        return in_array($roleSlug, ['mop'], true);
+    }
+
     private function visibleUsersQuery(User $authUser)
     {
         $roleSlug = $this->roleSlug($authUser);
@@ -135,8 +140,8 @@ class UserController extends Controller
     {
         return match ($this->roleSlug($authUser)) {
             'superadmin', 'admin' => null,
-            'marketing' => ['marketing', 'branch_director', 'rop', 'agent', 'manager', 'operator', 'intern', 'client'],
-            'hr' => ['hr', 'marketing', 'branch_director', 'rop', 'agent', 'manager', 'operator', 'intern', 'client', 'reels_manager'],
+            'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'manager', 'operator', 'intern', 'client'],
+            'hr' => ['hr', 'marketing', 'branch_director', 'rop', 'mop', 'agent', 'manager', 'operator', 'intern', 'client', 'reels_manager'],
             'rop' => ['agent', 'manager', 'operator', 'intern', 'client'],
             'branch_director' => ['agent', 'manager', 'operator', 'intern', 'client'],
             default => [],
@@ -200,10 +205,14 @@ class UserController extends Controller
             return $data;
         }
 
-        if (! $this->isBranchScopedRole($roleSlug)) {
+        if (! $this->isBranchScopedRole($roleSlug) && ! $this->isBranchGroupScopedRole($roleSlug)) {
             $data['branch_group_id'] = null;
 
             return $data;
+        }
+
+        if ($this->isBranchGroupScopedRole($roleSlug) && empty($data['branch_group_id'])) {
+            abort(422, 'branch_group_id is required for this role.');
         }
 
         if (empty($data['branch_group_id'])) {
@@ -212,7 +221,11 @@ class UserController extends Controller
 
         $branchGroup = BranchGroup::query()->find($data['branch_group_id']);
 
-        if (! $branchGroup || empty($data['branch_id']) || (int) $branchGroup->branch_id !== (int) $data['branch_id']) {
+        if (! $branchGroup) {
+            abort(422, 'branch_group_id must exist.');
+        }
+
+        if (! empty($data['branch_id']) && (int) $branchGroup->branch_id !== (int) $data['branch_id']) {
             abort(422, 'branch_group_id must belong to the user branch.');
         }
 

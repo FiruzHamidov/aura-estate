@@ -4,10 +4,15 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Schema;
 
 class Property extends Model
 {
     use HasFactory;
+
+    protected $appends = [
+        'branch_group_id',
+    ];
 
     protected $fillable = [
         'title',
@@ -43,6 +48,7 @@ class Property extends Model
         'created_by',
         'agent_id',
         'branch_id',
+        'branch_group_id',
         'district',
         'address',
         'owner_phone',
@@ -218,5 +224,59 @@ class Property extends Model
     public function isDealClosed(): bool
     {
         return !is_null($this->sold_at);
+    }
+
+    public function getBranchGroupIdAttribute($value): ?int
+    {
+        $ownBranchGroupId = $this->normalizeBranchGroupId(
+            $value ?? ($this->attributes['branch_group_id'] ?? null)
+        );
+
+        if ($ownBranchGroupId !== null) {
+            return $ownBranchGroupId;
+        }
+
+        return $this->resolveUserBranchGroupId(
+            $this->agent_id,
+            $this->relationLoaded('agent') ? $this->agent : null
+        )
+            ?? $this->resolveUserBranchGroupId(
+                $this->created_by,
+                $this->relationLoaded('creator') ? $this->creator : null
+            )
+            ?? $this->resolveUserBranchGroupId(
+                $this->relationLoaded('creator') ? $this->creator?->id : null,
+                $this->relationLoaded('creator') ? $this->creator : null
+            );
+    }
+
+    private function resolveUserBranchGroupId($userId, ?User $loadedUser = null): ?int
+    {
+        if ($loadedUser && (int) $loadedUser->id === (int) $userId) {
+            $branchGroupId = $this->normalizeBranchGroupId(
+                $loadedUser->getAttributes()['branch_group_id'] ?? null
+            );
+
+            if ($branchGroupId !== null) {
+                return $branchGroupId;
+            }
+        }
+
+        if (empty($userId) || !Schema::hasColumn('users', 'branch_group_id')) {
+            return null;
+        }
+
+        return $this->normalizeBranchGroupId(
+            User::query()->whereKey($userId)->value('branch_group_id')
+        );
+    }
+
+    private function normalizeBranchGroupId($branchGroupId): ?int
+    {
+        if ($branchGroupId === null || $branchGroupId === '') {
+            return null;
+        }
+
+        return (int) $branchGroupId;
     }
 }
