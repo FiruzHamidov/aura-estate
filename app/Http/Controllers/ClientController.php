@@ -13,6 +13,7 @@ use App\Support\ClientPhone;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 
 class ClientController extends Controller
@@ -270,6 +271,8 @@ class ClientController extends Controller
             'need_status_id' => 'nullable|integer|exists:client_need_statuses,id',
             'need_type_id' => 'nullable|integer|exists:client_need_types,id',
             'repair_type_id' => 'nullable|integer|exists:repair_types,id',
+            'property_type_ids' => 'sometimes|array',
+            'property_type_ids.*' => ['integer', 'distinct', Rule::exists('property_types', 'id')],
             'wants_mortgage' => 'nullable|boolean',
             'budget_total_from' => 'nullable|numeric|min:0',
             'budget_total_to' => 'nullable|numeric|min:0',
@@ -343,6 +346,7 @@ class ClientController extends Controller
             !empty($validated['need_status_id'])
             || !empty($validated['need_type_id'])
             || !empty($validated['repair_type_id'])
+            || !empty($validated['property_type_ids'])
             || (array_key_exists('wants_mortgage', $validated) && $validated['wants_mortgage'] !== null)
             || (array_key_exists('budget_total_from', $validated) && $validated['budget_total_from'] !== null)
             || (array_key_exists('budget_total_to', $validated) && $validated['budget_total_to'] !== null)
@@ -363,6 +367,25 @@ class ClientController extends Controller
 
                 if (!empty($validated['repair_type_id'])) {
                     $builder->where('repair_type_id', $validated['repair_type_id']);
+                }
+
+                if (!empty($validated['property_type_ids'])) {
+                    $propertyTypeIds = $validated['property_type_ids'];
+                    $hasPropertyTypePivotTable = Schema::hasTable('client_need_property_type');
+
+                    $builder->where(function ($needBuilder) use ($propertyTypeIds, $hasPropertyTypePivotTable) {
+                        $needBuilder->whereHas(
+                            'propertyType',
+                            fn ($propertyTypeBuilder) => $propertyTypeBuilder->whereIn('id', $propertyTypeIds)
+                        );
+
+                        if ($hasPropertyTypePivotTable) {
+                            $needBuilder->orWhereHas(
+                                'propertyTypes',
+                                fn ($propertyTypesBuilder) => $propertyTypesBuilder->whereIn('id', $propertyTypeIds)
+                            );
+                        }
+                    });
                 }
 
                 if (array_key_exists('wants_mortgage', $validated) && $validated['wants_mortgage'] !== null) {
