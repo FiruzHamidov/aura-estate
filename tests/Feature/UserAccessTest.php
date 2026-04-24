@@ -760,4 +760,161 @@ class UserAccessTest extends TestCase
 
         $this->assertSame('inactive', $dismissedAgent->fresh()->status);
     }
+
+    public function test_user_index_exposes_meta_and_can_filter_report_agents(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $group = BranchGroup::create([
+            'branch_id' => $branch->id,
+            'name' => 'Group A',
+            'contact_visibility_mode' => BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY,
+        ]);
+
+        $superadminRole = Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $internRole = Role::create(['name' => 'Intern', 'slug' => 'intern']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $managerRole = Role::create(['name' => 'Manager', 'slug' => 'manager']);
+
+        $superadmin = User::create([
+            'name' => 'Superadmin',
+            'phone' => '900000091',
+            'password' => bcrypt('password'),
+            'role_id' => $superadminRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        User::create([
+            'name' => 'Manager CRM',
+            'phone' => '900000092',
+            'email' => 'manager@example.com',
+            'password' => bcrypt('password'),
+            'role_id' => $managerRole->id,
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'status' => 'active',
+        ]);
+
+        User::create([
+            'name' => 'Agent Report',
+            'phone' => '900000093',
+            'email' => 'agent@example.com',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'status' => 'active',
+        ]);
+
+        User::create([
+            'name' => 'Intern Report',
+            'phone' => '900000094',
+            'email' => 'intern@example.com',
+            'password' => bcrypt('password'),
+            'role_id' => $internRole->id,
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'status' => 'active',
+        ]);
+
+        User::create([
+            'name' => 'ROP Report',
+            'phone' => '900000095',
+            'email' => 'rop@example.com',
+            'password' => bcrypt('password'),
+            'role_id' => $ropRole->id,
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'status' => 'active',
+        ]);
+
+        $inactiveMop = User::create([
+            'name' => 'MOP Report',
+            'phone' => '900000096',
+            'email' => 'mop@example.com',
+            'password' => bcrypt('password'),
+            'role_id' => $mopRole->id,
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'status' => 'inactive',
+        ]);
+
+        Sanctum::actingAs($superadmin);
+
+        $response = $this->getJson('/api/user?report_agents=1&status=inactive&email=mop@example.com&page=1&per_page=100');
+
+        $response->assertOk();
+        $response->assertJsonCount(1, 'data');
+        $response->assertJsonPath('data.0.id', $inactiveMop->id);
+        $response->assertJsonPath('data.0.role.slug', 'mop');
+        $response->assertJsonPath('data.0.branch_id', $branch->id);
+        $response->assertJsonPath('data.0.branch_group_id', $group->id);
+        $response->assertJsonPath('data.0.branch.name', 'Branch A');
+        $response->assertJsonPath('meta.current_page', 1);
+        $response->assertJsonPath('meta.last_page', 1);
+        $response->assertJsonPath('meta.per_page', 100);
+        $response->assertJsonPath('meta.total', 1);
+        $response->assertJsonPath('current_page', 1);
+        $response->assertJsonPath('last_page', 1);
+        $response->assertJsonPath('per_page', 100);
+        $response->assertJsonPath('total', 1);
+    }
+
+    public function test_user_index_can_filter_by_roles_array(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+
+        $superadminRole = Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $internRole = Role::create(['name' => 'Intern', 'slug' => 'intern']);
+        $managerRole = Role::create(['name' => 'Manager', 'slug' => 'manager']);
+
+        $superadmin = User::create([
+            'name' => 'Superadmin',
+            'phone' => '900000101',
+            'password' => bcrypt('password'),
+            'role_id' => $superadminRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $agent = User::create([
+            'name' => 'Agent User',
+            'phone' => '900000102',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $intern = User::create([
+            'name' => 'Intern User',
+            'phone' => '900000103',
+            'password' => bcrypt('password'),
+            'role_id' => $internRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        User::create([
+            'name' => 'Manager User',
+            'phone' => '900000104',
+            'password' => bcrypt('password'),
+            'role_id' => $managerRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($superadmin);
+
+        $response = $this->getJson('/api/user?roles[]=agent&roles[]=intern&status=active');
+
+        $response->assertOk();
+        $response->assertJsonCount(2, 'data');
+        $response->assertJsonFragment(['id' => $agent->id]);
+        $response->assertJsonFragment(['id' => $intern->id]);
+        $response->assertJsonMissing(['phone' => '900000104']);
+    }
 }

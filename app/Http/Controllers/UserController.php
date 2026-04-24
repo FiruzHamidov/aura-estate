@@ -16,6 +16,8 @@ use Illuminate\Validation\Rule;
 
 class UserController extends Controller
 {
+    private const REPORT_AGENT_ROLE_SLUGS = ['agent', 'intern', 'rop', 'mop'];
+
     private function authUser(): User
     {
         /** @var User $user */
@@ -96,6 +98,10 @@ class UserController extends Controller
             $query->where('phone', 'like', '%'.trim($validated['phone']).'%');
         }
 
+        if (! empty($validated['email'])) {
+            $query->where('email', 'like', '%'.trim($validated['email']).'%');
+        }
+
         if ($this->isPrivilegedRole($this->roleSlug($authUser))) {
             if (! empty($validated['branch_id'])) {
                 $query->where('branch_id', $validated['branch_id']);
@@ -112,11 +118,29 @@ class UserController extends Controller
             $query->whereHas('role', fn ($roleQuery) => $roleQuery->where('slug', $validated['role']));
         }
 
+        if (! empty($validated['roles'])) {
+            $query->whereHas('role', fn ($roleQuery) => $roleQuery->whereIn('slug', $validated['roles']));
+        }
+
+        if (! empty($validated['report_agents'])) {
+            $query->whereHas('role', fn ($roleQuery) => $roleQuery->whereIn('slug', self::REPORT_AGENT_ROLE_SLUGS));
+        }
+
         if ($applyStatusFilter && ! empty($validated['status'])) {
             $this->applyStatusFilter($query, $validated['status']);
         }
 
         return $query;
+    }
+
+    private function paginationMeta(array $users): array
+    {
+        return [
+            'current_page' => $users['current_page'] ?? 1,
+            'last_page' => $users['last_page'] ?? 1,
+            'per_page' => $users['per_page'] ?? count($users['data'] ?? []),
+            'total' => $users['total'] ?? count($users['data'] ?? []),
+        ];
     }
 
     private function statusCountsForIndex(Builder $query): array
@@ -262,9 +286,13 @@ class UserController extends Controller
         $validated = $request->validate([
             'name' => 'nullable|string',
             'phone' => 'nullable|string',
+            'email' => 'nullable|string',
             'branch_id' => 'nullable|integer|exists:branches,id',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'role' => 'nullable|string|exists:roles,slug',
+            'roles' => 'nullable|array',
+            'roles.*' => 'string|exists:roles,slug',
+            'report_agents' => 'nullable|boolean',
             'status' => ['nullable', Rule::in(['active', 'inactive'])],
             'page' => 'nullable|integer|min:1',
             'per_page' => 'nullable|integer|min:1|max:100',
@@ -284,7 +312,12 @@ class UserController extends Controller
             ->paginate((int) ($validated['per_page'] ?? 15))
             ->withQueryString();
 
-        return response()->json(array_merge($users->toArray(), $tabCounts));
+        $payload = $users->toArray();
+        $meta = $this->paginationMeta($payload);
+
+        return response()->json(array_merge($payload, $tabCounts, [
+            'meta' => $meta,
+        ], $meta));
     }
 
     // Создание пользователя
