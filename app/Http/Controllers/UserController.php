@@ -47,7 +47,7 @@ class UserController extends Controller
 
     private function isBranchScopedRole(?string $roleSlug): bool
     {
-        return in_array($roleSlug, ['branch_director', 'rop', 'agent', 'manager', 'operator', 'intern'], true);
+        return in_array($roleSlug, ['branch_director', 'rop', 'mop', 'agent', 'manager', 'operator', 'intern'], true);
     }
 
     private function isBranchGroupScopedRole(?string $roleSlug): bool
@@ -166,7 +166,7 @@ class UserController extends Controller
             'superadmin', 'admin' => null,
             'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'manager', 'operator', 'intern', 'client'],
             'hr' => ['hr', 'marketing', 'branch_director', 'rop', 'mop', 'agent', 'manager', 'operator', 'intern', 'client', 'reels_manager'],
-            'rop' => ['agent', 'manager', 'operator', 'intern', 'client'],
+            'rop' => ['mop', 'agent', 'manager', 'operator', 'intern', 'client'],
             'branch_director' => ['agent', 'manager', 'operator', 'intern', 'client'],
             default => [],
         };
