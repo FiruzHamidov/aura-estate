@@ -22,6 +22,7 @@ use App\Http\Controllers\CrmReportController;
 use App\Http\Controllers\DealController;
 use App\Http\Controllers\DealPipelineController;
 use App\Http\Controllers\DealStageController;
+use App\Http\Controllers\DailyReportController;
 use App\Http\Controllers\DeveloperController;
 use App\Http\Controllers\DeveloperUnitController;
 use App\Http\Controllers\DeveloperUnitPhotoController;
@@ -125,11 +126,18 @@ Route::scopeBindings()->group(function () {
 Route::get('/chat/history', [ChatController::class, 'history']);
 
 // --- ЗАЩИЩЁННЫЕ ---
-Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
+Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(function () {
     Route::get('/user/profile', [UserController::class, 'profile']);
     Route::put('/user/profile', [UserController::class, 'updateProfile']);
     Route::patch('/user/profile', [UserController::class, 'updateProfile']);
     Route::post('/logout', [AuthController::class, 'logout']);
+    Route::get('/daily-reports/status', [DailyReportController::class, 'status']);
+    Route::get('/daily-reports/my', [DailyReportController::class, 'my']);
+    Route::get('/daily-reports/my/{date}', [DailyReportController::class, 'showMine']);
+    Route::get('/daily-reports', [DailyReportController::class, 'index']);
+    Route::post('/daily-reports', [DailyReportController::class, 'store']);
+    Route::put('/daily-reports/{dailyReport}', [DailyReportController::class, 'update']);
+    Route::patch('/daily-reports/{dailyReport}', [DailyReportController::class, 'update']);
     Route::post('/telegram/auth/link', [TelegramAuthController::class, 'link']);
     Route::delete('/user/photo', [UserController::class, 'deleteMyPhoto']);
     Route::post('/user/update-password', [UserController::class, 'updatePassword']);

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\User;
+use App\Services\DailyReportService;
 use App\Services\TelegramAuthService;
 use App\Services\TelegramBotService;
 use Illuminate\Http\Request;
@@ -46,11 +47,14 @@ class TelegramAuthController extends Controller
             return response()->json(['message' => $e->getMessage()], $status);
         }
 
-        return response()->json([
+        $dailyReportStatus = app(DailyReportService::class)->statusForUser($result['user']);
+
+        return response()->json(array_merge([
             'status' => 'authorized',
             'token' => $result['token'],
             'user' => $result['user'],
-        ]);
+            'daily_report_status' => $dailyReportStatus,
+        ], $dailyReportStatus));
     }
 
     public function link(Request $request, TelegramAuthService $telegramAuthService)

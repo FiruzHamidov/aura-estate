@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\SmsVerificationCode;
 use App\Models\User;
+use App\Services\DailyReportService;
 use App\Services\SmsAuthService;
 use App\Services\TelegramBotService;
 use Illuminate\Http\Request;
@@ -33,6 +34,17 @@ class AuthController extends Controller
             ['*'],
             now()->addHours(24)
         )->plainTextToken;
+    }
+
+    private function authPayload(User $user, string $token): array
+    {
+        $dailyReportStatus = app(DailyReportService::class)->statusForUser($user);
+
+        return array_merge([
+            'token' => $token,
+            'user' => $user,
+            'daily_report_status' => $dailyReportStatus,
+        ], $dailyReportStatus);
     }
 
     // Проверка доступных способов входа без привязки к auth_method пользователя
@@ -194,10 +206,7 @@ class AuthController extends Controller
         if ($smsAuthService->verifyCode($request->phone, $request->code)) {
             $token = $this->issueApiToken($user);
 
-            return response()->json([
-                'token' => $token,
-                'user' => $user
-            ]);
+            return response()->json($this->authPayload($user, $token));
         }
 
         return response()->json(['message' => 'Неверный код'], 401);
@@ -227,10 +236,7 @@ class AuthController extends Controller
 
         $token = $this->issueApiToken($user);
 
-        return response()->json([
-            'token' => $token,
-            'user' => $user
-        ]);
+        return response()->json($this->authPayload($user, $token));
     }
 
     public function logout(Request $request)

@@ -6,6 +6,7 @@ use App\Models\BranchGroup;
 use App\Models\Property;
 use App\Models\Role;
 use App\Models\User;
+use App\Services\DailyReportService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -369,9 +370,11 @@ class UserController extends Controller
 
     public function profile()
     {
-        return response()->json(
-            $this->authUser()->loadMissing(['role', 'branch', 'branchGroup'])
-        );
+        $user = $this->authUser()->loadMissing(['role', 'branch', 'branchGroup']);
+
+        return response()->json(array_merge($user->toArray(), [
+            'daily_report_status' => app(DailyReportService::class)->reportStatusPayload($user),
+        ]));
     }
 
     public function updateProfile(Request $request)

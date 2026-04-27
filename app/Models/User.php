@@ -145,4 +145,9 @@ class User extends Authenticatable
     {
         return $this->hasMany(Notification::class, 'user_id');
     }
+
+    public function dailyReports()
+    {
+        return $this->hasMany(DailyReport::class);
+    }
 }
