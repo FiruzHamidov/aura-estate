@@ -277,6 +277,68 @@ class UserAccessTest extends TestCase
             ->assertJsonPath('branch_group_id', $groupA->id);
     }
 
+    public function test_branch_director_can_create_and_update_mop_in_own_branch_group(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $groupA = BranchGroup::create([
+            'branch_id' => $branchA->id,
+            'name' => 'Group A',
+            'contact_visibility_mode' => BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY,
+        ]);
+        $groupB = BranchGroup::create([
+            'branch_id' => $branchB->id,
+            'name' => 'Group B',
+            'contact_visibility_mode' => BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY,
+        ]);
+
+        $directorRole = Role::create(['name' => 'Director', 'slug' => 'branch_director']);
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+
+        $director = User::create([
+            'name' => 'Director A',
+            'phone' => '900000027',
+            'password' => bcrypt('password'),
+            'role_id' => $directorRole->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($director);
+
+        $this->postJson('/api/user', [
+            'name' => 'MOP Wrong Group',
+            'phone' => '900000028',
+            'role_id' => $mopRole->id,
+            'branch_group_id' => $groupB->id,
+        ])->assertStatus(422);
+
+        $response = $this->postJson('/api/user', [
+            'name' => 'MOP A',
+            'phone' => '900000029',
+            'role_id' => $mopRole->id,
+            'branch_group_id' => $groupA->id,
+        ]);
+
+        $createdUserId = $response->json('id');
+
+        $response->assertCreated();
+        $response->assertJsonPath('role.slug', 'mop');
+        $response->assertJsonPath('branch_id', $branchA->id);
+        $response->assertJsonPath('branch_group_id', $groupA->id);
+
+        $this->patchJson('/api/user/'.$createdUserId, [
+            'name' => 'MOP A Updated By Director',
+            'status' => 'inactive',
+        ])->assertOk()
+            ->assertJsonPath('name', 'MOP A Updated By Director')
+            ->assertJsonPath('status', 'inactive')
+            ->assertJsonPath('role.slug', 'mop')
+            ->assertJsonPath('branch_id', $branchA->id)
+            ->assertJsonPath('branch_group_id', $groupA->id);
+    }
+
     public function test_authenticated_user_can_fetch_own_profile(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);

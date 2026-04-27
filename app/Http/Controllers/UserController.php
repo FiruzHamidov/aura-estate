@@ -167,7 +167,7 @@ class UserController extends Controller
             'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'manager', 'operator', 'intern', 'client'],
             'hr' => ['hr', 'marketing', 'branch_director', 'rop', 'mop', 'agent', 'manager', 'operator', 'intern', 'client', 'reels_manager'],
             'rop' => ['mop', 'agent', 'manager', 'operator', 'intern', 'client'],
-            'branch_director' => ['agent', 'manager', 'operator', 'intern', 'client'],
+            'branch_director' => ['mop', 'agent', 'manager', 'operator', 'intern', 'client'],
             default => [],
         };
     }
