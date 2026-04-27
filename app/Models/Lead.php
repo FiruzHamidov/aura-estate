@@ -35,7 +35,12 @@ class Lead extends Model
         'created_by',
         'responsible_agent_id',
         'client_id',
+        'converted_client_id',
+        'converted_deal_id',
+        'client_need_id',
         'status',
+        'budget',
+        'currency',
         'first_contact_due_at',
         'first_contacted_at',
         'last_activity_at',
@@ -53,6 +58,7 @@ class Lead extends Model
     protected $casts = [
         'meta' => 'array',
         'tags' => 'array',
+        'budget' => 'decimal:2',
         'first_contact_due_at' => 'datetime',
         'first_contacted_at' => 'datetime',
         'last_activity_at' => 'datetime',
@@ -65,6 +71,7 @@ class Lead extends Model
     protected $appends = [
         'is_first_contact_overdue',
         'is_closed',
+        'need_id',
     ];
 
     public static function statuses(): array
@@ -112,6 +119,16 @@ class Lead extends Model
         return $this->belongsTo(Client::class);
     }
 
+    public function clientNeed()
+    {
+        return $this->belongsTo(ClientNeed::class);
+    }
+
+    public function need()
+    {
+        return $this->clientNeed();
+    }
+
     public function deals()
     {
         return $this->hasMany(Deal::class)->latest('id');
@@ -139,5 +156,10 @@ class Lead extends Model
         }
 
         return $this->first_contact_due_at->isPast();
+    }
+
+    public function getNeedIdAttribute(): ?int
+    {
+        return $this->client_need_id ? (int) $this->client_need_id : null;
     }
 }

@@ -19,6 +19,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\ValidationException;
 
 class DealController extends Controller
@@ -45,7 +46,7 @@ class DealController extends Controller
 
     private function relations(): array
     {
-        return [
+        $relations = [
             'client',
             'lead',
             'branch',
@@ -58,11 +59,13 @@ class DealController extends Controller
             'primaryProperty.logs.user',
             'auditLogs.actor',
         ];
+
+        return array_merge($relations, $this->clientNeedRelations());
     }
 
     private function listRelations(): array
     {
-        return [
+        $relations = [
             'client',
             'lead',
             'branch',
@@ -72,6 +75,22 @@ class DealController extends Controller
             'pipeline',
             'stage',
             'primaryProperty.ownerClient.type',
+        ];
+
+        return array_merge($relations, Schema::hasTable('client_needs') ? ['clientNeed'] : []);
+    }
+
+    private function clientNeedRelations(): array
+    {
+        if (! Schema::hasTable('client_needs')) {
+            return [];
+        }
+
+        return [
+            'client.needs',
+            'lead.client',
+            'lead.clientNeed',
+            'clientNeed',
         ];
     }
 
@@ -102,6 +121,18 @@ class DealController extends Controller
 
     private function attachShowIncludes(Deal $deal, array $includes): Deal
     {
+        if (
+            ! $deal->client_need_id
+            && $deal->relationLoaded('lead')
+            && $deal->lead?->client_need_id
+        ) {
+            $deal->setAttribute('client_need_id', $deal->lead->client_need_id);
+
+            if ($deal->lead->relationLoaded('clientNeed')) {
+                $deal->setRelation('clientNeed', $deal->lead->clientNeed);
+            }
+        }
+
         if (in_array('activities', $includes, true)) {
             $deal->setRelation('activities', $deal->auditLogs);
         }
@@ -119,6 +150,7 @@ class DealController extends Controller
             'title' => ($deal ? 'sometimes|' : '').'nullable|string|max:255',
             'client_id' => ($deal ? 'sometimes|' : '').'nullable|integer|exists:clients,id',
             'lead_id' => ($deal ? 'sometimes|' : '').'nullable|integer|exists:leads,id',
+            'client_need_id' => ($deal ? 'sometimes|' : '').'nullable|integer|exists:client_needs,id',
             'responsible_agent_id' => ($deal ? 'sometimes|' : '').'nullable|integer|exists:users,id',
             'pipeline_id' => ($deal ? 'sometimes|' : '').'required|integer|exists:crm_deal_pipelines,id',
             'stage_id' => ($deal ? 'sometimes|' : '').'nullable|integer|exists:crm_deal_stages,id',
@@ -212,6 +244,10 @@ class DealController extends Controller
             $data['client_id'] = $lead->client_id;
         }
 
+        if ($lead && empty($data['client_need_id']) && ! empty($lead->client_need_id)) {
+            $data['client_need_id'] = $lead->client_need_id;
+        }
+
         if ($property && empty($data['client_id']) && ! empty($property->owner_client_id)) {
             $data['client_id'] = $property->owner_client_id;
         }
@@ -252,6 +288,7 @@ class DealController extends Controller
             'branch_id' => $lead->branch_id,
             'responsible_agent_id' => $lead->responsible_agent_id,
             'client_id' => $lead->client_id,
+            'client_need_id' => $lead->client_need_id,
             'note' => $lead->note,
             'tags' => $lead->tags,
             'last_contact_result' => $lead->last_contact_result,
@@ -438,6 +475,7 @@ class DealController extends Controller
             'stage_id' => 'nullable|integer|exists:crm_deal_stages,id',
             'client_id' => 'nullable|integer|exists:clients,id',
             'lead_id' => 'nullable|integer|exists:leads,id',
+            'client_need_id' => 'nullable|integer|exists:client_needs,id',
             'primary_property_id' => 'nullable|integer|exists:properties,id',
             'source_property_status' => 'nullable|string|max:40',
             'source' => 'nullable|string|max:100',
@@ -460,7 +498,7 @@ class DealController extends Controller
             });
         }
 
-        foreach (['pipeline_id', 'stage_id', 'client_id', 'lead_id', 'responsible_agent_id', 'primary_property_id', 'source_property_status'] as $field) {
+        foreach (['pipeline_id', 'stage_id', 'client_id', 'lead_id', 'client_need_id', 'responsible_agent_id', 'primary_property_id', 'source_property_status'] as $field) {
             if (! empty($validated[$field])) {
                 $query->where($field, $validated[$field]);
             }

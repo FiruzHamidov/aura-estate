@@ -141,6 +141,7 @@ class DealPipelineController extends Controller
 
         return response()->json(
             $this->pipelineAccess->visibleQuery($authUser)
+                ->with('defaultStage')
                 ->withCount(['stages', 'deals'])
                 ->orderBy('sort_order')
                 ->orderBy('id')

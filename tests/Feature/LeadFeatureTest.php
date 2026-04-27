@@ -4,7 +4,11 @@ namespace Tests\Feature;
 
 use App\Models\Branch;
 use App\Models\Client;
+use App\Models\ClientNeed;
 use App\Models\ClientType;
+use App\Models\Deal;
+use App\Models\DealPipeline;
+use App\Models\DealStage;
 use App\Models\Lead;
 use App\Models\Role;
 use App\Models\User;
@@ -83,6 +87,81 @@ class LeadFeatureTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('client_need_types', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->unique();
+            $table->unsignedInteger('sort_order')->default(0);
+            $table->boolean('is_active')->default(true);
+            $table->timestamps();
+        });
+
+        Schema::create('client_need_statuses', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->unique();
+            $table->boolean('is_default')->default(false);
+            $table->boolean('is_closed')->default(false);
+            $table->unsignedInteger('sort_order')->default(0);
+            $table->timestamps();
+        });
+
+        Schema::create('locations', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->timestamps();
+        });
+
+        Schema::create('property_types', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->unique();
+            $table->timestamps();
+        });
+
+        Schema::create('repair_types', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->unique();
+            $table->timestamps();
+        });
+
+        Schema::create('client_needs', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('client_id');
+            $table->unsignedBigInteger('type_id');
+            $table->unsignedBigInteger('status_id')->nullable();
+            $table->decimal('budget_from', 15, 2)->nullable();
+            $table->decimal('budget_to', 15, 2)->nullable();
+            $table->decimal('budget_total', 15, 2)->nullable();
+            $table->decimal('budget_cash', 15, 2)->nullable();
+            $table->decimal('budget_mortgage', 15, 2)->nullable();
+            $table->string('currency', 3)->nullable();
+            $table->unsignedBigInteger('location_id')->nullable();
+            $table->string('district')->nullable();
+            $table->unsignedBigInteger('property_type_id')->nullable();
+            $table->unsignedBigInteger('repair_type_id')->nullable();
+            $table->integer('rooms_from')->nullable();
+            $table->integer('rooms_to')->nullable();
+            $table->decimal('area_from', 10, 2)->nullable();
+            $table->decimal('area_to', 10, 2)->nullable();
+            $table->text('comment')->nullable();
+            $table->unsignedBigInteger('created_by')->nullable();
+            $table->unsignedBigInteger('responsible_agent_id')->nullable();
+            $table->timestamp('closed_at')->nullable();
+            $table->boolean('wants_mortgage')->default(false);
+            $table->json('meta')->nullable();
+            $table->softDeletes();
+            $table->timestamps();
+        });
+
+        Schema::create('client_need_property_type', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('client_need_id');
+            $table->unsignedBigInteger('property_type_id');
+            $table->timestamps();
+        });
+
         Schema::create('leads', function (Blueprint $table) {
             $table->id();
             $table->string('full_name')->nullable();
@@ -95,7 +174,12 @@ class LeadFeatureTest extends TestCase
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('responsible_agent_id')->nullable();
             $table->unsignedBigInteger('client_id')->nullable();
+            $table->unsignedBigInteger('converted_client_id')->nullable();
+            $table->unsignedBigInteger('converted_deal_id')->nullable();
+            $table->unsignedBigInteger('client_need_id')->nullable();
             $table->string('status')->default(Lead::STATUS_NEW);
+            $table->decimal('budget', 15, 2)->nullable();
+            $table->string('currency', 3)->nullable();
             $table->timestamp('first_contact_due_at')->nullable();
             $table->timestamp('first_contacted_at')->nullable();
             $table->timestamp('last_activity_at')->nullable();
@@ -107,6 +191,72 @@ class LeadFeatureTest extends TestCase
             $table->string('last_contact_result', 100)->nullable();
             $table->timestamp('next_follow_up_at')->nullable();
             $table->timestamp('next_activity_at')->nullable();
+            $table->unsignedBigInteger('updated_by')->nullable();
+            $table->softDeletes();
+            $table->timestamps();
+        });
+
+        Schema::create('crm_deal_pipelines', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->unique();
+            $table->string('code')->nullable();
+            $table->string('type')->default(DealPipeline::TYPE_SALES);
+            $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedInteger('sort_order')->default(0);
+            $table->boolean('is_default')->default(false);
+            $table->boolean('is_active')->default(true);
+            $table->json('meta')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('crm_deal_stages', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('pipeline_id');
+            $table->string('name');
+            $table->string('slug');
+            $table->string('color', 24)->nullable();
+            $table->unsignedInteger('sort_order')->default(0);
+            $table->boolean('is_default')->default(false);
+            $table->boolean('is_closed')->default(false);
+            $table->boolean('is_lost')->default(false);
+            $table->boolean('is_active')->default(true);
+            $table->json('meta')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('crm_deals', function (Blueprint $table) {
+            $table->id();
+            $table->string('title')->nullable();
+            $table->unsignedBigInteger('client_id')->nullable();
+            $table->unsignedBigInteger('lead_id')->nullable();
+            $table->unsignedBigInteger('client_need_id')->nullable();
+            $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('created_by')->nullable();
+            $table->unsignedBigInteger('responsible_agent_id')->nullable();
+            $table->unsignedBigInteger('pipeline_id');
+            $table->unsignedBigInteger('stage_id');
+            $table->unsignedBigInteger('primary_property_id')->nullable();
+            $table->decimal('amount', 15, 2)->nullable();
+            $table->string('currency', 3)->default('TJS');
+            $table->unsignedTinyInteger('probability')->default(0);
+            $table->decimal('expected_company_income', 15, 2)->nullable();
+            $table->string('expected_company_income_currency', 3)->default('TJS');
+            $table->decimal('expected_agent_commission', 15, 2)->nullable();
+            $table->string('expected_agent_commission_currency', 3)->default('TJS');
+            $table->decimal('actual_company_income', 15, 2)->nullable();
+            $table->string('actual_company_income_currency', 3)->default('TJS');
+            $table->timestamp('deadline_at')->nullable();
+            $table->timestamp('closed_at')->nullable();
+            $table->text('lost_reason')->nullable();
+            $table->string('source')->nullable();
+            $table->unsignedInteger('board_position')->default(0);
+            $table->json('meta')->nullable();
+            $table->text('note')->nullable();
+            $table->json('tags')->nullable();
+            $table->string('last_contact_result', 100)->nullable();
+            $table->timestamp('next_activity_at')->nullable();
+            $table->string('source_property_status', 40)->nullable();
             $table->unsignedBigInteger('updated_by')->nullable();
             $table->softDeletes();
             $table->timestamps();
@@ -145,6 +295,47 @@ class LeadFeatureTest extends TestCase
             'is_active' => true,
             'created_at' => now(),
             'updated_at' => now(),
+        ]);
+
+        DB::table('client_need_types')->insert([
+            'id' => 1,
+            'name' => 'Покупка',
+            'slug' => 'buy',
+            'sort_order' => 10,
+            'is_active' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        DB::table('client_need_statuses')->insert([
+            'id' => 1,
+            'name' => 'Новая',
+            'slug' => 'new',
+            'is_default' => true,
+            'is_closed' => false,
+            'sort_order' => 10,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $pipeline = DealPipeline::create([
+            'name' => 'Основная воронка',
+            'slug' => 'default_sales',
+            'code' => 'default_sales',
+            'type' => DealPipeline::TYPE_SALES,
+            'branch_id' => null,
+            'sort_order' => 10,
+            'is_default' => true,
+            'is_active' => true,
+        ]);
+
+        DealStage::create([
+            'pipeline_id' => $pipeline->id,
+            'name' => 'Новая',
+            'slug' => 'new',
+            'sort_order' => 10,
+            'is_default' => true,
+            'is_active' => true,
         ]);
     }
 
@@ -242,6 +433,135 @@ class LeadFeatureTest extends TestCase
         $this->getJson('/api/leads/'.$leadForeign->id)->assertForbidden();
     }
 
+    public function test_client_id_filters_return_paginated_lead_and_deal_totals(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = $this->createUser($agentRole, $branch, 'Agent A');
+        $client = $this->createClient($branch, $agent, 'Client With CRM', '992950000015');
+        $otherClient = $this->createClient($branch, $agent, 'Other Client', '992950000016');
+        $stage = DealStage::query()->firstOrFail();
+
+        foreach (['Lead 1', 'Lead 2'] as $index => $name) {
+            Lead::create([
+                'full_name' => $name,
+                'phone' => '99295000001'.(7 + $index),
+                'client_id' => $client->id,
+                'branch_id' => $branch->id,
+                'created_by' => $agent->id,
+                'responsible_agent_id' => $agent->id,
+                'status' => Lead::STATUS_NEW,
+            ]);
+        }
+
+        Lead::create([
+            'full_name' => 'Other Lead',
+            'phone' => '992950000019',
+            'client_id' => $otherClient->id,
+            'branch_id' => $branch->id,
+            'created_by' => $agent->id,
+            'responsible_agent_id' => $agent->id,
+            'status' => Lead::STATUS_NEW,
+        ]);
+
+        foreach (['Deal 1', 'Deal 2'] as $title) {
+            Deal::create([
+                'title' => $title,
+                'client_id' => $client->id,
+                'branch_id' => $branch->id,
+                'created_by' => $agent->id,
+                'responsible_agent_id' => $agent->id,
+                'pipeline_id' => $stage->pipeline_id,
+                'stage_id' => $stage->id,
+            ]);
+        }
+
+        Deal::create([
+            'title' => 'Other Deal',
+            'client_id' => $otherClient->id,
+            'branch_id' => $branch->id,
+            'created_by' => $agent->id,
+            'responsible_agent_id' => $agent->id,
+            'pipeline_id' => $stage->pipeline_id,
+            'stage_id' => $stage->id,
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $this->getJson('/api/leads?client_id='.$client->id.'&per_page=1')
+            ->assertOk()
+            ->assertJsonPath('total', 2)
+            ->assertJsonPath('current_page', 1)
+            ->assertJsonPath('last_page', 2)
+            ->assertJsonPath('per_page', 1);
+
+        $this->getJson('/api/deals?client_id='.$client->id.'&per_page=1')
+            ->assertOk()
+            ->assertJsonPath('total', 2)
+            ->assertJsonPath('current_page', 1)
+            ->assertJsonPath('last_page', 2)
+            ->assertJsonPath('per_page', 1);
+    }
+
+    public function test_lead_and_deal_show_return_client_needs_and_specific_need(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = $this->createUser($agentRole, $branch, 'Agent A');
+        $client = $this->createClient($branch, $agent, 'Need Client', '992950000025');
+        $need = ClientNeed::create([
+            'client_id' => $client->id,
+            'type_id' => 1,
+            'status_id' => 1,
+            'budget_total' => 100000,
+            'currency' => 'USD',
+            'created_by' => $agent->id,
+            'responsible_agent_id' => $agent->id,
+        ]);
+        $lead = $this->createLead($branch, $agent, $agent, 'Need Lead', '992950000026');
+        $lead->update([
+            'client_id' => $client->id,
+            'client_need_id' => $need->id,
+        ]);
+        $stage = DealStage::query()->firstOrFail();
+        $deal = Deal::create([
+            'title' => 'Need Deal',
+            'client_id' => $client->id,
+            'lead_id' => $lead->id,
+            'client_need_id' => $need->id,
+            'branch_id' => $branch->id,
+            'created_by' => $agent->id,
+            'responsible_agent_id' => $agent->id,
+            'pipeline_id' => $stage->pipeline_id,
+            'stage_id' => $stage->id,
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $this->getJson('/api/leads/'.$lead->id.'?include=client,client.needs,deals')
+            ->assertOk()
+            ->assertJsonPath('client_id', $client->id)
+            ->assertJsonPath('client_need_id', $need->id)
+            ->assertJsonPath('need_id', $need->id)
+            ->assertJsonPath('client.id', $client->id)
+            ->assertJsonPath('client.needs.0.id', $need->id)
+            ->assertJsonPath('client_need.id', $need->id)
+            ->assertJsonPath('deals.0.id', $deal->id);
+
+        $this->getJson('/api/deals/'.$deal->id.'?include=client,client.needs,lead,pipeline,stage')
+            ->assertOk()
+            ->assertJsonPath('client_id', $client->id)
+            ->assertJsonPath('lead_id', $lead->id)
+            ->assertJsonPath('client_need_id', $need->id)
+            ->assertJsonPath('need_id', $need->id)
+            ->assertJsonPath('client.id', $client->id)
+            ->assertJsonPath('client.needs.0.id', $need->id)
+            ->assertJsonPath('client_need.id', $need->id)
+            ->assertJsonPath('lead.id', $lead->id)
+            ->assertJsonPath('pipeline.id', $stage->pipeline_id)
+            ->assertJsonPath('stage.id', $stage->id);
+    }
+
     public function test_converting_lead_reuses_existing_client_and_writes_audit_log(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);
@@ -256,17 +576,30 @@ class LeadFeatureTest extends TestCase
         $response = $this->postJson('/api/leads/'.$lead->id.'/convert');
 
         $response->assertOk();
-        $response->assertJsonPath('status', Lead::STATUS_CONVERTED);
+        $response->assertJsonPath('message', 'Лид успешно конвертирован в сделку');
+        $response->assertJsonPath('lead.status', Lead::STATUS_CONVERTED);
         $response->assertJsonPath('client.id', $existingClient->id);
         $response->assertJsonPath('client.contact_kind', Client::CONTACT_KIND_BUYER);
+        $response->assertJsonPath('deal.lead_id', $lead->id);
+        $response->assertJsonPath('deal.client_id', $existingClient->id);
+        $response->assertJsonPath('deal.title', 'Lead To Convert');
+        $this->assertNotNull($response->json('deal.id'));
 
         $this->assertDatabaseHas('leads', [
             'id' => $lead->id,
             'status' => Lead::STATUS_CONVERTED,
             'client_id' => $existingClient->id,
+            'converted_client_id' => $existingClient->id,
+            'converted_deal_id' => $response->json('deal.id'),
+        ]);
+        $this->assertDatabaseHas('crm_deals', [
+            'id' => $response->json('deal.id'),
+            'lead_id' => $lead->id,
+            'client_id' => $existingClient->id,
         ]);
 
         $this->assertDatabaseCount('clients', 1);
+        $this->assertDatabaseCount('crm_deals', 1);
         $this->assertDatabaseHas('crm_audit_logs', [
             'auditable_type' => Lead::class,
             'auditable_id' => $lead->id,
@@ -276,6 +609,11 @@ class LeadFeatureTest extends TestCase
             'auditable_type' => Client::class,
             'auditable_id' => $existingClient->id,
             'event' => 'lead_linked',
+        ]);
+        $this->assertDatabaseHas('crm_audit_logs', [
+            'auditable_type' => Deal::class,
+            'auditable_id' => $response->json('deal.id'),
+            'event' => 'created_from_lead',
         ]);
     }
 
@@ -292,10 +630,12 @@ class LeadFeatureTest extends TestCase
         $response = $this->postJson('/api/leads/'.$lead->id.'/convert');
 
         $response->assertOk();
-        $response->assertJsonPath('status', Lead::STATUS_CONVERTED);
+        $response->assertJsonPath('lead.status', Lead::STATUS_CONVERTED);
         $response->assertJsonPath('client.full_name', 'Fresh Lead');
         $response->assertJsonPath('client.phone', '992950000030');
         $response->assertJsonPath('client.contact_kind', Client::CONTACT_KIND_BUYER);
+        $response->assertJsonPath('deal.lead_id', $lead->id);
+        $this->assertNotNull($response->json('deal.id'));
 
         $this->assertDatabaseCount('clients', 1);
         $this->assertDatabaseHas('clients', [
@@ -308,6 +648,82 @@ class LeadFeatureTest extends TestCase
             'auditable_type' => Client::class,
             'event' => 'created_from_lead',
         ]);
+    }
+
+    public function test_converting_lead_creates_deal_and_is_idempotent(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = $this->createUser($agentRole, $branch, 'Agent A');
+
+        $lead = $this->createLead($branch, $agent, $agent, 'Budget Lead', '992950000040');
+        $client = $this->createClient($branch, $agent, 'Budget Client', '992950000041');
+        $need = ClientNeed::create([
+            'client_id' => $client->id,
+            'type_id' => 1,
+            'status_id' => 1,
+            'budget_total' => 125000,
+            'currency' => 'USD',
+            'created_by' => $agent->id,
+            'responsible_agent_id' => $agent->id,
+        ]);
+        $lead->update([
+            'client_id' => $client->id,
+            'client_need_id' => $need->id,
+            'budget' => 125000,
+            'currency' => 'USD',
+            'note' => 'Interested in new buildings',
+            'tags' => ['vip', 'new-build'],
+            'last_contact_result' => 'called',
+            'next_follow_up_at' => now()->addDay(),
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $first = $this->postJson('/api/leads/'.$lead->id.'/convert');
+        $first->assertOk()
+            ->assertJsonPath('lead.status', Lead::STATUS_CONVERTED)
+            ->assertJsonPath('deal.lead_id', $lead->id)
+            ->assertJsonPath('deal.client_need_id', $need->id)
+            ->assertJsonPath('deal.need_id', $need->id)
+            ->assertJsonPath('deal.client_need.id', $need->id)
+            ->assertJsonPath('deal.client.needs.0.id', $need->id)
+            ->assertJsonPath('deal.title', 'Budget Lead')
+            ->assertJsonPath('deal.source', 'website')
+            ->assertJsonPath('deal.currency', 'USD')
+            ->assertJsonPath('deal.branch_id', $branch->id)
+            ->assertJsonPath('deal.responsible_agent_id', $agent->id)
+            ->assertJsonPath('deal.note', 'Interested in new buildings')
+            ->assertJsonPath('deal.last_contact_result', 'called');
+
+        $this->assertEquals(125000.0, (float) $first->json('deal.amount'));
+
+        $dealId = $first->json('deal.id');
+        $clientId = $first->json('client.id');
+
+        $this->assertNotNull($dealId);
+        $this->assertDatabaseHas('leads', [
+            'id' => $lead->id,
+            'status' => Lead::STATUS_CONVERTED,
+            'client_id' => $clientId,
+            'converted_client_id' => $clientId,
+            'converted_deal_id' => $dealId,
+            'client_need_id' => $need->id,
+        ]);
+        $this->assertDatabaseHas('crm_deals', [
+            'id' => $dealId,
+            'lead_id' => $lead->id,
+            'client_id' => $clientId,
+            'client_need_id' => $need->id,
+        ]);
+
+        $second = $this->postJson('/api/leads/'.$lead->id.'/convert');
+
+        $second->assertOk()
+            ->assertJsonPath('deal.id', $dealId)
+            ->assertJsonPath('client.id', $clientId);
+
+        $this->assertDatabaseCount('crm_deals', 1);
     }
 
     private function createUser(Role $role, Branch $branch, string $name): User

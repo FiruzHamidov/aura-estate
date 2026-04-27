@@ -16,6 +16,7 @@ class Deal extends Model
         'title',
         'client_id',
         'lead_id',
+        'client_need_id',
         'branch_id',
         'created_by',
         'responsible_agent_id',
@@ -55,6 +56,7 @@ class Deal extends Model
 
     protected $appends = [
         'is_closed',
+        'need_id',
     ];
 
     public function client()
@@ -65,6 +67,16 @@ class Deal extends Model
     public function lead()
     {
         return $this->belongsTo(Lead::class);
+    }
+
+    public function clientNeed()
+    {
+        return $this->belongsTo(ClientNeed::class);
+    }
+
+    public function need()
+    {
+        return $this->clientNeed();
     }
 
     public function branch()
@@ -115,5 +127,20 @@ class Deal extends Model
     public function getIsClosedAttribute(): bool
     {
         return ! is_null($this->closed_at) || (bool) ($this->stage?->is_closed ?? false);
+    }
+
+    public function getNeedIdAttribute(): ?int
+    {
+        $clientNeedId = $this->attributes['client_need_id'] ?? null;
+
+        if ($clientNeedId) {
+            return (int) $clientNeedId;
+        }
+
+        if ($this->relationLoaded('lead') && $this->lead?->client_need_id) {
+            return (int) $this->lead->client_need_id;
+        }
+
+        return null;
     }
 }

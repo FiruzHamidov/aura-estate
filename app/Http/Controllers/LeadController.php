@@ -16,6 +16,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
@@ -44,7 +45,7 @@ class LeadController extends Controller
 
     private function relations(): array
     {
-        return [
+        $relations = [
             'branch',
             'creator',
             'responsibleAgent',
@@ -52,6 +53,8 @@ class LeadController extends Controller
             'client',
             'auditLogs.actor',
         ];
+
+        return array_merge($relations, $this->clientNeedRelations());
     }
 
     private function listRelations(): array
@@ -62,6 +65,18 @@ class LeadController extends Controller
             'responsibleAgent',
             'updater',
             'client',
+        ];
+    }
+
+    private function clientNeedRelations(): array
+    {
+        if (! Schema::hasTable('client_needs')) {
+            return [];
+        }
+
+        return [
+            'client.needs',
+            'clientNeed',
         ];
     }
 
@@ -120,6 +135,10 @@ class LeadController extends Controller
             $data['source'] = trim((string) $data['source']);
         }
 
+        if (array_key_exists('currency', $data) && $data['currency']) {
+            $data['currency'] = mb_strtoupper(trim((string) $data['currency']));
+        }
+
         if (array_key_exists('tags', $data)) {
             $data['tags'] = $this->activityService->normalizeTags($data['tags']);
         }
@@ -140,13 +159,19 @@ class LeadController extends Controller
     private function validatePayload(Request $request, ?Lead $lead = null): array
     {
         $rules = [
+            'name' => ($lead ? 'sometimes|' : '').'nullable|string|max:255',
             'full_name' => ($lead ? 'sometimes|' : '').'nullable|string|max:255',
             'phone' => ($lead ? 'sometimes|' : '').'nullable|string|max:50',
             'email' => ($lead ? 'sometimes|' : '').'nullable|email|max:255',
+            'comment' => 'nullable|string',
             'note' => 'nullable|string',
             'source' => ($lead ? 'sometimes|' : '').'nullable|string|max:100',
             'branch_id' => ($lead ? 'sometimes|' : '').'nullable|integer|exists:branches,id',
             'responsible_agent_id' => ($lead ? 'sometimes|' : '').'nullable|integer|exists:users,id',
+            'client_id' => ($lead ? 'sometimes|' : '').'nullable|integer|exists:clients,id',
+            'client_need_id' => ($lead ? 'sometimes|' : '').'nullable|integer|exists:client_needs,id',
+            'budget' => ($lead ? 'sometimes|' : '').'nullable|numeric|min:0',
+            'currency' => [$lead ? 'sometimes' : 'nullable', 'nullable', Rule::in(['TJS', 'USD', 'tjs', 'usd'])],
             'status' => [
                 $lead ? 'sometimes' : 'nullable',
                 Rule::in(array_diff(Lead::statuses(), [Lead::STATUS_CONVERTED])),
@@ -163,6 +188,16 @@ class LeadController extends Controller
         ];
 
         $validated = $request->validate($rules);
+
+        if (empty($validated['full_name']) && ! empty($validated['name'])) {
+            $validated['full_name'] = $validated['name'];
+        }
+
+        if (empty($validated['note']) && ! empty($validated['comment'])) {
+            $validated['note'] = $validated['comment'];
+        }
+
+        unset($validated['name'], $validated['comment']);
 
         $fullName = trim((string) ($validated['full_name'] ?? $lead?->full_name ?? ''));
         $phone = trim((string) ($validated['phone'] ?? $lead?->phone ?? ''));
@@ -464,6 +499,8 @@ class LeadController extends Controller
                 'source',
                 'branch_id',
                 'responsible_agent_id',
+                'budget',
+                'currency',
                 'status',
                 'tags',
                 'last_contact_result',
@@ -486,6 +523,10 @@ class LeadController extends Controller
         $this->leadAccess->ensureVisible($this->authUser(), $lead);
 
         $lead->load($this->relations());
+        $lead->loadMissing(array_merge(
+            ['deals.pipeline', 'deals.stage', 'deals.client'],
+            Schema::hasTable('client_needs') ? ['deals.client.needs', 'deals.clientNeed'] : []
+        ));
         $this->appendActivitySummary($lead);
         $this->attachShowIncludes($lead, $this->parseIncludes($request));
 
@@ -554,11 +595,11 @@ class LeadController extends Controller
         $authUser = $this->authUser();
         $this->leadAccess->ensureVisible($authUser, $lead);
 
-        $convertedLead = $this->conversionService->convert($lead, $authUser);
-        $this->notifications->handleLeadConverted($convertedLead, $authUser);
+        $conversion = $this->conversionService->convert($lead, $authUser);
+        $this->notifications->handleLeadConverted($conversion['lead'], $authUser);
 
-        return response()->json(
-            $this->attachDuplicateSummary($convertedLead)
-        );
+        $conversion['lead'] = $this->attachDuplicateSummary($conversion['lead']);
+
+        return response()->json($conversion);
     }
 }
