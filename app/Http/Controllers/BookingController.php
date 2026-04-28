@@ -404,7 +404,7 @@ class BookingController extends Controller
 
         $this->applyBranchAccessForAgents($request, $q, 'agent_id');
 
-        $bookings = $q->orderBy('start_time')
+        $bookings = $q->orderByDesc('start_time')
             ->paginate((int) ($validated['per_page'] ?? 20))
             ->withQueryString();
 

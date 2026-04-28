@@ -14,6 +14,7 @@ class DatabaseSeeder extends Seeder
             ClientTypeSeeder::class,
             ClientNeedTypeSeeder::class,
             ClientNeedStatusSeeder::class,
+            ClientSourceSeeder::class,
             PropertyTypeSeeder::class,
             PropertyStatusSeeder::class,
             LocationSeeder::class,

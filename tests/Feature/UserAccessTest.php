@@ -1041,4 +1041,86 @@ class UserAccessTest extends TestCase
         $response->assertJsonFragment(['id' => $intern->id]);
         $response->assertJsonMissing(['phone' => '900000104']);
     }
+
+    public function test_public_user_agents_endpoint_returns_agents_and_mops(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $group = BranchGroup::create([
+            'branch_id' => $branch->id,
+            'name' => 'Group A',
+            'contact_visibility_mode' => BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY,
+        ]);
+
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $managerRole = Role::create(['name' => 'Manager', 'slug' => 'manager']);
+
+        $activeAgent = User::create([
+            'name' => 'Active Agent',
+            'phone' => '900000105',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'status' => 'active',
+        ]);
+
+        $activeMop = User::create([
+            'name' => 'Active MOP',
+            'phone' => '900000106',
+            'password' => bcrypt('password'),
+            'role_id' => $mopRole->id,
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'status' => 'active',
+        ]);
+
+        $inactiveMop = User::create([
+            'name' => 'Inactive MOP',
+            'phone' => '900000107',
+            'password' => bcrypt('password'),
+            'role_id' => $mopRole->id,
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'status' => 'inactive',
+        ]);
+
+        $inactiveAgent = User::create([
+            'name' => 'Inactive Agent',
+            'phone' => '900000108',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'status' => 'inactive',
+        ]);
+
+        User::create([
+            'name' => 'Manager User',
+            'phone' => '900000109',
+            'password' => bcrypt('password'),
+            'role_id' => $managerRole->id,
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'status' => 'active',
+        ]);
+
+        $activeResponse = $this->getJson('/api/user/agents');
+        $activeResponse->assertOk();
+        $activeResponse->assertJsonCount(2);
+        $activeResponse->assertJsonFragment(['id' => $activeAgent->id]);
+        $activeResponse->assertJsonFragment(['id' => $activeMop->id]);
+        $activeResponse->assertJsonMissing(['id' => $inactiveAgent->id]);
+        $activeResponse->assertJsonMissing(['id' => $inactiveMop->id]);
+        $activeResponse->assertJsonMissing(['phone' => '900000109']);
+
+        $inactiveResponse = $this->getJson('/api/user/agents?status=inactive');
+        $inactiveResponse->assertOk();
+        $inactiveResponse->assertJsonCount(2);
+        $inactiveResponse->assertJsonFragment(['id' => $inactiveAgent->id]);
+        $inactiveResponse->assertJsonFragment(['id' => $inactiveMop->id]);
+        $inactiveResponse->assertJsonMissing(['id' => $activeAgent->id]);
+        $inactiveResponse->assertJsonMissing(['id' => $activeMop->id]);
+        $inactiveResponse->assertJsonMissing(['phone' => '900000109']);
+    }
 }

@@ -11,6 +11,7 @@ use App\Http\Controllers\ClientController;
 use App\Http\Controllers\ClientNeedController;
 use App\Http\Controllers\ClientNeedStatusController;
 use App\Http\Controllers\ClientNeedTypeController;
+use App\Http\Controllers\ClientSourceController;
 use App\Http\Controllers\ClientTypeController;
 use App\Http\Controllers\ConversationController;
 use App\Http\Controllers\ConversationMessageController;
@@ -92,6 +93,7 @@ Route::get('/repair-types', [RepairTypeController::class, 'index']);
 Route::get('/contract-types', [ContractTypeController::class, 'index']);
 Route::get('/branches', [BranchController::class, 'index']);
 Route::get('/client-types', [ClientTypeController::class, 'index']);
+Route::get('/client-sources', [ClientSourceController::class, 'index']);
 Route::get('/client-need-types', [ClientNeedTypeController::class, 'index']);
 Route::get('/client-need-statuses', [ClientNeedStatusController::class, 'index']);
 

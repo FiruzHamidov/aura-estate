@@ -13,6 +13,7 @@ class ClientNeed extends Model
 
     protected $appends = [
         'property_type_ids',
+        'repair_type_ids',
     ];
 
     protected $fillable = [
@@ -100,6 +101,12 @@ class ClientNeed extends Model
             ->withTimestamps();
     }
 
+    public function repairTypes()
+    {
+        return $this->belongsToMany(RepairType::class, 'client_need_repair_type')
+            ->withTimestamps();
+    }
+
     public function getPropertyTypeIdsAttribute(): array
     {
         if ($this->relationLoaded('propertyTypes')) {
@@ -134,5 +141,41 @@ class ClientNeed extends Model
         }
 
         return $this->property_type_id ? [(int) $this->property_type_id] : [];
+    }
+
+    public function getRepairTypeIdsAttribute(): array
+    {
+        if ($this->relationLoaded('repairTypes')) {
+            $ids = $this->repairTypes
+                ->pluck('id')
+                ->map(fn ($id) => (int) $id)
+                ->values()
+                ->all();
+
+            if ($ids !== []) {
+                return $ids;
+            }
+
+            return $this->repair_type_id ? [(int) $this->repair_type_id] : [];
+        }
+
+        static $hasRepairTypePivotTable;
+        $hasRepairTypePivotTable ??= Schema::hasTable('client_need_repair_type');
+
+        if (!$hasRepairTypePivotTable) {
+            return $this->repair_type_id ? [(int) $this->repair_type_id] : [];
+        }
+
+        $ids = $this->repairTypes()
+            ->pluck('repair_types.id')
+            ->map(fn ($id) => (int) $id)
+            ->values()
+            ->all();
+
+        if ($ids !== []) {
+            return $ids;
+        }
+
+        return $this->repair_type_id ? [(int) $this->repair_type_id] : [];
     }
 }

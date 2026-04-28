@@ -18,6 +18,7 @@ use Illuminate\Validation\Rule;
 class UserController extends Controller
 {
     private const REPORT_AGENT_ROLE_SLUGS = ['agent', 'intern', 'rop', 'mop'];
+    private const PUBLIC_AGENT_ROLE_SLUGS = ['agent', 'mop'];
 
     private function authUser(): User
     {
@@ -482,7 +483,7 @@ class UserController extends Controller
 
         $agents = User::with(['role', 'branch', 'branchGroup'])
             ->whereHas('role', function ($q) {
-                $q->where('slug', 'agent');
+                $q->whereIn('slug', self::PUBLIC_AGENT_ROLE_SLUGS);
             })
             ->when($status !== 'all', function ($q) use ($status) {
                 $this->applyStatusFilter($q, $status);

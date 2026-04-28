@@ -59,7 +59,7 @@ class ClientController extends Controller
 
     private function showRelations(): array
     {
-        return [
+        $relations = [
             'branch',
             'branchGroup',
             'creator',
@@ -74,6 +74,12 @@ class ClientController extends Controller
             'needs.propertyTypes',
             'needs.repairType',
         ];
+
+        if (Schema::hasTable('client_sources')) {
+            array_splice($relations, 5, 0, ['source']);
+        }
+
+        return $relations;
     }
 
     private function parseIncludes(Request $request): array
@@ -81,6 +87,52 @@ class ClientController extends Controller
         return collect(explode(',', (string) $request->query('include', '')))
             ->map(fn (string $include) => trim($include))
             ->filter()
+            ->values()
+            ->all();
+    }
+
+    private function parseRepairTypeIds(Request $request): ?array
+    {
+        if (!$request->has('repair_type_ids')) {
+            return null;
+        }
+
+        $raw = $request->query('repair_type_ids');
+        $parts = is_array($raw) ? $raw : [$raw];
+
+        return collect($parts)
+            ->flatMap(function ($value) {
+                if (is_string($value)) {
+                    return explode(',', $value);
+                }
+
+                return [$value];
+            })
+            ->map(fn ($value) => is_string($value) ? trim($value) : $value)
+            ->filter(fn ($value) => $value !== null && $value !== '')
+            ->values()
+            ->all();
+    }
+
+    private function parseSourceIds(Request $request): ?array
+    {
+        if (!$request->has('source_ids')) {
+            return null;
+        }
+
+        $raw = $request->query('source_ids');
+        $parts = is_array($raw) ? $raw : [$raw];
+
+        return collect($parts)
+            ->flatMap(function ($value) {
+                if (is_string($value)) {
+                    return explode(',', $value);
+                }
+
+                return [$value];
+            })
+            ->map(fn ($value) => is_string($value) ? trim($value) : $value)
+            ->filter(fn ($value) => $value !== null && $value !== '')
             ->values()
             ->all();
     }
@@ -255,6 +307,15 @@ class ClientController extends Controller
     public function index(Request $request)
     {
         $authUser = $this->authUser();
+        $parsedRepairTypeIds = $this->parseRepairTypeIds($request);
+        $parsedSourceIds = $this->parseSourceIds($request);
+
+        if ($parsedRepairTypeIds !== null) {
+            $request->merge(['repair_type_ids' => $parsedRepairTypeIds]);
+        }
+        if ($parsedSourceIds !== null) {
+            $request->merge(['source_ids' => $parsedSourceIds]);
+        }
 
         $validated = $request->validate([
             'search' => 'nullable|string',
@@ -265,12 +326,17 @@ class ClientController extends Controller
             'branch_id' => 'nullable|integer|exists:branches,id',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'client_type_id' => 'nullable|integer|exists:client_types,id',
+            'source_id' => 'nullable|integer|exists:client_sources,id',
+            'source_ids' => 'sometimes|array',
+            'source_ids.*' => ['integer', 'distinct', Rule::exists('client_sources', 'id')],
             'contact_kind' => ['nullable', Rule::in(Client::contactKinds())],
             'is_business' => 'nullable|boolean',
             'has_open_needs' => 'nullable|boolean',
             'need_status_id' => 'nullable|integer|exists:client_need_statuses,id',
             'need_type_id' => 'nullable|integer|exists:client_need_types,id',
             'repair_type_id' => 'nullable|integer|exists:repair_types,id',
+            'repair_type_ids' => 'sometimes|array',
+            'repair_type_ids.*' => ['integer', 'distinct', Rule::exists('repair_types', 'id')],
             'property_type_ids' => 'sometimes|array',
             'property_type_ids.*' => ['integer', 'distinct', Rule::exists('property_types', 'id')],
             'wants_mortgage' => 'nullable|boolean',
@@ -283,6 +349,20 @@ class ClientController extends Controller
             'status' => ['nullable', Rule::in(['active', 'inactive'])],
             'per_page' => 'nullable|integer|min:1|max:100',
         ]);
+
+        $effectiveRepairTypeIds = [];
+        if (array_key_exists('repair_type_ids', $validated)) {
+            $effectiveRepairTypeIds = $validated['repair_type_ids'];
+        } elseif (!empty($validated['repair_type_id'])) {
+            $effectiveRepairTypeIds = [$validated['repair_type_id']];
+        }
+
+        $effectiveSourceIds = [];
+        if (array_key_exists('source_ids', $validated)) {
+            $effectiveSourceIds = $validated['source_ids'];
+        } elseif (!empty($validated['source_id'])) {
+            $effectiveSourceIds = [$validated['source_id']];
+        }
 
         $query = $this->clientAccess->visibleQuery($authUser)
             ->with($this->showRelations())
@@ -326,6 +406,10 @@ class ClientController extends Controller
             $query->where('client_type_id', $validated['client_type_id']);
         }
 
+        if (!empty($effectiveSourceIds)) {
+            $query->whereIn('source_id', $effectiveSourceIds);
+        }
+
         if (!empty($validated['contact_kind'])) {
             $query->whereIn('contact_kind', Client::kindsMatchingFilter($validated['contact_kind']));
         }
@@ -345,7 +429,7 @@ class ClientController extends Controller
         $hasNeedFilters =
             !empty($validated['need_status_id'])
             || !empty($validated['need_type_id'])
-            || !empty($validated['repair_type_id'])
+            || !empty($effectiveRepairTypeIds)
             || !empty($validated['property_type_ids'])
             || (array_key_exists('wants_mortgage', $validated) && $validated['wants_mortgage'] !== null)
             || (array_key_exists('budget_total_from', $validated) && $validated['budget_total_from'] !== null)
@@ -356,7 +440,7 @@ class ClientController extends Controller
             || (array_key_exists('budget_mortgage_to', $validated) && $validated['budget_mortgage_to'] !== null);
 
         if ($hasNeedFilters) {
-            $query->whereHas('needs', function ($builder) use ($validated, $request) {
+            $query->whereHas('needs', function ($builder) use ($validated, $request, $effectiveRepairTypeIds) {
                 if (!empty($validated['need_status_id'])) {
                     $builder->where('status_id', $validated['need_status_id']);
                 }
@@ -365,8 +449,8 @@ class ClientController extends Controller
                     $builder->where('type_id', $validated['need_type_id']);
                 }
 
-                if (!empty($validated['repair_type_id'])) {
-                    $builder->where('repair_type_id', $validated['repair_type_id']);
+                if (!empty($effectiveRepairTypeIds)) {
+                    $builder->whereIn('repair_type_id', $effectiveRepairTypeIds);
                 }
 
                 if (!empty($validated['property_type_ids'])) {
@@ -442,6 +526,12 @@ class ClientController extends Controller
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'responsible_agent_id' => 'nullable|integer|exists:users,id',
             'client_type_id' => 'nullable|integer|exists:client_types,id',
+            'source_id' => [
+                'nullable',
+                'integer',
+                Rule::exists('client_sources', 'id')->where(fn ($query) => $query->where('is_active', true)),
+            ],
+            'source_comment' => 'nullable|string',
             'contact_kind' => ['nullable', Rule::in(Client::contactKinds())],
             'status' => ['nullable', Rule::in(['active', 'inactive'])],
             'bitrix_contact_id' => 'nullable|integer',
@@ -457,6 +547,8 @@ class ClientController extends Controller
             'branch_group_id',
             'responsible_agent_id',
             'client_type_id',
+            'source_id',
+            'source_comment',
             'contact_kind',
             'status',
             'bitrix_contact_id',
@@ -540,6 +632,13 @@ class ClientController extends Controller
             'branch_group_id' => 'sometimes|nullable|integer|exists:branch_groups,id',
             'responsible_agent_id' => 'sometimes|nullable|integer|exists:users,id',
             'client_type_id' => 'sometimes|nullable|integer|exists:client_types,id',
+            'source_id' => [
+                'sometimes',
+                'nullable',
+                'integer',
+                Rule::exists('client_sources', 'id')->where(fn ($query) => $query->where('is_active', true)),
+            ],
+            'source_comment' => 'sometimes|nullable|string',
             'contact_kind' => ['sometimes', 'nullable', Rule::in(Client::contactKinds())],
             'status' => ['sometimes', Rule::in(['active', 'inactive'])],
             'bitrix_contact_id' => 'sometimes|nullable|integer',
@@ -555,6 +654,8 @@ class ClientController extends Controller
             'branch_group_id',
             'responsible_agent_id',
             'client_type_id',
+            'source_id',
+            'source_comment',
             'contact_kind',
             'status',
             'bitrix_contact_id',
@@ -568,6 +669,8 @@ class ClientController extends Controller
             'created_by' => $client->created_by,
             'responsible_agent_id' => $client->responsible_agent_id,
             'client_type_id' => $client->client_type_id,
+            'source_id' => $client->source_id,
+            'source_comment' => $client->source_comment,
             'contact_kind' => $client->contact_kind,
         ], $data);
         $data = $this->clientAccess->normalizeMutationData($data, $authUser);

@@ -96,6 +96,22 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('repair_types', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('client_sources', function (Blueprint $table) {
+            $table->id();
+            $table->string('code')->unique();
+            $table->string('name');
+            $table->boolean('is_active')->default(true);
+            $table->unsignedInteger('sort_order')->default(0);
+            $table->timestamps();
+        });
+
         Schema::create('clients', function (Blueprint $table) {
             $table->id();
             $table->string('full_name');
@@ -108,6 +124,8 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('responsible_agent_id')->nullable();
             $table->unsignedBigInteger('client_type_id')->nullable();
+            $table->unsignedBigInteger('source_id')->nullable();
+            $table->text('source_comment')->nullable();
             $table->string('contact_kind', 16)->default(Client::CONTACT_KIND_BUYER);
             $table->enum('status', ['active', 'inactive'])->default('active');
             $table->unsignedBigInteger('bitrix_contact_id')->nullable();
@@ -206,6 +224,60 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             'is_active' => true,
             'created_at' => now(),
             'updated_at' => now(),
+        ]);
+
+        DB::table('repair_types')->insert([
+            [
+                'id' => 1,
+                'name' => 'Черновой',
+                'slug' => 'rough',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'id' => 2,
+                'name' => 'Косметический',
+                'slug' => 'cosmetic',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'id' => 3,
+                'name' => 'Дизайнерский',
+                'slug' => 'designer',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+        ]);
+
+        DB::table('client_sources')->insert([
+            [
+                'id' => 1,
+                'code' => 'phone',
+                'name' => 'Телефон',
+                'is_active' => true,
+                'sort_order' => 10,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'id' => 2,
+                'code' => 'instagram',
+                'name' => 'Instagram',
+                'is_active' => true,
+                'sort_order' => 20,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'id' => 3,
+                'code' => 'other',
+                'name' => 'Другое',
+                'is_active' => false,
+                'sort_order' => 30,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
         ]);
     }
 
@@ -343,6 +415,279 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             ->assertJsonFragment(['id' => $houseClient->id])
             ->assertJsonFragment(['id' => $apartmentClient->id])
             ->assertJsonMissing(['id' => $landClient->id]);
+    }
+
+    public function test_clients_index_filters_by_single_repair_type_id_in_array_param(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+
+        $matchClient = $this->createClient($branch, $agent, 'Repair match');
+        $otherClient = $this->createClient($branch, $agent, 'Repair other');
+
+        DB::table('client_needs')->insert([
+            [
+                'client_id' => $matchClient->id,
+                'type_id' => 1,
+                'status_id' => 1,
+                'repair_type_id' => 1,
+                'created_by' => $agent->id,
+                'responsible_agent_id' => $agent->id,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'client_id' => $otherClient->id,
+                'type_id' => 1,
+                'status_id' => 1,
+                'repair_type_id' => 2,
+                'created_by' => $agent->id,
+                'responsible_agent_id' => $agent->id,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $this->getJson('/api/clients?repair_type_ids[]=1')
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonFragment(['id' => $matchClient->id])
+            ->assertJsonMissing(['id' => $otherClient->id]);
+    }
+
+    public function test_clients_index_filters_by_multiple_repair_type_ids(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+
+        $firstClient = $this->createClient($branch, $agent, 'Repair one');
+        $secondClient = $this->createClient($branch, $agent, 'Repair two');
+        $thirdClient = $this->createClient($branch, $agent, 'Repair three');
+
+        DB::table('client_needs')->insert([
+            [
+                'client_id' => $firstClient->id,
+                'type_id' => 1,
+                'status_id' => 1,
+                'repair_type_id' => 1,
+                'created_by' => $agent->id,
+                'responsible_agent_id' => $agent->id,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'client_id' => $secondClient->id,
+                'type_id' => 1,
+                'status_id' => 1,
+                'repair_type_id' => 2,
+                'created_by' => $agent->id,
+                'responsible_agent_id' => $agent->id,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'client_id' => $thirdClient->id,
+                'type_id' => 1,
+                'status_id' => 1,
+                'repair_type_id' => 3,
+                'created_by' => $agent->id,
+                'responsible_agent_id' => $agent->id,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $this->getJson('/api/clients?repair_type_ids=1,2')
+            ->assertOk()
+            ->assertJsonPath('total', 2)
+            ->assertJsonFragment(['id' => $firstClient->id])
+            ->assertJsonFragment(['id' => $secondClient->id])
+            ->assertJsonMissing(['id' => $thirdClient->id]);
+    }
+
+    public function test_clients_index_ignores_empty_repair_type_ids_parameter(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $firstClient = $this->createClient($branch, $agent, 'First client');
+        $secondClient = $this->createClient($branch, $agent, 'Second client');
+
+        DB::table('client_needs')->insert([
+            [
+                'client_id' => $firstClient->id,
+                'type_id' => 1,
+                'status_id' => 1,
+                'repair_type_id' => 1,
+                'created_by' => $agent->id,
+                'responsible_agent_id' => $agent->id,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'client_id' => $secondClient->id,
+                'type_id' => 1,
+                'status_id' => 1,
+                'repair_type_id' => 2,
+                'created_by' => $agent->id,
+                'responsible_agent_id' => $agent->id,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $this->getJson('/api/clients?repair_type_ids=')
+            ->assertOk()
+            ->assertJsonPath('total', 2)
+            ->assertJsonFragment(['id' => $firstClient->id])
+            ->assertJsonFragment(['id' => $secondClient->id]);
+    }
+
+    public function test_clients_index_keeps_backward_compatibility_for_repair_type_id_and_prioritizes_repair_type_ids(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+
+        $legacyClient = $this->createClient($branch, $agent, 'Legacy filter client');
+        $priorityClient = $this->createClient($branch, $agent, 'Priority filter client');
+
+        DB::table('client_needs')->insert([
+            [
+                'client_id' => $legacyClient->id,
+                'type_id' => 1,
+                'status_id' => 1,
+                'repair_type_id' => 1,
+                'created_by' => $agent->id,
+                'responsible_agent_id' => $agent->id,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'client_id' => $priorityClient->id,
+                'type_id' => 1,
+                'status_id' => 1,
+                'repair_type_id' => 2,
+                'created_by' => $agent->id,
+                'responsible_agent_id' => $agent->id,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $this->getJson('/api/clients?repair_type_id=1')
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonFragment(['id' => $legacyClient->id])
+            ->assertJsonMissing(['id' => $priorityClient->id]);
+
+        $this->getJson('/api/clients?repair_type_id=1&repair_type_ids[]=2')
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonFragment(['id' => $priorityClient->id])
+            ->assertJsonMissing(['id' => $legacyClient->id]);
+    }
+
+    public function test_client_store_accepts_valid_source_id(): void
+    {
+        [$agent] = $this->prepareAgentContext();
+        Sanctum::actingAs($agent);
+
+        $this->postJson('/api/clients', [
+            'full_name' => 'Source Test',
+            'source_id' => 1,
+            'source_comment' => 'С рекламы',
+        ])->assertCreated()
+            ->assertJsonPath('source_id', 1)
+            ->assertJsonPath('source.id', 1)
+            ->assertJsonPath('source.code', 'phone');
+    }
+
+    public function test_client_store_rejects_non_existing_source_id(): void
+    {
+        [$agent] = $this->prepareAgentContext();
+        Sanctum::actingAs($agent);
+
+        $this->postJson('/api/clients', [
+            'full_name' => 'Invalid Source',
+            'source_id' => 999,
+        ])->assertStatus(422)
+            ->assertJsonValidationErrors(['source_id']);
+    }
+
+    public function test_client_store_rejects_inactive_source_id(): void
+    {
+        [$agent] = $this->prepareAgentContext();
+        Sanctum::actingAs($agent);
+
+        $this->postJson('/api/clients', [
+            'full_name' => 'Inactive Source',
+            'source_id' => 3,
+        ])->assertStatus(422)
+            ->assertJsonValidationErrors(['source_id']);
+    }
+
+    public function test_clients_index_filters_by_source_id_and_source_ids_with_priority(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+
+        $phoneClient = $this->createClient($branch, $agent, 'Phone source');
+        $instaClient = $this->createClient($branch, $agent, 'Insta source');
+
+        $phoneClient->update(['source_id' => 1]);
+        $instaClient->update(['source_id' => 2]);
+
+        Sanctum::actingAs($agent);
+
+        $this->getJson('/api/clients?source_id=1')
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonFragment(['id' => $phoneClient->id])
+            ->assertJsonMissing(['id' => $instaClient->id]);
+
+        $this->getJson('/api/clients?source_ids[]=1&source_ids[]=2')
+            ->assertOk()
+            ->assertJsonPath('total', 2)
+            ->assertJsonFragment(['id' => $phoneClient->id])
+            ->assertJsonFragment(['id' => $instaClient->id]);
+
+        $this->getJson('/api/clients?source_ids=')
+            ->assertOk()
+            ->assertJsonPath('total', 2);
+
+        $this->getJson('/api/clients?source_id=1&source_ids[]=2')
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonFragment(['id' => $instaClient->id])
+            ->assertJsonMissing(['id' => $phoneClient->id]);
+    }
+
+    public function test_client_sources_endpoint_returns_only_active_sources_sorted(): void
+    {
+        $this->getJson('/api/client-sources')
+            ->assertOk()
+            ->assertJsonCount(2)
+            ->assertJsonPath('0.id', 1)
+            ->assertJsonPath('0.code', 'phone')
+            ->assertJsonPath('1.id', 2)
+            ->assertJsonPath('1.code', 'instagram')
+            ->assertJsonMissing(['id' => 3]);
+    }
+
+    private function prepareAgentContext(): array
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_ALL_BRANCH,
+        ]);
+
+        $branch = Branch::create(['name' => 'Main branch']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = $this->createUser($agentRole, $branch, 'Agent A');
+
+        return [$agent, $branch];
     }
 
     private function createUser(Role $role, Branch $branch, string $name): User

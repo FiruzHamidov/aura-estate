@@ -6,6 +6,7 @@ use App\Models\Client;
 use App\Models\ClientNeed;
 use App\Models\ClientNeedStatus;
 use App\Models\PropertyType;
+use App\Models\RepairType;
 use App\Models\User;
 use App\Support\ClientAccess;
 use Illuminate\Http\Request;
@@ -33,7 +34,18 @@ class ClientNeedController extends Controller
 
     private function relations(): array
     {
-        return ['client.type', 'type', 'status', 'creator', 'responsibleAgent', 'location', 'propertyType', 'propertyTypes', 'repairType'];
+        return [
+            'client.type',
+            'type',
+            'status',
+            'creator',
+            'responsibleAgent',
+            'location',
+            'propertyType',
+            'propertyTypes',
+            'repairType',
+            'repairTypes',
+        ];
     }
 
     private function validatePayload(Request $request, ?ClientNeed $clientNeed = null): array
@@ -53,6 +65,8 @@ class ClientNeedController extends Controller
             'property_type_ids' => 'sometimes|array',
             'property_type_ids.*' => ['integer', 'distinct', Rule::exists('property_types', 'id')],
             'repair_type_id' => 'nullable|exists:repair_types,id',
+            'repair_type_ids' => 'sometimes|array',
+            'repair_type_ids.*' => ['integer', 'distinct', Rule::exists('repair_types', 'id')],
             'rooms_from' => 'nullable|integer|min:0',
             'rooms_to' => 'nullable|integer|min:0',
             'area_from' => 'nullable|numeric|min:0',
@@ -140,6 +154,33 @@ class ClientNeedController extends Controller
         return $data;
     }
 
+    private function normalizeRepairTypes(array $data): array
+    {
+        $hasLegacyRepairType = array_key_exists('repair_type_id', $data);
+        $hasRepairTypeIds = array_key_exists('repair_type_ids', $data);
+
+        if (!$hasLegacyRepairType && !$hasRepairTypeIds) {
+            return $data;
+        }
+
+        if ($hasRepairTypeIds) {
+            $data['repair_type_ids'] = collect($data['repair_type_ids'] ?? [])
+                ->filter(fn ($id) => $id !== null && $id !== '')
+                ->map(fn ($id) => (int) $id)
+                ->unique()
+                ->values()
+                ->all();
+        } else {
+            $data['repair_type_ids'] = $data['repair_type_id']
+                ? [(int) $data['repair_type_id']]
+                : [];
+        }
+
+        $data['repair_type_id'] = $data['repair_type_ids'][0] ?? null;
+
+        return $data;
+    }
+
     private function syncPropertyTypes(ClientNeed $need, array $propertyTypeIds): void
     {
         $propertyTypeIds = collect($propertyTypeIds)
@@ -166,6 +207,34 @@ class ClientNeedController extends Controller
         }
 
         $need->setRelation('propertyType', PropertyType::query()->find($propertyTypeIds[0]));
+    }
+
+    private function syncRepairTypes(ClientNeed $need, array $repairTypeIds): void
+    {
+        $repairTypeIds = collect($repairTypeIds)
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values()
+            ->all();
+
+        $need->repairTypes()->sync($repairTypeIds);
+
+        if ($repairTypeIds === []) {
+            $need->unsetRelation('repairType');
+
+            return;
+        }
+
+        if ($need->relationLoaded('repairTypes')) {
+            $need->setRelation(
+                'repairType',
+                $need->repairTypes->firstWhere('id', $repairTypeIds[0]) ?? $need->repairTypes->first()
+            );
+
+            return;
+        }
+
+        $need->setRelation('repairType', RepairType::query()->find($repairTypeIds[0]));
     }
 
     private function applyClosedState(array $data, ?ClientNeed $clientNeed = null): array
@@ -200,6 +269,7 @@ class ClientNeedController extends Controller
 
         $validated = $this->validatePayload($request);
         $validated = $this->normalizePropertyTypes($validated);
+        $validated = $this->normalizeRepairTypes($validated);
         $validated = $this->normalizeFinance($validated);
         $validated['status_id'] ??= ClientNeedStatus::defaultId();
         $validated = $this->clientAccess->normalizeNeedMutationData($validated, $authUser, $client);
@@ -208,10 +278,13 @@ class ClientNeedController extends Controller
         $validated['currency'] ??= 'TJS';
 
         $propertyTypeIds = $validated['property_type_ids'] ?? [];
+        $repairTypeIds = $validated['repair_type_ids'] ?? [];
         unset($validated['property_type_ids']);
+        unset($validated['repair_type_ids']);
 
         $need = ClientNeed::create($validated);
         $this->syncPropertyTypes($need, $propertyTypeIds);
+        $this->syncRepairTypes($need, $repairTypeIds);
 
         return response()->json($need->load($this->relations()), 201);
     }
@@ -231,21 +304,30 @@ class ClientNeedController extends Controller
 
         $validated = $this->validatePayload($request, $clientNeed);
         $validated = $this->normalizePropertyTypes($validated, $clientNeed);
+        $validated = $this->normalizeRepairTypes($validated);
         $validated = $this->normalizeFinance($validated, $clientNeed);
         $validated = $this->clientAccess->normalizeNeedMutationData($validated, $authUser, $clientNeed->client);
         $this->clientAccess->validateNeedMutationTargets($authUser, $clientNeed->client, $validated);
         $validated = $this->applyClosedState($validated, $clientNeed);
 
         $propertyTypeIds = null;
+        $repairTypeIds = null;
         if (array_key_exists('property_type_ids', $validated)) {
             $propertyTypeIds = $validated['property_type_ids'];
             unset($validated['property_type_ids']);
+        }
+        if (array_key_exists('repair_type_ids', $validated)) {
+            $repairTypeIds = $validated['repair_type_ids'];
+            unset($validated['repair_type_ids']);
         }
 
         $clientNeed->update($validated);
 
         if ($propertyTypeIds !== null) {
             $this->syncPropertyTypes($clientNeed, $propertyTypeIds);
+        }
+        if ($repairTypeIds !== null) {
+            $this->syncRepairTypes($clientNeed, $repairTypeIds);
         }
 
         return response()->json($clientNeed->fresh($this->relations()));

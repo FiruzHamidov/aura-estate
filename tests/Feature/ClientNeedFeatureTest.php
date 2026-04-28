@@ -88,6 +88,13 @@ class ClientNeedFeatureTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('repair_types', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->nullable();
+            $table->timestamps();
+        });
+
         Schema::create('clients', function (Blueprint $table) {
             $table->id();
             $table->string('full_name');
@@ -119,6 +126,7 @@ class ClientNeedFeatureTest extends TestCase
             $table->unsignedBigInteger('location_id')->nullable();
             $table->string('district')->nullable();
             $table->unsignedBigInteger('property_type_id')->nullable();
+            $table->unsignedBigInteger('repair_type_id')->nullable();
             $table->unsignedInteger('rooms_from')->nullable();
             $table->unsignedInteger('rooms_to')->nullable();
             $table->decimal('area_from', 10, 2)->nullable();
@@ -130,6 +138,14 @@ class ClientNeedFeatureTest extends TestCase
             $table->json('meta')->nullable();
             $table->softDeletes();
             $table->timestamps();
+        });
+
+        Schema::create('client_need_repair_type', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('client_need_id');
+            $table->unsignedBigInteger('repair_type_id');
+            $table->timestamps();
+            $table->unique(['client_need_id', 'repair_type_id']);
         });
 
         Schema::create('personal_access_tokens', function (Blueprint $table) {
@@ -161,6 +177,12 @@ class ClientNeedFeatureTest extends TestCase
             ['id' => 3, 'name' => 'Ожидание', 'slug' => 'waiting', 'is_closed' => false, 'sort_order' => 30, 'is_active' => true, 'created_at' => now(), 'updated_at' => now()],
             ['id' => 4, 'name' => 'Закрыта успешно', 'slug' => 'closed_success', 'is_closed' => true, 'sort_order' => 40, 'is_active' => true, 'created_at' => now(), 'updated_at' => now()],
             ['id' => 5, 'name' => 'Закрыта без результата', 'slug' => 'closed_lost', 'is_closed' => true, 'sort_order' => 50, 'is_active' => true, 'created_at' => now(), 'updated_at' => now()],
+        ]);
+
+        DB::table('repair_types')->insert([
+            ['id' => 1, 'name' => 'Черновой', 'slug' => 'rough', 'created_at' => now(), 'updated_at' => now()],
+            ['id' => 2, 'name' => 'Косметический', 'slug' => 'cosmetic', 'created_at' => now(), 'updated_at' => now()],
+            ['id' => 3, 'name' => 'Дизайнерский', 'slug' => 'designer', 'created_at' => now(), 'updated_at' => now()],
         ]);
     }
 
@@ -273,6 +295,46 @@ class ClientNeedFeatureTest extends TestCase
 
         $this->getJson('/api/clients/'.$foreignClient->id.'/needs')->assertForbidden();
         $this->getJson('/api/client-needs/'.$needId)->assertForbidden();
+    }
+
+    public function test_agent_can_create_need_with_multiple_repair_types_and_legacy_compatibility(): void
+    {
+        [$agent, $client] = $this->seedClientContext();
+        Sanctum::actingAs($agent);
+
+        $create = $this->postJson('/api/clients/'.$client->id.'/needs', [
+            'type_id' => 1,
+            'status_id' => 1,
+            'repair_type_ids' => [1, 2],
+            'comment' => 'Multi repair',
+        ]);
+
+        $create->assertCreated()
+            ->assertJsonPath('repair_type_id', 1)
+            ->assertJsonPath('repair_type_ids.0', 1)
+            ->assertJsonPath('repair_type_ids.1', 2);
+
+        $needId = (int) $create->json('id');
+
+        $this->assertDatabaseHas('client_need_repair_type', [
+            'client_need_id' => $needId,
+            'repair_type_id' => 1,
+        ]);
+        $this->assertDatabaseHas('client_need_repair_type', [
+            'client_need_id' => $needId,
+            'repair_type_id' => 2,
+        ]);
+
+        $legacy = $this->postJson('/api/clients/'.$client->id.'/needs', [
+            'type_id' => 1,
+            'status_id' => 1,
+            'repair_type_id' => 3,
+            'comment' => 'Legacy repair',
+        ]);
+
+        $legacy->assertCreated()
+            ->assertJsonPath('repair_type_id', 3)
+            ->assertJsonPath('repair_type_ids.0', 3);
     }
 
     private function seedClientContext(): array

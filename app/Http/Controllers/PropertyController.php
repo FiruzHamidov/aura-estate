@@ -78,6 +78,46 @@ class PropertyController extends Controller
         return $user->hasRole('agent') || $user->hasRole('intern');
     }
 
+    private function canManageVipAndUrgentListing(User $user): bool
+    {
+        return $user->hasRole('branch_director')
+            || $user->hasRole('admin')
+            || $user->hasRole('superadmin');
+    }
+
+    private function applyListingTypeAccessRules(User $user, array $payload): array
+    {
+        if (!array_key_exists('listing_type', $payload)) {
+            return $payload;
+        }
+
+        $requestedListingType = (string) $payload['listing_type'];
+
+        if (!in_array($requestedListingType, ['vip', 'urgent'], true)) {
+            return $payload;
+        }
+
+        if ($this->canManageVipAndUrgentListing($user)) {
+            return $payload;
+        }
+
+        $payload['listing_type'] = 'regular';
+        $payload['moderation_status'] = 'pending';
+
+        $autoComment = sprintf(
+            'Автоматически отправлено на модерацию: роль "%s" не может устанавливать тип объявления "%s".',
+            $user->role?->slug ?? 'unknown',
+            $requestedListingType
+        );
+
+        $existingComment = isset($payload['status_comment']) ? trim((string) $payload['status_comment']) : '';
+        $payload['status_comment'] = $existingComment !== ''
+            ? $existingComment . PHP_EOL . $autoComment
+            : $autoComment;
+
+        return $payload;
+    }
+
     private function canMutateProperty(User $user, Property $property): bool
     {
         if ($user->hasRole('admin') || $user->hasRole('superadmin')) {
@@ -964,6 +1004,7 @@ class PropertyController extends Controller
         $validated['created_by'] = $user->id;
 //        $validated['moderation_status'] = auth()->user()->hasRole('client') ? 'pending' : 'approved';
         $validated['listing_type'] = $request->input('listing_type', 'regular');
+        $validated = $this->applyListingTypeAccessRules($user, $validated);
 
         if ($force) {
             $dups = $this->findDuplicateCandidates($validated);
@@ -1028,6 +1069,7 @@ class PropertyController extends Controller
 
         $validated = $this->validateProperty($request, isUpdate: true, property: $property);
         $validated = $this->normalizeMopBranchGroupPayload($user, $validated);
+        $validated = $this->applyListingTypeAccessRules($user, $validated);
         $this->ensureVisibleClientsForProperty($validated, $property);
         $validated = $this->syncPropertyClientSnapshots($validated);
 
@@ -1208,9 +1250,9 @@ class PropertyController extends Controller
         SavePropertyDealRequest $request,
         Property $property
     ) {
-        $this->authorizePropertyMutation($property);
+        $user = $this->authorizePropertyMutation($property);
 
-        DB::transaction(function () use ($request, $property) {
+        DB::transaction(function () use ($request, $property, $user) {
 
             /**
              * 1️⃣ ОБНОВЛЯЕМ ВСЁ, ЧТО ПРИШЛО
@@ -1253,6 +1295,7 @@ class PropertyController extends Controller
                 ->mapWithKeys(fn ($field) => [$field => $request->$field])
                 ->toArray();
 
+            $payload = $this->applyListingTypeAccessRules($user, $payload);
             $this->ensureVisibleClientsForProperty($payload, $property);
             $payload = $this->syncPropertyClientSnapshots($payload);
 

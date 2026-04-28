@@ -28,6 +28,8 @@ class Client extends Model
         'created_by',
         'responsible_agent_id',
         'client_type_id',
+        'source_id',
+        'source_comment',
         'contact_kind',
         'status',
         'bitrix_contact_id',
@@ -133,6 +135,11 @@ class Client extends Model
     public function type()
     {
         return $this->belongsTo(ClientType::class, 'client_type_id');
+    }
+
+    public function source()
+    {
+        return $this->belongsTo(ClientSource::class, 'source_id');
     }
 
     public function needs()
