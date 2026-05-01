@@ -260,23 +260,11 @@ class UserController extends Controller
 
     private function transferablePropertiesQuery(User $user): Builder
     {
-        $closedModerationStatuses = ['sold', 'rented', 'sold_by_owner'];
-        $closedStatusIds = DB::table('property_statuses')
-            ->whereIn('slug', ['sold', 'rented'])
-            ->pluck('id')
-            ->all();
-
         return Property::query()
-            ->where('created_by', $user->id)
-            ->where(function (Builder $query) use ($closedModerationStatuses) {
-                $query->whereNull('moderation_status')
-                    ->orWhereNotIn('moderation_status', $closedModerationStatuses);
-            })
-            ->when(! empty($closedStatusIds), function (Builder $query) use ($closedStatusIds) {
-                $query->where(function (Builder $statusQuery) use ($closedStatusIds) {
-                    $statusQuery->whereNull('status_id')
-                        ->orWhereNotIn('status_id', $closedStatusIds);
-                });
+            ->where('moderation_status', 'approved')
+            ->where(function (Builder $query) use ($user) {
+                $query->where('created_by', $user->id)
+                    ->orWhere('agent_id', $user->id);
             });
     }
 
@@ -548,6 +536,7 @@ class UserController extends Controller
                                 ->orWhereNull('status');
                         })
                         ->where('id', '!=', $user->id)
+                        ->orderBy('id')
                         ->pluck('id')
                         ->all();
 
@@ -556,13 +545,49 @@ class UserController extends Controller
                         throw new \RuntimeException('Нет доступных агентов для авто-распределения.');
                     }
 
-                    // Равномерно распределяем (round-robin)
-                    $countAgents = count($agentIds);
-                    $i = 0;
-                    foreach ($props as $p) {
-                        $newAgentId = $agentIds[$i % $countAgents];
-                        Property::whereKey($p->id)->update(['agent_id' => $newAgentId, 'created_by' => $newAgentId]);
-                        $i++;
+                    // Справедливое распределение:
+                    // 1) выбираем агентa с минимальной текущей нагрузкой (approved объекты),
+                    // 2) при равной нагрузке используем циклический tie-break, чтобы не выигрывал первый в списке.
+                    $loadByAgent = array_fill_keys($agentIds, 0);
+                    $currentLoads = Property::query()
+                        ->selectRaw('agent_id, COUNT(*) as total')
+                        ->where('moderation_status', 'approved')
+                        ->whereIn('agent_id', $agentIds)
+                        ->groupBy('agent_id')
+                        ->pluck('total', 'agent_id')
+                        ->all();
+
+                    foreach ($currentLoads as $currentAgentId => $currentTotal) {
+                        $intAgentId = (int) $currentAgentId;
+                        if (array_key_exists($intAgentId, $loadByAgent)) {
+                            $loadByAgent[$intAgentId] = (int) $currentTotal;
+                        }
+                    }
+
+                    $rotationIndex = 0;
+                    $agentCount = count($agentIds);
+                    foreach ($props->sortBy('id')->values() as $p) {
+                        $minLoad = min($loadByAgent);
+                        $nextAgentId = null;
+
+                        for ($offset = 0; $offset < $agentCount; $offset++) {
+                            $candidateIndex = ($rotationIndex + $offset) % $agentCount;
+                            $candidateAgentId = $agentIds[$candidateIndex];
+
+                            if (($loadByAgent[$candidateAgentId] ?? PHP_INT_MAX) === $minLoad) {
+                                $nextAgentId = $candidateAgentId;
+                                $rotationIndex = ($candidateIndex + 1) % $agentCount;
+                                break;
+                            }
+                        }
+
+                        if ($nextAgentId === null) {
+                            $nextAgentId = $agentIds[$rotationIndex % $agentCount];
+                            $rotationIndex = ($rotationIndex + 1) % $agentCount;
+                        }
+
+                        Property::whereKey($p->id)->update(['agent_id' => $nextAgentId, 'created_by' => $nextAgentId]);
+                        $loadByAgent[$nextAgentId] = ($loadByAgent[$nextAgentId] ?? 0) + 1;
                     }
                 } else {
                     Property::whereKey($props->pluck('id')->all())
