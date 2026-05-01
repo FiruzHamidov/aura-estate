@@ -785,7 +785,7 @@ class UserAccessTest extends TestCase
             ->assertJsonPath('branch_group.id', $groupA->id);
     }
 
-    public function test_destroy_user_does_not_transfer_closed_properties(): void
+    public function test_destroy_user_transfers_only_approved_properties(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);
 
@@ -844,9 +844,9 @@ class UserAccessTest extends TestCase
         ]);
 
         $closedByStatusPropertyId = DB::table('properties')->insertGetId([
-            'title' => 'Closed by status',
+            'title' => 'Not approved property',
             'status_id' => $soldStatusId,
-            'moderation_status' => 'approved',
+            'moderation_status' => 'pending',
             'created_by' => $dismissedAgent->id,
             'agent_id' => $dismissedAgent->id,
             'created_at' => now(),
@@ -883,6 +883,136 @@ class UserAccessTest extends TestCase
         $this->assertSame($dismissedAgent->id, $closedByModerationProperty->agent_id);
 
         $this->assertSame('inactive', $dismissedAgent->fresh()->status);
+    }
+
+    public function test_destroy_user_auto_distribution_is_fair_between_agents(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+
+        $superadminRole = Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $superadmin = User::create([
+            'name' => 'Superadmin',
+            'phone' => '900000084',
+            'password' => bcrypt('password'),
+            'role_id' => $superadminRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $dismissedAgent = User::create([
+            'name' => 'Dismissed Agent',
+            'phone' => '900000085',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $agentA = User::create([
+            'name' => 'Agent A',
+            'phone' => '900000086',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $agentB = User::create([
+            'name' => 'Agent B',
+            'phone' => '900000087',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $agentC = User::create([
+            'name' => 'Agent C',
+            'phone' => '900000088',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $availableStatusId = DB::table('property_statuses')->insertGetId([
+            'name' => 'Доступен',
+            'slug' => 'available',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        // Текущая нагрузка агентов: A=3, B=1, C=1
+        foreach (['A-1', 'A-2', 'A-3'] as $title) {
+            DB::table('properties')->insert([
+                'title' => $title,
+                'status_id' => $availableStatusId,
+                'moderation_status' => 'approved',
+                'created_by' => $agentA->id,
+                'agent_id' => $agentA->id,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+
+        foreach (['B-1', 'C-1'] as $idx => $title) {
+            $agentId = $idx === 0 ? $agentB->id : $agentC->id;
+            DB::table('properties')->insert([
+                'title' => $title,
+                'status_id' => $availableStatusId,
+                'moderation_status' => 'approved',
+                'created_by' => $agentId,
+                'agent_id' => $agentId,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+
+        // 4 опубликованных объекта уволенного + 1 неопубликованный (не должен переназначаться)
+        foreach (['D-1', 'D-2', 'D-3', 'D-4'] as $title) {
+            DB::table('properties')->insert([
+                'title' => $title,
+                'status_id' => $availableStatusId,
+                'moderation_status' => 'approved',
+                'created_by' => $dismissedAgent->id,
+                'agent_id' => $dismissedAgent->id,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+        }
+
+        $pendingId = DB::table('properties')->insertGetId([
+            'title' => 'D-pending',
+            'status_id' => $availableStatusId,
+            'moderation_status' => 'pending',
+            'created_by' => $dismissedAgent->id,
+            'agent_id' => $dismissedAgent->id,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        Sanctum::actingAs($superadmin);
+
+        $this->deleteJson('/api/user/'.$dismissedAgent->id, [
+            'distribute_to_agents' => true,
+        ])->assertOk();
+
+        $counts = DB::table('properties')
+            ->where('moderation_status', 'approved')
+            ->whereIn('agent_id', [$agentA->id, $agentB->id, $agentC->id])
+            ->selectRaw('agent_id, COUNT(*) as total')
+            ->groupBy('agent_id')
+            ->pluck('total', 'agent_id');
+
+        $this->assertSame(3, (int) ($counts[$agentA->id] ?? 0));
+        $this->assertSame(3, (int) ($counts[$agentB->id] ?? 0));
+        $this->assertSame(3, (int) ($counts[$agentC->id] ?? 0));
+
+        $pendingProperty = DB::table('properties')->where('id', $pendingId)->first();
+        $this->assertSame($dismissedAgent->id, $pendingProperty->agent_id);
+        $this->assertSame($dismissedAgent->id, $pendingProperty->created_by);
     }
 
     public function test_user_index_exposes_meta_and_can_filter_report_agents(): void
