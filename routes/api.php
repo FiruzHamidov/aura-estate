@@ -55,6 +55,8 @@ use App\Http\Controllers\SelectionController;
 use App\Http\Controllers\SupportConversationController;
 use App\Http\Controllers\TelegramAuthController;
 use App\Http\Controllers\UserController;
+use App\Http\Controllers\StoryController;
+use App\Http\Controllers\AdminStoryController;
 use Illuminate\Support\Facades\Route;
 
 // --- ПИНГ ---
@@ -101,6 +103,9 @@ Route::get('/client-need-statuses', [ClientNeedStatusController::class, 'index']
 Route::get('/user/agents', [UserController::class, 'agents']);
 Route::get('/public/realtors/{id}', [PublicRealtorController::class, 'show'])->whereNumber('id');
 Route::get('/public/team/hall-of-fame', [PublicTeamController::class, 'hallOfFame']);
+Route::get('/stories/feed', [StoryController::class, 'feed']);
+Route::get('/stories/{story}', [StoryController::class, 'show'])->whereNumber('story');
+Route::post('/stories/{story}/view', [StoryController::class, 'trackView'])->whereNumber('story')->middleware('throttle:120,1');
 Route::post('/reviews/request-code', [ReviewController::class, 'requestCode'])->middleware('throttle:10,1');
 Route::get('/agents/{agent}/reviews', [ReviewController::class, 'index'])->whereNumber('agent');
 Route::post('/agents/{agent}/reviews', [ReviewController::class, 'store'])->middleware('throttle:10,1')->whereNumber('agent');
@@ -148,6 +153,15 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::get('/notifications/unread-count', [NotificationController::class, 'unreadCount']);
     Route::patch('/notifications/read-all', [NotificationController::class, 'markAllRead']);
     Route::patch('/notifications/{notification}/read', [NotificationController::class, 'markRead']);
+    Route::get('/my/stories', [StoryController::class, 'myStories']);
+    Route::post('/stories', [StoryController::class, 'store'])->middleware('throttle:30,60');
+    Route::post('/stories/from-property/{property}', [StoryController::class, 'storeFromProperty'])->middleware('throttle:30,60');
+    Route::post('/stories/from-reel/{reel}', [StoryController::class, 'storeFromReel'])->middleware('throttle:30,60');
+    Route::patch('/stories/{story}', [StoryController::class, 'update'])->whereNumber('story');
+    Route::delete('/stories/{story}', [StoryController::class, 'destroy'])->whereNumber('story');
+    Route::patch('/stories/{story}/status', [StoryController::class, 'changeStatus'])->whereNumber('story');
+    Route::get('/admin/stories', [AdminStoryController::class, 'index']);
+    Route::patch('/admin/stories/{story}/status', [AdminStoryController::class, 'updateStatus'])->whereNumber('story');
 
     // Messaging
     Route::get('/conversations', [ConversationController::class, 'index']);

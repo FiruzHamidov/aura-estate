@@ -8,6 +8,7 @@ use Laravel\Sanctum\HasApiTokens;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class User extends Authenticatable
 {
@@ -149,5 +150,15 @@ class User extends Authenticatable
     public function dailyReports()
     {
         return $this->hasMany(DailyReport::class);
+    }
+
+    public function stories(): HasMany
+    {
+        return $this->hasMany(Story::class);
+    }
+
+    public function storyViews(): HasMany
+    {
+        return $this->hasMany(StoryView::class, 'viewer_user_id');
     }
 }

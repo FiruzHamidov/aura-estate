@@ -46,5 +46,6 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withSchedule(function (Schedule $schedule) {
         $schedule->command('b24:sync:properties')->everyTenMinutes();
         $schedule->command('notifications:dispatch-reminders')->everyFiveMinutes();
+        $schedule->command('stories:expire')->everyFiveMinutes();
     })
     ->create();
