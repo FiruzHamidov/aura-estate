@@ -1238,6 +1238,8 @@ class UserAccessTest extends TestCase
         $activeResponse = $this->getJson('/api/user/agents');
         $activeResponse->assertOk();
         $activeResponse->assertJsonCount(2);
+        $activeResponse->assertJsonPath('0.id', $activeMop->id);
+        $activeResponse->assertJsonPath('1.id', $activeAgent->id);
         $activeResponse->assertJsonFragment(['id' => $activeAgent->id]);
         $activeResponse->assertJsonFragment(['id' => $activeMop->id]);
         $activeResponse->assertJsonMissing(['id' => $inactiveAgent->id]);
@@ -1247,6 +1249,8 @@ class UserAccessTest extends TestCase
         $inactiveResponse = $this->getJson('/api/user/agents?status=inactive');
         $inactiveResponse->assertOk();
         $inactiveResponse->assertJsonCount(2);
+        $inactiveResponse->assertJsonPath('0.id', $inactiveMop->id);
+        $inactiveResponse->assertJsonPath('1.id', $inactiveAgent->id);
         $inactiveResponse->assertJsonFragment(['id' => $inactiveAgent->id]);
         $inactiveResponse->assertJsonFragment(['id' => $inactiveMop->id]);
         $inactiveResponse->assertJsonMissing(['id' => $activeAgent->id]);

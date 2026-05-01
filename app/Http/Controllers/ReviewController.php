@@ -11,6 +11,8 @@ use Illuminate\Http\Request;
 
 class ReviewController extends Controller
 {
+    private const PUBLIC_ROLE_SLUGS = ['agent', 'mop'];
+
     public function __construct(
         private readonly RealtorReviewService $reviewService
     ) {}
@@ -145,10 +147,10 @@ class ReviewController extends Controller
         $isPublicAgent = User::query()
             ->whereKey($agent->id)
             ->where('status', 'active')
-            ->whereHas('role', fn ($query) => $query->where('slug', 'agent'))
+            ->whereHas('role', fn ($query) => $query->whereIn('slug', self::PUBLIC_ROLE_SLUGS))
             ->exists();
 
-        abort_if(!$isPublicAgent, 404);
+        abort_if(!$isPublicAgent, 404, 'Agent not found or not public');
 
         return $agent;
     }

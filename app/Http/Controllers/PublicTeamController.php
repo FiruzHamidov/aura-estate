@@ -15,7 +15,7 @@ use Illuminate\Validation\Rule;
 
 class PublicTeamController extends Controller
 {
-    private const PUBLIC_ROLE_SLUGS = ['agent'];
+    private const PUBLIC_ROLE_SLUGS = ['agent', 'mop'];
 
     public function hallOfFame(Request $request): JsonResponse
     {

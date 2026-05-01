@@ -12,7 +12,7 @@ class PublicRealtorController extends Controller
     /**
      * Roles allowed to expose a public team profile.
      */
-    private const PUBLIC_ROLE_SLUGS = ['agent'];
+    private const PUBLIC_ROLE_SLUGS = ['agent', 'mop'];
 
     public function __construct(
         private readonly RealtorReviewService $reviewService
@@ -34,7 +34,7 @@ class PublicRealtorController extends Controller
             ->whereHas('role', fn ($query) => $query->whereIn('slug', self::PUBLIC_ROLE_SLUGS))
             ->first();
 
-        abort_if(!$realtor, 404);
+        abort_if(!$realtor, 404, 'Realtor not found or not public');
 
         $summary = $this->reviewService->approvedSummary($realtor);
         $reviews = $this->reviewService
@@ -66,6 +66,7 @@ class PublicRealtorController extends Controller
 
         return match ($realtor->role?->slug) {
             'agent' => 'Специалист по недвижимости',
+            'mop' => 'МОП',
             'manager' => 'Менеджер',
             default => $realtor->role?->name,
         };

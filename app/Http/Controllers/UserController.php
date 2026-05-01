@@ -476,7 +476,11 @@ class UserController extends Controller
             ->when($status !== 'all', function ($q) use ($status) {
                 $this->applyStatusFilter($q, $status);
             })
-            ->get();
+            ->get()
+            ->sortBy(function (User $user) {
+                return $user->role?->slug === 'mop' ? 0 : 1;
+            })
+            ->values();
 
         return response()->json($agents);
     }
