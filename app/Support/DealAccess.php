@@ -15,7 +15,8 @@ class DealAccess
     public function __construct(
         private readonly DealPipelineAccess $pipelineAccess,
         private readonly ClientAccess $clientAccess,
-        private readonly LeadAccess $leadAccess
+        private readonly LeadAccess $leadAccess,
+        private readonly RbacBranchScope $rbacBranchScope
     ) {}
 
     public function roleSlug(?User $user): ?string
@@ -94,7 +95,15 @@ class DealAccess
             ->whereKey($deal->id)
             ->exists();
 
-        abort_unless($allowed, 403, 'Forbidden');
+        if ($allowed) {
+            return;
+        }
+
+        if ($this->rbacBranchScope->isRop($authUser)) {
+            $this->rbacBranchScope->denyBranchScopeViolation('Deal does not belong to your branch.');
+        }
+
+        abort(403, 'Forbidden');
     }
 
     public function normalizeMutationData(array $data, User $authUser): array

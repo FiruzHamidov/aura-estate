@@ -136,7 +136,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::get('/daily-reports/status', [DailyReportController::class, 'status']);
     Route::get('/daily-reports/my', [DailyReportController::class, 'my']);
     Route::get('/daily-reports/my/{date}', [DailyReportController::class, 'showMine']);
-    Route::get('/daily-reports', [DailyReportController::class, 'index']);
+    Route::get('/daily-reports', [DailyReportController::class, 'index'])->middleware('rop.branch.scope');
     Route::post('/daily-reports', [DailyReportController::class, 'store']);
     Route::put('/daily-reports/{dailyReport}', [DailyReportController::class, 'update']);
     Route::patch('/daily-reports/{dailyReport}', [DailyReportController::class, 'update']);
@@ -201,7 +201,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         Route::apiResource('contract-types', ContractTypeController::class)->except(['index']);
         Route::apiResource('repair-types', RepairTypeController::class)->except(['index']);
         Route::apiResource('branches', BranchController::class)->except(['index']);
-        Route::apiResource('branch-groups', BranchGroupController::class);
+        Route::apiResource('branch-groups', BranchGroupController::class)->middleware('rop.branch.scope');
         Route::apiResource('developers', DeveloperController::class)->except(['index', 'show']);
         Route::apiResource('features', FeatureController::class)->except(['index', 'show']);
         Route::apiResource('materials', MaterialController::class)->except(['index', 'show']);
@@ -213,20 +213,20 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         Route::get('/clients/settings', [ClientController::class, 'settings']);
         Route::put('/clients/settings', [ClientController::class, 'updateSettings']);
         Route::patch('/clients/settings', [ClientController::class, 'updateSettings']);
-        Route::get('/deal-pipelines/{dealPipeline}/board', [DealPipelineController::class, 'board']);
+        Route::get('/deal-pipelines/{dealPipeline}/board', [DealPipelineController::class, 'board'])->middleware('rop.branch.scope');
         Route::patch('/deal-pipelines/{dealPipeline}/stages/reorder', [DealStageController::class, 'reorder']);
         Route::post('/deal-pipelines/{dealPipeline}/stages', [DealStageController::class, 'store']);
-        Route::apiResource('deal-pipelines', DealPipelineController::class);
+        Route::apiResource('deal-pipelines', DealPipelineController::class)->middleware('rop.branch.scope');
         Route::apiResource('deal-stages', DealStageController::class)->only(['show', 'update', 'destroy']);
-        Route::patch('/deals/{deal}/move', [DealController::class, 'move']);
-        Route::apiResource('deals', DealController::class);
-        Route::post('/leads/{lead}/convert', [LeadController::class, 'convert']);
-        Route::apiResource('leads', LeadController::class);
-        Route::get('/crm/leads/{lead}/activities', [CrmActivityController::class, 'leadIndex']);
-        Route::post('/crm/leads/{lead}/activities', [CrmActivityController::class, 'leadStore']);
-        Route::get('/crm/deals/{deal}/activities', [CrmActivityController::class, 'dealIndex']);
-        Route::post('/crm/deals/{deal}/activities', [CrmActivityController::class, 'dealStore']);
-        Route::get('/crm/reports/performance', [CrmReportController::class, 'performance']);
+        Route::patch('/deals/{deal}/move', [DealController::class, 'move'])->middleware('rop.branch.scope');
+        Route::apiResource('deals', DealController::class)->middleware('rop.branch.scope');
+        Route::post('/leads/{lead}/convert', [LeadController::class, 'convert'])->middleware('rop.branch.scope');
+        Route::apiResource('leads', LeadController::class)->middleware('rop.branch.scope');
+        Route::get('/crm/leads/{lead}/activities', [CrmActivityController::class, 'leadIndex'])->middleware('rop.branch.scope');
+        Route::post('/crm/leads/{lead}/activities', [CrmActivityController::class, 'leadStore'])->middleware('rop.branch.scope');
+        Route::get('/crm/deals/{deal}/activities', [CrmActivityController::class, 'dealIndex'])->middleware('rop.branch.scope');
+        Route::post('/crm/deals/{deal}/activities', [CrmActivityController::class, 'dealStore'])->middleware('rop.branch.scope');
+        Route::get('/crm/reports/performance', [CrmReportController::class, 'performance'])->middleware('rop.branch.scope');
         Route::post('/clients/duplicate-check', [ClientController::class, 'duplicateCheck']);
         Route::post('/clients/attach-existing', [ClientController::class, 'attachExisting']);
         Route::get('/clients/{client}/activities', [ClientController::class, 'activities']);
@@ -249,26 +249,28 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
 
         // Отчёты
         // --- Агентские отчёты (дополнительно) ---
-        Route::get('/reports/agent/contracts', [PropertyReportController::class, 'agentContractsStats']);
-        Route::get('/reports/agent/clients', [PropertyReportController::class, 'agentClientsStats']);
-        Route::get('/reports/agent/shows', [PropertyReportController::class, 'agentShowsStats']);
-        Route::get('/reports/agent/earnings', [PropertyReportController::class, 'agentEarningsReport']);
-        Route::get('/reports/properties/summary', [PropertyReportController::class, 'summary']);
-        Route::get('/reports/properties/manager-efficiency', [PropertyReportController::class, 'managerEfficiency']);
-        Route::get('/reports/properties/by-status', [PropertyReportController::class, 'byStatus']);
-        Route::get('/reports/properties/by-type', [PropertyReportController::class, 'byType']);
-        Route::get('/reports/properties/by-location', [PropertyReportController::class, 'byLocation']);
-        Route::get('/reports/properties/monthly-comparison', [PropertyReportController::class, 'monthlyComparison']);
-        Route::get('/reports/properties/monthly-comparison-range', [PropertyReportController::class, 'monthlyComparisonRange']);
-        Route::get('/reports/properties/time-series', [PropertyReportController::class, 'timeSeries']);
-        Route::get('/reports/properties/price-buckets', [PropertyReportController::class, 'priceBuckets']);
-        Route::get('/reports/properties/rooms-hist', [PropertyReportController::class, 'roomsHistogram']);
-        Route::get('/reports/properties/agents-leaderboard', [PropertyReportController::class, 'agentsLeaderboard']);
-        Route::get('/reports/properties/conversion', [PropertyReportController::class, 'conversionFunnel']);
-        Route::get('/reports/missing-phone/agents-by-status', [PropertyReportController::class, 'missingPhoneAgentsByStatus']);
-        Route::get('/reports/missing-phone/list', [PropertyReportController::class, 'missingPhoneList']);
-        // детализированный (по одному агенту) — уже есть
-        Route::get('/reports/agents/{agent}/properties', [PropertyReportController::class, 'agentPropertiesReport']);
+        Route::middleware('rop.branch.scope')->group(function () {
+            Route::get('/reports/agent/contracts', [PropertyReportController::class, 'agentContractsStats']);
+            Route::get('/reports/agent/clients', [PropertyReportController::class, 'agentClientsStats']);
+            Route::get('/reports/agent/shows', [PropertyReportController::class, 'agentShowsStats']);
+            Route::get('/reports/agent/earnings', [PropertyReportController::class, 'agentEarningsReport']);
+            Route::get('/reports/properties/summary', [PropertyReportController::class, 'summary']);
+            Route::get('/reports/properties/manager-efficiency', [PropertyReportController::class, 'managerEfficiency']);
+            Route::get('/reports/properties/by-status', [PropertyReportController::class, 'byStatus']);
+            Route::get('/reports/properties/by-type', [PropertyReportController::class, 'byType']);
+            Route::get('/reports/properties/by-location', [PropertyReportController::class, 'byLocation']);
+            Route::get('/reports/properties/monthly-comparison', [PropertyReportController::class, 'monthlyComparison']);
+            Route::get('/reports/properties/monthly-comparison-range', [PropertyReportController::class, 'monthlyComparisonRange']);
+            Route::get('/reports/properties/time-series', [PropertyReportController::class, 'timeSeries']);
+            Route::get('/reports/properties/price-buckets', [PropertyReportController::class, 'priceBuckets']);
+            Route::get('/reports/properties/rooms-hist', [PropertyReportController::class, 'roomsHistogram']);
+            Route::get('/reports/properties/agents-leaderboard', [PropertyReportController::class, 'agentsLeaderboard']);
+            Route::get('/reports/properties/conversion', [PropertyReportController::class, 'conversionFunnel']);
+            Route::get('/reports/missing-phone/agents-by-status', [PropertyReportController::class, 'missingPhoneAgentsByStatus']);
+            Route::get('/reports/missing-phone/list', [PropertyReportController::class, 'missingPhoneList']);
+            // детализированный (по одному агенту) — уже есть
+            Route::get('/reports/agents/{agent}/properties', [PropertyReportController::class, 'agentPropertiesReport']);
+        });
 
         Route::post(
             '/properties/{property}/deal',
@@ -276,7 +278,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         );
 
         // агрегированный — новый (без параметра agent)
-        Route::get('/reports/agents/properties', [PropertyReportController::class, 'agentPropertiesReport']);
+        Route::get('/reports/agents/properties', [PropertyReportController::class, 'agentPropertiesReport'])->middleware('rop.branch.scope');
 
         // Новостройки (админ) + полностью ВЛОЖЕННЫЕ blocks/units c CRUD
         Route::apiResource('new-buildings', NewBuildingController::class)->except(['index', 'show']);

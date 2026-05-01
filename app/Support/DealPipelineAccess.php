@@ -8,6 +8,10 @@ use Illuminate\Database\Eloquent\Builder;
 
 class DealPipelineAccess
 {
+    public function __construct(
+        private readonly RbacBranchScope $rbacBranchScope
+    ) {}
+
     public function roleSlug(?User $user): ?string
     {
         $user?->loadMissing('role');
@@ -96,7 +100,15 @@ class DealPipelineAccess
             ->whereKey($pipeline->id)
             ->exists();
 
-        abort_unless($allowed, 403, 'Forbidden');
+        if ($allowed) {
+            return;
+        }
+
+        if ($this->rbacBranchScope->isRop($authUser)) {
+            $this->rbacBranchScope->denyBranchScopeViolation('Pipeline does not belong to your branch.');
+        }
+
+        abort(403, 'Forbidden');
     }
 
     public function ensureManageable(User $authUser, DealPipeline $pipeline): void

@@ -8,6 +8,10 @@ use Illuminate\Database\Eloquent\Builder;
 
 class LeadAccess
 {
+    public function __construct(
+        private readonly RbacBranchScope $rbacBranchScope
+    ) {}
+
     public function roleSlug(?User $user): ?string
     {
         $user?->loadMissing('role');
@@ -63,7 +67,15 @@ class LeadAccess
             ->whereKey($lead->id)
             ->exists();
 
-        abort_unless($allowed, 403, 'Forbidden');
+        if ($allowed) {
+            return;
+        }
+
+        if ($this->rbacBranchScope->isRop($authUser)) {
+            $this->rbacBranchScope->denyBranchScopeViolation('Lead does not belong to your branch.');
+        }
+
+        abort(403, 'Forbidden');
     }
 
     public function normalizeCreationData(array $data, User $authUser): array

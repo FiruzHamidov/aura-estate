@@ -3,8 +3,10 @@
 namespace App\Http\Controllers;
 
 use App\Models\Booking;
+use App\Models\BranchGroup;
 use App\Models\Property;
 use App\Models\User;
+use App\Support\RbacBranchScope;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -12,6 +14,10 @@ use Illuminate\Support\Facades\Schema;
 
 class PropertyReportController extends Controller
 {
+    public function __construct(private readonly RbacBranchScope $branchScope)
+    {
+    }
+
     private function ensureReportsAllowed(Request $request): void
     {
         $request->user()?->loadMissing('role');
@@ -39,6 +45,8 @@ class PropertyReportController extends Controller
 
     private function applyBranchAccessFilter(Request $request, $query, string $creatorColumn = 'created_by'): void
     {
+        $this->validateReportScope($request);
+
         $authUser = auth()->user();
         $authUser?->loadMissing('role');
         $roleSlug = $authUser->role->slug ?? null;
@@ -83,6 +91,8 @@ class PropertyReportController extends Controller
 
     private function applyBranchAccessByUserColumn(Request $request, $query, string $userColumn): void
     {
+        $this->validateReportScope($request);
+
         $authUser = auth()->user();
         $authUser?->loadMissing('role');
         $roleSlug = $authUser->role->slug ?? null;
@@ -432,6 +442,7 @@ class PropertyReportController extends Controller
     private function applyCommonFilters(Request $request, $query, string $creatorColumn = 'created_by')
     {
         $this->ensureReportsAllowed($request);
+        $this->validateReportScope($request);
 
         // Диапазон дат и поле даты
         // created_at | updated_at | sold_at
@@ -524,6 +535,54 @@ class PropertyReportController extends Controller
         }
 
         return [$query, $dateField];
+    }
+
+    private function validateReportScope(Request $request): void
+    {
+        /** @var User|null $authUser */
+        $authUser = $request->user();
+
+        if (! $authUser) {
+            return;
+        }
+
+        if (! $this->branchScope->isBranchScopedManager($authUser)) {
+            return;
+        }
+
+        if ($request->filled('branch_id')) {
+            foreach ($this->toArray($request->input('branch_id')) as $branchId) {
+                $this->branchScope->ensureSameBranchOrDeny((int) $branchId, $authUser);
+            }
+        }
+
+        if ($request->filled('branch_group_id')) {
+            foreach ($this->toArray($request->input('branch_group_id')) as $branchGroupId) {
+                $belongs = BranchGroup::query()
+                    ->whereKey((int) $branchGroupId)
+                    ->where('branch_id', $authUser->branch_id)
+                    ->exists();
+
+                if (! $belongs) {
+                    $this->branchScope->denyBranchScopeViolation();
+                }
+            }
+        }
+
+        if ($request->filled('agent_id')) {
+            $agentIds = array_map('intval', $this->toArray($request->input('agent_id')));
+
+            if (! empty($agentIds)) {
+                $count = User::query()
+                    ->whereIn('id', $agentIds)
+                    ->where('branch_id', $authUser->branch_id)
+                    ->count();
+
+                if ($count !== count(array_unique($agentIds))) {
+                    $this->branchScope->denyBranchScopeViolation();
+                }
+            }
+        }
     }
 
     private function priceExpr(Request $request): array

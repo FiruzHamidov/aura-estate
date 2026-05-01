@@ -5,6 +5,7 @@ use App\Http\Middleware\DetectClientLocale;
 use App\Http\Middleware\EnsureDailyReportSubmitted;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\EnsureUserIsNotClient;
+use App\Http\Middleware\EnforceRopBranchScope;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
@@ -34,6 +35,7 @@ return Application::configure(basePath: dirname(__DIR__))
             'active.user' => EnsureUserIsActive::class,
             'daily.report' => EnsureDailyReportSubmitted::class,
             'non.client' => EnsureUserIsNotClient::class,
+            'rop.branch.scope' => EnforceRopBranchScope::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions) {

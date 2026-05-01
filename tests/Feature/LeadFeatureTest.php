@@ -433,6 +433,122 @@ class LeadFeatureTest extends TestCase
         $this->getJson('/api/leads/'.$leadForeign->id)->assertForbidden();
     }
 
+    public function test_rop_branch_scope_violations_return_403_with_rbac_code_on_filters(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $rop = $this->createUser($ropRole, $branchA, 'ROP A');
+        $agentA = $this->createUser($agentRole, $branchA, 'Agent A');
+        $agentB = $this->createUser($agentRole, $branchB, 'Agent B');
+
+        Sanctum::actingAs($rop);
+
+        $this->getJson('/api/leads?branch_id='.$branchB->id)
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+
+        $this->getJson('/api/leads?responsible_agent_id='.$agentB->id)
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+
+        $this->getJson('/api/deals?responsible_agent_id='.$agentB->id)
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+
+        $this->getJson('/api/crm/reports/performance?role_type=operator&responsible_user_id='.$agentB->id)
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+
+        $this->getJson('/api/leads?responsible_agent_id='.$agentA->id)->assertOk();
+    }
+
+    public function test_rop_gets_403_with_rbac_code_on_foreign_lead_and_deal_details(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $rop = $this->createUser($ropRole, $branchA, 'ROP A');
+        $agentA = $this->createUser($agentRole, $branchA, 'Agent A');
+        $agentB = $this->createUser($agentRole, $branchB, 'Agent B');
+
+        $foreignLead = $this->createLead($branchB, $agentB, $agentB, 'Foreign Lead', '992950000210');
+
+        $stage = DealStage::query()->firstOrFail();
+        $foreignDeal = Deal::create([
+            'title' => 'Foreign Deal',
+            'branch_id' => $branchB->id,
+            'created_by' => $agentB->id,
+            'responsible_agent_id' => $agentB->id,
+            'pipeline_id' => $stage->pipeline_id,
+            'stage_id' => $stage->id,
+        ]);
+
+        Sanctum::actingAs($rop);
+
+        $this->getJson('/api/leads/'.$foreignLead->id)
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+
+        $this->getJson('/api/deals/'.$foreignDeal->id)
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+    }
+
+    public function test_admin_and_superadmin_keep_multibranch_crm_visibility(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $superadminRole = Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $admin = $this->createUser($adminRole, $branchA, 'Admin A');
+        $superadmin = $this->createUser($superadminRole, $branchA, 'Superadmin A');
+        $agentA = $this->createUser($agentRole, $branchA, 'Agent A');
+        $agentB = $this->createUser($agentRole, $branchB, 'Agent B');
+
+        $leadA = $this->createLead($branchA, $agentA, $agentA, 'Lead A', '992950000220');
+        $leadB = $this->createLead($branchB, $agentB, $agentB, 'Lead B', '992950000221');
+
+        $stage = DealStage::query()->firstOrFail();
+        $dealA = Deal::create([
+            'title' => 'Deal A',
+            'branch_id' => $branchA->id,
+            'created_by' => $agentA->id,
+            'responsible_agent_id' => $agentA->id,
+            'pipeline_id' => $stage->pipeline_id,
+            'stage_id' => $stage->id,
+        ]);
+        $dealB = Deal::create([
+            'title' => 'Deal B',
+            'branch_id' => $branchB->id,
+            'created_by' => $agentB->id,
+            'responsible_agent_id' => $agentB->id,
+            'pipeline_id' => $stage->pipeline_id,
+            'stage_id' => $stage->id,
+        ]);
+
+        Sanctum::actingAs($admin);
+        $this->getJson('/api/leads')->assertOk()->assertJsonCount(2, 'data');
+        $this->getJson('/api/deals')->assertOk()->assertJsonCount(2, 'data');
+        $this->getJson('/api/leads/'.$leadA->id)->assertOk();
+        $this->getJson('/api/leads/'.$leadB->id)->assertOk();
+        $this->getJson('/api/deals/'.$dealA->id)->assertOk();
+        $this->getJson('/api/deals/'.$dealB->id)->assertOk();
+
+        Sanctum::actingAs($superadmin);
+        $this->getJson('/api/leads')->assertOk()->assertJsonCount(2, 'data');
+        $this->getJson('/api/deals')->assertOk()->assertJsonCount(2, 'data');
+    }
+
     public function test_client_id_filters_return_paginated_lead_and_deal_totals(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);

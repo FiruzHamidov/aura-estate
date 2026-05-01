@@ -4,12 +4,17 @@ namespace App\Http\Controllers;
 
 use App\Models\BranchGroup;
 use App\Models\User;
+use App\Support\RbacBranchScope;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\Rule;
 
 class BranchGroupController extends Controller
 {
+    public function __construct(private readonly RbacBranchScope $branchScope)
+    {
+    }
+
     private function authUser(): User
     {
         /** @var User $user */
@@ -67,7 +72,13 @@ class BranchGroupController extends Controller
             ->whereKey($branchGroup->id)
             ->exists();
 
-        abort_unless($allowed, 403, 'Forbidden');
+        if (! $allowed) {
+            if ($this->branchScope->isBranchScopedManager($authUser)) {
+                $this->branchScope->denyBranchScopeViolation();
+            }
+
+            abort(403, 'Forbidden');
+        }
     }
 
     private function ensureManageable(User $authUser, ?int $branchId = null, ?BranchGroup $branchGroup = null): void
@@ -89,7 +100,7 @@ class BranchGroupController extends Controller
         }
 
         if ($branchGroup && (int) $branchGroup->branch_id !== (int) $authUser->branch_id) {
-            abort(403, 'Forbidden');
+            $this->branchScope->denyBranchScopeViolation();
         }
     }
 
@@ -130,6 +141,10 @@ class BranchGroupController extends Controller
         }
 
         if (!empty($validated['branch_id'])) {
+            if ($this->branchScope->isBranchScopedManager($authUser)) {
+                $this->branchScope->ensureSameBranchOrDeny((int) $validated['branch_id'], $authUser);
+            }
+
             $query->where('branch_id', $validated['branch_id']);
         }
 

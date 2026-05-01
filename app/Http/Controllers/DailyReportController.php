@@ -5,13 +5,17 @@ namespace App\Http\Controllers;
 use App\Models\DailyReport;
 use App\Models\User;
 use App\Services\DailyReportService;
+use App\Support\RbacBranchScope;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 
 class DailyReportController extends Controller
 {
-    public function __construct(private readonly DailyReportService $dailyReports)
+    public function __construct(
+        private readonly DailyReportService $dailyReports,
+        private readonly RbacBranchScope $branchScope
+    )
     {
     }
 
@@ -40,6 +44,7 @@ class DailyReportController extends Controller
         $query = DailyReport::query()
             ->with(['user.role', 'user.branch', 'user.branchGroup']);
 
+        $this->validateScopeFilters($validated, $authUser);
         $this->applyVisibilityScope($query, $authUser);
 
         if (! empty($validated['date_from'])) {
@@ -59,7 +64,11 @@ class DailyReportController extends Controller
         }
 
         if (! empty($validated['branch_id'])) {
-            $query->whereHas('user', fn (Builder $userQuery) => $userQuery->where('branch_id', $validated['branch_id']));
+            $effectiveBranchId = $this->branchScope->isRop($authUser)
+                ? (int) $authUser->branch_id
+                : (int) $validated['branch_id'];
+
+            $query->whereHas('user', fn (Builder $userQuery) => $userQuery->where('branch_id', $effectiveBranchId));
         }
 
         if (! empty($validated['branch_group_id'])) {
@@ -191,6 +200,25 @@ class DailyReportController extends Controller
             'mop' => $query->whereHas('user', fn (Builder $userQuery) => $userQuery->where('branch_group_id', $authUser->branch_group_id)),
             default => $query->where('user_id', $authUser->id),
         };
+    }
+
+    private function validateScopeFilters(array $validated, User $authUser): void
+    {
+        if (! $this->branchScope->isBranchScopedManager($authUser)) {
+            return;
+        }
+
+        if (array_key_exists('branch_id', $validated) && $validated['branch_id'] !== null) {
+            $this->branchScope->ensureSameBranchOrDeny((int) $validated['branch_id'], $authUser);
+        }
+
+        if (array_key_exists('branch_group_id', $validated) && $validated['branch_group_id'] !== null) {
+            $this->branchScope->ensureBranchGroupInUserBranchOrDeny((int) $validated['branch_group_id'], $authUser);
+        }
+
+        if (array_key_exists('user_id', $validated) && $validated['user_id'] !== null) {
+            $this->branchScope->ensureUserInUserBranchOrDeny((int) $validated['user_id'], $authUser);
+        }
     }
 
     private function authUser(): User
