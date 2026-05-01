@@ -451,10 +451,32 @@ class PropertyController extends Controller
         return response()->json($query->latest()->paginate($perPage));
     }
 
+    private function propertyListRelations(): array
+    {
+        $relations = [
+            'type',
+            'status',
+            'location',
+            'repairType',
+            'photos',
+            'creator',
+            'heating',
+            'parking',
+            'ownerClient.type',
+            'buyerClient.type',
+        ];
+
+        if (Schema::hasTable('contract_types')) {
+            $relations[] = 'contractType';
+        }
+
+        return $relations;
+    }
+
     private function baseQueryMyProperties(Request $request): Builder
     {
         $user = auth()->user();
-        $query = Property::query()->with(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'heating', 'parking', 'saleAgents', 'ownerClient.type', 'buyerClient.type']);
+        $query = Property::query()->with(array_merge($this->propertyListRelations(), ['saleAgents']));
 
         $hasStatusFilter = $request->filled('moderation_status');
 
@@ -490,7 +512,7 @@ class PropertyController extends Controller
     private function baseQuery(Request $request): Builder
     {
         $user = auth()->user();
-        $query = Property::query()->with(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'heating', 'parking', 'ownerClient.type', 'buyerClient.type']);
+        $query = Property::query()->with($this->propertyListRelations());
 
         $hasStatusFilter = $request->filled('moderation_status');
 
