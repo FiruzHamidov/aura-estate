@@ -61,6 +61,7 @@ use Illuminate\Support\Facades\Route;
 Route::get('/ping', fn () => response()->json(['message' => 'API works']));
 
 // --- ПУБЛИЧНЫЕ ---
+Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/sms/request', [AuthController::class, 'requestSmsCode']);
 Route::post('/sms/verify', [AuthController::class, 'verifySmsCode']);

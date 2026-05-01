@@ -341,4 +341,97 @@ class PropertyConstructionFieldsTest extends TestCase
         $response->assertJsonPath('data.0.title', 'Intern Property');
         $response->assertJsonMissing(['title' => 'Foreign Property']);
     }
+
+    public function test_properties_index_filters_by_construction_status_and_keeps_other_filters(): void
+    {
+        $agentRole = Role::create([
+            'name' => 'Agent',
+            'slug' => 'agent',
+        ]);
+
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000210',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $status = \App\Models\PropertyStatus::create(['name' => 'Available']);
+
+        \App\Models\Property::query()->create([
+            'title' => 'Built Match',
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 140000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'rooms' => 3,
+            'construction_status' => 'built',
+            'moderation_status' => 'approved',
+            'created_by' => $user->id,
+            'agent_id' => $user->id,
+        ]);
+
+        \App\Models\Property::query()->create([
+            'title' => 'Built Low Price',
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 90000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'rooms' => 3,
+            'construction_status' => 'built',
+            'moderation_status' => 'approved',
+            'created_by' => $user->id,
+            'agent_id' => $user->id,
+        ]);
+
+        \App\Models\Property::query()->create([
+            'title' => 'Commissioned',
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 160000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'rooms' => 3,
+            'construction_status' => 'commissioned',
+            'moderation_status' => 'approved',
+            'created_by' => $user->id,
+            'agent_id' => $user->id,
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $response = $this->getJson('/api/properties?construction_status=built&priceFrom=100000&roomsFrom=2');
+
+        $response->assertOk();
+        $response->assertJsonCount(1, 'data');
+        $response->assertJsonPath('data.0.title', 'Built Match');
+        $response->assertJsonPath('data.0.construction_status', 'built');
+    }
+
+    public function test_properties_index_returns_422_for_invalid_construction_status_filter(): void
+    {
+        $agentRole = Role::create([
+            'name' => 'Agent',
+            'slug' => 'agent',
+        ]);
+
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000220',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $response = $this->getJson('/api/properties?construction_status=test');
+
+        $response->assertStatus(422);
+        $response->assertJsonValidationErrors(['construction_status']);
+    }
 }

@@ -12,6 +12,19 @@ use RuntimeException;
 
 class TelegramAuthController extends Controller
 {
+    private function resolveDeviceContext(Request $request): array
+    {
+        $deviceName = trim((string) $request->input('device_name', 'telegram-widget-token'));
+        $platform = trim((string) $request->input('platform', 'unknown'));
+        $appVersion = trim((string) $request->input('app_version', 'unknown'));
+
+        return [
+            'device_name' => $deviceName !== '' ? $deviceName : 'telegram-widget-token',
+            'platform' => $platform !== '' ? $platform : 'unknown',
+            'app_version' => $appVersion !== '' ? $appVersion : 'unknown',
+        ];
+    }
+
     private function ensureWebhookAuthorized(Request $request): void
     {
         $secret = config('services.telegram.webhook_secret');
@@ -37,10 +50,15 @@ class TelegramAuthController extends Controller
             'photo_url' => 'nullable|string',
             'auth_date' => 'required',
             'hash' => 'required|string',
+            'device_name' => 'nullable|string|max:255',
+            'platform' => 'nullable|string|max:50',
+            'app_version' => 'nullable|string|max:50',
         ]);
 
+        $device = $this->resolveDeviceContext($request);
+
         try {
-            $result = $telegramAuthService->authenticateWidgetUser($payload);
+            $result = $telegramAuthService->authenticateWidgetUser($payload, $device['device_name']);
         } catch (RuntimeException $e) {
             $status = $e->getMessage() === 'Telegram account is not linked to any user.' ? 404 : 422;
 
@@ -53,6 +71,7 @@ class TelegramAuthController extends Controller
             'status' => 'authorized',
             'token' => $result['token'],
             'user' => $result['user'],
+            'device' => $device,
             'daily_report_status' => $dailyReportStatus,
         ], $dailyReportStatus));
     }

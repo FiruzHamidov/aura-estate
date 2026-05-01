@@ -14,6 +14,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Validation\Rule;
 use Intervention\Image\Drivers\Gd\Driver;
 use Intervention\Image\Encoders\JpegEncoder;
 use Intervention\Image\ImageManager;
@@ -421,8 +422,17 @@ class PropertyController extends Controller
     }
 
     // ==== Список (как у тебя), но на общих методах ====
+    /**
+     * GET /api/properties
+     *
+     * @queryParam construction_status string Filter by construction stage.
+     * Allowed: under_construction, built, commissioned.
+     * Example: commissioned
+     */
     public function index(Request $request)
     {
+        $this->validateListFilters($request);
+
         $query = $this->baseQuery($request);
         $this->applyFilters($query, $request);
         $this->applySorts($query, $request->input('sort'), $request->input('dir'));
@@ -432,6 +442,8 @@ class PropertyController extends Controller
 
     public function myProperties(Request $request)
     {
+        $this->validateListFilters($request);
+
         $query = $this->baseQueryMyProperties($request);
         $this->applyFilters($query, $request);
         $this->applySorts($query, $request->input('sort'), $request->input('dir'));
@@ -511,8 +523,17 @@ class PropertyController extends Controller
     }
 
     // ==== Карта: bbox + zoom + кластеризация/точки ====
+    /**
+     * GET /api/properties/map
+     *
+     * @queryParam construction_status string Filter by construction stage.
+     * Allowed: under_construction, built, commissioned.
+     * Example: built
+     */
     public function map(Request $request)
     {
+        $this->validateListFilters($request);
+
         // bbox: south,west,north,east
         $bboxRaw = $request->query('bbox', '');
         $parts = array_map('trim', explode(',', $bboxRaw));
@@ -803,7 +824,7 @@ class PropertyController extends Controller
             'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
             'agent_id', 'listing_type', 'created_by', 'contract_type_id',
             'is_business_owner', 'is_full_apartment', 'is_for_aura', 'developer_id',
-            'heating_type_id', 'parking_type_id'
+            'heating_type_id', 'parking_type_id', 'construction_status'
             // при желании можно и lat/lng, но для карты они задаются bbox'ом
         ];
         foreach ($exactFields as $field) {
@@ -925,6 +946,23 @@ class PropertyController extends Controller
                 // можно логировать при необходимости
             }
         }
+    }
+
+    /**
+     * Query validation for list/map property filters.
+     * Returns 422 for unsupported construction_status values.
+     *
+     * @queryParam construction_status string Filter by construction stage.
+     * Allowed: under_construction, built, commissioned.
+     * Example: built
+     */
+    private function validateListFilters(Request $request): void
+    {
+        $request->validate([
+            'construction_status' => ['sometimes', 'nullable', Rule::in(['under_construction', 'built', 'commissioned'])],
+        ], [
+            'construction_status.in' => 'Поле construction_status должно быть одним из значений: under_construction, built, commissioned.',
+        ]);
     }
 
     private function applyBranchGroupFilter(Builder $query, array $branchGroupIds): void

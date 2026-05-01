@@ -10,7 +10,7 @@ use RuntimeException;
 
 class TelegramAuthService
 {
-    public function authenticateWidgetUser(array $payload): array
+    public function authenticateWidgetUser(array $payload, string $tokenName = 'telegram-widget-token'): array
     {
         $data = $this->validateWidgetPayload($payload);
 
@@ -31,7 +31,7 @@ class TelegramAuthService
         $this->syncTelegramProfile($user, $data);
 
         $plainTextToken = $user->createToken(
-            'telegram-widget-token',
+            $tokenName,
             ['*'],
             now()->addHours(24)
         )->plainTextToken;
