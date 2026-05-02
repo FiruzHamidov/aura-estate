@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Booking;
 use App\Models\ConversationMessage;
+use App\Models\DailyReport;
 use App\Models\Deal;
 use App\Models\Favorite;
 use App\Models\Lead;
@@ -23,7 +24,8 @@ use Illuminate\Support\Facades\Schema;
 class NotificationService
 {
     public function __construct(
-        private readonly NotificationRecipientResolver $recipients
+        private readonly NotificationRecipientResolver $recipients,
+        private readonly TelegramBotService $telegramBot
     ) {}
 
     public function markAsRead(Notification $notification, User $user): Notification
@@ -509,7 +511,152 @@ class NotificationService
             'motivation_agent_day_plan' => $this->dispatchAgentDayPlan(),
             'motivation_manager_evening_digest' => $this->dispatchManagerEveningDigest(),
             'motivation_agent_evening_digest' => $this->dispatchAgentEveningDigest(),
+            'kpi_early_risk' => $this->dispatchKpiEarlyRisk(),
         ];
+    }
+
+    private function dispatchKpiEarlyRisk(): int
+    {
+        if (! Schema::hasTable('daily_reports')) {
+            return 0;
+        }
+
+        $threshold = (float) (config('kpi.status_thresholds.risk', 0.6) + 0.2); // < 0.8
+        $metricsConfig = (array) config('kpi.metrics', []);
+        $today = now()->startOfDay();
+
+        $reportsByUser = DailyReport::query()
+            ->with('user.role')
+            ->whereDate('report_date', '>=', $today->copy()->subDays(7)->toDateString())
+            ->get()
+            ->groupBy('user_id');
+
+        $sent = 0;
+
+        foreach ($reportsByUser as $userReports) {
+            /** @var DailyReport|null $latest */
+            $latest = $userReports->sortByDesc('report_date')->first();
+            $agent = $latest?->user;
+
+            if (! $agent instanceof User || ! in_array($agent->role?->slug, ['agent', 'mop'], true)) {
+                continue;
+            }
+
+            $workingReports = $userReports
+                ->sortByDesc('report_date')
+                ->filter(function (DailyReport $report) {
+                    $dayOfWeek = $report->report_date->dayOfWeek ?? null;
+
+                    return $dayOfWeek !== Carbon::SUNDAY;
+                })
+                ->take(2)
+                ->values();
+
+            if ($workingReports->count() < 2) {
+                continue;
+            }
+
+            $kpis = $workingReports->map(fn (DailyReport $report) => $this->calculateKpiValue($report, $metricsConfig));
+            if ($kpis->filter(fn (float $kpi) => $kpi < $threshold)->count() !== 2) {
+                continue;
+            }
+
+            $receivers = User::query()
+                ->with('role')
+                ->where('status', User::STATUS_ACTIVE)
+                ->where('branch_id', $agent->branch_id)
+                ->where(function ($q) use ($agent) {
+                    $q->whereIn('role_id', function ($sub) {
+                        $sub->select('id')->from('roles')->whereIn('slug', ['rop', 'branch_director']);
+                    });
+
+                    if ($agent->branch_group_id) {
+                        $q->orWhere(function ($mopQ) use ($agent) {
+                            $mopQ->whereIn('role_id', function ($sub) {
+                                $sub->select('id')->from('roles')->where('slug', 'mop');
+                            })->where('branch_group_id', $agent->branch_group_id);
+                        });
+                    }
+                })
+                ->get();
+
+            if ($receivers->isEmpty()) {
+                continue;
+            }
+
+            $latestReport = $workingReports->first();
+            $previousReport = $workingReports->get(1);
+            $message = sprintf(
+                'Ранний риск KPI: %s (%s) — два рабочих дня подряд ниже 0.8 (%.2f и %.2f).',
+                $agent->name,
+                $agent->role?->slug ?? 'agent',
+                $kpis->get(0),
+                $kpis->get(1)
+            );
+
+            $this->notifyUsers(
+                $receivers,
+                NotificationType::KPI_EARLY_RISK,
+                'Ранний риск KPI',
+                $message,
+                null,
+                null,
+                [
+                    'channels' => [NotificationChannel::IN_APP, NotificationChannel::TELEGRAM],
+                    'action_url' => '/kpi-reports?period_type=day&user_id='.$agent->id,
+                    'action_type' => 'open_kpi_report',
+                    'dedupe_key' => 'kpi:early-risk:'.$agent->id.':'.$latestReport->report_date->toDateString(),
+                    'data' => [
+                        'agent_id' => $agent->id,
+                        'agent_name' => $agent->name,
+                        'kpi_day_latest' => $kpis->get(0),
+                        'kpi_day_previous' => $kpis->get(1),
+                        'latest_date' => $latestReport->report_date->toDateString(),
+                        'previous_date' => $previousReport?->report_date?->toDateString(),
+                    ],
+                ]
+            );
+
+            $telegramText = "Early risk KPI\nСотрудник: {$agent->name}\n{$latestReport->report_date->toDateString()}: ".number_format($kpis->get(0), 2)."\n{$previousReport?->report_date?->toDateString()}: ".number_format($kpis->get(1), 2);
+            foreach ($receivers as $receiver) {
+                if (! $receiver->telegram_chat_id || ! $this->telegramBot->isEnabled()) {
+                    continue;
+                }
+
+                try {
+                    $this->telegramBot->sendUserMessage($receiver, $telegramText);
+                } catch (\Throwable $e) {
+                    Log::warning('Failed to send early risk telegram message.', [
+                        'receiver_id' => $receiver->id,
+                        'agent_id' => $agent->id,
+                        'error' => $e->getMessage(),
+                    ]);
+                }
+            }
+
+            $sent++;
+        }
+
+        return $sent;
+    }
+
+    private function calculateKpiValue(DailyReport $report, array $metricsConfig): float
+    {
+        $sum = 0.0;
+
+        foreach ($metricsConfig as $column => $config) {
+            $target = (float) ($config['target'] ?? 0);
+            $weight = (float) ($config['weight'] ?? 0);
+            $fact = (float) ($report->{$column} ?? 0);
+
+            if ($target <= 0 || $weight <= 0) {
+                continue;
+            }
+
+            $sum += ($fact / $target) * $weight;
+        }
+
+        return round($sum, 4);
     }
 
     private function notifyLeadAssigned(Lead $lead, ?User $actor = null): void

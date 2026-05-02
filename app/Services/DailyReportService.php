@@ -94,6 +94,8 @@ class DailyReportService
             'submitted_at' => $report?->submitted_at,
             'auto' => $this->autoMetrics($user, $date),
             'manual' => [
+                'ad_count' => $report?->ad_count ?? 0,
+                'meetings_count' => $report?->meetings_count ?? 0,
                 'comment' => $report?->comment ?? '',
                 'plans_for_tomorrow' => $report?->plans_for_tomorrow ?? '',
             ],
@@ -117,6 +119,20 @@ class DailyReportService
 
     private function countCalls(User $user, Carbon $startUtc, Carbon $endUtc): int
     {
+        if (Schema::hasTable('crm_tasks')
+            && Schema::hasTable('crm_task_types')
+            && Schema::hasColumn('crm_tasks', 'assignee_id')
+            && Schema::hasColumn('crm_tasks', 'status')
+            && Schema::hasColumn('crm_tasks', 'completed_at')) {
+            return (int) DB::table('crm_tasks')
+                ->join('crm_task_types', 'crm_task_types.id', '=', 'crm_tasks.task_type_id')
+                ->where('crm_tasks.assignee_id', $user->id)
+                ->where('crm_tasks.status', 'done')
+                ->where('crm_task_types.code', 'CALL')
+                ->whereBetween('crm_tasks.completed_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
+                ->count();
+        }
+
         if (! Schema::hasTable('crm_audit_logs')
             || ! Schema::hasColumn('crm_audit_logs', 'actor_id')
             || ! Schema::hasColumn('crm_audit_logs', 'event')
