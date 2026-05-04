@@ -123,6 +123,17 @@ class KpiReportFeatureTest extends TestCase
         $this->assertCount(3, $response->json('data'));
     }
 
+    public function test_legacy_kpi_dashboard_endpoint_is_supported(): void
+    {
+        [$users] = $this->seedContext();
+
+        Sanctum::actingAs($users['directorA']);
+
+        $response = $this->getJson('/api/kpi/dashboard?period_type=day&date_from=2026-05-01&date_to=2026-05-01');
+        $response->assertOk();
+        $this->assertCount(2, $response->json('data'));
+    }
+
     private function seedContext(): array
     {
         $roles = [

@@ -148,6 +148,8 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::get('/daily-reports/my/{date}', [DailyReportController::class, 'showMine']);
     Route::get('/daily-reports', [DailyReportController::class, 'index'])->middleware('rop.branch.scope');
     Route::get('/kpi-reports', [KpiReportController::class, 'index'])->middleware('rop.branch.scope');
+    // Backward compatibility for legacy frontend endpoint.
+    Route::get('/kpi/dashboard', [KpiReportController::class, 'index'])->middleware('rop.branch.scope');
     Route::get('/crm/task-types', [CrmTaskTypeController::class, 'index']);
     Route::get('/crm/tasks', [CrmTaskController::class, 'index'])->middleware('rop.branch.scope');
     Route::post('/crm/tasks', [CrmTaskController::class, 'store'])->middleware('rop.branch.scope');
