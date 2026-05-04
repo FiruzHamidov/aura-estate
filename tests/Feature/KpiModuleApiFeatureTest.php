@@ -83,6 +83,10 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->getJson('/api/kpi/weekly?year=2026&week=19')->assertOk();
         $this->getJson('/api/kpi/monthly?year=2026&month=5')->assertOk();
         $this->getJson('/api/kpi/dashboard?date=2026-05-04')->assertOk();
+        $this->getJson('/api/kpi/dashboard?date=2026-05-04&role=agent')->assertOk();
+        $this->getJson('/api/kpi/dashboard/debug?date=2026-05-04&role=agent')->assertOk()->assertJsonStructure([
+            'data' => ['summary', 'ranking', 'applied_filters', 'timezone', 'period_bounds'],
+        ]);
 
         $this->getJson('/api/kpi/ops/integrations/status')->assertOk();
         $this->patchJson('/api/kpi/ops/telegram/config', ['daily_enabled' => true, 'daily_time' => '08:30'])->assertOk();

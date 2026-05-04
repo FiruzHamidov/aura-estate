@@ -92,6 +92,14 @@ class KpiModuleController extends Controller
         return response()->json(['data' => $this->service->dashboard($this->authUser(), $date, $validated)]);
     }
 
+    public function dashboardDebug(Request $request)
+    {
+        $validated = $this->validateKpiFilters($request, true);
+        $date = isset($validated['date']) ? Carbon::parse($validated['date'], 'Asia/Dushanbe') : Carbon::now('Asia/Dushanbe');
+
+        return response()->json(['data' => $this->service->dashboardDebug($this->authUser(), $date, $validated)]);
+    }
+
     public function integrationsStatus()
     {
         return response()->json(['data' => KpiIntegrationStatus::query()->orderBy('id')->get()]);
@@ -214,6 +222,7 @@ class KpiModuleController extends Controller
     private function validateKpiFilters(Request $request, bool $withDate): array
     {
         return $request->validate(array_merge($withDate ? ['date' => 'nullable|date_format:Y-m-d'] : [], [
+            'role' => ['nullable', Rule::in(['admin', 'superadmin', 'branch_director', 'rop', 'mop', 'agent', 'intern'])],
             'assignee_id' => 'nullable|integer|exists:users,id',
             'mop_id' => 'nullable|integer|exists:users,id',
             'agent_id' => 'nullable|integer|exists:users,id',

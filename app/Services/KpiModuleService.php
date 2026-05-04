@@ -11,6 +11,7 @@ use App\Models\KpiPlan;
 use App\Models\KpiQualityIssue;
 use App\Models\KpiTelegramReportConfig;
 use App\Models\User;
+use App\Services\DailyReportService;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
@@ -19,6 +20,10 @@ use Illuminate\Support\Facades\Schema;
 class KpiModuleService
 {
     private const TZ = 'Asia/Dushanbe';
+
+    public function __construct(private readonly DailyReportService $dailyReportService)
+    {
+    }
 
     public function plans(string $role): Collection
     {
@@ -122,6 +127,48 @@ class KpiModuleService
         ];
     }
 
+    public function dashboardDebug(User $authUser, Carbon $date, array $filters): array
+    {
+        $base = $this->dashboard($authUser, $date, $filters);
+        $dayStart = $date->copy()->startOfDay();
+        $dayEnd = $date->copy()->endOfDay();
+        $dayStartUtc = $dayStart->copy()->setTimezone('UTC');
+        $dayEndUtc = $dayEnd->copy()->setTimezone('UTC');
+
+        $ranking = collect($base['ranking'])->map(function (array $row) use ($date) {
+            $userId = (int) ($row['user']['id'] ?? 0);
+            $user = $userId > 0 ? User::query()->find($userId) : null;
+            $sourceCounts = $user ? $this->dailyReportService->autoMetrics($user, $date->toDateString()) : [];
+
+            $row['source_counts'] = $sourceCounts;
+            $row['stored_metrics_total'] = array_sum($row['metrics']);
+            $row['source_metrics_total'] = array_sum($sourceCounts);
+
+            return $row;
+        })->values();
+
+        return [
+            'summary' => $base['summary'],
+            'ranking' => $ranking,
+            'applied_filters' => [
+                'date' => $date->toDateString(),
+                'role' => $filters['role'] ?? null,
+                'assignee_id' => $filters['assignee_id'] ?? null,
+                'mop_id' => $filters['mop_id'] ?? null,
+                'agent_id' => $filters['agent_id'] ?? null,
+                'branch_id' => $filters['branch_id'] ?? null,
+                'branch_group_id' => $filters['branch_group_id'] ?? null,
+                'auth_role' => $authUser->role?->slug,
+                'auth_user_id' => $authUser->id,
+            ],
+            'timezone' => self::TZ,
+            'period_bounds' => [
+                'local' => ['start' => $dayStart->toDateTimeString(), 'end' => $dayEnd->toDateTimeString()],
+                'utc' => ['start' => $dayStartUtc->toDateTimeString(), 'end' => $dayEndUtc->toDateTimeString()],
+            ],
+        ];
+    }
+
     public function telegramConfig(): KpiTelegramReportConfig
     {
         return KpiTelegramReportConfig::query()->firstOrCreate([], [
@@ -209,6 +256,10 @@ class KpiModuleService
 
         if (! empty($filters['branch_group_id'])) {
             $query->whereHas('user', fn (Builder $q) => $q->where('branch_group_id', (int) $filters['branch_group_id']));
+        }
+
+        if (! empty($filters['role'])) {
+            $query->where('role_slug', (string) $filters['role']);
         }
 
         match ($authUser->role?->slug) {
