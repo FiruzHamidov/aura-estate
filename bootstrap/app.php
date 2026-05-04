@@ -3,17 +3,19 @@
 use App\Http\Middleware\B24Jwt;
 use App\Http\Middleware\DetectClientLocale;
 use App\Http\Middleware\EnsureDailyReportSubmitted;
+use App\Http\Middleware\EnsureTraceId;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\EnsureUserIsNotClient;
 use App\Http\Middleware\EnforceRopBranchScope;
+use Illuminate\Auth\AuthenticationException;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
-use Illuminate\Auth\AuthenticationException;
 use Illuminate\Http\Middleware\HandleCors;
 use Illuminate\Routing\Middleware\SubstituteBindings;
-
+use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
 return Application::configure(basePath: dirname(__DIR__))
     ->withRouting(
@@ -23,9 +25,9 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        // Enable CORS globally for API routes (configured via config/cors.php)
         $middleware->group('api', [
             HandleCors::class,
+            EnsureTraceId::class,
             DetectClientLocale::class,
             SubstituteBindings::class,
         ]);
@@ -39,8 +41,36 @@ return Application::configure(basePath: dirname(__DIR__))
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions) {
+        $exceptions->render(function (ValidationException $e, $request) {
+            return response()->json([
+                'message' => 'Validation failed.',
+                'errors' => $e->errors(),
+                'trace_id' => $request->attributes->get('trace_id'),
+            ], 422);
+        });
+
         $exceptions->render(function (AuthenticationException $e, $request) {
-            return response()->json(['message' => 'Unauthenticated.'], 401);
+            return response()->json([
+                'message' => 'Unauthenticated.',
+                'trace_id' => $request->attributes->get('trace_id'),
+            ], 401);
+        });
+
+        $exceptions->render(function (\Throwable $e, $request) {
+            $status = $e instanceof HttpExceptionInterface ? $e->getStatusCode() : 500;
+
+            if ($status < 400) {
+                $status = 500;
+            }
+
+            if ($status === 500) {
+                report($e);
+            }
+
+            return response()->json([
+                'message' => $status === 500 ? 'Server Error.' : ($e->getMessage() ?: 'Request failed.'),
+                'trace_id' => $request->attributes->get('trace_id'),
+            ], $status);
         });
     })
     ->withSchedule(function (Schedule $schedule) {

@@ -30,6 +30,7 @@ class DatabaseSeeder extends Seeder
             FeatureSeeder::class,
             DeveloperSeeder::class,
             DemoNewBuildingSeeder::class,
+            KpiModuleSeeder::class,
         ]);
     }
 }

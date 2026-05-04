@@ -1,0 +1,55 @@
+openapi: 3.0.3
+info:
+  title: Aura KPI API
+  version: 1.0.0
+servers:
+  - url: /api
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Token
+  schemas:
+    Error:
+      type: object
+      properties:
+        message: { type: string }
+        trace_id: { type: string }
+security:
+  - bearerAuth: []
+paths:
+  /kpi-plans:
+    get: { summary: List KPI plans, responses: { '200': { description: OK } } }
+    patch: { summary: Update KPI plans, responses: { '200': { description: OK }, '403': { description: Forbidden } } }
+  /kpi/daily:
+    get: { summary: Daily KPI rows, responses: { '200': { description: OK } } }
+    post: { summary: Save daily KPI, responses: { '201': { description: Created }, '422': { description: Validation error } } }
+  /kpi/weekly:
+    get: { summary: Weekly KPI rows, responses: { '200': { description: OK } } }
+  /kpi/monthly:
+    get: { summary: Monthly KPI rows, responses: { '200': { description: OK } } }
+  /kpi/dashboard:
+    get: { summary: KPI dashboard summary and ranking, responses: { '200': { description: OK } } }
+  /kpi/integrations/status:
+    get: { summary: KPI integration statuses, responses: { '200': { description: OK } } }
+  /kpi/telegram-reports/config:
+    get: { summary: Telegram report config, responses: { '200': { description: OK } } }
+    patch: { summary: Update telegram report config, responses: { '200': { description: OK } } }
+  /kpi/quality/issues:
+    get: { summary: KPI quality issues, responses: { '200': { description: OK } } }
+  /kpi/early-risk-alerts:
+    get: { summary: Early risk alerts, responses: { '200': { description: OK } } }
+  /kpi/early-risk-alerts/status:
+    patch: { summary: Update early risk alert status, responses: { '200': { description: OK } } }
+  /kpi/period-contract:
+    get: { summary: KPI period contract rows, responses: { '200': { description: OK } } }
+  /kpi/acceptance-runs:
+    get: { summary: Acceptance run logs, responses: { '200': { description: OK } } }
+  /kpi/adjustments:
+    get: { summary: KPI adjustments list, responses: { '200': { description: OK } } }
+    post: { summary: Create KPI adjustment, responses: { '201': { description: Created } } }
+  /crm/tasks/kpi-daily-summary:
+    get: { summary: CRM task KPI daily summary, responses: { '200': { description: OK } } }
+  /crm/tasks/kpi-weekly-summary:
+    get: { summary: CRM task KPI weekly summary, responses: { '200': { description: OK } } }
