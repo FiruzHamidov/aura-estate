@@ -367,10 +367,6 @@ class DailyReportController extends Controller
             $this->denyKpi('KPI_FORBIDDEN_LOCKED_PERIOD', 'Period is locked for your role.');
         }
 
-        $deadline = Carbon::parse($reportDate, 'Asia/Dushanbe')->endOfDay();
-        if (Carbon::now('Asia/Dushanbe')->greaterThan($deadline)) {
-            $this->denyKpi('KPI_FORBIDDEN_DEADLINE_PASSED', 'Daily report deadline has passed for your role.');
-        }
     }
 
     private function denyKpi(string $code, string $message, int $status = 403, array $details = []): void
