@@ -148,11 +148,14 @@ class KpiModuleApiFeatureTest extends TestCase
             ->assertCreated()
             ->assertJsonPath('data.0.employee_id', $agent->id)
             ->assertJsonPath('data.0.call', 2)
-            ->assertJsonPath('data.0.kabul', 3)
             ->assertJsonPath('data.0.show', 4)
             ->assertJsonPath('data.0.lead', 5)
-            ->assertJsonPath('data.0.deposit', 6)
-            ->assertJsonPath('data.0.deal', 7);
+            ->assertJsonPath('data.0.deal', 7)
+            ->assertJsonPath('data.0.objects', 5)
+            ->assertJsonPath('data.0.shows', 4)
+            ->assertJsonPath('data.0.ads', 1)
+            ->assertJsonPath('data.0.calls', 2)
+            ->assertJsonPath('data.0.sales', 7);
 
         $this->assertDatabaseHas('daily_reports', [
             'user_id' => $agent->id,
@@ -169,12 +172,18 @@ class KpiModuleApiFeatureTest extends TestCase
         if ($metrics === null) {
             $this->fail('Unexpected response: '.json_encode($response->json()));
         }
-        $this->assertSame(1, (int) $metrics['advertisement']['final_value']);
-        $this->assertSame(2, (int) $metrics['call']['final_value']);
-        $this->assertSame(3, (int) $metrics['kabul']['final_value']);
-        $this->assertSame(4, (int) $metrics['show']['final_value']);
-        $this->assertSame(5, (int) $metrics['lead']['final_value']);
-        $this->assertSame(6, (int) $metrics['deposit']['final_value']);
-        $this->assertSame(7, (int) $metrics['deal']['final_value']);
+        $this->assertSame(0, (int) $metrics['objects']['final_value']);
+        $this->assertSame(0, (int) $metrics['shows']['final_value']);
+        $this->assertSame(1, (int) $metrics['ads']['final_value']);
+        $this->assertSame(2, (int) $metrics['calls']['final_value']);
+        $this->assertSame(0, (int) $metrics['sales']['final_value']);
+
+        $response->assertJsonPath('data.0.objects_raw', 0)
+            ->assertJsonPath('data.0.shows_raw', 0)
+            ->assertJsonPath('data.0.ads_raw', 1)
+            ->assertJsonPath('data.0.calls_raw', 2)
+            ->assertJsonPath('data.0.sales_raw', 0)
+            ->assertJsonPath('data.0.objects_display', '0.00')
+            ->assertJsonPath('data.0.sales_display', '0.00');
     }
 }

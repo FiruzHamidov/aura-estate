@@ -1374,16 +1374,7 @@ class PropertyController extends Controller
              * 3️⃣ АГЕНТЫ — ТОЛЬКО ЕСЛИ SOLD
              */
             if ($request->moderation_status === 'sold' && $request->filled('agents')) {
-                $property->saleAgents()->sync(
-                    collect($request->agents)->mapWithKeys(fn ($agent) => [
-                        $agent['agent_id'] => [
-                            'role' => $agent['role'] ?? 'assistant',
-                            'agent_commission_amount' => $agent['commission_amount'] ?? null,
-                            'agent_commission_currency' => $agent['commission_currency'] ?? 'TJS',
-                            'agent_paid_at' => $agent['paid_at'] ?? null,
-                        ],
-                    ])->toArray()
-                );
+                $property->saleAgents()->sync($this->saleAgentsSyncPayload($request->agents));
             }
         });
 
@@ -1487,6 +1478,12 @@ class PropertyController extends Controller
             'money_holder' => 'nullable|in:company,agent,owner,developer,client',
             'money_received_at' => 'nullable|date',
             'contract_signed_at' => 'nullable|date',
+            'agents' => 'nullable|array|max:3',
+            'agents.*.agent_id' => 'nullable|exists:users,id|distinct',
+            'agents.*.role' => 'nullable|in:main,assistant,partner',
+            'agents.*.commission_amount' => 'nullable|numeric|min:0',
+            'agents.*.commission_currency' => 'nullable|in:TJS,USD',
+            'agents.*.paid_at' => 'nullable|date',
         ]);
 
         $effectivePrice = array_key_exists('price', $validated)
@@ -1951,19 +1948,7 @@ class PropertyController extends Controller
 
             // 2️⃣ Агенты — заменяем только если клиент прислал список
             if ($request->has('agents')) {
-                $property->saleAgents()->sync(
-                    collect($request->input('agents', []))
-                        ->filter(fn ($agent) => !empty($agent['agent_id']))
-                        ->mapWithKeys(fn ($agent) => [
-                            $agent['agent_id'] => [
-                                'role' => $agent['role'] ?? 'assistant',
-                                'agent_commission_amount' => $agent['commission_amount'] ?? null,
-                                'agent_commission_currency' => $agent['commission_currency'] ?? 'TJS',
-                                'agent_paid_at' => $agent['paid_at'] ?? null,
-                            ],
-                        ])
-                        ->toArray()
-                );
+                $property->saleAgents()->sync($this->saleAgentsSyncPayload($request->input('agents', [])));
             }
         });
 
@@ -1971,5 +1956,36 @@ class PropertyController extends Controller
             'message' => 'Сделка успешно сохранена',
             'property_id' => $property->id,
         ]);
+    }
+
+    private function saleAgentsSyncPayload(array $agents): array
+    {
+        $payload = collect($agents)
+            ->filter(fn ($agent) => !empty($agent['agent_id']))
+            ->groupBy(fn ($agent) => (int) $agent['agent_id'])
+            ->map(function ($group, $agentId) {
+                $agent = collect($group)->first();
+
+                return [
+                    'agent_id' => (int) $agentId,
+                    'pivot' => [
+                        'role' => $agent['role'] ?? 'assistant',
+                        'agent_commission_amount' => $agent['commission_amount'] ?? null,
+                        'agent_commission_currency' => $agent['commission_currency'] ?? 'TJS',
+                        'agent_paid_at' => $agent['paid_at'] ?? null,
+                    ],
+                ];
+            })
+            ->values();
+
+        if ($payload->count() > 3) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'agents' => 'Можно указать не более 3 продавцов для одного объекта.',
+            ]);
+        }
+
+        return $payload
+            ->mapWithKeys(fn (array $item) => [$item['agent_id'] => $item['pivot']])
+            ->toArray();
     }
 }

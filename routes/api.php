@@ -156,6 +156,9 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::get('/kpi-reports', [KpiReportController::class, 'index'])->middleware('rop.branch.scope');
     Route::get('/kpi-plans', [KpiModuleController::class, 'plans']);
     Route::patch('/kpi-plans', [KpiModuleController::class, 'updatePlans'])->middleware('rop.branch.scope');
+    Route::get('/kpi/plans', [KpiModuleController::class, 'plans'])->middleware('rop.branch.scope');
+    Route::put('/kpi/plans/{userId}', [KpiModuleController::class, 'updateUserPlans'])->middleware('rop.branch.scope');
+    Route::patch('/kpi/plans/{userId}', [KpiModuleController::class, 'updateUserPlans'])->middleware('rop.branch.scope');
     Route::get('/kpi/daily', [KpiModuleController::class, 'daily'])->middleware('rop.branch.scope');
     Route::post('/kpi/daily', [KpiModuleController::class, 'upsertDaily']);
     Route::get('/kpi/weekly', [KpiModuleController::class, 'weekly'])->middleware('rop.branch.scope');

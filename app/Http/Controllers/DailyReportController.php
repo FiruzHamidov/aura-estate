@@ -138,8 +138,8 @@ class DailyReportController extends Controller
             'auto' => $this->dailyReports->autoMetrics($user, $date),
             'report' => $report,
             'manual' => [
-                'ad_count' => $report?->ad_count ?? 0,
-                'meetings_count' => $report?->meetings_count ?? 0,
+                'ads' => $report?->ad_count ?? 0,
+                'calls' => $report?->calls_count ?? 0,
                 'comment' => $report?->comment ?? '',
                 'plans_for_tomorrow' => $report?->plans_for_tomorrow ?? '',
             ],
@@ -152,22 +152,29 @@ class DailyReportController extends Controller
 
         $validated = $this->validatedPayload($request, true);
         $reportDate = $validated['report_date'] ?? $this->dailyReports->defaultReportDate($user);
-        abort_if($this->isDateLocked($user, $reportDate), 422, 'Period is locked. Use KPI adjustment endpoint.');
+        $this->ensureCanEditByPeriodRules($user, $user, $reportDate, null);
         $metrics = $this->dailyReports->autoMetrics($user, $reportDate);
+        $payload = array_merge($metrics, [
+            'role_slug' => $user->role?->slug,
+            'ad_count' => $validated['ads'] ?? $validated['ads_count'] ?? $validated['ad_count'] ?? 0,
+            'calls_count' => $validated['calls'] ?? $validated['calls_count'] ?? 0,
+            'meetings_count' => $validated['meetings_count'] ?? 0,
+            'comment' => $validated['comment'] ?? null,
+            'plans_for_tomorrow' => $validated['plans_for_tomorrow'] ?? null,
+            'submitted_at' => now(),
+        ]);
+        if (\Illuminate\Support\Facades\Schema::hasColumn('daily_reports', 'sales_count')) {
+            $payload['sales_count'] = $metrics['sales_count'] ?? 0;
+        } else {
+            unset($payload['sales_count']);
+        }
 
         $report = DailyReport::query()->updateOrCreate(
             [
                 'user_id' => $user->id,
                 'report_date' => $reportDate,
             ],
-            array_merge($metrics, [
-                'role_slug' => $user->role?->slug,
-                'ad_count' => $validated['ad_count'] ?? 0,
-                'meetings_count' => $validated['meetings_count'] ?? 0,
-                'comment' => $validated['comment'] ?? null,
-                'plans_for_tomorrow' => $validated['plans_for_tomorrow'] ?? null,
-                'submitted_at' => now(),
-            ])
+            $payload
         );
 
         return response()->json($report->fresh('user.role'), 201);
@@ -183,17 +190,24 @@ class DailyReportController extends Controller
 
         $validated = $this->validatedPayload($request, false);
         $reportDate = $dailyReport->report_date->toDateString();
-        abort_if($this->isDateLocked($targetUser, $reportDate), 422, 'Period is locked. Use KPI adjustment endpoint.');
+        $this->ensureCanEditByPeriodRules($authUser, $targetUser, $reportDate, $dailyReport);
         $metrics = $this->dailyReports->autoMetrics($targetUser, $reportDate);
-
-        $dailyReport->update(array_merge($metrics, [
+        $payload = array_merge($metrics, [
             'role_slug' => $targetUser->role?->slug,
-            'ad_count' => $validated['ad_count'] ?? $dailyReport->ad_count,
+            'ad_count' => $validated['ads'] ?? $validated['ads_count'] ?? $validated['ad_count'] ?? $dailyReport->ad_count,
+            'calls_count' => $validated['calls'] ?? $validated['calls_count'] ?? $dailyReport->calls_count,
             'meetings_count' => $validated['meetings_count'] ?? $dailyReport->meetings_count,
             'comment' => $validated['comment'] ?? $dailyReport->comment,
             'plans_for_tomorrow' => $validated['plans_for_tomorrow'] ?? $dailyReport->plans_for_tomorrow,
             'submitted_at' => $dailyReport->submitted_at ?? now(),
-        ]));
+        ]);
+        if (\Illuminate\Support\Facades\Schema::hasColumn('daily_reports', 'sales_count')) {
+            $payload['sales_count'] = $metrics['sales_count'] ?? $dailyReport->sales_count;
+        } else {
+            unset($payload['sales_count']);
+        }
+
+        $dailyReport->update($payload);
 
         return response()->json($dailyReport->fresh('user.role'));
     }
@@ -204,6 +218,9 @@ class DailyReportController extends Controller
             'report_date' => [$allowReportDate ? 'nullable' : 'prohibited', 'date'],
             'comment' => 'nullable|string',
             'plans_for_tomorrow' => 'nullable|string',
+            'ads' => 'nullable|integer|min:0',
+            'ads_count' => 'nullable|integer|min:0',
+            'calls' => 'nullable|integer|min:0',
             'ad_count' => 'nullable|integer|min:0',
             'calls_count' => 'nullable|integer|min:0',
             'meetings_count' => 'nullable|integer|min:0',
@@ -326,5 +343,43 @@ class DailyReportController extends Controller
                 $query->whereNull('branch_group_id')->orWhere('branch_group_id', $user->branch_group_id);
             })
             ->exists();
+    }
+
+    private function ensureCanEditByPeriodRules(
+        User $actor,
+        User $targetUser,
+        string $reportDate,
+        ?DailyReport $report
+    ): void {
+        $role = $actor->role?->slug;
+        $isPrivileged = in_array($role, ['admin', 'superadmin', 'owner', 'rop', 'branch_director'], true);
+        $isRestricted = in_array($role, ['agent', 'intern', 'mop'], true);
+
+        if ($report && (bool) ($report->is_finalized ?? false) && !$isPrivileged) {
+            $this->denyKpi('KPI_FINALIZED_EDIT_FORBIDDEN', 'Finalized KPI report cannot be edited.');
+        }
+
+        if (!$isRestricted) {
+            return;
+        }
+
+        if ($this->isDateLocked($targetUser, $reportDate)) {
+            $this->denyKpi('KPI_FORBIDDEN_LOCKED_PERIOD', 'Period is locked for your role.');
+        }
+
+        $deadline = Carbon::parse($reportDate, 'Asia/Dushanbe')->endOfDay();
+        if (Carbon::now('Asia/Dushanbe')->greaterThan($deadline)) {
+            $this->denyKpi('KPI_FORBIDDEN_DEADLINE_PASSED', 'Daily report deadline has passed for your role.');
+        }
+    }
+
+    private function denyKpi(string $code, string $message, int $status = 403, array $details = []): void
+    {
+        abort(response()->json([
+            'code' => $code,
+            'message' => $message,
+            'details' => (object) $details,
+            'trace_id' => request()->attributes->get('trace_id'),
+        ], $status));
     }
 }

@@ -67,8 +67,8 @@ class SavePropertyDealRequest extends FormRequest
              * 👥 АГЕНТЫ
              * =========================
              */
-            'agents' => 'nullable|array',
-            'agents.*.agent_id' => 'nullable|exists:users,id',
+            'agents' => 'nullable|array|max:3',
+            'agents.*.agent_id' => 'nullable|exists:users,id|distinct',
             'agents.*.role' => 'nullable|in:main,assistant,partner',
             'agents.*.commission_amount' => 'nullable|numeric|min:0',
             'agents.*.commission_currency' => 'nullable|in:TJS,USD',

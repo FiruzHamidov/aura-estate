@@ -21,10 +21,48 @@ class KpiModuleController extends Controller
 
     public function plans(Request $request)
     {
-        $validated = $request->validate(['role' => 'nullable|string|max:64']);
+        $validated = $request->validate([
+            'role' => 'nullable|string|max:64',
+            'user_id' => 'nullable|integer|exists:users,id',
+            'date' => 'nullable|date_format:Y-m-d',
+        ]);
+
+        if (! empty($validated['user_id'])) {
+            $date = isset($validated['date'])
+                ? Carbon::parse($validated['date'], 'Asia/Dushanbe')
+                : Carbon::now('Asia/Dushanbe');
+
+            return response()->json([
+                'data' => $this->service->plansForUser((int) $validated['user_id'], $date),
+            ]);
+        }
+
         $role = (string) ($validated['role'] ?? 'mop');
 
         return response()->json(['data' => $this->service->plans($role)]);
+    }
+
+    public function updateUserPlans(Request $request, int $userId)
+    {
+        $this->ensureManageAccess($this->authUser(), ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
+
+        $validated = $request->validate([
+            'effective_from' => 'required|date_format:Y-m-d',
+            'effective_to' => 'nullable|date_format:Y-m-d|after_or_equal:effective_from',
+            'items' => 'required|array|min:1',
+            'items.*.metric_key' => 'required|string|max:64',
+            'items.*.daily_plan' => 'required|numeric|min:0',
+            'items.*.weight' => 'required|numeric|min:0|max:1',
+            'items.*.comment' => 'nullable|string|max:500',
+        ]);
+
+        try {
+            $result = $this->service->upsertUserPlans($this->authUser(), $userId, $validated);
+        } catch (\DomainException $e) {
+            return $this->kpiError('KPI_PLAN_PERIOD_CONFLICT', $e->getMessage(), 409);
+        }
+
+        return response()->json(['data' => $result]);
     }
 
     public function updatePlans(Request $request)
@@ -74,6 +112,11 @@ class KpiModuleController extends Controller
                 'rows.*.lead' => 'nullable|integer|min:0',
                 'rows.*.deposit' => 'nullable|integer|min:0',
                 'rows.*.deal' => 'nullable|integer|min:0',
+                'rows.*.objects' => 'nullable|numeric|min:0',
+                'rows.*.shows' => 'nullable|numeric|min:0',
+                'rows.*.ads' => 'nullable|numeric|min:0',
+                'rows.*.calls' => 'nullable|numeric|min:0',
+                'rows.*.sales' => 'nullable|numeric|min:0',
                 'rows.*.comment' => 'nullable|string',
             ]);
 
@@ -317,7 +360,24 @@ class KpiModuleController extends Controller
 
     private function ensureManageAccess(User $user, array $allowed): void
     {
-        abort_unless(in_array($user->role?->slug, $allowed, true), 403, 'Forbidden');
+        if (! in_array($user->role?->slug, $allowed, true)) {
+            abort(response()->json([
+                'code' => 'KPI_FORBIDDEN',
+                'message' => 'Forbidden.',
+                'details' => (object) [],
+                'trace_id' => request()->attributes->get('trace_id'),
+            ], 403));
+        }
+    }
+
+    private function kpiError(string $code, string $message, int $status, array $details = []): \Illuminate\Http\JsonResponse
+    {
+        return response()->json([
+            'code' => $code,
+            'message' => $message,
+            'details' => (object) $details,
+            'trace_id' => request()->attributes->get('trace_id'),
+        ], $status);
     }
 
     private function authUser(): User

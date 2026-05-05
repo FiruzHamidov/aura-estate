@@ -78,6 +78,91 @@ class KpiModuleService
         return $this->plans($role);
     }
 
+    public function plansForUser(int $userId, Carbon $date): Collection
+    {
+        $user = User::query()->with('role')->findOrFail($userId);
+        $role = (string) ($user->role?->slug ?? 'mop');
+        $base = $this->plans($role)->keyBy('metric_key');
+
+        if (! Schema::hasTable('kpi_plans')) {
+            return $base->values();
+        }
+
+        $personalRows = KpiPlan::query()
+            ->where('user_id', $userId)
+            ->where(function ($q) use ($date) {
+                $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $date->toDateString());
+            })
+            ->where(function ($q) use ($date) {
+                $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $date->toDateString());
+            })
+            ->get()
+            ->keyBy('metric_key');
+
+        return $base->map(function (array $row) use ($personalRows, $userId) {
+            $personal = $personalRows->get($row['metric_key']);
+            if (! $personal) {
+                $row['metric'] = $row['metric_key'];
+                $row['plan_source'] = 'role_default';
+                return $row;
+            }
+
+            $row['user_id'] = $userId;
+            $row['metric'] = $row['metric_key'];
+            $row['daily_plan'] = (float) $personal->daily_plan;
+            $row['weight'] = (float) $personal->weight;
+            $row['comment'] = (string) ($personal->comment ?? $row['comment']);
+            $row['effective_from'] = optional($personal->effective_from)->toDateString();
+            $row['effective_to'] = optional($personal->effective_to)->toDateString();
+            $row['plan_source'] = 'personal';
+
+            return $row;
+        })->values();
+    }
+
+    public function upsertUserPlans(User $actor, int $userId, array $payload): Collection
+    {
+        $user = User::query()->with('role')->findOrFail($userId);
+        $this->ensurePlanScopeAccess($actor, $user);
+
+        $from = (string) $payload['effective_from'];
+        $to = $payload['effective_to'] ?? null;
+
+        $conflicts = KpiPlan::query()
+            ->where('user_id', $userId)
+            ->where(function ($q) use ($from, $to) {
+                $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $from);
+            })
+            ->where(function ($q) use ($to) {
+                if ($to === null) {
+                    $q->whereNotNull('id');
+                    return;
+                }
+
+                $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $to);
+            })
+            ->exists();
+
+        if ($conflicts) {
+            throw new \DomainException('Plan period conflicts with an existing personal KPI plan interval.');
+        }
+
+        foreach ((array) $payload['items'] as $item) {
+            KpiPlan::query()->create([
+                'role_slug' => (string) ($user->role?->slug ?? 'mop'),
+                'user_id' => $userId,
+                'metric_key' => (string) $item['metric_key'],
+                'daily_plan' => (float) $item['daily_plan'],
+                'weight' => (float) $item['weight'],
+                'comment' => $item['comment'] ?? null,
+                'effective_from' => $from,
+                'effective_to' => $to,
+            ]);
+        }
+
+        return $this->plansForUser($userId, Carbon::parse($from, self::TZ));
+    }
+
     public function dailyRows(User $authUser, Carbon $date, array $filters): Collection
     {
         $query = DailyReport::query()->with(['user.role'])->whereDate('report_date', $date->toDateString());
@@ -110,7 +195,7 @@ class KpiModuleService
                     'shows_count' => (int) $rows->sum('shows_count'),
                     'new_clients_count' => (int) $rows->sum('new_clients_count'),
                     'deposits_count' => (int) $rows->sum('deposits_count'),
-                    'deals_count' => (int) $rows->sum('deals_count'),
+                    'deals_count' => $this->normalizeNumber($rows->sum(fn (DailyReport $row) => $this->dealMetricValue($row))),
                 ],
             ];
         })->values();
@@ -261,7 +346,7 @@ class KpiModuleService
                 (float) (config('kpi.metrics.shows_count.target') ?? 0)
             ),
             'deal' => $this->metricProgress(
-                (int) ($report?->deals_count ?? ($auto['deals_count'] ?? 0)),
+                (float) ($report ? $this->dealMetricValue($report) : ($auto['sales_count'] ?? $auto['deals_count'] ?? 0)),
                 (float) (config('kpi.metrics.deals_count.target') ?? 0)
             ),
             'advertisement' => $this->metricProgress(
@@ -298,24 +383,28 @@ class KpiModuleService
             $date = (string) Arr::get($row, 'date');
             $targetUser = User::query()->with('role')->findOrFail($employeeId);
             $this->ensureCanUpsertDailyForUser($authUser, $targetUser);
+            $writePayload = [
+                'role_slug' => (string) (Arr::get($row, 'role') ?: $targetUser->role?->slug),
+                'ad_count' => (int) Arr::get($row, 'ads', Arr::get($row, 'advertisement', 0)),
+                'calls_count' => (int) Arr::get($row, 'calls', Arr::get($row, 'call', 0)),
+                'new_clients_count' => (int) Arr::get($row, 'kabul', 0),
+                'shows_count' => (int) Arr::get($row, 'shows', Arr::get($row, 'show', 0)),
+                'new_properties_count' => (int) Arr::get($row, 'objects', Arr::get($row, 'lead', 0)),
+                'deposits_count' => (int) Arr::get($row, 'deposit', 0),
+                'deals_count' => (int) floor((float) Arr::get($row, 'sales', Arr::get($row, 'deal', 0))),
+                'comment' => Arr::get($row, 'comment'),
+                'submitted_at' => now(),
+            ];
+            if (Schema::hasColumn('daily_reports', 'sales_count')) {
+                $writePayload['sales_count'] = (float) Arr::get($row, 'sales', Arr::get($row, 'deal', 0));
+            }
 
             $report = DailyReport::query()->updateOrCreate(
                 [
                     'user_id' => $employeeId,
                     'report_date' => $date,
                 ],
-                [
-                    'role_slug' => (string) (Arr::get($row, 'role') ?: $targetUser->role?->slug),
-                    'ad_count' => (int) Arr::get($row, 'advertisement', 0),
-                    'calls_count' => (int) Arr::get($row, 'call', 0),
-                    'new_clients_count' => (int) Arr::get($row, 'kabul', 0),
-                    'shows_count' => (int) Arr::get($row, 'show', 0),
-                    'new_properties_count' => (int) Arr::get($row, 'lead', 0),
-                    'deposits_count' => (int) Arr::get($row, 'deposit', 0),
-                    'deals_count' => (int) Arr::get($row, 'deal', 0),
-                    'comment' => Arr::get($row, 'comment'),
-                    'submitted_at' => now(),
-                ]
+                $writePayload
             );
 
             $saved[] = [
@@ -330,7 +419,12 @@ class KpiModuleService
                 'show' => (int) $report->shows_count,
                 'lead' => (int) $report->new_properties_count,
                 'deposit' => (int) $report->deposits_count,
-                'deal' => (int) $report->deals_count,
+                'deal' => (float) ($report->sales_count ?? $report->deals_count),
+                'objects' => (int) $report->new_properties_count,
+                'shows' => (int) $report->shows_count,
+                'ads' => (int) $report->ad_count,
+                'calls' => (int) $report->calls_count,
+                'sales' => (float) ($report->sales_count ?? $report->deals_count),
                 'comment' => (string) ($report->comment ?? ''),
             ];
         }
@@ -418,6 +512,18 @@ class KpiModuleService
                     'branch_id' => $user?->branch_id,
                     'branch_name' => $user?->branch?->name,
                     'metrics' => $metrics,
+                    'objects_raw' => (float) ($metrics['objects']['final_value'] ?? 0),
+                    'objects_display' => $this->displayNumber((float) ($metrics['objects']['final_value'] ?? 0)),
+                    'shows_raw' => (float) ($metrics['shows']['final_value'] ?? 0),
+                    'shows_display' => $this->displayNumber((float) ($metrics['shows']['final_value'] ?? 0)),
+                    'ads_raw' => (float) ($metrics['ads']['final_value'] ?? 0),
+                    'ads_display' => $this->displayNumber((float) ($metrics['ads']['final_value'] ?? 0)),
+                    'calls_raw' => (float) ($metrics['calls']['final_value'] ?? 0),
+                    'calls_display' => $this->displayNumber((float) ($metrics['calls']['final_value'] ?? 0)),
+                    'sales_raw' => (float) ($metrics['sales']['final_value'] ?? 0),
+                    'sales_display' => $this->displayNumber((float) ($metrics['sales']['final_value'] ?? 0)),
+                    'sales_count_raw' => (float) ($metrics['sales']['final_value'] ?? 0),
+                    'sales_count_display' => $this->displayNumber((float) ($metrics['sales']['final_value'] ?? 0)),
                     'kpi_value' => $kpiValue,
                     'kpi_percent' => $kpiPercent,
                     'status' => $status,
@@ -469,7 +575,7 @@ class KpiModuleService
         $daysInPeriod = max(1, $rows->count());
 
         foreach ($mapping as $metricKey => $cfg) {
-            $column = (string) ($cfg['source_column'] ?? '');
+            $column = $this->resolveMetricSourceColumn((string) ($cfg['source_column'] ?? ''));
             $sourceType = (string) ($cfg['source_type'] ?? 'manual');
             $target = ((float) ($targetMap[$metricKey] ?? 0)) * ($periodType === 'day' ? 1 : $daysInPeriod);
 
@@ -686,7 +792,7 @@ class KpiModuleService
         };
     }
 
-    private function metricProgress(int $fact, float $target): array
+    private function metricProgress(float $fact, float $target): array
     {
         $progressPct = $target > 0 ? round(($fact / $target) * 100, 1) : 0.0;
 
@@ -721,6 +827,29 @@ class KpiModuleService
         $rounded = round($value, 4);
 
         return floor($rounded) == $rounded ? (int) $rounded : $rounded;
+    }
+
+    private function displayNumber(float $value): string
+    {
+        return number_format($value, 2, '.', '');
+    }
+
+    private function resolveMetricSourceColumn(string $column): string
+    {
+        if ($column === 'sales_count' && !Schema::hasColumn('daily_reports', 'sales_count')) {
+            return 'deals_count';
+        }
+
+        return $column;
+    }
+
+    private function dealMetricValue(DailyReport $row): float
+    {
+        if (Schema::hasColumn('daily_reports', 'sales_count')) {
+            return (float) ($row->sales_count ?? 0);
+        }
+
+        return (float) ($row->deals_count ?? 0);
     }
 
     private function applyTaskScope(Builder $query, User $authUser, array $filters): void
@@ -758,6 +887,35 @@ class KpiModuleService
             default => (int) $authUser->id === (int) $targetUser->id,
         };
 
-        abort_unless($canWrite, 403, 'Forbidden');
+        if (! $canWrite) {
+            abort(response()->json([
+                'code' => 'KPI_FORBIDDEN_SCOPE',
+                'message' => 'Forbidden in current scope.',
+                'details' => (object) [],
+                'trace_id' => request()->attributes->get('trace_id'),
+            ], 403));
+        }
+    }
+
+    private function ensurePlanScopeAccess(User $actor, User $target): void
+    {
+        $actor->loadMissing('role');
+        $role = (string) ($actor->role?->slug ?? '');
+
+        $allowed = match ($role) {
+            'admin', 'superadmin', 'owner' => true,
+            'rop', 'branch_director' => (int) $actor->branch_id === (int) $target->branch_id,
+            'mop' => (int) $actor->branch_group_id === (int) $target->branch_group_id,
+            default => (int) $actor->id === (int) $target->id,
+        };
+
+        if (! $allowed) {
+            abort(response()->json([
+                'code' => 'KPI_FORBIDDEN_SCOPE',
+                'message' => 'Forbidden in current scope.',
+                'details' => (object) [],
+                'trace_id' => request()->attributes->get('trace_id'),
+            ], 403));
+        }
     }
 }

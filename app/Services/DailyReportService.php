@@ -67,6 +67,7 @@ class DailyReportService
         [$startUtc, $endUtc] = $this->utcDayBounds($reportDate);
 
         $showsCount = $this->countBookings($user, $startUtc, $endUtc);
+        $salesCount = $this->countDeals($user, $startUtc, $endUtc);
 
         return [
             'calls_count' => $this->countCalls($user, $startUtc, $endUtc),
@@ -74,7 +75,10 @@ class DailyReportService
             'shows_count' => $showsCount,
             'new_clients_count' => $this->countNewClients($user, $startUtc, $endUtc),
             'new_properties_count' => $this->countNewProperties($user, $startUtc, $endUtc),
-            'deals_count' => $this->countDeals($user, $startUtc, $endUtc),
+            // Keep integer legacy deals_count for backward compatibility.
+            'deals_count' => (int) floor($salesCount),
+            // Fractional sales KPI metric (1/N for N sale participants).
+            'sales_count' => $salesCount,
         ];
     }
 
@@ -94,8 +98,8 @@ class DailyReportService
             'submitted_at' => $report?->submitted_at,
             'auto' => $this->autoMetrics($user, $date),
             'manual' => [
-                'ad_count' => $report?->ad_count ?? 0,
-                'meetings_count' => $report?->meetings_count ?? 0,
+                'ads' => $report?->ad_count ?? 0,
+                'calls' => $report?->calls_count ?? 0,
                 'comment' => $report?->comment ?? '',
                 'plans_for_tomorrow' => $report?->plans_for_tomorrow ?? '',
             ],
@@ -199,20 +203,58 @@ class DailyReportService
             ->count();
     }
 
-    private function countDeals(User $user, Carbon $startUtc, Carbon $endUtc): int
+    private function countDeals(User $user, Carbon $startUtc, Carbon $endUtc): float
     {
         if (! Schema::hasTable('properties')
-            || ! Schema::hasColumn('properties', 'agent_id')
             || ! Schema::hasColumn('properties', 'moderation_status')
             || ! Schema::hasColumn('properties', 'sold_at')) {
-            return 0;
+            return 0.0;
         }
 
-        return (int) DB::table('properties')
-            ->where('agent_id', $user->id)
+        $soldProperties = DB::table('properties')
+            ->select(['id', 'agent_id'])
             ->whereIn('moderation_status', ['sold', 'rented', 'sold_by_owner'])
             ->whereBetween('sold_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
-            ->count();
+            ->get();
+
+        if ($soldProperties->isEmpty()) {
+            return 0.0;
+        }
+
+        if (! Schema::hasTable('property_agent_sales')) {
+            return (float) $soldProperties->where('agent_id', $user->id)->count();
+        }
+
+        $propertyIds = $soldProperties->pluck('id')->all();
+        $saleAgentsRows = DB::table('property_agent_sales')
+            ->select(['property_id', 'agent_id'])
+            ->whereIn('property_id', $propertyIds)
+            ->get()
+            ->groupBy('property_id');
+
+        $credit = 0.0;
+
+        foreach ($soldProperties as $property) {
+            $participants = collect($saleAgentsRows->get($property->id, []))
+                ->pluck('agent_id')
+                ->unique()
+                ->values();
+
+            if ($participants->isNotEmpty()) {
+                if ($participants->contains($user->id)) {
+                    $credit += 1 / max(1, $participants->count());
+                }
+
+                continue;
+            }
+
+            // Fallback only when explicit participants are absent.
+            if ((int) ($property->agent_id ?? 0) === (int) $user->id) {
+                $credit += 1.0;
+            }
+        }
+
+        return round($credit, 4);
     }
 
     private function utcDayBounds(string $reportDate): array

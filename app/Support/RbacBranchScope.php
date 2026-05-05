@@ -36,16 +36,20 @@ class RbacBranchScope
     public function denyBranchScopeViolation(string $message = 'Forbidden'): void
     {
         abort(response()->json([
-            'message' => $message,
             'code' => self::VIOLATION_CODE,
+            'message' => $message,
+            'details' => (object) [],
+            'trace_id' => request()->attributes->get('trace_id'),
         ], 403));
     }
 
     public function denyWithCode(string $code, string $message = 'Forbidden'): void
     {
         abort(response()->json([
-            'message' => $message,
             'code' => $code,
+            'message' => $message,
+            'details' => (object) [],
+            'trace_id' => request()->attributes->get('trace_id'),
         ], 403));
     }
 

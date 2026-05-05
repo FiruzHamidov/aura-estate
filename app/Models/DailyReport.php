@@ -21,9 +21,13 @@ class DailyReport extends Model
         'new_properties_count',
         'deposits_count',
         'deals_count',
+        'sales_count',
         'comment',
         'plans_for_tomorrow',
         'submitted_at',
+        'is_finalized',
+        'finalized_at',
+        'finalized_by',
     ];
 
     protected $casts = [
@@ -36,7 +40,10 @@ class DailyReport extends Model
         'new_properties_count' => 'integer',
         'deposits_count' => 'integer',
         'deals_count' => 'integer',
+        'sales_count' => 'decimal:4',
         'submitted_at' => 'datetime',
+        'is_finalized' => 'boolean',
+        'finalized_at' => 'datetime',
     ];
 
     public function user()

@@ -9,5 +9,21 @@ class KpiPlan extends Model
 {
     use HasFactory;
 
-    protected $fillable = ['role_slug', 'metric_key', 'daily_plan', 'weight', 'comment'];
+    protected $fillable = [
+        'role_slug',
+        'user_id',
+        'metric_key',
+        'daily_plan',
+        'weight',
+        'comment',
+        'effective_from',
+        'effective_to',
+    ];
+
+    protected $casts = [
+        'daily_plan' => 'decimal:4',
+        'weight' => 'decimal:4',
+        'effective_from' => 'date',
+        'effective_to' => 'date',
+    ];
 }

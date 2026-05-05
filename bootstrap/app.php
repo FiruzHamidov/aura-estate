@@ -42,16 +42,22 @@ return Application::configure(basePath: dirname(__DIR__))
     })
     ->withExceptions(function (Exceptions $exceptions) {
         $exceptions->render(function (ValidationException $e, $request) {
+            $isKpi = str_starts_with((string) $request->path(), 'api/kpi')
+                || str_starts_with((string) $request->path(), 'api/daily-reports');
+
             return response()->json([
+                'code' => $isKpi ? 'KPI_VALIDATION_FAILED' : 'VALIDATION_ERROR',
                 'message' => 'Validation failed.',
-                'errors' => $e->errors(),
+                'details' => ['errors' => $e->errors()],
                 'trace_id' => $request->attributes->get('trace_id'),
             ], 422);
         });
 
         $exceptions->render(function (AuthenticationException $e, $request) {
             return response()->json([
+                'code' => 'UNAUTHENTICATED',
                 'message' => 'Unauthenticated.',
+                'details' => (object) [],
                 'trace_id' => $request->attributes->get('trace_id'),
             ], 401);
         });
@@ -68,7 +74,9 @@ return Application::configure(basePath: dirname(__DIR__))
             }
 
             return response()->json([
+                'code' => $status === 500 ? 'INTERNAL_ERROR' : 'REQUEST_FAILED',
                 'message' => $status === 500 ? 'Server Error.' : ($e->getMessage() ?: 'Request failed.'),
+                'details' => (object) [],
                 'trace_id' => $request->attributes->get('trace_id'),
             ], $status);
         });
