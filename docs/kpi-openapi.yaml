@@ -29,6 +29,8 @@ paths:
     get: { summary: Weekly KPI rows, responses: { '200': { description: OK } } }
   /kpi/monthly:
     get: { summary: Monthly KPI rows, responses: { '200': { description: OK } } }
+  /kpi/metric-mapping:
+    get: { summary: KPI metric mapping dictionary (v2), responses: { '200': { description: OK } } }
   /kpi/dashboard:
     get: { summary: KPI dashboard summary and ranking, responses: { '200': { description: OK } } }
   /kpi/integrations/status:

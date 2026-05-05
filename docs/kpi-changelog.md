@@ -8,6 +8,7 @@
 - `GET /api/kpi/weekly`
 - `GET /api/kpi/monthly`
 - `GET /api/kpi/dashboard`
+- `GET /api/kpi/metric-mapping`
 - `GET /api/kpi/integrations/status`
 - `GET /api/kpi/telegram-reports/config`
 - `PATCH /api/kpi/telegram-reports/config`
@@ -56,3 +57,13 @@
 
 ## OpenAPI
 - Added `/docs/kpi-openapi.yaml`.
+
+## KPI v2 contract (2026-05-05)
+- Added opt-in contract by query/header: `?v=2` or `X-KPI-Version: 2` for:
+- `GET /api/kpi/daily`
+- `GET /api/kpi/weekly`
+- `GET /api/kpi/monthly`
+- New `metrics` keys: `advertisement`, `call`, `kabul`, `show`, `lead`, `deposit`, `deal`.
+- Each metric now includes: `fact_value`, `manual_value`, `final_value`, `target_value`, `progress_pct`, `source`, `source_error`.
+- Added `meta.quality` with: `duplicate_check_passed`, `completeness_pct`, `source_error`.
+- Added `breakdown_by_day` for weekly/monthly `v2` response.

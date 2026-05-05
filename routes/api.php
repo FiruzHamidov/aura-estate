@@ -162,6 +162,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::get('/kpi/monthly', [KpiModuleController::class, 'monthly'])->middleware('rop.branch.scope');
     Route::get('/kpi/dashboard', [KpiModuleController::class, 'dashboard'])->middleware('rop.branch.scope');
     Route::get('/kpi/dashboard/debug', [KpiModuleController::class, 'dashboardDebug'])->middleware('rop.branch.scope');
+    Route::get('/kpi/metric-mapping', [KpiModuleController::class, 'metricMapping'])->middleware('rop.branch.scope');
     Route::get('/crm/task-types', [CrmTaskTypeController::class, 'index']);
     Route::get('/crm/tasks', [CrmTaskController::class, 'index'])->middleware('rop.branch.scope');
     Route::post('/crm/tasks', [CrmTaskController::class, 'store'])->middleware('rop.branch.scope');

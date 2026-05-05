@@ -80,8 +80,20 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->getJson('/api/kpi-plans')->assertOk()->assertJsonStructure(['data']);
         $this->patchJson('/api/kpi-plans', ['role' => 'mop', 'items' => [['metric_key' => 'calls_count', 'daily_plan' => 10, 'weight' => 0.2, 'comment' => 'x']]])->assertOk();
         $this->getJson('/api/kpi/daily?date=2026-05-04')->assertOk();
+        $this->getJson('/api/kpi/daily?date=2026-05-04&v=2')->assertOk()->assertJsonStructure([
+            'data',
+            'meta' => ['period_type', 'quality' => ['duplicate_check_passed', 'completeness_pct', 'source_error']],
+        ])->assertJsonPath('meta.period_type', 'day');
         $this->getJson('/api/kpi/weekly?year=2026&week=19')->assertOk();
+        $this->getJson('/api/kpi/weekly?year=2026&week=19&v=2')->assertOk()->assertJsonStructure([
+            'data',
+            'meta' => ['period_type'],
+        ])->assertJsonPath('meta.period_type', 'week');
         $this->getJson('/api/kpi/monthly?year=2026&month=5')->assertOk();
+        $this->getJson('/api/kpi/monthly?year=2026&month=5&v=2')->assertOk();
+        $this->getJson('/api/kpi/metric-mapping')->assertOk()->assertJsonStructure([
+            'data' => ['metric_keys', 'mapping'],
+        ]);
         $this->getJson('/api/kpi/dashboard?date=2026-05-04')->assertOk();
         $this->getJson('/api/kpi/dashboard?date=2026-05-04&role=agent')->assertOk();
         $this->getJson('/api/kpi/dashboard/debug?date=2026-05-04&role=agent')->assertOk()->assertJsonStructure([

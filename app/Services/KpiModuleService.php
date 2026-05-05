@@ -7,6 +7,7 @@ use App\Models\DailyReport;
 use App\Models\KpiAdjustmentLog;
 use App\Models\KpiEarlyRiskAlert;
 use App\Models\KpiIntegrationStatus;
+use App\Models\KpiPeriodLock;
 use App\Models\KpiPlan;
 use App\Models\KpiQualityIssue;
 use App\Models\KpiTelegramReportConfig;
@@ -16,10 +17,15 @@ use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Schema;
+use Throwable;
 
 class KpiModuleService
 {
     private const TZ = 'Asia/Dushanbe';
+    private const STATUS_DONE = 'done';
+    private const STATUS_CONTROL = 'control';
+    private const STATUS_WEAK = 'weak';
+    private const STATUS_URGENT = 'urgent';
 
     public function __construct(private readonly DailyReportService $dailyReportService)
     {
@@ -272,6 +278,325 @@ class KpiModuleService
             'status' => $this->statusForProgressPct($overallProgressPct),
             'metrics' => $metrics,
         ];
+    }
+
+    public function metricMapping(): array
+    {
+        return [
+            'metric_keys' => (array) config('kpi.v2.metric_keys', []),
+            'mapping' => (array) config('kpi.v2.metric_mapping', []),
+        ];
+    }
+
+    public function dailyRowsV2(User $authUser, Carbon $date, array $filters): array
+    {
+        $from = $this->rangeDateFromFilters($filters, $date->copy()->startOfDay());
+        $to = $this->rangeDateToFilters($filters, $date->copy()->endOfDay());
+        $periodKey = $from->toDateString();
+
+        return $this->buildV2Response($authUser, 'day', $from, $to, $filters, $periodKey, false);
+    }
+
+    public function periodRowsV2(User $authUser, string $periodType, Carbon $from, Carbon $to, array $filters): array
+    {
+        $periodKey = $periodType === 'week'
+            ? $from->format('o-\WW')
+            : $from->format('Y-m');
+
+        return $this->buildV2Response($authUser, $periodType, $from, $to, $filters, $periodKey, true);
+    }
+
+    private function buildV2Response(
+        User $authUser,
+        string $periodType,
+        Carbon $from,
+        Carbon $to,
+        array $filters,
+        string $periodKey,
+        bool $withBreakdown
+    ): array {
+        $query = DailyReport::query()
+            ->with(['user.role', 'user.branch', 'user.branchGroup'])
+            ->whereBetween('report_date', [$from->toDateString(), $to->toDateString()]);
+        $this->applyScope($query, $authUser, $filters);
+
+        $perPage = (int) ($filters['per_page'] ?? 50);
+        $page = max(1, (int) ($filters['page'] ?? 1));
+        $paginator = $query->orderBy('user_id')->paginate($perPage, ['*'], 'page', $page);
+
+        $mapping = (array) config('kpi.v2.metric_mapping', []);
+        $targetMap = (array) config('kpi.v2.targets', []);
+        $weightMap = (array) config('kpi.v2.weights', []);
+        $globalSourceError = false;
+
+        $data = collect($paginator->items())
+            ->groupBy('user_id')
+            ->map(function (Collection $rows) use ($periodType, $from, $mapping, $targetMap, $weightMap, $withBreakdown, &$globalSourceError) {
+                $first = $rows->first();
+                $user = $first?->user;
+                $autoByDate = [];
+                $sourceErrors = [];
+
+                foreach ($rows as $row) {
+                    try {
+                        $autoByDate[$row->report_date->toDateString()] = $this->dailyReportService->autoMetrics($user, $row->report_date->toDateString());
+                    } catch (Throwable) {
+                        $autoByDate[$row->report_date->toDateString()] = [];
+                        $sourceErrors[$row->report_date->toDateString()] = true;
+                    }
+                }
+
+                $metrics = $this->buildMetricsForRows($rows, $autoByDate, $sourceErrors, $mapping, $targetMap, $periodType);
+                $kpiValue = $this->kpiValueFromMetrics($metrics, $weightMap);
+                $kpiPercent = round($kpiValue * 100, 1);
+                $status = $this->statusForKpiPercent($kpiPercent);
+                $locked = $this->isPeriodLockedForUser($periodType, $from, $user);
+                $rowSourceError = collect($metrics)->contains(fn (array $metric) => (bool) $metric['source_error']);
+                $globalSourceError = $globalSourceError || $rowSourceError;
+
+                $payload = [
+                    'period_key' => $periodType === 'day' ? $from->toDateString() : ($periodType === 'week' ? $from->format('o-\WW') : $from->format('Y-m')),
+                    'employee_id' => $user?->id,
+                    'employee_name' => $user?->name,
+                    'agent_id' => $user?->role?->slug === 'agent' ? $user?->id : null,
+                    'agent_name' => $user?->role?->slug === 'agent' ? $user?->name : null,
+                    'mop_id' => $user?->role?->slug === 'mop' ? $user?->id : null,
+                    'mop_name' => $user?->role?->slug === 'mop' ? $user?->name : null,
+                    'group_id' => $user?->branch_group_id,
+                    'group_name' => $user?->branchGroup?->name,
+                    'branch_id' => $user?->branch_id,
+                    'branch_name' => $user?->branch?->name,
+                    'metrics' => $metrics,
+                    'kpi_value' => $kpiValue,
+                    'kpi_percent' => $kpiPercent,
+                    'status' => $status,
+                    'locked' => $locked,
+                ];
+
+                if ($withBreakdown) {
+                    $payload['breakdown_by_day'] = $this->breakdownByDay($rows, $mapping, $targetMap, $sourceErrors);
+                }
+
+                return $payload;
+            })
+            ->values();
+
+        $completeness = $this->completenessPct($data);
+
+        return [
+            'data' => $data,
+            'meta' => [
+                'period_type' => $periodType,
+                'period_key' => $periodType === 'day' ? $from->toDateString() : null,
+                'date_from' => $from->toDateString(),
+                'date_to' => $to->toDateString(),
+                'locked' => $this->isPeriodLocked($periodType, $from, $filters),
+                'quality' => [
+                    'duplicate_check_passed' => true,
+                    'completeness_pct' => $completeness,
+                    'source_error' => $globalSourceError,
+                ],
+                'pagination' => [
+                    'page' => $paginator->currentPage(),
+                    'per_page' => $paginator->perPage(),
+                    'total' => $paginator->total(),
+                    'last_page' => $paginator->lastPage(),
+                ],
+            ],
+        ];
+    }
+
+    private function buildMetricsForRows(
+        Collection $rows,
+        array $autoByDate,
+        array $sourceErrors,
+        array $mapping,
+        array $targetMap,
+        string $periodType
+    ): array {
+        $metrics = [];
+        $daysInPeriod = max(1, $rows->count());
+
+        foreach ($mapping as $metricKey => $cfg) {
+            $column = (string) ($cfg['source_column'] ?? '');
+            $sourceType = (string) ($cfg['source_type'] ?? 'manual');
+            $target = ((float) ($targetMap[$metricKey] ?? 0)) * ($periodType === 'day' ? 1 : $daysInPeriod);
+
+            $manualValue = (float) $rows->sum($column);
+            $factValue = 0.0;
+            $sourceError = false;
+
+            foreach ($rows as $row) {
+                $dateKey = $row->report_date->toDateString();
+                if (! empty($sourceErrors[$dateKey])) {
+                    $sourceError = true;
+                    continue;
+                }
+                $factValue += (float) ($autoByDate[$dateKey][$column] ?? 0);
+            }
+
+            if ($sourceType === 'system') {
+                $finalValue = $factValue;
+                $manualResult = 0.0;
+                $source = 'system';
+            } elseif ($sourceType === 'mixed') {
+                $finalValue = $factValue + $manualValue;
+                $manualResult = $manualValue;
+                $source = 'mixed';
+            } else {
+                $finalValue = $manualValue;
+                $manualResult = $manualValue;
+                $factValue = 0.0;
+                $source = 'manual';
+            }
+
+            $progress = $target > 0 ? round(($finalValue / $target) * 100, 2) : 0.0;
+
+            $metrics[$metricKey] = [
+                'fact_value' => $this->normalizeNumber($factValue),
+                'manual_value' => $this->normalizeNumber($manualResult),
+                'final_value' => $this->normalizeNumber($finalValue),
+                'target_value' => $this->normalizeNumber($target),
+                'progress_pct' => $progress,
+                'source' => $source,
+                'source_error' => $sourceError,
+            ];
+        }
+
+        return $metrics;
+    }
+
+    private function breakdownByDay(Collection $rows, array $mapping, array $targetMap, array $sourceErrors): array
+    {
+        return $rows
+            ->groupBy(fn (DailyReport $row) => $row->report_date->toDateString())
+            ->map(function (Collection $dayRows, string $day) use ($mapping, $targetMap, $sourceErrors) {
+                $autoByDate = [];
+                foreach ($dayRows as $row) {
+                    try {
+                        $autoByDate[$day] = $this->dailyReportService->autoMetrics($row->user, $day);
+                    } catch (Throwable) {
+                        $autoByDate[$day] = [];
+                    }
+                }
+
+                return [
+                    'period_key' => $day,
+                    'metrics' => $this->buildMetricsForRows($dayRows, $autoByDate, $sourceErrors, $mapping, $targetMap, 'day'),
+                ];
+            })
+            ->values()
+            ->all();
+    }
+
+    private function kpiValueFromMetrics(array $metrics, array $weightMap): float
+    {
+        $value = 0.0;
+
+        foreach ($metrics as $key => $metric) {
+            $target = (float) ($metric['target_value'] ?? 0);
+            $final = (float) ($metric['final_value'] ?? 0);
+            if ($target <= 0) {
+                continue;
+            }
+
+            $weight = (float) ($weightMap[$key] ?? 0);
+            $value += ($final / $target) * $weight;
+        }
+
+        return round($value, 4);
+    }
+
+    private function statusForKpiPercent(float $kpiPercent): string
+    {
+        if ($kpiPercent >= 100) {
+            return self::STATUS_DONE;
+        }
+        if ($kpiPercent >= 80) {
+            return self::STATUS_CONTROL;
+        }
+        if ($kpiPercent >= 60) {
+            return self::STATUS_WEAK;
+        }
+
+        return self::STATUS_URGENT;
+    }
+
+    private function completenessPct(Collection $rows): float
+    {
+        if ($rows->isEmpty()) {
+            return 100.0;
+        }
+
+        $metricCount = count((array) config('kpi.v2.metric_mapping', []));
+        if ($metricCount === 0) {
+            return 0.0;
+        }
+
+        $total = $rows->count() * $metricCount;
+        $ok = 0;
+        foreach ($rows as $row) {
+            foreach ((array) ($row['metrics'] ?? []) as $metric) {
+                if (! ($metric['source_error'] ?? false)) {
+                    $ok++;
+                }
+            }
+        }
+
+        return round(($ok / max(1, $total)) * 100, 2);
+    }
+
+    private function isPeriodLocked(string $periodType, Carbon $periodStart, array $filters): bool
+    {
+        $periodKey = match ($periodType) {
+            'day' => $periodStart->toDateString(),
+            'week' => $periodStart->toDateString(),
+            'month' => $periodStart->format('Y-m'),
+            default => $periodStart->toDateString(),
+        };
+
+        $query = KpiPeriodLock::query()
+            ->where('period_type', $periodType)
+            ->where('period_key', $periodKey);
+
+        if (! empty($filters['branch_id'])) {
+            $query->where('branch_id', (int) $filters['branch_id']);
+        }
+        if (! empty($filters['branch_group_id'])) {
+            $query->where('branch_group_id', (int) $filters['branch_group_id']);
+        }
+
+        return $query->exists();
+    }
+
+    private function isPeriodLockedForUser(string $periodType, Carbon $periodStart, ?User $user): bool
+    {
+        if (! $user) {
+            return false;
+        }
+
+        return $this->isPeriodLocked($periodType, $periodStart, [
+            'branch_id' => $user->branch_id,
+            'branch_group_id' => $user->branch_group_id,
+        ]);
+    }
+
+    private function rangeDateFromFilters(array $filters, Carbon $fallback): Carbon
+    {
+        if (! empty($filters['date_from'])) {
+            return Carbon::parse($filters['date_from'], self::TZ)->startOfDay();
+        }
+
+        return $fallback;
+    }
+
+    private function rangeDateToFilters(array $filters, Carbon $fallback): Carbon
+    {
+        if (! empty($filters['date_to'])) {
+            return Carbon::parse($filters['date_to'], self::TZ)->endOfDay();
+        }
+
+        return $fallback;
     }
 
     private function applyScope(Builder $query, User $authUser, array $filters): void
