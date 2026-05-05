@@ -559,16 +559,6 @@ class ClientController extends Controller
         $data = $this->clientAccess->normalizeMutationData($data, $authUser);
         $this->clientAccess->validateMutationTargets($authUser, $data);
 
-        $duplicateSummary = $this->summarizeDuplicates(
-            $authUser,
-            $data,
-            null,
-            $this->attachService->normalizedContext([])
-        );
-        if ($duplicateSummary['has_duplicates']) {
-            return $this->duplicateConflictResponse($duplicateSummary);
-        }
-
         $client = Client::create($data);
         $this->logClientCreated($client, $authUser);
 

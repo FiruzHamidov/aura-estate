@@ -15,6 +15,7 @@ use App\Models\User;
 use App\Services\DailyReportService;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Schema;
 use Throwable;
@@ -288,6 +289,55 @@ class KpiModuleService
         ];
     }
 
+    public function upsertDailyRowsV2(User $authUser, array $rows): array
+    {
+        $saved = [];
+
+        foreach ($rows as $row) {
+            $employeeId = (int) Arr::get($row, 'employee_id');
+            $date = (string) Arr::get($row, 'date');
+            $targetUser = User::query()->with('role')->findOrFail($employeeId);
+            $this->ensureCanUpsertDailyForUser($authUser, $targetUser);
+
+            $report = DailyReport::query()->updateOrCreate(
+                [
+                    'user_id' => $employeeId,
+                    'report_date' => $date,
+                ],
+                [
+                    'role_slug' => (string) (Arr::get($row, 'role') ?: $targetUser->role?->slug),
+                    'ad_count' => (int) Arr::get($row, 'advertisement', 0),
+                    'calls_count' => (int) Arr::get($row, 'call', 0),
+                    'new_clients_count' => (int) Arr::get($row, 'kabul', 0),
+                    'shows_count' => (int) Arr::get($row, 'show', 0),
+                    'new_properties_count' => (int) Arr::get($row, 'lead', 0),
+                    'deposits_count' => (int) Arr::get($row, 'deposit', 0),
+                    'deals_count' => (int) Arr::get($row, 'deal', 0),
+                    'comment' => Arr::get($row, 'comment'),
+                    'submitted_at' => now(),
+                ]
+            );
+
+            $saved[] = [
+                'date' => $report->report_date->toDateString(),
+                'role' => $report->role_slug,
+                'employee_id' => $employeeId,
+                'employee_name' => (string) ($targetUser->name ?? Arr::get($row, 'employee_name', '')),
+                'group_name' => (string) Arr::get($row, 'group_name', ''),
+                'advertisement' => (int) $report->ad_count,
+                'call' => (int) $report->calls_count,
+                'kabul' => (int) $report->new_clients_count,
+                'show' => (int) $report->shows_count,
+                'lead' => (int) $report->new_properties_count,
+                'deposit' => (int) $report->deposits_count,
+                'deal' => (int) $report->deals_count,
+                'comment' => (string) ($report->comment ?? ''),
+            ];
+        }
+
+        return $saved;
+    }
+
     public function dailyRowsV2(User $authUser, Carbon $date, array $filters): array
     {
         $from = $this->rangeDateFromFilters($filters, $date->copy()->startOfDay());
@@ -317,7 +367,8 @@ class KpiModuleService
     ): array {
         $query = DailyReport::query()
             ->with(['user.role', 'user.branch', 'user.branchGroup'])
-            ->whereBetween('report_date', [$from->toDateString(), $to->toDateString()]);
+            ->whereDate('report_date', '>=', $from->toDateString())
+            ->whereDate('report_date', '<=', $to->toDateString());
         $this->applyScope($query, $authUser, $filters);
 
         $perPage = (int) ($filters['per_page'] ?? 50);
@@ -694,5 +745,19 @@ class KpiModuleService
             'mop' => $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_group_id', $authUser->branch_group_id)),
             default => $query->where('assignee_id', $authUser->id),
         };
+    }
+
+    private function ensureCanUpsertDailyForUser(User $authUser, User $targetUser): void
+    {
+        $authUser->loadMissing('role');
+
+        $canWrite = match ($authUser->role?->slug) {
+            'admin', 'superadmin', 'owner' => true,
+            'rop', 'branch_director' => (int) $authUser->branch_id === (int) $targetUser->branch_id,
+            'mop' => (int) $authUser->branch_group_id === (int) $targetUser->branch_group_id,
+            default => (int) $authUser->id === (int) $targetUser->id,
+        };
+
+        abort_unless($canWrite, 403, 'Forbidden');
     }
 }

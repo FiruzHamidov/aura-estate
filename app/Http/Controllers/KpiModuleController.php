@@ -59,6 +59,29 @@ class KpiModuleController extends Controller
 
     public function upsertDaily(Request $request)
     {
+        if ($this->wantsV2($request)) {
+            $validated = $request->validate([
+                'rows' => 'required|array|min:1',
+                'rows.*.date' => 'required|date_format:Y-m-d',
+                'rows.*.role' => 'nullable|string|max:64',
+                'rows.*.employee_id' => 'required|integer|exists:users,id',
+                'rows.*.employee_name' => 'nullable|string|max:255',
+                'rows.*.group_name' => 'nullable|string|max:255',
+                'rows.*.advertisement' => 'nullable|integer|min:0',
+                'rows.*.call' => 'nullable|integer|min:0',
+                'rows.*.kabul' => 'nullable|integer|min:0',
+                'rows.*.show' => 'nullable|integer|min:0',
+                'rows.*.lead' => 'nullable|integer|min:0',
+                'rows.*.deposit' => 'nullable|integer|min:0',
+                'rows.*.deal' => 'nullable|integer|min:0',
+                'rows.*.comment' => 'nullable|string',
+            ]);
+
+            return response()->json([
+                'data' => $this->service->upsertDailyRowsV2($this->authUser(), $validated['rows']),
+            ], 201);
+        }
+
         return app(DailyReportController::class)->store($request);
     }
 

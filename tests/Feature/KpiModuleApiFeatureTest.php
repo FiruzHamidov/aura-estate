@@ -113,4 +113,68 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->getJson('/api/crm/tasks/kpi-daily-summary?date=2026-05-04')->assertOk();
         $this->getJson('/api/crm/tasks/kpi-weekly-summary?year=2026&week=19')->assertOk();
     }
+
+    public function test_post_kpi_daily_v2_upserts_rows_and_get_v2_returns_saved_values(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+
+        $admin = User::create(['name' => 'Admin', 'phone' => '900000101', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900000102', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        Sanctum::actingAs($admin);
+
+        $payload = [
+            'rows' => [[
+                'date' => '2026-05-05',
+                'role' => 'agent',
+                'employee_id' => $agent->id,
+                'employee_name' => $agent->name,
+                'group_name' => 'G1',
+                'advertisement' => 1,
+                'call' => 2,
+                'kabul' => 3,
+                'show' => 4,
+                'lead' => 5,
+                'deposit' => 6,
+                'deal' => 7,
+                'comment' => 'ok',
+            ]],
+        ];
+
+        $this->postJson('/api/kpi/daily?v=2', $payload, ['X-KPI-Version' => '2'])
+            ->assertCreated()
+            ->assertJsonPath('data.0.employee_id', $agent->id)
+            ->assertJsonPath('data.0.call', 2)
+            ->assertJsonPath('data.0.kabul', 3)
+            ->assertJsonPath('data.0.show', 4)
+            ->assertJsonPath('data.0.lead', 5)
+            ->assertJsonPath('data.0.deposit', 6)
+            ->assertJsonPath('data.0.deal', 7);
+
+        $this->assertDatabaseHas('daily_reports', [
+            'user_id' => $agent->id,
+            'calls_count' => 2,
+            'new_properties_count' => 5,
+            'deposits_count' => 6,
+            'deals_count' => 7,
+        ]);
+
+        $response = $this->getJson('/api/kpi/daily?date=2026-05-05&v=2')
+            ->assertOk();
+
+        $metrics = $response->json('data.0.metrics');
+        if ($metrics === null) {
+            $this->fail('Unexpected response: '.json_encode($response->json()));
+        }
+        $this->assertSame(1, (int) $metrics['advertisement']['final_value']);
+        $this->assertSame(2, (int) $metrics['call']['final_value']);
+        $this->assertSame(3, (int) $metrics['kabul']['final_value']);
+        $this->assertSame(4, (int) $metrics['show']['final_value']);
+        $this->assertSame(5, (int) $metrics['lead']['final_value']);
+        $this->assertSame(6, (int) $metrics['deposit']['final_value']);
+        $this->assertSame(7, (int) $metrics['deal']['final_value']);
+    }
 }

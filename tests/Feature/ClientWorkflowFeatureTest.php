@@ -224,29 +224,27 @@ class ClientWorkflowFeatureTest extends TestCase
         ]);
     }
 
-    public function test_visible_duplicate_blocks_create_and_returns_visible_match(): void
+    public function test_visible_duplicate_does_not_block_create(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);
         $group = $this->createBranchGroup($branch, 'Group A');
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
         $agentA = $this->createUser($agentRole, $branch, 'Agent A', $group);
         $agentB = $this->createUser($agentRole, $branch, 'Agent B', $group);
-        $existingClient = $this->createClient($branch, $agentB, $agentB, 'Existing Buyer', '+992 90 111 1111');
+        $this->createClient($branch, $agentB, $agentB, 'Existing Buyer', '+992 90 111 1111');
 
         Sanctum::actingAs($agentA);
 
-        $this->postJson('/api/clients', [
+        $response = $this->postJson('/api/clients', [
             'full_name' => 'Duplicate Buyer',
             'phone' => '+992 90 111 1111',
-        ])
-            ->assertStatus(409)
-            ->assertJsonPath('duplicate_summary.has_duplicates', true)
-            ->assertJsonPath('duplicate_summary.visible_matches_count', 1)
-            ->assertJsonPath('duplicate_summary.hidden_matches_count', 0)
-            ->assertJsonPath('duplicate_summary.top_visible_match.id', $existingClient->id);
+        ]);
+
+        $response->assertCreated();
+        $response->assertJsonPath('phone_normalized', ClientPhone::normalize('+992 90 111 1111'));
     }
 
-    public function test_hidden_duplicate_blocks_create_but_returns_only_hidden_count(): void
+    public function test_hidden_duplicate_does_not_block_create(): void
     {
         Setting::create([
             'key' => ClientAccess::VISIBILITY_SETTING_KEY,
@@ -262,7 +260,7 @@ class ClientWorkflowFeatureTest extends TestCase
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
         $agentA = $this->createUser($agentRole, $branch, 'Agent A', $group);
         $agentB = $this->createUser($agentRole, $branch, 'Agent B', $group);
-        $hiddenClient = $this->createClient(
+        $this->createClient(
             $branch,
             $agentB,
             $agentB,
@@ -274,19 +272,14 @@ class ClientWorkflowFeatureTest extends TestCase
 
         Sanctum::actingAs($agentA);
 
-        $this->postJson('/api/clients', [
+        $response = $this->postJson('/api/clients', [
             'full_name' => 'Seller Duplicate',
             'phone' => '+992 90 222 2222',
             'contact_kind' => Client::CONTACT_KIND_SELLER,
-        ])
-            ->assertStatus(409)
-            ->assertJsonPath('duplicate_summary.visible_matches_count', 0)
-            ->assertJsonPath('duplicate_summary.hidden_matches_count', 0)
-            ->assertJsonPath('duplicate_summary.attachable_hidden_matches_count', 1)
-            ->assertJsonPath('duplicate_summary.attachable_matches.0.id', $hiddenClient->id)
-            ->assertJsonPath('duplicate_summary.attachable_matches.0.limited_visibility', true)
-            ->assertJsonPath('duplicate_summary.attachable_matches.0.can_attach', true)
-            ->assertJsonPath('duplicate_summary.top_visible_match', null);
+        ]);
+
+        $response->assertCreated();
+        $response->assertJsonPath('phone_normalized', ClientPhone::normalize('+992 90 222 2222'));
     }
 
     public function test_agent_can_attach_existing_hidden_client_and_receive_shared_access(): void
@@ -524,7 +517,7 @@ class ClientWorkflowFeatureTest extends TestCase
             ->assertJsonPath('id', $client->id);
     }
 
-    public function test_second_agent_still_cannot_create_duplicate_and_sees_existing_client_after_collaboration(): void
+    public function test_second_agent_can_create_duplicate_and_sees_existing_client_after_collaboration(): void
     {
         Setting::create([
             'key' => ClientAccess::VISIBILITY_SETTING_KEY,
@@ -562,9 +555,8 @@ class ClientWorkflowFeatureTest extends TestCase
             'phone' => '+992 90 999 9999',
             'contact_kind' => Client::CONTACT_KIND_SELLER,
         ])
-            ->assertStatus(409)
-            ->assertJsonPath('duplicate_summary.visible_matches_count', 1)
-            ->assertJsonPath('duplicate_summary.top_visible_match.id', $client->id);
+            ->assertCreated()
+            ->assertJsonPath('phone_normalized', ClientPhone::normalize('+992 90 999 9999'));
     }
 
     public function test_actions_of_different_agents_appear_in_one_client_history(): void
