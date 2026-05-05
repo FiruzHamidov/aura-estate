@@ -33,8 +33,11 @@ class DailyReportController extends Controller
         $authUser = $this->authUser();
 
         $validated = $request->validate([
-            'date_from' => 'nullable|date',
-            'date_to' => 'nullable|date',
+            'report_date' => 'nullable|date_format:Y-m-d',
+            'from' => 'nullable|date_format:Y-m-d',
+            'to' => 'nullable|date_format:Y-m-d|after_or_equal:from',
+            'date_from' => 'nullable|date_format:Y-m-d',
+            'date_to' => 'nullable|date_format:Y-m-d|after_or_equal:date_from',
             'role' => 'nullable|string|exists:roles,slug',
             'user_id' => 'nullable|integer|exists:users,id',
             'branch_id' => 'nullable|integer|exists:branches,id',
@@ -49,12 +52,20 @@ class DailyReportController extends Controller
         $this->validateScopeFilters($validated, $authUser);
         $this->applyVisibilityScope($query, $authUser);
 
-        if (! empty($validated['date_from'])) {
-            $query->whereDate('report_date', '>=', $validated['date_from']);
-        }
+        // Explicit priority: report_date wins over from/to and date_from/date_to when both are present.
+        if (! empty($validated['report_date'])) {
+            $query->whereDate('report_date', $validated['report_date']);
+        } else {
+            $from = $validated['from'] ?? $validated['date_from'] ?? null;
+            $to = $validated['to'] ?? $validated['date_to'] ?? null;
 
-        if (! empty($validated['date_to'])) {
-            $query->whereDate('report_date', '<=', $validated['date_to']);
+            if (! empty($from)) {
+                $query->whereDate('report_date', '>=', $from);
+            }
+
+            if (! empty($to)) {
+                $query->whereDate('report_date', '<=', $to);
+            }
         }
 
         if (! empty($validated['role'])) {
@@ -164,17 +175,19 @@ class DailyReportController extends Controller
 
     public function update(Request $request, DailyReport $dailyReport)
     {
-        $user = $this->authUser();
+        $authUser = $this->authUser();
+        $targetUser = $dailyReport->user()->with('role')->first();
+        abort_unless($targetUser, 422, 'Daily report user not found.');
 
-        abort_unless((int) $dailyReport->user_id === (int) $user->id, 403, 'Forbidden');
+        $this->authorizeUpdateOrDeny($authUser, $targetUser);
 
         $validated = $this->validatedPayload($request, false);
         $reportDate = $dailyReport->report_date->toDateString();
-        abort_if($this->isDateLocked($user, $reportDate), 422, 'Period is locked. Use KPI adjustment endpoint.');
-        $metrics = $this->dailyReports->autoMetrics($user, $reportDate);
+        abort_if($this->isDateLocked($targetUser, $reportDate), 422, 'Period is locked. Use KPI adjustment endpoint.');
+        $metrics = $this->dailyReports->autoMetrics($targetUser, $reportDate);
 
         $dailyReport->update(array_merge($metrics, [
-            'role_slug' => $user->role?->slug,
+            'role_slug' => $targetUser->role?->slug,
             'ad_count' => $validated['ad_count'] ?? $dailyReport->ad_count,
             'meetings_count' => $validated['meetings_count'] ?? $dailyReport->meetings_count,
             'comment' => $validated['comment'] ?? $dailyReport->comment,
@@ -207,7 +220,7 @@ class DailyReportController extends Controller
         $authUser->loadMissing('role');
 
         match ($authUser->role?->slug) {
-            'admin', 'superadmin' => null,
+            'admin', 'superadmin', 'owner' => null,
             'rop', 'branch_director' => $query->whereHas('user', fn (Builder $userQuery) => $userQuery->where('branch_id', $authUser->branch_id)),
             'mop' => $query->whereHas('user', fn (Builder $userQuery) => $userQuery->where('branch_group_id', $authUser->branch_group_id)),
             default => $query->where('user_id', $authUser->id),
@@ -216,21 +229,58 @@ class DailyReportController extends Controller
 
     private function validateScopeFilters(array $validated, User $authUser): void
     {
-        if (! $this->branchScope->isBranchScopedManager($authUser)) {
+        if ($this->branchScope->isBranchScopedManager($authUser)) {
+            if (array_key_exists('branch_id', $validated) && $validated['branch_id'] !== null) {
+                $this->branchScope->ensureSameBranchOrDeny((int) $validated['branch_id'], $authUser);
+            }
+
+            if (array_key_exists('branch_group_id', $validated) && $validated['branch_group_id'] !== null) {
+                $this->branchScope->ensureBranchGroupInUserBranchOrDeny((int) $validated['branch_group_id'], $authUser);
+            }
+
+            if (array_key_exists('user_id', $validated) && $validated['user_id'] !== null) {
+                $this->branchScope->ensureUserInUserBranchOrDeny((int) $validated['user_id'], $authUser);
+            }
+
             return;
         }
 
-        if (array_key_exists('branch_id', $validated) && $validated['branch_id'] !== null) {
-            $this->branchScope->ensureSameBranchOrDeny((int) $validated['branch_id'], $authUser);
+        if ($this->branchScope->isMop($authUser)) {
+            if (array_key_exists('branch_group_id', $validated) && $validated['branch_group_id'] !== null) {
+                $this->branchScope->ensureSameBranchGroupOrDeny((int) $validated['branch_group_id'], $authUser);
+            }
+
+            if (array_key_exists('user_id', $validated) && $validated['user_id'] !== null) {
+                $this->branchScope->ensureUserInUserBranchGroupOrDeny((int) $validated['user_id'], $authUser);
+            }
+
+            if (array_key_exists('branch_id', $validated) && $validated['branch_id'] !== null) {
+                $this->branchScope->ensureSameBranchOrDeny((int) $validated['branch_id'], $authUser);
+            }
+        }
+    }
+
+    private function authorizeUpdateOrDeny(User $authUser, User $targetUser): void
+    {
+        $role = $authUser->role?->slug;
+
+        if ((int) $authUser->id === (int) $targetUser->id) {
+            return;
         }
 
-        if (array_key_exists('branch_group_id', $validated) && $validated['branch_group_id'] !== null) {
-            $this->branchScope->ensureBranchGroupInUserBranchOrDeny((int) $validated['branch_group_id'], $authUser);
+        if (in_array($role, ['admin', 'superadmin', 'owner'], true)) {
+            return;
         }
 
-        if (array_key_exists('user_id', $validated) && $validated['user_id'] !== null) {
-            $this->branchScope->ensureUserInUserBranchOrDeny((int) $validated['user_id'], $authUser);
+        if (in_array($role, ['rop', 'branch_director'], true) && (int) $authUser->branch_id === (int) $targetUser->branch_id) {
+            return;
         }
+
+        if ($role === 'mop' && (int) $authUser->branch_group_id === (int) $targetUser->branch_group_id) {
+            return;
+        }
+
+        $this->branchScope->denyWithCode(RbacBranchScope::DAILY_REPORT_EDIT_FORBIDDEN);
     }
 
     private function authUser(): User

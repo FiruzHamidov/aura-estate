@@ -234,6 +234,46 @@ class KpiModuleService
         })->values();
     }
 
+    public function myDailyProgress(User $authUser, Carbon $date): array
+    {
+        $report = DailyReport::query()
+            ->where('user_id', $authUser->id)
+            ->whereDate('report_date', $date->toDateString())
+            ->first();
+
+        $auto = $this->dailyReportService->autoMetrics($authUser, $date->toDateString());
+        $submitted = $report?->submitted_at !== null;
+
+        $metrics = [
+            'call' => $this->metricProgress(
+                (int) ($report?->calls_count ?? ($auto['calls_count'] ?? 0)),
+                (float) (config('kpi.metrics.calls_count.target') ?? 0)
+            ),
+            'show' => $this->metricProgress(
+                (int) ($report?->shows_count ?? ($auto['shows_count'] ?? 0)),
+                (float) (config('kpi.metrics.shows_count.target') ?? 0)
+            ),
+            'deal' => $this->metricProgress(
+                (int) ($report?->deals_count ?? ($auto['deals_count'] ?? 0)),
+                (float) (config('kpi.metrics.deals_count.target') ?? 0)
+            ),
+            'advertisement' => $this->metricProgress(
+                (int) ($report?->ad_count ?? 0),
+                (float) (config('kpi.metrics.ad_count.target') ?? 0)
+            ),
+        ];
+
+        $overallProgressPct = round(collect($metrics)->avg('progress_pct') ?? 0, 1);
+
+        return [
+            'date' => $date->toDateString(),
+            'submitted_daily_report' => $submitted,
+            'overall_progress_pct' => $overallProgressPct,
+            'status' => $this->statusForProgressPct($overallProgressPct),
+            'metrics' => $metrics,
+        ];
+    }
+
     private function applyScope(Builder $query, User $authUser, array $filters): void
     {
         $authUser->loadMissing('role');
@@ -263,11 +303,48 @@ class KpiModuleService
         }
 
         match ($authUser->role?->slug) {
-            'admin', 'superadmin' => null,
+            'admin', 'superadmin', 'owner' => null,
             'rop', 'branch_director' => $query->whereHas('user', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id)),
             'mop' => $query->whereHas('user', fn (Builder $q) => $q->where('branch_group_id', $authUser->branch_group_id)),
             default => $query->where('user_id', $authUser->id),
         };
+    }
+
+    private function metricProgress(int $fact, float $target): array
+    {
+        $progressPct = $target > 0 ? round(($fact / $target) * 100, 1) : 0.0;
+
+        return [
+            'fact' => $fact,
+            'target' => $this->normalizeNumber($target),
+            'progress_pct' => $progressPct,
+        ];
+    }
+
+    private function statusForProgressPct(float $progressPct): string
+    {
+        $thresholds = (array) config('kpi.status_thresholds', []);
+
+        if ($progressPct >= (float) (($thresholds['success'] ?? 1.0) * 100)) {
+            return 'success';
+        }
+
+        if ($progressPct >= (float) (($thresholds['control'] ?? 0.8) * 100)) {
+            return 'control';
+        }
+
+        if ($progressPct >= (float) (($thresholds['risk'] ?? 0.6) * 100)) {
+            return 'risk';
+        }
+
+        return 'weak';
+    }
+
+    private function normalizeNumber(float $value): int|float
+    {
+        $rounded = round($value, 4);
+
+        return floor($rounded) == $rounded ? (int) $rounded : $rounded;
     }
 
     private function applyTaskScope(Builder $query, User $authUser, array $filters): void
@@ -287,7 +364,7 @@ class KpiModuleService
         $authUser->loadMissing('role');
 
         match ($authUser->role?->slug) {
-            'admin', 'superadmin' => null,
+            'admin', 'superadmin', 'owner' => null,
             'rop', 'branch_director' => $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id)),
             'mop' => $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_group_id', $authUser->branch_group_id)),
             default => $query->where('assignee_id', $authUser->id),

@@ -8,6 +8,8 @@ use App\Models\User;
 class RbacBranchScope
 {
     public const VIOLATION_CODE = 'RBAC_BRANCH_SCOPE_VIOLATION';
+    public const DAILY_REPORT_EDIT_FORBIDDEN = 'DAILY_REPORT_EDIT_FORBIDDEN';
+    public const DAILY_REPORT_SCOPE_FORBIDDEN = 'DAILY_REPORT_SCOPE_FORBIDDEN';
 
     public function roleSlug(?User $user): ?string
     {
@@ -26,11 +28,24 @@ class RbacBranchScope
         return in_array($this->roleSlug($user), ['rop', 'branch_director'], true);
     }
 
+    public function isMop(?User $user): bool
+    {
+        return $this->roleSlug($user) === 'mop';
+    }
+
     public function denyBranchScopeViolation(string $message = 'Forbidden'): void
     {
         abort(response()->json([
             'message' => $message,
             'code' => self::VIOLATION_CODE,
+        ], 403));
+    }
+
+    public function denyWithCode(string $code, string $message = 'Forbidden'): void
+    {
+        abort(response()->json([
+            'message' => $message,
+            'code' => $code,
         ], 403));
     }
 
@@ -70,6 +85,33 @@ class RbacBranchScope
         $belongs = User::query()
             ->whereKey($userId)
             ->where('branch_id', $authUser->branch_id)
+            ->exists();
+
+        if (! $belongs) {
+            $this->denyBranchScopeViolation();
+        }
+    }
+
+    public function ensureSameBranchGroupOrDeny(?int $candidateBranchGroupId, User $authUser): void
+    {
+        if ($candidateBranchGroupId === null) {
+            return;
+        }
+
+        if ((int) $candidateBranchGroupId !== (int) $authUser->branch_group_id) {
+            $this->denyBranchScopeViolation();
+        }
+    }
+
+    public function ensureUserInUserBranchGroupOrDeny(?int $userId, User $authUser): void
+    {
+        if ($userId === null) {
+            return;
+        }
+
+        $belongs = User::query()
+            ->whereKey($userId)
+            ->where('branch_group_id', $authUser->branch_group_id)
             ->exists();
 
         if (! $belongs) {

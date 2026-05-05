@@ -11,6 +11,7 @@ use App\Models\Lead;
 use App\Models\Notification;
 use App\Models\Selection;
 use App\Models\User;
+use App\Models\UserDailyReportReminderSetting;
 use App\Support\Notifications\NotificationCategory;
 use App\Support\Notifications\NotificationChannel;
 use App\Support\Notifications\NotificationStatus;
@@ -512,7 +513,87 @@ class NotificationService
             'motivation_manager_evening_digest' => $this->dispatchManagerEveningDigest(),
             'motivation_agent_evening_digest' => $this->dispatchAgentEveningDigest(),
             'kpi_early_risk' => $this->dispatchKpiEarlyRisk(),
+            'daily_report_reminder' => $this->dispatchDailyReportReminders(),
         ];
+    }
+
+    private function dispatchDailyReportReminders(): int
+    {
+        if (! Schema::hasTable('daily_reports') || ! Schema::hasTable('user_daily_report_reminder_settings')) {
+            return 0;
+        }
+
+        $nowUtc = now()->setTimezone('UTC');
+        $sent = 0;
+
+        $settings = UserDailyReportReminderSetting::query()
+            ->with(['user.role'])
+            ->where('enabled', true)
+            ->get();
+
+        foreach ($settings as $setting) {
+            $user = $setting->user;
+            if (! $user || $user->status !== User::STATUS_ACTIVE) {
+                continue;
+            }
+
+            if (! in_array($user->role?->slug, ['agent', 'mop'], true)) {
+                continue;
+            }
+
+            $timezone = $setting->timezone ?: 'Asia/Dushanbe';
+            try {
+                $localNow = $nowUtc->copy()->setTimezone($timezone);
+            } catch (\Throwable) {
+                $localNow = $nowUtc->copy()->setTimezone('Asia/Dushanbe');
+                $timezone = 'Asia/Dushanbe';
+            }
+
+            $parts = explode(':', (string) $setting->remind_time);
+            if (count($parts) !== 2) {
+                continue;
+            }
+
+            $remindAt = $localNow->copy()->setTime((int) $parts[0], (int) $parts[1], 0);
+            if ($localNow->lt($remindAt) || $localNow->gte($remindAt->copy()->addMinutes(5))) {
+                continue;
+            }
+
+            $reportDate = $localNow->toDateString();
+            $submitted = DailyReport::query()
+                ->where('user_id', $user->id)
+                ->whereDate('report_date', $reportDate)
+                ->whereNotNull('submitted_at')
+                ->exists();
+
+            if ($submitted) {
+                continue;
+            }
+
+            $this->notifyUsers(
+                [$user],
+                NotificationType::DAILY_REPORT_REMINDER,
+                'Ежедневный KPI-отчёт ещё не сдан',
+                'Заполните ежедневку сегодня, чтобы зафиксировать KPI за день.',
+                null,
+                null,
+                [
+                    'category' => NotificationCategory::MOTIVATION,
+                    'channels' => array_values($setting->channels ?? [NotificationChannel::IN_APP]),
+                    'action_url' => '/daily-report',
+                    'action_type' => 'open_daily_report',
+                    'dedupe_key' => 'daily-report:reminder:'.$user->id.':'.$reportDate,
+                    'data' => [
+                        'report_date' => $reportDate,
+                        'timezone' => $timezone,
+                    ],
+                    'quiet_window_minutes' => 24 * 60,
+                ]
+            );
+            $sent++;
+        }
+
+        return $sent;
     }
 
     private function dispatchKpiEarlyRisk(): int

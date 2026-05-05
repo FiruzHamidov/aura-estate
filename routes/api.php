@@ -62,6 +62,7 @@ use App\Http\Controllers\UserController;
 use App\Http\Controllers\StoryController;
 use App\Http\Controllers\AdminStoryController;
 use App\Http\Controllers\KpiPeriodLockController;
+use App\Http\Controllers\MyReminderController;
 use Illuminate\Support\Facades\Route;
 
 // --- ПИНГ ---
@@ -140,6 +141,10 @@ Route::get('/chat/history', [ChatController::class, 'history']);
 
 // --- ЗАЩИЩЁННЫЕ ---
 Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(function () {
+    Route::get('/me/reminders/daily-report', [MyReminderController::class, 'showDailyReport']);
+    Route::put('/me/reminders/daily-report', [MyReminderController::class, 'updateDailyReport']);
+    Route::get('/kpi/daily/my-progress', [KpiModuleController::class, 'myDailyProgress']);
+
     Route::get('/user/profile', [UserController::class, 'profile']);
     Route::put('/user/profile', [UserController::class, 'updateProfile']);
     Route::patch('/user/profile', [UserController::class, 'updateProfile']);

@@ -55,6 +55,7 @@ final class NotificationType
     public const MOTIVATION_AGENT_STREAK = 'motivation_agent_streak';
     public const MOTIVATION_AGENT_EVENING_DIGEST = 'motivation_agent_evening_digest';
     public const KPI_EARLY_RISK = 'kpi_early_risk';
+    public const DAILY_REPORT_REMINDER = 'daily_report_reminder';
 
     public static function all(): array
     {
@@ -104,6 +105,7 @@ final class NotificationType
             self::MOTIVATION_AGENT_STREAK,
             self::MOTIVATION_AGENT_EVENING_DIGEST,
             self::KPI_EARLY_RISK,
+            self::DAILY_REPORT_REMINDER,
         ];
     }
 
@@ -131,7 +133,8 @@ final class NotificationType
             self::MOTIVATION_AGENT_PLAN_ALMOST_DONE,
             self::MOTIVATION_AGENT_DEAL_WON,
             self::MOTIVATION_AGENT_STREAK,
-            self::MOTIVATION_AGENT_EVENING_DIGEST => NotificationCategory::MOTIVATION,
+            self::MOTIVATION_AGENT_EVENING_DIGEST,
+            self::DAILY_REPORT_REMINDER => NotificationCategory::MOTIVATION,
 
             self::SELECTION_VIEWED,
             self::SELECTION_OPENED,

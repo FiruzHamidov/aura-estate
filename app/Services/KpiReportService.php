@@ -118,7 +118,7 @@ class KpiReportService
         $authUser->loadMissing('role');
 
         match ($authUser->role?->slug) {
-            'admin', 'superadmin' => null,
+            'admin', 'superadmin', 'owner' => null,
             'rop', 'branch_director' => $query->whereHas('user', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id)),
             'mop' => $query->whereHas('user', fn (Builder $q) => $q->where('branch_group_id', $authUser->branch_group_id)),
             default => $query->where('user_id', $authUser->id),

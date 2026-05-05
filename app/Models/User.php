@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class User extends Authenticatable
 {
@@ -155,6 +156,11 @@ class User extends Authenticatable
     public function stories(): HasMany
     {
         return $this->hasMany(Story::class);
+    }
+
+    public function dailyReportReminderSetting(): HasOne
+    {
+        return $this->hasOne(UserDailyReportReminderSetting::class, 'user_id');
     }
 
     public function storyViews(): HasMany
