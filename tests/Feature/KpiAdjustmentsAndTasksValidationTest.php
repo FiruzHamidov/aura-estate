@@ -224,7 +224,7 @@ class KpiAdjustmentsAndTasksValidationTest extends TestCase
             'period_type' => 'week',
             'period_key' => '2026-05-04',
             'entity_id' => $agent->id,
-            'field_name' => 'calls_count',
+            'field_name' => 'calls',
             'new_value' => 9,
             'distribution_mode' => 'distribute_evenly',
             'reason' => 'manual correction',
@@ -243,7 +243,7 @@ class KpiAdjustmentsAndTasksValidationTest extends TestCase
             'period_type' => 'week',
             'period_key' => '2026-05-04',
             'entity_id' => $agent->id,
-            'field_name' => 'calls_count',
+            'field_name' => 'calls',
         ]);
     }
 

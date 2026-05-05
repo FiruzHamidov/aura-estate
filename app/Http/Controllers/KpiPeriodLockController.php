@@ -54,7 +54,7 @@ class KpiPeriodLockController extends Controller
             'period_type' => ['required', Rule::in(['day', 'week', 'month'])],
             'period_key' => 'required|string|max:32',
             'entity_id' => 'required|integer|exists:users,id',
-            'field_name' => ['required', Rule::in(['ad_count', 'meetings_count', 'calls_count', 'shows_count', 'new_clients_count', 'deposits_count', 'deals_count'])],
+            'field_name' => ['required', Rule::in(['objects', 'shows', 'ads', 'calls', 'sales'])],
             'new_value' => 'required|numeric|min:0',
             'distribution_mode' => ['nullable', Rule::in(['set_first_day', 'distribute_evenly'])],
             'reason' => 'required|string|min:3',
@@ -77,7 +77,7 @@ class KpiPeriodLockController extends Controller
 
         abort_unless($reports->isNotEmpty(), 404, 'Daily report row not found for selected period and user.');
 
-        $field = $validated['field_name'];
+        $field = $this->resolveAdjustmentColumn($validated['field_name']);
         $newValue = (float) $validated['new_value'];
         $distributionMode = $validated['distribution_mode'] ?? ($validated['period_type'] === 'day' ? 'set_first_day' : 'distribute_evenly');
 
@@ -113,7 +113,7 @@ class KpiPeriodLockController extends Controller
             'period_type' => $validated['period_type'],
             'period_key' => $validated['period_key'],
             'entity_id' => $validated['entity_id'],
-            'field_name' => $field,
+            'field_name' => $validated['field_name'],
             'old_value' => $oldTotal,
             'new_value' => $newTotal,
             'reason' => $validated['reason'].'; mode='.$distributionMode.'; rows='.$updatedRows,
@@ -160,6 +160,17 @@ class KpiPeriodLockController extends Controller
             'day' => [$periodKey, $periodKey],
             'week' => [$periodKey, Carbon::parse($periodKey)->addDays(6)->toDateString()],
             'month' => [Carbon::createFromFormat('Y-m', $periodKey)->startOfMonth()->toDateString(), Carbon::createFromFormat('Y-m', $periodKey)->endOfMonth()->toDateString()],
+        };
+    }
+
+    private function resolveAdjustmentColumn(string $fieldName): string
+    {
+        return match ($fieldName) {
+            'objects' => 'new_properties_count',
+            'shows' => 'shows_count',
+            'ads' => 'ad_count',
+            'calls' => 'calls_count',
+            'sales' => \Illuminate\Support\Facades\Schema::hasColumn('daily_reports', 'sales_count') ? 'sales_count' : 'deals_count',
         };
     }
 

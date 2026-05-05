@@ -50,7 +50,7 @@ class KpiModuleController extends Controller
             'effective_from' => 'required|date_format:Y-m-d',
             'effective_to' => 'nullable|date_format:Y-m-d|after_or_equal:effective_from',
             'items' => 'required|array|min:1',
-            'items.*.metric_key' => 'required|string|max:64',
+            'items.*.metric_key' => ['required', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
             'items.*.daily_plan' => 'required|numeric|min:0',
             'items.*.weight' => 'required|numeric|min:0|max:1',
             'items.*.comment' => 'nullable|string|max:500',
@@ -72,7 +72,7 @@ class KpiModuleController extends Controller
         $validated = $request->validate([
             'role' => 'nullable|string|max:64',
             'items' => 'required|array|min:1',
-            'items.*.metric_key' => 'required|string|max:64',
+            'items.*.metric_key' => ['required', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
             'items.*.daily_plan' => 'required|numeric|min:0',
             'items.*.weight' => 'required|numeric|min:0|max:1',
             'items.*.comment' => 'nullable|string|max:500',
@@ -240,7 +240,15 @@ class KpiModuleController extends Controller
             $query->whereDate('detected_at', '<=', $validated['date_to']);
         }
 
-        return response()->json(['data' => $query->get()]);
+        $rows = $query->get()->map(function (KpiQualityIssue $issue) {
+            $details = (array) ($issue->details ?? []);
+            $details['metric_key'] = $this->normalizeMetricKey($details['metric_key'] ?? null);
+            $details['version'] = '2';
+
+            return array_merge($issue->toArray(), ['details' => $details]);
+        });
+
+        return response()->json(['data' => $rows, 'meta' => ['version' => '2']]);
     }
 
     public function earlyRiskAlerts(Request $request)
@@ -251,7 +259,15 @@ class KpiModuleController extends Controller
             $query->whereDate('alert_date', $validated['date']);
         }
 
-        return response()->json(['data' => $query->get()]);
+        $rows = $query->get()->map(function (KpiEarlyRiskAlert $alert) {
+            $meta = (array) ($alert->meta ?? []);
+            $meta['metric_key'] = $this->normalizeMetricKey($meta['metric_key'] ?? null);
+            $meta['version'] = '2';
+
+            return array_merge($alert->toArray(), ['meta' => $meta]);
+        });
+
+        return response()->json(['data' => $rows, 'meta' => ['version' => '2']]);
     }
 
     public function updateEarlyRiskStatus(Request $request)
@@ -282,7 +298,17 @@ class KpiModuleController extends Controller
 
     public function acceptanceRuns()
     {
-        return response()->json(['data' => KpiAcceptanceRun::query()->orderByDesc('id')->get()]);
+        $rows = KpiAcceptanceRun::query()->orderByDesc('id')->get()->map(function (KpiAcceptanceRun $run) {
+            $details = (array) ($run->details ?? []);
+            if (isset($details['metric_key'])) {
+                $details['metric_key'] = $this->normalizeMetricKey($details['metric_key']);
+            }
+            $details['version'] = '2';
+
+            return array_merge($run->toArray(), ['details' => $details]);
+        });
+
+        return response()->json(['data' => $rows, 'meta' => ['version' => '2']]);
     }
 
     public function adjustments(Request $request)
@@ -378,6 +404,22 @@ class KpiModuleController extends Controller
             'details' => (object) $details,
             'trace_id' => request()->attributes->get('trace_id'),
         ], $status);
+    }
+
+    private function normalizeMetricKey(null|string $metricKey): ?string
+    {
+        if ($metricKey === null || $metricKey === '') {
+            return null;
+        }
+
+        return match ($metricKey) {
+            'ad_count', 'advertisement' => 'ads',
+            'calls_count', 'call' => 'calls',
+            'shows_count', 'show', 'meetings_count' => 'shows',
+            'new_properties_count', 'lead' => 'objects',
+            'sales_count', 'deals_count', 'deal' => 'sales',
+            default => $metricKey,
+        };
     }
 
     private function authUser(): User

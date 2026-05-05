@@ -78,12 +78,13 @@ class KpiModuleApiFeatureTest extends TestCase
         Sanctum::actingAs($admin);
 
         $this->getJson('/api/kpi-plans')->assertOk()->assertJsonStructure(['data']);
-        $this->patchJson('/api/kpi-plans', ['role' => 'mop', 'items' => [['metric_key' => 'calls_count', 'daily_plan' => 10, 'weight' => 0.2, 'comment' => 'x']]])->assertOk();
+        $this->patchJson('/api/kpi-plans', ['role' => 'mop', 'items' => [['metric_key' => 'calls', 'daily_plan' => 10, 'weight' => 0.2, 'comment' => 'x']]])->assertOk();
         $this->getJson('/api/kpi/daily?date=2026-05-04')->assertOk();
         $this->getJson('/api/kpi/daily?date=2026-05-04&v=2')->assertOk()->assertJsonStructure([
             'data',
             'meta' => ['period_type', 'quality' => ['duplicate_check_passed', 'completeness_pct', 'source_error']],
-        ])->assertJsonPath('meta.period_type', 'day');
+        ])->assertJsonPath('meta.period_type', 'day')
+            ->assertJsonPath('meta.version', '2');
         $this->getJson('/api/kpi/weekly?year=2026&week=19')->assertOk();
         $this->getJson('/api/kpi/weekly?year=2026&week=19&v=2')->assertOk()->assertJsonStructure([
             'data',
@@ -147,10 +148,6 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->postJson('/api/kpi/daily?v=2', $payload, ['X-KPI-Version' => '2'])
             ->assertCreated()
             ->assertJsonPath('data.0.employee_id', $agent->id)
-            ->assertJsonPath('data.0.call', 2)
-            ->assertJsonPath('data.0.show', 4)
-            ->assertJsonPath('data.0.lead', 5)
-            ->assertJsonPath('data.0.deal', 7)
             ->assertJsonPath('data.0.objects', 5)
             ->assertJsonPath('data.0.shows', 4)
             ->assertJsonPath('data.0.ads', 1)

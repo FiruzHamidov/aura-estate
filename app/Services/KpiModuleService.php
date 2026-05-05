@@ -413,13 +413,6 @@ class KpiModuleService
                 'employee_id' => $employeeId,
                 'employee_name' => (string) ($targetUser->name ?? Arr::get($row, 'employee_name', '')),
                 'group_name' => (string) Arr::get($row, 'group_name', ''),
-                'advertisement' => (int) $report->ad_count,
-                'call' => (int) $report->calls_count,
-                'kabul' => (int) $report->new_clients_count,
-                'show' => (int) $report->shows_count,
-                'lead' => (int) $report->new_properties_count,
-                'deposit' => (int) $report->deposits_count,
-                'deal' => (float) ($report->sales_count ?? $report->deals_count),
                 'objects' => (int) $report->new_properties_count,
                 'shows' => (int) $report->shows_count,
                 'ads' => (int) $report->ad_count,
@@ -539,10 +532,18 @@ class KpiModuleService
             ->values();
 
         $completeness = $this->completenessPct($data);
+        $qualityIssuesCount = Schema::hasTable('kpi_quality_issues')
+            ? KpiQualityIssue::query()
+                ->where('status', 'open')
+                ->whereDate('detected_at', '>=', $from->toDateString())
+                ->whereDate('detected_at', '<=', $to->toDateString())
+                ->count()
+            : 0;
 
         return [
             'data' => $data,
             'meta' => [
+                'version' => '2',
                 'period_type' => $periodType,
                 'period_key' => $periodType === 'day' ? $from->toDateString() : null,
                 'date_from' => $from->toDateString(),
@@ -552,6 +553,7 @@ class KpiModuleService
                     'duplicate_check_passed' => true,
                     'completeness_pct' => $completeness,
                     'source_error' => $globalSourceError,
+                    'issues_count' => $qualityIssuesCount,
                 ],
                 'pagination' => [
                     'page' => $paginator->currentPage(),

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\DailyReport;
+use App\Models\KpiQualityIssue;
 use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -235,10 +236,28 @@ class DailyReportService
         $credit = 0.0;
 
         foreach ($soldProperties as $property) {
-            $participants = collect($saleAgentsRows->get($property->id, []))
-                ->pluck('agent_id')
-                ->unique()
-                ->values();
+            $rawParticipants = collect($saleAgentsRows->get($property->id, []))->pluck('agent_id')->values();
+            $participants = $rawParticipants->filter(fn ($id) => !is_null($id))->unique()->values();
+
+            if ($rawParticipants->isNotEmpty()) {
+                if ($rawParticipants->count() !== $participants->count()) {
+                    $this->reportSalesQualityIssue('SALES_AGENT_DUPLICATES', $property->id, [
+                        'metric_key' => 'sales',
+                        'source' => 'property_agent_sales',
+                        'participants_raw' => $rawParticipants->all(),
+                    ]);
+                    continue;
+                }
+
+                if ($participants->count() > 3) {
+                    $this->reportSalesQualityIssue('SALES_AGENT_LIMIT_EXCEEDED', $property->id, [
+                        'metric_key' => 'sales',
+                        'source' => 'property_agent_sales',
+                        'participants_count' => $participants->count(),
+                    ]);
+                    continue;
+                }
+            }
 
             if ($participants->isNotEmpty()) {
                 if ($participants->contains($user->id)) {
@@ -251,6 +270,11 @@ class DailyReportService
             // Fallback only when explicit participants are absent.
             if ((int) ($property->agent_id ?? 0) === (int) $user->id) {
                 $credit += 1.0;
+            } elseif ((int) ($property->agent_id ?? 0) === 0) {
+                $this->reportSalesQualityIssue('SALES_WITHOUT_AGENTS', $property->id, [
+                    'metric_key' => 'sales',
+                    'source' => 'properties.agent_id',
+                ]);
             }
         }
 
@@ -271,5 +295,22 @@ class DailyReportService
     private function timezone(): string
     {
         return (string) config('app.timezone', 'Asia/Dushanbe');
+    }
+
+    private function reportSalesQualityIssue(string $code, int $propertyId, array $details): void
+    {
+        if (!Schema::hasTable('kpi_quality_issues')) {
+            return;
+        }
+
+        KpiQualityIssue::query()->updateOrCreate(
+            ['title' => $code.'#'.$propertyId],
+            [
+                'severity' => 'high',
+                'detected_at' => now(),
+                'status' => 'open',
+                'details' => array_merge($details, ['code' => $code, 'property_id' => $propertyId]),
+            ]
+        );
     }
 }

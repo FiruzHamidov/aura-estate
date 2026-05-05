@@ -58,8 +58,8 @@ class DailyReportFrontendScenariosTest extends TestCase
 
         Sanctum::actingAs($users['mopA1']);
         $this->patchJson('/api/daily-reports/'.$reports['agentA'], ['comment' => 'mop edit'])
-            ->assertOk()
-            ->assertJsonPath('comment', 'mop edit');
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'KPI_FORBIDDEN_DEADLINE_PASSED');
         $this->patchJson('/api/daily-reports/'.$reports['agentA2'], ['comment' => 'x'])
             ->assertStatus(403)
             ->assertJsonPath('code', 'DAILY_REPORT_EDIT_FORBIDDEN');
