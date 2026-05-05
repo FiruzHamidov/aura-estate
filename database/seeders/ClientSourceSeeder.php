@@ -18,6 +18,7 @@ class ClientSourceSeeder extends Seeder
             ['code' => 'website', 'name' => 'Сайт', 'sort_order' => 60],
             ['code' => 'referral', 'name' => 'По рекомендации', 'sort_order' => 70],
             ['code' => 'walk_in', 'name' => 'Офлайн/с улицы', 'sort_order' => 80],
+            ['code' => 'showing', 'name' => 'Показ', 'sort_order' => 85],
             ['code' => 'other', 'name' => 'Другое', 'sort_order' => 90],
         ];
 
@@ -33,4 +34,3 @@ class ClientSourceSeeder extends Seeder
         }
     }
 }
-
