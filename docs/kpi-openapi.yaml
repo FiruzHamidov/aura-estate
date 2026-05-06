@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Aura KPI API
-  version: 1.1.0
+  version: 1.2.0
 servers:
   - url: /api
 security:
@@ -18,11 +18,38 @@ components:
       enum: [agent, intern, mop, rop]
     KpiError:
       type: object
+      required: [code, message, details, trace_id]
       properties:
         code: { type: string }
         message: { type: string }
-        details: { type: object }
+        details:
+          type: object
+          properties:
+            errors:
+              type: object
+              additionalProperties:
+                type: array
+                items: { type: string }
         trace_id: { type: string }
+    KpiPlanReadItem:
+      type: object
+      required: [metric_key, daily_plan, weight, comment, effective_from, effective_to]
+      properties:
+        id: { type: integer }
+        role: { $ref: '#/components/schemas/KpiRole' }
+        metric: { type: string, description: Legacy alias of metric_key }
+        metric_key: { type: string }
+        daily_plan: { type: number }
+        weight: { type: number }
+        comment: { type: string }
+        effective_from: { type: string, format: date, nullable: true }
+        effective_to: { type: string, format: date, nullable: true }
+        updated_at: { type: string, format: date-time, nullable: true }
+        branch_id: { type: integer, nullable: true }
+        branch_group_id: { type: integer, nullable: true }
+        user_id: { type: integer, nullable: true }
+        source: { type: string, enum: [personal, common] }
+        plan_source: { type: string, enum: [personal, common] }
     KpiPlanItem:
       type: object
       properties:
@@ -84,7 +111,12 @@ paths:
                       user_id: { type: integer }
                       items:
                         type: array
-                        items: { $ref: '#/components/schemas/KpiPlanItem' }
+                        items:
+                          allOf:
+                            - $ref: '#/components/schemas/KpiPlanItem'
+                          anyOf:
+                            - required: [metric_key]
+                            - required: [metric]
       responses:
         '200':
           description: Partial success result
@@ -184,14 +216,16 @@ paths:
                 properties:
                   data:
                     type: array
-                    items:
-                      allOf:
-                        - $ref: '#/components/schemas/KpiPlanItem'
-                        - type: object
-                          properties:
-                            role: { $ref: '#/components/schemas/KpiRole' }
-                            source: { type: string }
-                            plan_source: { type: string }
+                    items: { $ref: '#/components/schemas/KpiPlanReadItem' }
+                  plans:
+                    type: array
+                    items: { $ref: '#/components/schemas/KpiPlanReadItem' }
+                  meta:
+                    type: object
+                    required: [exists, source]
+                    properties:
+                      exists: { type: boolean }
+                      source: { type: string, enum: [common] }
         '403':
           description: Forbidden
           content:
@@ -223,6 +257,87 @@ paths:
   /kpi-plans:
     get: { summary: List KPI plans, responses: { '200': { description: OK } } }
     patch: { summary: Update KPI plans, responses: { '200': { description: OK }, '403': { description: Forbidden } } }
+  /kpi/plans:
+    get:
+      summary: Read effective personal KPI plans for user by date
+      parameters:
+        - in: query
+          name: user_id
+          schema: { type: integer }
+          required: true
+        - in: query
+          name: date
+          schema: { type: string, format: date }
+          required: false
+      responses:
+        '200':
+          description: Effective plans (personal preferred over common)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/KpiPlanReadItem' }
+                  plans:
+                    type: array
+                    items: { $ref: '#/components/schemas/KpiPlanReadItem' }
+                  source:
+                    type: string
+                    nullable: true
+                    enum: [personal, common, null]
+                  meta:
+                    type: object
+                    required: [exists, source]
+                    properties:
+                      exists: { type: boolean }
+                      source:
+                        type: string
+                        nullable: true
+                        enum: [personal, common, null]
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KpiError' }
+        '403':
+          description: Forbidden in current scope
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KpiError' }
+        '422':
+          description: Validation failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KpiError' }
+  /kpi/plans/{userId}:
+    patch:
+      summary: Upsert personal KPI plans for one user
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+        '401': { description: Unauthenticated }
+        '403': { description: Forbidden in current scope / role action }
+        '409': { description: Plan period conflict }
+        '422': { description: Validation failed }
+    put:
+      summary: Upsert personal KPI plans for one user
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+        '401': { description: Unauthenticated }
+        '403': { description: Forbidden in current scope / role action }
+        '409': { description: Plan period conflict }
+        '422': { description: Validation failed }
   /kpi/daily:
     get: { summary: Daily KPI rows, responses: { '200': { description: OK } } }
     post: { summary: Save daily KPI, responses: { '201': { description: Created }, '422': { description: Validation error } } }

@@ -48,6 +48,10 @@ class KpiModuleController extends Controller
                 'data' => $effective['items'],
                 'plans' => $effective['items'],
                 'source' => $effective['source'],
+                'meta' => [
+                    'exists' => count($effective['items']) > 0,
+                    'source' => $effective['source'],
+                ],
             ]);
         }
 
@@ -64,8 +68,8 @@ class KpiModuleController extends Controller
             'effective_from' => 'required|date_format:Y-m-d',
             'effective_to' => 'nullable|date_format:Y-m-d|after_or_equal:effective_from',
             'items' => 'required|array|min:1',
-            'items.*.metric' => ['nullable', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
-            'items.*.metric_key' => ['nullable', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
+            'items.*.metric' => ['nullable', 'required_without:items.*.metric_key', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
+            'items.*.metric_key' => ['nullable', 'required_without:items.*.metric', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
             'items.*.daily_plan' => 'required|numeric|min:0',
             'items.*.weight' => 'required|numeric|min:0|max:1',
             'items.*.comment' => 'nullable|string|max:500',
@@ -102,8 +106,8 @@ class KpiModuleController extends Controller
             'rows' => 'required|array|min:1|max:500',
             'rows.*.user_id' => 'required|integer|exists:users,id',
             'rows.*.items' => 'required|array|min:1',
-            'rows.*.items.*.metric' => ['nullable', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
-            'rows.*.items.*.metric_key' => ['nullable', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
+            'rows.*.items.*.metric' => ['nullable', 'required_without:rows.*.items.*.metric_key', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
+            'rows.*.items.*.metric_key' => ['nullable', 'required_without:rows.*.items.*.metric', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
             'rows.*.items.*.daily_plan' => 'required|numeric|min:0',
             'rows.*.items.*.weight' => 'required|numeric|min:0|max:1',
             'rows.*.items.*.comment' => 'nullable|string|max:500',
@@ -252,7 +256,14 @@ class KpiModuleController extends Controller
             ->flatten(1)
             ->values();
 
-        return response()->json(['data' => $data]);
+        return response()->json([
+            'data' => $data,
+            'plans' => $data,
+            'meta' => [
+                'exists' => $data->isNotEmpty(),
+                'source' => 'common',
+            ],
+        ]);
     }
 
     public function upsertCommonPlans(Request $request)
@@ -266,8 +277,8 @@ class KpiModuleController extends Controller
             'branch_id' => 'nullable|integer|exists:branches,id',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'items' => 'required|array|min:1',
-            'items.*.metric' => ['nullable', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
-            'items.*.metric_key' => ['nullable', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
+            'items.*.metric' => ['nullable', 'required_without:items.*.metric_key', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
+            'items.*.metric_key' => ['nullable', 'required_without:items.*.metric', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
             'items.*.daily_plan' => 'required|numeric|min:0',
             'items.*.weight' => 'required|numeric|min:0|max:1',
             'items.*.comment' => 'nullable|string|max:500',
