@@ -311,7 +311,7 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->patchJson('/api/kpi/plans/'.$intern->id, $payload)->assertOk();
     }
 
-    public function test_mop_forbidden_outside_group_and_for_mop_target(): void
+    public function test_mop_forbidden_outside_group(): void
     {
         $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
@@ -320,7 +320,6 @@ class KpiModuleApiFeatureTest extends TestCase
         $group2 = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G2']);
 
         $mop = User::create(['name' => 'MOP1', 'phone' => '900000411', 'role_id' => $mopRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group1->id]);
-        $otherMop = User::create(['name' => 'MOP2', 'phone' => '900000412', 'role_id' => $mopRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group1->id]);
         $foreignAgent = User::create(['name' => 'Agent2', 'phone' => '900000413', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group2->id]);
 
         Sanctum::actingAs($mop);
@@ -336,10 +335,28 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->patchJson('/api/kpi/plans/'.$foreignAgent->id, $payload)
             ->assertStatus(403)
             ->assertJsonPath('code', 'KPI_FORBIDDEN_SCOPE');
+    }
 
-        $this->patchJson('/api/kpi/plans/'.$otherMop->id, $payload)
-            ->assertStatus(403)
-            ->assertJsonPath('code', 'KPI_FORBIDDEN_SCOPE');
+    public function test_mop_can_save_personal_plan_for_mop_in_own_group(): void
+    {
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+
+        $mop = User::create(['name' => 'MOP1', 'phone' => '900000414', 'role_id' => $mopRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $otherMop = User::create(['name' => 'MOP2', 'phone' => '900000415', 'role_id' => $mopRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        Sanctum::actingAs($mop);
+
+        $payload = [
+            'effective_from' => '2026-05-01',
+            'items' => [
+                ['metric_key' => 'calls', 'daily_plan' => 10, 'weight' => 0.5],
+                ['metric_key' => 'sales', 'daily_plan' => 1, 'weight' => 0.5],
+            ],
+        ];
+
+        $this->patchJson('/api/kpi/plans/'.$otherMop->id, $payload)->assertOk();
     }
 
     public function test_rop_can_save_agent_mop_intern_in_own_branch(): void
@@ -521,6 +538,175 @@ class KpiModuleApiFeatureTest extends TestCase
         ]);
     }
 
+    public function test_mop_cannot_manage_common_plan_even_in_own_group(): void
+    {
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $otherGroup = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G2']);
+        $mop = User::create(['name' => 'MOP', 'phone' => '900000455', 'role_id' => $mopRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        Sanctum::actingAs($mop);
+
+        $payload = [
+            'role' => 'mop',
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'effective_from' => '2026-05-01',
+            'items' => [
+                ['metric' => 'objects', 'daily_plan' => 1, 'weight' => 0.2],
+                ['metric' => 'shows', 'daily_plan' => 2, 'weight' => 0.2],
+                ['metric' => 'ads', 'daily_plan' => 10, 'weight' => 0.2],
+                ['metric' => 'calls', 'daily_plan' => 30, 'weight' => 0.2],
+                ['metric' => 'sales', 'daily_plan' => 1, 'weight' => 0.2],
+            ],
+        ];
+
+        $this->putJson('/api/kpi/plans/common', $payload)
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'KPI_FORBIDDEN_ROLE_ACTION');
+
+        $payload['branch_group_id'] = $otherGroup->id;
+        $this->putJson('/api/kpi/plans/common', $payload)
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'KPI_FORBIDDEN_ROLE_ACTION');
+    }
+
+    public function test_mop_can_read_common_plan_for_own_group(): void
+    {
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $mop = User::create(['name' => 'MOP', 'phone' => '900000458', 'role_id' => $mopRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        KpiPlan::query()->create([
+            'role_slug' => 'agent',
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'metric_key' => 'calls',
+            'daily_plan' => 40,
+            'weight' => 1,
+            'effective_from' => '2026-05-01',
+            'effective_to' => null,
+        ]);
+
+        Sanctum::actingAs($mop);
+
+        $this->getJson('/api/kpi/plans/common?role=agent&date=2026-05-06&branch_id='.$branch->id.'&branch_group_id='.$group->id)
+            ->assertOk()
+            ->assertJsonPath('data.0.metric_key', 'calls');
+    }
+
+    public function test_rop_can_create_and_update_common_plan_in_own_scope(): void
+    {
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '900000459', 'role_id' => $ropRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        Sanctum::actingAs($rop);
+
+        $payload = [
+            'role' => 'agent',
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'effective_from' => '2026-05-01',
+            'effective_to' => null,
+            'items' => [
+                ['metric' => 'objects', 'daily_plan' => 1.4, 'weight' => 0.2],
+                ['metric' => 'shows', 'daily_plan' => 3, 'weight' => 0.2],
+                ['metric' => 'ads', 'daily_plan' => 12, 'weight' => 0.2],
+                ['metric' => 'calls', 'daily_plan' => 40, 'weight' => 0.2],
+                ['metric' => 'sales', 'daily_plan' => 0.8, 'weight' => 0.2],
+            ],
+        ];
+
+        $this->putJson('/api/kpi/plans/common', $payload)->assertOk();
+
+        $payload['items'][3]['daily_plan'] = 45;
+        $this->patchJson('/api/kpi/plans/common', $payload)->assertOk();
+
+        $this->assertDatabaseHas('kpi_plans', [
+            'role_slug' => 'agent',
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'metric_key' => 'calls',
+            'daily_plan' => '45.0000',
+        ]);
+    }
+
+    public function test_rop_bulk_upsert_handles_50_plus_users_successfully(): void
+    {
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '900000460', 'role_id' => $ropRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        $users = collect(range(1, 55))->map(function (int $i) use ($agentRole, $branch, $group) {
+            return User::create([
+                'name' => 'Agent '.$i,
+                'phone' => '901'.str_pad((string) $i, 6, '0', STR_PAD_LEFT),
+                'role_id' => $agentRole->id,
+                'branch_id' => $branch->id,
+                'branch_group_id' => $group->id,
+            ]);
+        });
+
+        Sanctum::actingAs($rop);
+
+        $rows = $users->map(fn (User $user) => [
+            'user_id' => $user->id,
+            'items' => [
+                ['metric' => 'objects', 'daily_plan' => 1.4, 'weight' => 0.2, 'comment' => ''],
+                ['metric' => 'shows', 'daily_plan' => 3, 'weight' => 0.2, 'comment' => ''],
+                ['metric' => 'ads', 'daily_plan' => 12, 'weight' => 0.2, 'comment' => ''],
+                ['metric' => 'calls', 'daily_plan' => 40, 'weight' => 0.2, 'comment' => ''],
+                ['metric' => 'sales', 'daily_plan' => 0.8, 'weight' => 0.2, 'comment' => ''],
+            ],
+        ])->values()->all();
+
+        $this->postJson('/api/kpi/plans/bulk-upsert', [
+            'effective_from' => '2026-05-06',
+            'effective_to' => null,
+            'scope' => ['branch_id' => $branch->id, 'branch_group_id' => $group->id, 'role' => 'agent'],
+            'rows' => $rows,
+        ])->assertOk()
+            ->assertJsonPath('success_count', 55)
+            ->assertJsonPath('failed_count', 0);
+    }
+
+    public function test_mop_bulk_upsert_rejects_foreign_scope_at_request_level(): void
+    {
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $otherGroup = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G2']);
+
+        $mop = User::create(['name' => 'MOP', 'phone' => '900000456', 'role_id' => $mopRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900000457', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        Sanctum::actingAs($mop);
+
+        $this->postJson('/api/kpi/plans/bulk-upsert', [
+            'effective_from' => '2026-05-06',
+            'effective_to' => null,
+            'scope' => ['branch_id' => $branch->id, 'branch_group_id' => $otherGroup->id, 'role' => null],
+            'rows' => [[
+                'user_id' => $agent->id,
+                'items' => [
+                    ['metric' => 'objects', 'daily_plan' => 1, 'weight' => 0.2],
+                    ['metric' => 'shows', 'daily_plan' => 3, 'weight' => 0.2],
+                    ['metric' => 'ads', 'daily_plan' => 12, 'weight' => 0.2],
+                    ['metric' => 'calls', 'daily_plan' => 40, 'weight' => 0.2],
+                    ['metric' => 'sales', 'daily_plan' => 1, 'weight' => 0.2],
+                ],
+            ]],
+        ])->assertStatus(403)
+            ->assertJsonPath('code', 'KPI_FORBIDDEN_SCOPE');
+    }
+
     public function test_eligible_users_returns_paginated_data_and_enforces_mop_scope(): void
     {
         $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
@@ -543,8 +729,7 @@ class KpiModuleApiFeatureTest extends TestCase
             ->assertJsonPath('data.0.name', 'Ivan Agent');
 
         $this->getJson('/api/kpi/plans/eligible-users?role=mop')
-            ->assertStatus(403)
-            ->assertJsonPath('code', 'KPI_FORBIDDEN_SCOPE');
+            ->assertOk();
     }
 
     public function test_apply_common_plan_to_users_creates_personal_plans(): void

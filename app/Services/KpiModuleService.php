@@ -20,6 +20,7 @@ use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Schema;
+use App\Support\KpiPlanScopePolicy;
 use Throwable;
 
 class KpiModuleService
@@ -32,7 +33,8 @@ class KpiModuleService
 
     public function __construct(
         private readonly DailyReportService $dailyReportService,
-        private readonly AuditLogger $auditLogger
+        private readonly AuditLogger $auditLogger,
+        private readonly KpiPlanScopePolicy $kpiPlanScopePolicy
     )
     {
     }
@@ -1146,23 +1148,7 @@ class KpiModuleService
 
     private function ensureCanUpsertDailyForUser(User $authUser, User $targetUser): void
     {
-        $authUser->loadMissing('role');
-
-        $canWrite = match ($authUser->role?->slug) {
-            'admin', 'superadmin', 'owner' => true,
-            'rop', 'branch_director' => (int) $authUser->branch_id === (int) $targetUser->branch_id,
-            'mop' => (int) $authUser->branch_group_id === (int) $targetUser->branch_group_id,
-            default => (int) $authUser->id === (int) $targetUser->id,
-        };
-
-        if (! $canWrite) {
-            abort(response()->json([
-                'code' => 'KPI_FORBIDDEN_SCOPE',
-                'message' => 'Forbidden in current scope.',
-                'details' => (object) [],
-                'trace_id' => request()->attributes->get('trace_id'),
-            ], 403));
-        }
+        $this->ensurePlanScopeAccess($authUser, $targetUser);
     }
 
     private function findCommonPlanRows(string $role, Carbon $date, ?int $branchId, ?int $branchGroupId): EloquentCollection
@@ -1249,26 +1235,6 @@ class KpiModuleService
 
     private function ensurePlanScopeAccess(User $actor, User $target): void
     {
-        $actor->loadMissing('role');
-        $target->loadMissing('role');
-        $role = (string) ($actor->role?->slug ?? '');
-        $targetRole = (string) ($target->role?->slug ?? '');
-
-        $allowed = match ($role) {
-            'admin', 'superadmin', 'owner' => true,
-            'rop', 'branch_director' => (int) $actor->branch_id === (int) $target->branch_id,
-            'mop' => in_array($targetRole, ['agent', 'intern'], true)
-                && (int) $actor->branch_group_id === (int) $target->branch_group_id,
-            default => (int) $actor->id === (int) $target->id,
-        };
-
-        if (! $allowed) {
-            abort(response()->json([
-                'code' => 'KPI_FORBIDDEN_SCOPE',
-                'message' => 'Forbidden in current scope.',
-                'details' => (object) [],
-                'trace_id' => request()->attributes->get('trace_id'),
-            ], 403));
-        }
+        $this->kpiPlanScopePolicy->ensureCanManageUserPlan($actor, $target);
     }
 }

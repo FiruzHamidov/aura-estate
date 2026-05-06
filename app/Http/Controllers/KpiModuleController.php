@@ -8,6 +8,7 @@ use App\Models\KpiIntegrationStatus;
 use App\Models\KpiQualityIssue;
 use App\Models\User;
 use App\Services\KpiModuleService;
+use App\Support\KpiPlanScopePolicy;
 use App\Support\RbacBranchScope;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -20,7 +21,8 @@ class KpiModuleController extends Controller
 {
     public function __construct(
         private readonly KpiModuleService $service,
-        private readonly RbacBranchScope $branchScope
+        private readonly RbacBranchScope $branchScope,
+        private readonly KpiPlanScopePolicy $kpiPlanScopePolicy
     )
     {
     }
@@ -38,7 +40,8 @@ class KpiModuleController extends Controller
                 ? Carbon::parse($validated['date'], 'Asia/Dushanbe')
                 : Carbon::now('Asia/Dushanbe');
 
-            $this->ensureCanReadUserPlans($this->authUser(), (int) $validated['user_id']);
+            $target = User::query()->findOrFail((int) $validated['user_id']);
+            $this->kpiPlanScopePolicy->ensureCanReadUserPlan($this->authUser(), $target);
             $effective = $this->service->effectivePlanForUser((int) $validated['user_id'], $date);
 
             return response()->json([
@@ -102,7 +105,7 @@ class KpiModuleController extends Controller
             'rows.*.items.*.comment' => 'nullable|string|max:500',
         ]);
 
-        $this->ensureCommonScopeManageable($actor, (array) $validated['scope']);
+        $this->kpiPlanScopePolicy->ensureCanManageBulkScope($actor, (array) $validated['scope']);
         $scopeRole = isset($validated['scope']['role']) ? (string) $validated['scope']['role'] : null;
 
         $results = [];
@@ -153,7 +156,7 @@ class KpiModuleController extends Controller
                     'ok' => false,
                     'code' => (string) ($payload['code'] ?? 'KPI_FORBIDDEN_SCOPE'),
                     'message' => (string) ($payload['message'] ?? 'Forbidden in current scope.'),
-                    'details' => (array) ($payload['details'] ?? ['row' => $index, 'errors' => []]),
+                    'details' => array_merge(['row' => $index, 'errors' => []], (array) ($payload['details'] ?? [])),
                 ];
             } catch (\Throwable $e) {
                 $results[] = [
@@ -203,7 +206,7 @@ class KpiModuleController extends Controller
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
         ]);
 
-        $this->ensureCommonScopeReadable($this->authUser(), $validated);
+        $this->kpiPlanScopePolicy->ensureCanReadCommonPlan($this->authUser(), $validated);
         $date = Carbon::parse($validated['date'], 'Asia/Dushanbe');
 
         return response()->json([
@@ -240,7 +243,7 @@ class KpiModuleController extends Controller
         })->all();
 
         $this->assertWeightSumOrKpiError($validated['items']);
-        $this->ensureCommonScopeManageable($this->authUser(), $validated);
+        $this->kpiPlanScopePolicy->ensureCanManageCommonPlan($this->authUser(), $validated);
 
         try {
             $result = $this->service->upsertCommonPlans($this->authUser(), $validated);
@@ -271,7 +274,7 @@ class KpiModuleController extends Controller
             'branch_id' => $validated['branch_id'] ?? null,
             'branch_group_id' => $validated['branch_group_id'] ?? null,
         ];
-        $this->ensureCommonScopeManageable($actor, $scope);
+        $this->kpiPlanScopePolicy->ensureCanManageCommonPlan($actor, $scope);
 
         try {
             $result = $this->service->applyCommonPlanToUsers($actor, $validated);
@@ -296,8 +299,8 @@ class KpiModuleController extends Controller
             'per_page' => 'nullable|integer|min:1|max:200',
         ]);
 
-        $this->ensureCommonScopeReadable($actor, $validated);
-        if (($actor->role?->slug ?? '') === 'mop' && isset($validated['role']) && in_array((string) $validated['role'], ['mop', 'rop'], true)) {
+        $this->kpiPlanScopePolicy->ensureCanReadCommonPlan($actor, $validated);
+        if (($actor->role?->slug ?? '') === 'mop' && isset($validated['role']) && (string) $validated['role'] === 'rop') {
             $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
         }
 
@@ -766,22 +769,22 @@ class KpiModuleController extends Controller
         $role = (string) ($actor->role?->slug ?? '');
 
         if ($role === 'rop') {
-            $this->branchScope->ensureSameBranchOrDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
-            $this->branchScope->ensureBranchGroupInUserBranchOrDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
+            $this->ensureSameBranchOrKpiDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
+            $this->ensureBranchGroupInUserBranchOrKpiDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
             return;
         }
 
         if ($role === 'branch_director') {
-            $this->branchScope->ensureSameBranchOrDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
+            $this->ensureSameBranchOrKpiDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
             return;
         }
 
         if ($role === 'mop') {
-            if (isset($scope['role']) && (string) $scope['role'] === 'mop') {
+            if (isset($scope['role']) && (string) $scope['role'] === 'rop') {
                 $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
             }
-            $this->branchScope->ensureSameBranchOrDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
-            $this->branchScope->ensureSameBranchGroupOrDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
+            $this->ensureSameBranchOrKpiDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
+            $this->ensureSameBranchGroupOrKpiDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
             return;
         }
     }
@@ -795,23 +798,50 @@ class KpiModuleController extends Controller
         }
 
         if ($actor->role?->slug === 'branch_director' || $actor->role?->slug === 'rop') {
-            $this->branchScope->ensureSameBranchOrDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
-            $this->branchScope->ensureBranchGroupInUserBranchOrDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
+            $this->ensureSameBranchOrKpiDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
+            $this->ensureBranchGroupInUserBranchOrKpiDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
             return;
         }
 
         if ($actor->role?->slug === 'mop') {
             $planRole = (string) ($scope['role'] ?? '');
 
-            if ($planRole === 'mop' || $planRole === 'rop') {
+            if ($planRole === 'rop') {
                 $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
             }
 
-            $this->branchScope->ensureSameBranchGroupOrDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
-            $this->branchScope->ensureSameBranchOrDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
+            $this->ensureSameBranchGroupOrKpiDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
+            $this->ensureSameBranchOrKpiDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
             return;
         }
 
         $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
+    }
+
+    private function ensureSameBranchOrKpiDeny(?int $branchId, User $actor): void
+    {
+        try {
+            $this->branchScope->ensureSameBranchOrDeny($branchId, $actor);
+        } catch (HttpResponseException) {
+            $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
+        }
+    }
+
+    private function ensureSameBranchGroupOrKpiDeny(?int $branchGroupId, User $actor): void
+    {
+        try {
+            $this->branchScope->ensureSameBranchGroupOrDeny($branchGroupId, $actor);
+        } catch (HttpResponseException) {
+            $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
+        }
+    }
+
+    private function ensureBranchGroupInUserBranchOrKpiDeny(?int $branchGroupId, User $actor): void
+    {
+        try {
+            $this->branchScope->ensureBranchGroupInUserBranchOrDeny($branchGroupId, $actor);
+        } catch (HttpResponseException) {
+            $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
+        }
     }
 }
