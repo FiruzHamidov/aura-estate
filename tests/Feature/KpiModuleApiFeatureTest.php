@@ -453,4 +453,158 @@ class KpiModuleApiFeatureTest extends TestCase
             ->assertStatus(409)
             ->assertJsonPath('code', 'KPI_PLAN_PERIOD_CONFLICT');
     }
+
+    public function test_bulk_upsert_returns_per_row_result_and_supports_decimal_values(): void
+    {
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $internRole = Role::create(['name' => 'Intern', 'slug' => 'intern']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $otherGroup = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G2']);
+
+        $mop = User::create(['name' => 'MOP', 'phone' => '900000451', 'role_id' => $mopRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900000452', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $intern = User::create(['name' => 'Intern', 'phone' => '900000453', 'role_id' => $internRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $foreignAgent = User::create(['name' => 'Foreign Agent', 'phone' => '900000454', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $otherGroup->id]);
+
+        Sanctum::actingAs($mop);
+
+        $response = $this->postJson('/api/kpi/plans/bulk-upsert', [
+            'effective_from' => '2026-05-06',
+            'effective_to' => null,
+            'scope' => ['branch_id' => $branch->id, 'branch_group_id' => $group->id, 'role' => null],
+            'rows' => [
+                [
+                    'user_id' => $agent->id,
+                    'items' => [
+                        ['metric' => 'objects', 'daily_plan' => 1.4, 'weight' => 0.2, 'comment' => 'x'],
+                        ['metric' => 'shows', 'daily_plan' => 3, 'weight' => 0.2, 'comment' => 'x'],
+                        ['metric' => 'ads', 'daily_plan' => 12, 'weight' => 0.2, 'comment' => 'x'],
+                        ['metric' => 'calls', 'daily_plan' => 40, 'weight' => 0.2, 'comment' => 'x'],
+                        ['metric' => 'sales', 'daily_plan' => 0.8, 'weight' => 0.2, 'comment' => 'x'],
+                    ],
+                ],
+                [
+                    'user_id' => $intern->id,
+                    'items' => [
+                        ['metric' => 'objects', 'daily_plan' => 1, 'weight' => 0.1, 'comment' => 'x'],
+                        ['metric' => 'shows', 'daily_plan' => 3, 'weight' => 0.2, 'comment' => 'x'],
+                        ['metric' => 'ads', 'daily_plan' => 12, 'weight' => 0.2, 'comment' => 'x'],
+                        ['metric' => 'calls', 'daily_plan' => 40, 'weight' => 0.2, 'comment' => 'x'],
+                        ['metric' => 'sales', 'daily_plan' => 1, 'weight' => 0.2, 'comment' => 'x'],
+                    ],
+                ],
+                [
+                    'user_id' => $foreignAgent->id,
+                    'items' => [
+                        ['metric' => 'objects', 'daily_plan' => 1, 'weight' => 0.2, 'comment' => 'x'],
+                        ['metric' => 'shows', 'daily_plan' => 3, 'weight' => 0.2, 'comment' => 'x'],
+                        ['metric' => 'ads', 'daily_plan' => 12, 'weight' => 0.2, 'comment' => 'x'],
+                        ['metric' => 'calls', 'daily_plan' => 40, 'weight' => 0.2, 'comment' => 'x'],
+                        ['metric' => 'sales', 'daily_plan' => 1, 'weight' => 0.2, 'comment' => 'x'],
+                    ],
+                ],
+            ],
+        ])->assertOk();
+
+        $response->assertJsonPath('success_count', 1)
+            ->assertJsonPath('failed_count', 2)
+            ->assertJsonPath('results.0.ok', true)
+            ->assertJsonPath('results.1.code', 'KPI_VALIDATION_FAILED')
+            ->assertJsonPath('results.2.code', 'KPI_FORBIDDEN_SCOPE');
+
+        $this->assertDatabaseHas('kpi_plans', [
+            'user_id' => $agent->id,
+            'metric_key' => 'objects',
+            'daily_plan' => '1.4000',
+        ]);
+    }
+
+    public function test_eligible_users_returns_paginated_data_and_enforces_mop_scope(): void
+    {
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $group2 = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G2']);
+
+        $mop = User::create(['name' => 'MOP', 'phone' => '900000461', 'role_id' => $mopRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        User::create(['name' => 'Ivan Agent', 'phone' => '900000462', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        User::create(['name' => 'Petr Agent', 'phone' => '900000463', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group2->id]);
+
+        Sanctum::actingAs($mop);
+
+        $this->getJson('/api/kpi/plans/eligible-users?role=agent&q=Ivan&page=1&per_page=20')
+            ->assertOk()
+            ->assertJsonPath('meta.page', 1)
+            ->assertJsonPath('meta.per_page', 20)
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.name', 'Ivan Agent');
+
+        $this->getJson('/api/kpi/plans/eligible-users?role=mop')
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'KPI_FORBIDDEN_SCOPE');
+    }
+
+    public function test_apply_common_plan_to_users_creates_personal_plans(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+
+        $admin = User::create(['name' => 'Admin', 'phone' => '900000471', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent1 = User::create(['name' => 'Agent1', 'phone' => '900000472', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent2 = User::create(['name' => 'Agent2', 'phone' => '900000473', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        Sanctum::actingAs($admin);
+        $this->putJson('/api/kpi/plans/common', [
+            'role' => 'agent',
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'effective_from' => '2026-05-01',
+            'items' => [
+                ['metric' => 'objects', 'daily_plan' => 1, 'weight' => 0.2],
+                ['metric' => 'shows', 'daily_plan' => 2, 'weight' => 0.2],
+                ['metric' => 'ads', 'daily_plan' => 10, 'weight' => 0.2],
+                ['metric' => 'calls', 'daily_plan' => 30, 'weight' => 0.2],
+                ['metric' => 'sales', 'daily_plan' => 1, 'weight' => 0.2],
+            ],
+        ])->assertOk();
+
+        $this->postJson('/api/kpi/plans/common/apply-to-users', [
+            'role' => 'agent',
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'effective_from' => '2026-05-06',
+            'effective_to' => null,
+            'user_ids' => [$agent1->id, $agent2->id],
+        ])->assertOk()
+            ->assertJsonPath('success_count', 2)
+            ->assertJsonPath('failed_count', 0);
+
+        $this->assertDatabaseHas('kpi_plans', ['user_id' => $agent1->id, 'metric_key' => 'calls', 'daily_plan' => '30.0000']);
+        $this->assertDatabaseHas('kpi_plans', ['user_id' => $agent2->id, 'metric_key' => 'calls', 'daily_plan' => '30.0000']);
+    }
+
+    public function test_metric_mapping_contains_stable_keys_and_russian_labels(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900000481', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        Sanctum::actingAs($admin);
+
+        $this->getJson('/api/kpi/metric-mapping')
+            ->assertOk()
+            ->assertJsonPath('data.metric_keys.0', 'objects')
+            ->assertJsonPath('data.metric_keys.1', 'shows')
+            ->assertJsonPath('data.metric_keys.2', 'ads')
+            ->assertJsonPath('data.metric_keys.3', 'calls')
+            ->assertJsonPath('data.metric_keys.4', 'sales')
+            ->assertJsonPath('data.mapping.objects.label', 'Объекты')
+            ->assertJsonPath('data.mapping.sales.description', 'Количество завершённых сделок за период.');
+    }
 }

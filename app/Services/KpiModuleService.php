@@ -492,9 +492,151 @@ class KpiModuleService
 
     public function metricMapping(): array
     {
+        $labels = [
+            'objects' => 'Объекты',
+            'shows' => 'Показы',
+            'ads' => 'Реклама',
+            'calls' => 'Звонки',
+            'sales' => 'Сделки',
+        ];
+        $descriptions = [
+            'objects' => 'Количество добавленных объектов за период.',
+            'shows' => 'Количество проведённых показов за период.',
+            'ads' => 'Количество рекламных активностей за период.',
+            'calls' => 'Количество звонков за период.',
+            'sales' => 'Количество завершённых сделок за период.',
+        ];
+        $mapping = (array) config('kpi.v2.metric_mapping', []);
+
+        foreach ((array) config('kpi.v2.metric_keys', []) as $key) {
+            $mapping[$key] = array_merge((array) ($mapping[$key] ?? []), [
+                'key' => $key,
+                'label' => $labels[$key] ?? $key,
+                'description' => $descriptions[$key] ?? null,
+            ]);
+        }
+
         return [
             'metric_keys' => (array) config('kpi.v2.metric_keys', []),
-            'mapping' => (array) config('kpi.v2.metric_mapping', []),
+            'mapping' => $mapping,
+        ];
+    }
+
+    public function eligibleUsers(User $actor, array $filters): array
+    {
+        $actor->loadMissing('role');
+        $selectColumns = ['users.id', 'users.name', 'users.phone', 'users.branch_id', 'users.branch_group_id', 'users.role_id'];
+        if (Schema::hasColumn('users', 'email')) {
+            $selectColumns[] = 'users.email';
+        }
+        $query = User::query()
+            ->select($selectColumns)
+            ->with('role:id,slug');
+
+        if (!empty($filters['q'])) {
+            $q = trim((string) $filters['q']);
+            $query->where(function (Builder $inner) use ($q) {
+                $inner->where('users.name', 'like', '%'.$q.'%')
+                    ->orWhere('users.phone', 'like', '%'.$q.'%');
+                if (Schema::hasColumn('users', 'email')) {
+                    $inner->orWhere('users.email', 'like', '%'.$q.'%');
+                }
+            });
+        }
+
+        if (!empty($filters['role'])) {
+            $query->whereHas('role', fn (Builder $roleQ) => $roleQ->where('slug', (string) $filters['role']));
+        }
+        if (!empty($filters['branch_id'])) {
+            $query->where('users.branch_id', (int) $filters['branch_id']);
+        }
+        if (!empty($filters['branch_group_id'])) {
+            $query->where('users.branch_group_id', (int) $filters['branch_group_id']);
+        }
+
+        match ($actor->role?->slug) {
+            'admin', 'superadmin', 'owner' => null,
+            'rop', 'branch_director' => $query->where('users.branch_id', (int) $actor->branch_id),
+            'mop' => $query
+                ->where('users.branch_group_id', (int) $actor->branch_group_id)
+                ->whereHas('role', fn (Builder $roleQ) => $roleQ->whereIn('slug', ['agent', 'intern'])),
+            default => $query->where('users.id', (int) $actor->id),
+        };
+
+        $perPage = max(1, min(200, (int) ($filters['per_page'] ?? 20)));
+        $page = max(1, (int) ($filters['page'] ?? 1));
+        $paginator = $query->orderBy('users.name')->paginate($perPage, ['*'], 'page', $page);
+
+        return [
+            'data' => collect($paginator->items())->map(fn (User $user) => [
+                'id' => (int) $user->id,
+                'name' => (string) $user->name,
+                'role' => (string) ($user->role?->slug ?? ''),
+                'phone' => (string) ($user->phone ?? ''),
+                'email' => (string) ($user->email ?? ''),
+                'branch_id' => $user->branch_id !== null ? (int) $user->branch_id : null,
+                'branch_group_id' => $user->branch_group_id !== null ? (int) $user->branch_group_id : null,
+            ])->values()->all(),
+            'meta' => [
+                'page' => $paginator->currentPage(),
+                'per_page' => $paginator->perPage(),
+                'total' => $paginator->total(),
+                'last_page' => $paginator->lastPage(),
+            ],
+        ];
+    }
+
+    public function applyCommonPlanToUsers(User $actor, array $payload): array
+    {
+        $role = (string) $payload['role'];
+        $from = Carbon::parse((string) $payload['effective_from'], self::TZ);
+        $commonItems = $this->commonPlans(
+            $role,
+            $from,
+            isset($payload['branch_id']) ? (int) $payload['branch_id'] : null,
+            isset($payload['branch_group_id']) ? (int) $payload['branch_group_id'] : null
+        );
+
+        if ($commonItems->isEmpty()) {
+            return ['success_count' => 0, 'failed_count' => 0, 'results' => []];
+        }
+
+        $query = User::query()->with('role')->whereHas('role', fn (Builder $q) => $q->where('slug', $role));
+        if (isset($payload['branch_id'])) {
+            $query->where('branch_id', (int) $payload['branch_id']);
+        }
+        if (isset($payload['branch_group_id'])) {
+            $query->where('branch_group_id', (int) $payload['branch_group_id']);
+        }
+        if (!empty($payload['user_ids'])) {
+            $query->whereIn('id', array_map('intval', (array) $payload['user_ids']));
+        }
+
+        $results = [];
+        foreach ($query->get() as $targetUser) {
+            try {
+                $this->upsertUserPlans($actor, (int) $targetUser->id, [
+                    'effective_from' => $payload['effective_from'],
+                    'effective_to' => $payload['effective_to'] ?? null,
+                    'items' => $commonItems->map(fn (array $item) => [
+                        'metric_key' => (string) $item['metric_key'],
+                        'daily_plan' => (float) $item['daily_plan'],
+                        'weight' => (float) $item['weight'],
+                        'comment' => $item['comment'] ?? null,
+                    ])->values()->all(),
+                ]);
+                $results[] = ['user_id' => (int) $targetUser->id, 'ok' => true];
+            } catch (\DomainException $e) {
+                $results[] = ['user_id' => (int) $targetUser->id, 'ok' => false, 'code' => 'KPI_PLAN_PERIOD_CONFLICT', 'message' => $e->getMessage()];
+            } catch (\Throwable $e) {
+                $results[] = ['user_id' => (int) $targetUser->id, 'ok' => false, 'code' => 'KPI_CONFLICT', 'message' => $e->getMessage()];
+            }
+        }
+
+        return [
+            'success_count' => collect($results)->where('ok', true)->count(),
+            'failed_count' => collect($results)->where('ok', false)->count(),
+            'results' => $results,
         ];
     }
 

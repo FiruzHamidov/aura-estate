@@ -11,8 +11,10 @@ use App\Services\KpiModuleService;
 use App\Support\RbacBranchScope;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class KpiModuleController extends Controller
 {
@@ -66,12 +68,8 @@ class KpiModuleController extends Controller
             'items.*.comment' => 'nullable|string|max:500',
         ]);
 
-        $validated['items'] = collect((array) $validated['items'])->map(function (array $item) {
-            $item['metric_key'] = (string) ($item['metric_key'] ?? $item['metric'] ?? '');
-            return $item;
-        })->all();
-
-        $this->validateWeightSum($validated['items']);
+        $validated['items'] = $this->normalizePlanItems((array) $validated['items']);
+        $this->assertWeightSumOrKpiError($validated['items']);
 
         try {
             $result = $this->service->upsertUserPlans($this->authUser(), $userId, $validated);
@@ -80,6 +78,102 @@ class KpiModuleController extends Controller
         }
 
         return response()->json(['data' => $result]);
+    }
+
+    public function bulkUpsertUserPlans(Request $request)
+    {
+        $actor = $this->authUser();
+        $this->ensureManageAccess($actor, ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
+
+        $validated = $request->validate([
+            'effective_from' => 'required|date_format:Y-m-d',
+            'effective_to' => 'nullable|date_format:Y-m-d|after_or_equal:effective_from',
+            'scope' => 'required|array',
+            'scope.role' => ['nullable', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'scope.branch_id' => 'nullable|integer|exists:branches,id',
+            'scope.branch_group_id' => 'nullable|integer|exists:branch_groups,id',
+            'rows' => 'required|array|min:1|max:500',
+            'rows.*.user_id' => 'required|integer|exists:users,id',
+            'rows.*.items' => 'required|array|min:1',
+            'rows.*.items.*.metric' => ['nullable', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
+            'rows.*.items.*.metric_key' => ['nullable', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
+            'rows.*.items.*.daily_plan' => 'required|numeric|min:0',
+            'rows.*.items.*.weight' => 'required|numeric|min:0|max:1',
+            'rows.*.items.*.comment' => 'nullable|string|max:500',
+        ]);
+
+        $this->ensureCommonScopeManageable($actor, (array) $validated['scope']);
+        $scopeRole = isset($validated['scope']['role']) ? (string) $validated['scope']['role'] : null;
+
+        $results = [];
+        foreach ((array) $validated['rows'] as $index => $row) {
+            $userId = (int) $row['user_id'];
+            $items = $this->normalizePlanItems((array) ($row['items'] ?? []));
+
+            try {
+                if ($scopeRole !== null) {
+                    $target = User::query()->with('role')->findOrFail($userId);
+                    if ((string) ($target->role?->slug ?? '') !== $scopeRole) {
+                        throw new \RuntimeException('User role is out of requested scope.');
+                    }
+                }
+
+                $this->validateWeightSum($items);
+                $this->service->upsertUserPlans($actor, $userId, [
+                    'effective_from' => $validated['effective_from'],
+                    'effective_to' => $validated['effective_to'] ?? null,
+                    'items' => $items,
+                ]);
+
+                $results[] = ['user_id' => $userId, 'ok' => true];
+            } catch (ValidationException $e) {
+                $results[] = [
+                    'user_id' => $userId,
+                    'ok' => false,
+                    'code' => 'KPI_VALIDATION_FAILED',
+                    'message' => 'Validation failed.',
+                    'details' => ['row' => $index, 'errors' => $e->errors()],
+                ];
+            } catch (\DomainException $e) {
+                $results[] = [
+                    'user_id' => $userId,
+                    'ok' => false,
+                    'code' => 'KPI_PLAN_PERIOD_CONFLICT',
+                    'message' => $e->getMessage(),
+                    'details' => ['row' => $index, 'errors' => []],
+                ];
+            } catch (HttpResponseException $e) {
+                $response = $e->getResponse();
+                $payload = method_exists($response, 'getData')
+                    ? (array) $response->getData(true)
+                    : [];
+
+                $results[] = [
+                    'user_id' => $userId,
+                    'ok' => false,
+                    'code' => (string) ($payload['code'] ?? 'KPI_FORBIDDEN_SCOPE'),
+                    'message' => (string) ($payload['message'] ?? 'Forbidden in current scope.'),
+                    'details' => (array) ($payload['details'] ?? ['row' => $index, 'errors' => []]),
+                ];
+            } catch (\Throwable $e) {
+                $results[] = [
+                    'user_id' => $userId,
+                    'ok' => false,
+                    'code' => 'KPI_CONFLICT',
+                    'message' => $e->getMessage() !== '' ? $e->getMessage() : 'KPI conflict.',
+                    'details' => ['row' => $index, 'errors' => []],
+                ];
+            }
+        }
+
+        $successCount = collect($results)->where('ok', true)->count();
+        $failedCount = collect($results)->where('ok', false)->count();
+
+        return response()->json([
+            'success_count' => $successCount,
+            'failed_count' => $failedCount,
+            'results' => $results,
+        ]);
     }
 
     public function updatePlans(Request $request)
@@ -145,7 +239,7 @@ class KpiModuleController extends Controller
             return $item;
         })->all();
 
-        $this->validateWeightSum($validated['items']);
+        $this->assertWeightSumOrKpiError($validated['items']);
         $this->ensureCommonScopeManageable($this->authUser(), $validated);
 
         try {
@@ -155,6 +249,59 @@ class KpiModuleController extends Controller
         }
 
         return response()->json(['data' => $result]);
+    }
+
+    public function applyCommonPlansToUsers(Request $request)
+    {
+        $actor = $this->authUser();
+        $this->ensureManageAccess($actor, ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
+
+        $validated = $request->validate([
+            'role' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'effective_from' => 'required|date_format:Y-m-d',
+            'effective_to' => 'nullable|date_format:Y-m-d|after_or_equal:effective_from',
+            'branch_id' => 'nullable|integer|exists:branches,id',
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
+            'user_ids' => 'nullable|array',
+            'user_ids.*' => 'integer|exists:users,id',
+        ]);
+
+        $scope = [
+            'role' => $validated['role'],
+            'branch_id' => $validated['branch_id'] ?? null,
+            'branch_group_id' => $validated['branch_group_id'] ?? null,
+        ];
+        $this->ensureCommonScopeManageable($actor, $scope);
+
+        try {
+            $result = $this->service->applyCommonPlanToUsers($actor, $validated);
+        } catch (\DomainException $e) {
+            return $this->kpiError('KPI_PLAN_PERIOD_CONFLICT', $e->getMessage(), 409);
+        }
+
+        return response()->json($result);
+    }
+
+    public function eligibleUsers(Request $request)
+    {
+        $actor = $this->authUser();
+        $this->ensureManageAccess($actor, ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
+
+        $validated = $request->validate([
+            'role' => ['nullable', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'q' => 'nullable|string|max:255',
+            'branch_id' => 'nullable|integer|exists:branches,id',
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
+            'page' => 'nullable|integer|min:1',
+            'per_page' => 'nullable|integer|min:1|max:200',
+        ]);
+
+        $this->ensureCommonScopeReadable($actor, $validated);
+        if (($actor->role?->slug ?? '') === 'mop' && isset($validated['role']) && in_array((string) $validated['role'], ['mop', 'rop'], true)) {
+            $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
+        }
+
+        return response()->json($this->service->eligibleUsers($actor, $validated));
     }
 
     public function daily(Request $request)
@@ -568,14 +715,29 @@ class KpiModuleController extends Controller
     {
         $sum = round((float) collect($items)->sum(fn (array $item) => (float) ($item['weight'] ?? 0)), 4);
         if (abs($sum - 1.0) > 0.0001) {
+            throw ValidationException::withMessages([
+                'items' => ['The sum of all items.weight must be exactly 1.0.'],
+            ]);
+        }
+    }
+
+    private function normalizePlanItems(array $items): array
+    {
+        return collect($items)->map(function (array $item) {
+            $item['metric_key'] = (string) ($item['metric_key'] ?? $item['metric'] ?? '');
+            return $item;
+        })->all();
+    }
+
+    private function assertWeightSumOrKpiError(array $items): void
+    {
+        try {
+            $this->validateWeightSum($items);
+        } catch (ValidationException $e) {
             abort(response()->json([
                 'code' => 'KPI_VALIDATION_FAILED',
                 'message' => 'Validation failed.',
-                'details' => [
-                    'errors' => [
-                        'items' => ['The sum of all items.weight must be exactly 1.0.'],
-                    ],
-                ],
+                'details' => ['errors' => $e->errors()],
                 'trace_id' => request()->attributes->get('trace_id'),
             ], 422));
         }
