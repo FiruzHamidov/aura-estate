@@ -29,6 +29,7 @@ class KpiPeriodLockController extends Controller
             'branch_id' => 'nullable|integer|exists:branches,id',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
         ]);
+        $this->validatePeriodKeyFormat((string) $validated['period_type'], (string) $validated['period_key']);
 
         $this->validateScopedValues($validated, $user);
 
@@ -59,6 +60,7 @@ class KpiPeriodLockController extends Controller
             'distribution_mode' => ['nullable', Rule::in(['set_first_day', 'distribute_evenly'])],
             'reason' => 'required|string|min:3',
         ]);
+        $this->validatePeriodKeyFormat((string) $validated['period_type'], (string) $validated['period_key']);
 
         $isLocked = KpiPeriodLock::query()
             ->where('period_type', $validated['period_type'])
@@ -158,9 +160,20 @@ class KpiPeriodLockController extends Controller
     {
         return match ($periodType) {
             'day' => [$periodKey, $periodKey],
-            'week' => [$periodKey, Carbon::parse($periodKey)->addDays(6)->toDateString()],
+            'week' => $this->resolveWeekDateRange($periodKey),
             'month' => [Carbon::createFromFormat('Y-m', $periodKey)->startOfMonth()->toDateString(), Carbon::createFromFormat('Y-m', $periodKey)->endOfMonth()->toDateString()],
         };
+    }
+
+    private function resolveWeekDateRange(string $periodKey): array
+    {
+        preg_match('/^(?<year>\d{4})-W(?<week>\d{2})$/', $periodKey, $matches);
+        $year = (int) ($matches['year'] ?? 0);
+        $week = (int) ($matches['week'] ?? 0);
+
+        $start = Carbon::now('Asia/Dushanbe')->setISODate($year, $week)->startOfWeek(Carbon::MONDAY);
+
+        return [$start->toDateString(), $start->copy()->addDays(6)->toDateString()];
     }
 
     private function resolveAdjustmentColumn(string $fieldName): string
@@ -192,6 +205,60 @@ class KpiPeriodLockController extends Controller
     private function ensureCanManage(User $user): void
     {
         abort_unless(in_array($user->role?->slug, ['admin', 'superadmin', 'rop', 'branch_director'], true), 403, 'Forbidden');
+    }
+
+    private function validatePeriodKeyFormat(string $periodType, string $periodKey): void
+    {
+        $isValid = match ($periodType) {
+            'day' => $this->isValidDateFormat($periodKey, 'Y-m-d'),
+            'week' => preg_match('/^\d{4}-W\d{2}$/', $periodKey) === 1
+                && $this->isValidIsoWeek($periodKey),
+            'month' => $this->isValidDateFormat($periodKey, 'Y-m'),
+            default => false,
+        };
+
+        if (! $isValid) {
+            abort(response()->json([
+                'code' => 'INVALID_PERIOD_KEY_FORMAT',
+                'message' => 'period_key format is invalid for selected period_type.',
+                'details' => [
+                    'period_type' => $periodType,
+                    'expected' => match ($periodType) {
+                        'day' => 'YYYY-MM-DD',
+                        'week' => 'YYYY-Www',
+                        'month' => 'YYYY-MM',
+                        default => 'unknown',
+                    },
+                ],
+                'trace_id' => request()->attributes->get('trace_id'),
+            ], 422));
+        }
+    }
+
+    private function isValidDateFormat(string $value, string $format): bool
+    {
+        try {
+            $date = Carbon::createFromFormat($format, $value, 'Asia/Dushanbe');
+        } catch (\Throwable) {
+            return false;
+        }
+
+        return $date !== false && $date->format($format) === $value;
+    }
+
+    private function isValidIsoWeek(string $periodKey): bool
+    {
+        preg_match('/^(?<year>\d{4})-W(?<week>\d{2})$/', $periodKey, $matches);
+        $year = (int) ($matches['year'] ?? 0);
+        $week = (int) ($matches['week'] ?? 0);
+
+        if ($year < 2000 || $year > 2100 || $week < 1 || $week > 53) {
+            return false;
+        }
+
+        $probe = Carbon::now('Asia/Dushanbe')->setISODate($year, $week)->startOfWeek(Carbon::MONDAY);
+
+        return $probe->format('o-\WW') === $periodKey;
     }
 
     private function authUser(): User

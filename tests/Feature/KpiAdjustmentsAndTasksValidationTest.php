@@ -211,7 +211,7 @@ class KpiAdjustmentsAndTasksValidationTest extends TestCase
 
         KpiPeriodLock::create([
             'period_type' => 'week',
-            'period_key' => '2026-05-04',
+            'period_key' => '2026-W19',
             'branch_id' => $admin->branch_id,
             'branch_group_id' => null,
             'locked_by' => $admin->id,
@@ -222,7 +222,7 @@ class KpiAdjustmentsAndTasksValidationTest extends TestCase
 
         $response = $this->postJson('/api/kpi-adjustments', [
             'period_type' => 'week',
-            'period_key' => '2026-05-04',
+            'period_key' => '2026-W19',
             'entity_id' => $agent->id,
             'field_name' => 'calls',
             'new_value' => 9,
@@ -241,9 +241,97 @@ class KpiAdjustmentsAndTasksValidationTest extends TestCase
 
         $this->assertDatabaseHas('kpi_adjustment_logs', [
             'period_type' => 'week',
+            'period_key' => '2026-W19',
+            'entity_id' => $agent->id,
+            'field_name' => 'calls',
+        ]);
+    }
+
+    public function test_adjustments_reject_invalid_period_key_format_with_readable_code(): void
+    {
+        [$admin, $agent] = $this->seedUsersAndTypes();
+
+        KpiPeriodLock::create([
+            'period_type' => 'week',
+            'period_key' => '2026-W19',
+            'branch_id' => $admin->branch_id,
+            'branch_group_id' => null,
+            'locked_by' => $admin->id,
+            'locked_at' => now(),
+        ]);
+
+        Sanctum::actingAs($admin);
+
+        $response = $this->postJson('/api/kpi-adjustments', [
+            'period_type' => 'week',
             'period_key' => '2026-05-04',
             'entity_id' => $agent->id,
             'field_name' => 'calls',
+            'new_value' => 9,
+            'distribution_mode' => 'distribute_evenly',
+            'reason' => 'manual correction',
+        ]);
+
+        $response->assertStatus(422)
+            ->assertJson([
+                'code' => 'INVALID_PERIOD_KEY_FORMAT',
+            ]);
+    }
+
+    public function test_adjustments_meta_endpoint_returns_fields_and_period_types(): void
+    {
+        [$admin] = $this->seedUsersAndTypes();
+        Sanctum::actingAs($admin);
+
+        $response = $this->getJson('/api/kpi/adjustments/meta');
+
+        $response->assertOk()
+            ->assertJsonPath('fields.0.value', 'objects')
+            ->assertJsonPath('period_types.1.value', 'week');
+    }
+
+    public function test_adjustments_entities_endpoint_filters_roles_and_active_users(): void
+    {
+        [$admin, $agent] = $this->seedUsersAndTypes();
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+
+        $activeMop = User::create([
+            'name' => 'Active MOP',
+            'phone' => (string) ++$this->phoneCounter,
+            'role_id' => $mopRole->id,
+            'branch_id' => $admin->branch_id,
+            'branch_group_id' => $admin->branch_group_id,
+            'status' => 'active',
+            'auth_method' => 'password',
+        ]);
+
+        User::create([
+            'name' => 'Inactive ROP',
+            'phone' => (string) ++$this->phoneCounter,
+            'role_id' => $ropRole->id,
+            'branch_id' => $admin->branch_id,
+            'branch_group_id' => null,
+            'status' => 'inactive',
+            'auth_method' => 'password',
+        ]);
+
+        Sanctum::actingAs($admin);
+
+        $response = $this->getJson('/api/kpi/adjustments/entities?role=agent,mop,rop&active=1');
+
+        $response->assertOk();
+        $response->assertJsonFragment([
+            'id' => $agent->id,
+            'role' => 'agent',
+        ]);
+        $response->assertJsonFragment([
+            'id' => $activeMop->id,
+            'role' => 'mop',
+        ]);
+        $response->assertJsonMissing([
+            'role' => 'rop',
+            'name' => 'Inactive ROP',
         ]);
     }
 

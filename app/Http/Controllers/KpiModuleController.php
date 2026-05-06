@@ -395,6 +395,64 @@ class KpiModuleController extends Controller
         return app(KpiPeriodLockController::class)->adjustments($request);
     }
 
+    public function adjustmentMeta()
+    {
+        return response()->json([
+            'fields' => [
+                ['value' => 'objects', 'label' => 'Объекты', 'hint' => 'Количество добавленных объектов за период.'],
+                ['value' => 'shows', 'label' => 'Показы', 'hint' => 'Количество проведённых показов за период.'],
+                ['value' => 'ads', 'label' => 'Реклама', 'hint' => 'Количество рекламных активностей за период.'],
+                ['value' => 'calls', 'label' => 'Звонки', 'hint' => 'Количество звонков за период.'],
+                ['value' => 'sales', 'label' => 'Сделки', 'hint' => 'Количество завершённых сделок за период.'],
+            ],
+            'period_types' => [
+                ['value' => 'day', 'label' => 'День'],
+                ['value' => 'week', 'label' => 'Неделя'],
+                ['value' => 'month', 'label' => 'Месяц'],
+            ],
+        ]);
+    }
+
+    public function adjustmentEntities(Request $request)
+    {
+        $this->ensureManageAccess($this->authUser(), ['admin', 'superadmin', 'rop', 'branch_director']);
+
+        $validated = $request->validate([
+            'role' => 'nullable|string|max:128',
+            'active' => 'nullable|boolean',
+        ]);
+
+        $roles = collect(explode(',', (string) ($validated['role'] ?? 'agent,mop,rop')))
+            ->map(fn (string $role) => trim($role))
+            ->filter()
+            ->values()
+            ->all();
+
+        $query = User::query()
+            ->select(['users.id', 'users.name', 'users.branch_id', 'users.role_id'])
+            ->with('role:id,slug')
+            ->whereHas('role', fn ($q) => $q->whereIn('slug', $roles));
+
+        if (array_key_exists('active', $validated) && (bool) $validated['active']) {
+            $query->where(function ($q) {
+                $q->where('status', User::STATUS_ACTIVE)
+                    ->orWhereNull('status');
+            });
+        }
+
+        $rows = $query->orderBy('users.name')
+            ->get()
+            ->map(fn (User $user) => [
+                'id' => (int) $user->id,
+                'name' => (string) $user->name,
+                'role' => (string) ($user->role?->slug ?? ''),
+                'branch_id' => $user->branch_id !== null ? (int) $user->branch_id : null,
+            ])
+            ->values();
+
+        return response()->json(['data' => $rows]);
+    }
+
     public function crmTaskDailySummary(Request $request)
     {
         $validated = $request->validate([
