@@ -93,6 +93,10 @@ class KpiModuleController extends Controller
             'effective_to' => 'nullable|date_format:Y-m-d|after_or_equal:effective_from',
             'scope' => 'required|array',
             'scope.role' => ['nullable', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'scope.roles' => 'nullable|array|min:1',
+            'scope.roles.*' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'scope.target_roles' => 'nullable|array|min:1',
+            'scope.target_roles.*' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
             'scope.branch_id' => 'nullable|integer|exists:branches,id',
             'scope.branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'rows' => 'required|array|min:1|max:500',
@@ -105,20 +109,36 @@ class KpiModuleController extends Controller
             'rows.*.items.*.comment' => 'nullable|string|max:500',
         ]);
 
-        $this->kpiPlanScopePolicy->ensureCanManageBulkScope($actor, (array) $validated['scope']);
-        $scopeRole = isset($validated['scope']['role']) ? (string) $validated['scope']['role'] : null;
+        $scope = (array) $validated['scope'];
+        $scopeRoles = $this->extractScopeRoles($scope);
+
+        if ($scopeRoles === []) {
+            $this->kpiPlanScopePolicy->ensureCanManageBulkScope($actor, $scope);
+        } else {
+            foreach ($scopeRoles as $scopeRole) {
+                $scopeForRole = array_merge($scope, ['role' => $scopeRole]);
+                $this->kpiPlanScopePolicy->ensureCanManageBulkScope($actor, $scopeForRole);
+            }
+        }
 
         $results = [];
         foreach ((array) $validated['rows'] as $index => $row) {
             $userId = (int) $row['user_id'];
             $items = $this->normalizePlanItems((array) ($row['items'] ?? []));
+            $rowRole = null;
 
             try {
-                if ($scopeRole !== null) {
-                    $target = User::query()->with('role')->findOrFail($userId);
-                    if ((string) ($target->role?->slug ?? '') !== $scopeRole) {
-                        throw new \RuntimeException('User role is out of requested scope.');
-                    }
+                $target = User::query()->with('role')->findOrFail($userId);
+                $rowRole = (string) ($target->role?->slug ?? '');
+
+                $this->kpiPlanScopePolicy->ensureCanManageBulkScope($actor, array_merge($scope, ['role' => $rowRole]));
+
+                if ($scopeRoles !== [] && ! in_array($rowRole, $scopeRoles, true)) {
+                    $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'User role is out of requested scope.');
+                }
+
+                if ($scopeRoles === [] && isset($scope['role']) && $scope['role'] !== null && $rowRole !== (string) $scope['role']) {
+                    $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'User role is out of requested scope.');
                 }
 
                 $this->validateWeightSum($items);
@@ -135,7 +155,7 @@ class KpiModuleController extends Controller
                     'ok' => false,
                     'code' => 'KPI_VALIDATION_FAILED',
                     'message' => 'Validation failed.',
-                    'details' => ['row' => $index, 'errors' => $e->errors()],
+                    'details' => ['row' => $index, 'role' => $rowRole, 'errors' => $e->errors()],
                 ];
             } catch (\DomainException $e) {
                 $results[] = [
@@ -143,7 +163,7 @@ class KpiModuleController extends Controller
                     'ok' => false,
                     'code' => 'KPI_PLAN_PERIOD_CONFLICT',
                     'message' => $e->getMessage(),
-                    'details' => ['row' => $index, 'errors' => []],
+                    'details' => ['row' => $index, 'role' => $rowRole, 'errors' => []],
                 ];
             } catch (HttpResponseException $e) {
                 $response = $e->getResponse();
@@ -156,7 +176,7 @@ class KpiModuleController extends Controller
                     'ok' => false,
                     'code' => (string) ($payload['code'] ?? 'KPI_FORBIDDEN_SCOPE'),
                     'message' => (string) ($payload['message'] ?? 'Forbidden in current scope.'),
-                    'details' => array_merge(['row' => $index, 'errors' => []], (array) ($payload['details'] ?? [])),
+                    'details' => array_merge(['row' => $index, 'role' => $rowRole, 'errors' => []], (array) ($payload['details'] ?? [])),
                 ];
             } catch (\Throwable $e) {
                 $results[] = [
@@ -164,7 +184,7 @@ class KpiModuleController extends Controller
                     'ok' => false,
                     'code' => 'KPI_CONFLICT',
                     'message' => $e->getMessage() !== '' ? $e->getMessage() : 'KPI conflict.',
-                    'details' => ['row' => $index, 'errors' => []],
+                    'details' => ['row' => $index, 'role' => $rowRole, 'errors' => []],
                 ];
             }
         }
@@ -200,23 +220,39 @@ class KpiModuleController extends Controller
     public function commonPlans(Request $request)
     {
         $validated = $request->validate([
-            'role' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'role' => ['nullable', Rule::in(['agent', 'intern', 'mop', 'rop']), 'required_without_all:roles,role_in'],
+            'roles' => 'nullable|array|min:1',
+            'roles.*' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'role_in' => 'nullable|array|min:1',
+            'role_in.*' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
             'date' => 'required|date_format:Y-m-d',
             'branch_id' => 'nullable|integer|exists:branches,id',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
         ]);
 
-        $this->kpiPlanScopePolicy->ensureCanReadCommonPlan($this->authUser(), $validated);
+        $roles = $this->extractRolesFromRequest($validated);
         $date = Carbon::parse($validated['date'], 'Asia/Dushanbe');
+        $actor = $this->authUser();
+        $scope = [
+            'branch_id' => isset($validated['branch_id']) ? (int) $validated['branch_id'] : null,
+            'branch_group_id' => isset($validated['branch_group_id']) ? (int) $validated['branch_group_id'] : null,
+        ];
 
-        return response()->json([
-            'data' => $this->service->commonPlans(
-                (string) $validated['role'],
+        foreach ($roles as $role) {
+            $this->kpiPlanScopePolicy->ensureCanReadCommonPlan($actor, array_merge($scope, ['role' => $role]));
+        }
+
+        $data = collect($roles)
+            ->map(fn (string $role) => $this->service->commonPlans(
+                $role,
                 $date,
-                isset($validated['branch_id']) ? (int) $validated['branch_id'] : null,
-                isset($validated['branch_group_id']) ? (int) $validated['branch_group_id'] : null
-            ),
-        ]);
+                $scope['branch_id'],
+                $scope['branch_group_id']
+            ))
+            ->flatten(1)
+            ->values();
+
+        return response()->json(['data' => $data]);
     }
 
     public function upsertCommonPlans(Request $request)
@@ -744,6 +780,56 @@ class KpiModuleController extends Controller
                 'trace_id' => request()->attributes->get('trace_id'),
             ], 422));
         }
+    }
+
+    private function extractScopeRoles(array $scope): array
+    {
+        if (! empty($scope['roles']) && is_array($scope['roles'])) {
+            return collect((array) $scope['roles'])
+                ->filter(fn ($role) => is_string($role) && $role !== '')
+                ->map(fn (string $role) => trim($role))
+                ->unique()
+                ->values()
+                ->all();
+        }
+
+        if (! empty($scope['target_roles']) && is_array($scope['target_roles'])) {
+            return collect((array) $scope['target_roles'])
+                ->filter(fn ($role) => is_string($role) && $role !== '')
+                ->map(fn (string $role) => trim($role))
+                ->unique()
+                ->values()
+                ->all();
+        }
+
+        if (isset($scope['role']) && is_string($scope['role']) && $scope['role'] !== '') {
+            return [(string) $scope['role']];
+        }
+
+        return [];
+    }
+
+    private function extractRolesFromRequest(array $validated): array
+    {
+        if (! empty($validated['roles']) && is_array($validated['roles'])) {
+            return collect((array) $validated['roles'])
+                ->map(fn (string $role) => trim($role))
+                ->filter()
+                ->unique()
+                ->values()
+                ->all();
+        }
+
+        if (! empty($validated['role_in']) && is_array($validated['role_in'])) {
+            return collect((array) $validated['role_in'])
+                ->map(fn (string $role) => trim($role))
+                ->filter()
+                ->unique()
+                ->values()
+                ->all();
+        }
+
+        return [(string) $validated['role']];
     }
 
     private function ensureCanReadUserPlans(User $actor, int $targetUserId): void

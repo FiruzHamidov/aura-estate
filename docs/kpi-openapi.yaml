@@ -1,9 +1,11 @@
 openapi: 3.0.3
 info:
   title: Aura KPI API
-  version: 1.0.0
+  version: 1.1.0
 servers:
   - url: /api
+security:
+  - bearerAuth: []
 components:
   securitySchemes:
     bearerAuth:
@@ -11,14 +13,213 @@ components:
       scheme: bearer
       bearerFormat: Token
   schemas:
-    Error:
+    KpiRole:
+      type: string
+      enum: [agent, intern, mop, rop]
+    KpiError:
       type: object
       properties:
+        code: { type: string }
         message: { type: string }
+        details: { type: object }
         trace_id: { type: string }
-security:
-  - bearerAuth: []
+    KpiPlanItem:
+      type: object
+      properties:
+        metric: { type: string }
+        metric_key: { type: string }
+        daily_plan: { type: number }
+        weight: { type: number }
+        comment: { type: string }
+    KpiBulkResult:
+      type: object
+      properties:
+        user_id: { type: integer }
+        ok: { type: boolean }
+        code: { type: string }
+        message: { type: string }
+        details:
+          type: object
+          properties:
+            row: { type: integer }
+            role: { $ref: '#/components/schemas/KpiRole' }
+            errors:
+              type: object
 paths:
+  /kpi/plans/bulk-upsert:
+    post:
+      summary: Bulk upsert personal KPI plans
+      description: |
+        Supports role multiselect in scope. Priority is `scope.roles[]` > `scope.target_roles[]` > `scope.role`.
+        If only `scope.role` is sent, backward compatibility is preserved.
+        Response always contains partial success results.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [effective_from, scope, rows]
+              properties:
+                effective_from: { type: string, format: date }
+                effective_to: { type: string, format: date, nullable: true }
+                scope:
+                  type: object
+                  properties:
+                    role: { $ref: '#/components/schemas/KpiRole' }
+                    roles:
+                      type: array
+                      items: { $ref: '#/components/schemas/KpiRole' }
+                    target_roles:
+                      type: array
+                      items: { $ref: '#/components/schemas/KpiRole' }
+                    branch_id: { type: integer }
+                    branch_group_id: { type: integer }
+                rows:
+                  type: array
+                  items:
+                    type: object
+                    required: [user_id, items]
+                    properties:
+                      user_id: { type: integer }
+                      items:
+                        type: array
+                        items: { $ref: '#/components/schemas/KpiPlanItem' }
+      responses:
+        '200':
+          description: Partial success result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success_count: { type: integer }
+                  failed_count: { type: integer }
+                  results:
+                    type: array
+                    items: { $ref: '#/components/schemas/KpiBulkResult' }
+              examples:
+                mixed_result:
+                  value:
+                    success_count: 1
+                    failed_count: 2
+                    results:
+                      - user_id: 101
+                        ok: true
+                      - user_id: 102
+                        ok: false
+                        code: KPI_VALIDATION_FAILED
+                        message: Validation failed.
+                        details:
+                          row: 1
+                          role: intern
+                          errors:
+                            items:
+                              - The sum of all items.weight must be exactly 1.0.
+                      - user_id: 103
+                        ok: false
+                        code: KPI_FORBIDDEN_SCOPE
+                        message: Forbidden in current scope.
+                        details:
+                          row: 2
+                          role: rop
+                          errors: {}
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KpiError' }
+        '409':
+          description: Period conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KpiError' }
+        '422':
+          description: Validation failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KpiError' }
+  /kpi/plans/common:
+    get:
+      summary: Read common KPI plans by one or many roles
+      description: Returns flat array of plans with mandatory `role` field on each row.
+      parameters:
+        - in: query
+          name: role
+          schema: { $ref: '#/components/schemas/KpiRole' }
+          required: false
+        - in: query
+          name: roles[]
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/KpiRole' }
+          style: form
+          explode: true
+          required: false
+        - in: query
+          name: role_in[]
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/KpiRole' }
+          style: form
+          explode: true
+          required: false
+        - in: query
+          name: date
+          schema: { type: string, format: date }
+          required: true
+        - in: query
+          name: branch_id
+          schema: { type: integer }
+        - in: query
+          name: branch_group_id
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Flat list with role field
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      allOf:
+                        - $ref: '#/components/schemas/KpiPlanItem'
+                        - type: object
+                          properties:
+                            role: { $ref: '#/components/schemas/KpiRole' }
+                            source: { type: string }
+                            plan_source: { type: string }
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KpiError' }
+        '422':
+          description: Validation failed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KpiError' }
+    put:
+      summary: Upsert common KPI plans
+      responses:
+        '200': { description: OK }
+        '403':
+          description: Forbidden role action (e.g. MOP cannot edit common plans)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KpiError' }
+    patch:
+      summary: Upsert common KPI plans
+      responses:
+        '200': { description: OK }
+        '403':
+          description: Forbidden role action (e.g. MOP cannot edit common plans)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KpiError' }
   /kpi-plans:
     get: { summary: List KPI plans, responses: { '200': { description: OK } } }
     patch: { summary: Update KPI plans, responses: { '200': { description: OK }, '403': { description: Forbidden } } }

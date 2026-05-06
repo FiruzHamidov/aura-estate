@@ -597,6 +597,43 @@ class KpiModuleApiFeatureTest extends TestCase
             ->assertJsonPath('data.0.metric_key', 'calls');
     }
 
+    public function test_common_plans_supports_roles_array_and_returns_flat_rows_with_role_field(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900000658', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        KpiPlan::query()->create([
+            'role_slug' => 'agent',
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'metric_key' => 'calls',
+            'daily_plan' => 20,
+            'weight' => 1,
+            'effective_from' => '2026-05-01',
+            'effective_to' => null,
+        ]);
+        KpiPlan::query()->create([
+            'role_slug' => 'intern',
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'metric_key' => 'shows',
+            'daily_plan' => 3,
+            'weight' => 1,
+            'effective_from' => '2026-05-01',
+            'effective_to' => null,
+        ]);
+
+        Sanctum::actingAs($admin);
+
+        $this->getJson('/api/kpi/plans/common?roles[]=agent&roles[]=intern&date=2026-05-06&branch_id='.$branch->id.'&branch_group_id='.$group->id)
+            ->assertOk()
+            ->assertJsonCount(2, 'data')
+            ->assertJsonPath('data.0.role', 'agent')
+            ->assertJsonPath('data.1.role', 'intern');
+    }
+
     public function test_rop_can_create_and_update_common_plan_in_own_scope(): void
     {
         $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
@@ -674,6 +711,43 @@ class KpiModuleApiFeatureTest extends TestCase
         ])->assertOk()
             ->assertJsonPath('success_count', 55)
             ->assertJsonPath('failed_count', 0);
+    }
+
+    public function test_bulk_upsert_supports_scope_roles_multiselect_and_keeps_partial_success(): void
+    {
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $internRole = Role::create(['name' => 'Intern', 'slug' => 'intern']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '900000760', 'role_id' => $ropRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900000761', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $intern = User::create(['name' => 'Intern', 'phone' => '900000762', 'role_id' => $internRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        Sanctum::actingAs($rop);
+
+        $payloadItems = [
+            ['metric' => 'objects', 'daily_plan' => 1, 'weight' => 0.2],
+            ['metric' => 'shows', 'daily_plan' => 3, 'weight' => 0.2],
+            ['metric' => 'ads', 'daily_plan' => 12, 'weight' => 0.2],
+            ['metric' => 'calls', 'daily_plan' => 40, 'weight' => 0.2],
+            ['metric' => 'sales', 'daily_plan' => 1, 'weight' => 0.2],
+        ];
+
+        $this->postJson('/api/kpi/plans/bulk-upsert', [
+            'effective_from' => '2026-05-06',
+            'effective_to' => null,
+            'scope' => ['branch_id' => $branch->id, 'branch_group_id' => $group->id, 'role' => 'intern', 'roles' => ['agent']],
+            'rows' => [
+                ['user_id' => $agent->id, 'items' => $payloadItems],
+                ['user_id' => $intern->id, 'items' => $payloadItems],
+            ],
+        ])->assertOk()
+            ->assertJsonPath('success_count', 1)
+            ->assertJsonPath('failed_count', 1)
+            ->assertJsonPath('results.0.ok', true)
+            ->assertJsonPath('results.1.code', 'KPI_FORBIDDEN_SCOPE')
+            ->assertJsonPath('results.1.details.role', 'intern');
     }
 
     public function test_mop_bulk_upsert_rejects_foreign_scope_at_request_level(): void
