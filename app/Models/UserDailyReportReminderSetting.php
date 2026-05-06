@@ -16,11 +16,13 @@ class UserDailyReportReminderSetting extends Model
         'remind_time',
         'timezone',
         'channels',
+        'allow_edit_submitted_daily_report',
     ];
 
     protected $casts = [
         'enabled' => 'boolean',
         'channels' => 'array',
+        'allow_edit_submitted_daily_report' => 'boolean',
     ];
 
     public function user(): BelongsTo

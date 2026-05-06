@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\DailyReport;
 use App\Models\KpiPeriodLock;
 use App\Models\User;
+use App\Models\UserDailyReportReminderSetting;
 use App\Services\DailyReportService;
 use App\Support\RbacBranchScope;
 use Carbon\Carbon;
@@ -23,9 +24,13 @@ class DailyReportController extends Controller
 
     public function status(Request $request)
     {
-        return response()->json(
-            $this->dailyReports->reportStatusPayload($this->authUser(), $request->input('report_date'))
-        );
+        $user = $this->authUser();
+        $payload = $this->dailyReports->reportStatusPayload($user, $request->input('report_date'));
+        $reportDate = (string) ($payload['report_date'] ?? $this->dailyReports->defaultReportDate($user));
+        $report = $payload['report'] ?? null;
+        $payload['can_edit_submitted'] = $this->canEditSubmittedDailyReport($user, $user, $reportDate, $report);
+
+        return response()->json($payload);
     }
 
     public function index(Request $request)
@@ -143,6 +148,7 @@ class DailyReportController extends Controller
                 'comment' => $report?->comment ?? '',
                 'plans_for_tomorrow' => $report?->plans_for_tomorrow ?? '',
             ],
+            'can_edit_submitted' => $this->canEditSubmittedDailyReport($user, $user, $date, $report),
         ]);
     }
 
@@ -191,6 +197,9 @@ class DailyReportController extends Controller
         $validated = $this->validatedPayload($request, false);
         $reportDate = $dailyReport->report_date->toDateString();
         $this->ensureCanEditByPeriodRules($authUser, $targetUser, $reportDate, $dailyReport);
+        if (! $this->canEditSubmittedDailyReport($authUser, $targetUser, $reportDate, $dailyReport)) {
+            $this->denyKpi('KPI_SUBMITTED_EDIT_FORBIDDEN', 'Submitted daily report cannot be edited by current settings.');
+        }
         $metrics = $this->dailyReports->autoMetrics($targetUser, $reportDate);
         $payload = array_merge($metrics, [
             'role_slug' => $targetUser->role?->slug,
@@ -377,5 +386,40 @@ class DailyReportController extends Controller
             'details' => (object) $details,
             'trace_id' => request()->attributes->get('trace_id'),
         ], $status));
+    }
+
+    private function canEditSubmittedDailyReport(
+        User $actor,
+        User $targetUser,
+        string $reportDate,
+        mixed $report
+    ): bool {
+        $isSubmitted = $report instanceof DailyReport && $report->submitted_at !== null;
+        if (! $isSubmitted) {
+            return true;
+        }
+
+        $role = $actor->role?->slug;
+        if (in_array($role, ['admin', 'superadmin', 'owner', 'rop', 'branch_director'], true)) {
+            return true;
+        }
+
+        if ((int) $actor->id !== (int) $targetUser->id) {
+            return true;
+        }
+
+        if (in_array($role, ['agent', 'intern', 'mop'], true) && $this->isDateLocked($targetUser, $reportDate)) {
+            return false;
+        }
+
+        if (! \Illuminate\Support\Facades\Schema::hasTable('user_daily_report_reminder_settings')) {
+            return false;
+        }
+
+        $setting = UserDailyReportReminderSetting::query()
+            ->where('user_id', $targetUser->id)
+            ->first();
+
+        return (bool) ($setting?->allow_edit_submitted_daily_report ?? false);
     }
 }

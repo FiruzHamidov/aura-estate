@@ -8,6 +8,7 @@ use App\Models\KpiIntegrationStatus;
 use App\Models\KpiQualityIssue;
 use App\Models\User;
 use App\Services\KpiModuleService;
+use App\Support\RbacBranchScope;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -15,7 +16,10 @@ use Illuminate\Validation\Rule;
 
 class KpiModuleController extends Controller
 {
-    public function __construct(private readonly KpiModuleService $service)
+    public function __construct(
+        private readonly KpiModuleService $service,
+        private readonly RbacBranchScope $branchScope
+    )
     {
     }
 
@@ -32,8 +36,13 @@ class KpiModuleController extends Controller
                 ? Carbon::parse($validated['date'], 'Asia/Dushanbe')
                 : Carbon::now('Asia/Dushanbe');
 
+            $this->ensureCanReadUserPlans($this->authUser(), (int) $validated['user_id']);
+            $effective = $this->service->effectivePlanForUser((int) $validated['user_id'], $date);
+
             return response()->json([
-                'data' => $this->service->plansForUser((int) $validated['user_id'], $date),
+                'data' => $effective['items'],
+                'plans' => $effective['items'],
+                'source' => $effective['source'],
             ]);
         }
 
@@ -50,11 +59,19 @@ class KpiModuleController extends Controller
             'effective_from' => 'required|date_format:Y-m-d',
             'effective_to' => 'nullable|date_format:Y-m-d|after_or_equal:effective_from',
             'items' => 'required|array|min:1',
-            'items.*.metric_key' => ['required', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
+            'items.*.metric' => ['nullable', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
+            'items.*.metric_key' => ['nullable', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
             'items.*.daily_plan' => 'required|numeric|min:0',
             'items.*.weight' => 'required|numeric|min:0|max:1',
             'items.*.comment' => 'nullable|string|max:500',
         ]);
+
+        $validated['items'] = collect((array) $validated['items'])->map(function (array $item) {
+            $item['metric_key'] = (string) ($item['metric_key'] ?? $item['metric'] ?? '');
+            return $item;
+        })->all();
+
+        $this->validateWeightSum($validated['items']);
 
         try {
             $result = $this->service->upsertUserPlans($this->authUser(), $userId, $validated);
@@ -81,6 +98,63 @@ class KpiModuleController extends Controller
         $role = (string) ($validated['role'] ?? 'mop');
 
         return response()->json(['data' => $this->service->upsertPlans($role, $validated['items'])]);
+    }
+
+    public function commonPlans(Request $request)
+    {
+        $validated = $request->validate([
+            'role' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'date' => 'required|date_format:Y-m-d',
+            'branch_id' => 'nullable|integer|exists:branches,id',
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
+        ]);
+
+        $this->ensureCommonScopeReadable($this->authUser(), $validated);
+        $date = Carbon::parse($validated['date'], 'Asia/Dushanbe');
+
+        return response()->json([
+            'data' => $this->service->commonPlans(
+                (string) $validated['role'],
+                $date,
+                isset($validated['branch_id']) ? (int) $validated['branch_id'] : null,
+                isset($validated['branch_group_id']) ? (int) $validated['branch_group_id'] : null
+            ),
+        ]);
+    }
+
+    public function upsertCommonPlans(Request $request)
+    {
+        $this->ensureManageAccess($this->authUser(), ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
+
+        $validated = $request->validate([
+            'role' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'effective_from' => 'required|date_format:Y-m-d',
+            'effective_to' => 'nullable|date_format:Y-m-d|after_or_equal:effective_from',
+            'branch_id' => 'nullable|integer|exists:branches,id',
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
+            'items' => 'required|array|min:1',
+            'items.*.metric' => ['nullable', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
+            'items.*.metric_key' => ['nullable', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
+            'items.*.daily_plan' => 'required|numeric|min:0',
+            'items.*.weight' => 'required|numeric|min:0|max:1',
+            'items.*.comment' => 'nullable|string|max:500',
+        ]);
+
+        $validated['items'] = collect((array) $validated['items'])->map(function (array $item) {
+            $item['metric_key'] = (string) ($item['metric_key'] ?? $item['metric'] ?? '');
+            return $item;
+        })->all();
+
+        $this->validateWeightSum($validated['items']);
+        $this->ensureCommonScopeManageable($this->authUser(), $validated);
+
+        try {
+            $result = $this->service->upsertCommonPlans($this->authUser(), $validated);
+        } catch (\DomainException $e) {
+            return $this->kpiError('KPI_PLAN_PERIOD_CONFLICT', $e->getMessage(), 409);
+        }
+
+        return response()->json(['data' => $result]);
     }
 
     public function daily(Request $request)
@@ -430,5 +504,94 @@ class KpiModuleController extends Controller
         $user->loadMissing('role');
 
         return $user;
+    }
+
+    private function validateWeightSum(array $items): void
+    {
+        $sum = round((float) collect($items)->sum(fn (array $item) => (float) ($item['weight'] ?? 0)), 4);
+        if (abs($sum - 1.0) > 0.0001) {
+            abort(response()->json([
+                'code' => 'KPI_VALIDATION_FAILED',
+                'message' => 'Validation failed.',
+                'details' => [
+                    'errors' => [
+                        'items' => ['The sum of all items.weight must be exactly 1.0.'],
+                    ],
+                ],
+                'trace_id' => request()->attributes->get('trace_id'),
+            ], 422));
+        }
+    }
+
+    private function ensureCanReadUserPlans(User $actor, int $targetUserId): void
+    {
+        $target = User::query()->findOrFail($targetUserId);
+        $actor->loadMissing('role');
+
+        $allowed = match ($actor->role?->slug) {
+            'admin', 'superadmin', 'owner' => true,
+            'rop', 'branch_director' => (int) $actor->branch_id === (int) $target->branch_id,
+            'mop' => (int) $actor->branch_group_id === (int) $target->branch_group_id,
+            default => (int) $actor->id === (int) $target->id,
+        };
+
+        if (! $allowed) {
+            $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
+        }
+    }
+
+    private function ensureCommonScopeReadable(User $actor, array $scope): void
+    {
+        $actor->loadMissing('role');
+        $role = (string) ($actor->role?->slug ?? '');
+
+        if ($role === 'rop') {
+            $this->branchScope->ensureSameBranchOrDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
+            $this->branchScope->ensureBranchGroupInUserBranchOrDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
+            return;
+        }
+
+        if ($role === 'branch_director') {
+            $this->branchScope->ensureSameBranchOrDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
+            return;
+        }
+
+        if ($role === 'mop') {
+            if (isset($scope['role']) && (string) $scope['role'] === 'mop') {
+                $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
+            }
+            $this->branchScope->ensureSameBranchOrDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
+            $this->branchScope->ensureSameBranchGroupOrDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
+            return;
+        }
+    }
+
+    private function ensureCommonScopeManageable(User $actor, array $scope): void
+    {
+        $actor->loadMissing('role');
+
+        if (in_array($actor->role?->slug, ['admin', 'superadmin', 'owner'], true)) {
+            return;
+        }
+
+        if ($actor->role?->slug === 'branch_director' || $actor->role?->slug === 'rop') {
+            $this->branchScope->ensureSameBranchOrDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
+            $this->branchScope->ensureBranchGroupInUserBranchOrDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
+            return;
+        }
+
+        if ($actor->role?->slug === 'mop') {
+            $planRole = (string) ($scope['role'] ?? '');
+
+            if ($planRole === 'mop' || $planRole === 'rop') {
+                $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
+            }
+
+            $this->branchScope->ensureSameBranchGroupOrDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
+            $this->branchScope->ensureSameBranchOrDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
+            return;
+        }
+
+        $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
     }
 }

@@ -12,6 +12,8 @@ class KpiPlan extends Model
     protected $fillable = [
         'role_slug',
         'user_id',
+        'branch_id',
+        'branch_group_id',
         'metric_key',
         'daily_plan',
         'weight',

@@ -8,6 +8,7 @@ use App\Models\BranchGroup;
 use App\Models\DailyReport;
 use App\Models\Role;
 use App\Models\User;
+use App\Models\UserDailyReportReminderSetting;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
@@ -37,6 +38,16 @@ class DailyReportFrontendScenariosTest extends TestCase
             $t->unsignedInteger('shows_count')->default(0); $t->unsignedInteger('new_clients_count')->default(0); $t->unsignedInteger('new_properties_count')->default(0);
             $t->unsignedInteger('deposits_count')->default(0); $t->unsignedInteger('deals_count')->default(0);
             $t->text('comment')->nullable(); $t->text('plans_for_tomorrow')->nullable(); $t->timestamp('submitted_at')->nullable(); $t->timestamps();
+        });
+        Schema::create('user_daily_report_reminder_settings', function (Blueprint $t) {
+            $t->id();
+            $t->unsignedBigInteger('user_id')->unique();
+            $t->boolean('enabled')->default(false);
+            $t->string('remind_time', 5)->default('18:30');
+            $t->string('timezone', 64)->default('Asia/Dushanbe');
+            $t->json('channels')->nullable();
+            $t->boolean('allow_edit_submitted_daily_report')->default(false);
+            $t->timestamps();
         });
         Schema::create('personal_access_tokens', function (Blueprint $t) {
             $t->id(); $t->morphs('tokenable'); $t->string('name'); $t->string('token', 64)->unique();
@@ -101,6 +112,29 @@ class DailyReportFrontendScenariosTest extends TestCase
 
         $this->getJson('/api/daily-reports')->assertOk()->assertJsonCount(4, 'data');
         $this->getJson('/api/kpi/daily?date=2026-05-01')->assertOk();
+    }
+
+    public function test_agent_cannot_edit_own_submitted_report_without_flag_and_can_with_flag(): void
+    {
+        [$users, $reports] = $this->seedContext();
+        Sanctum::actingAs($users['agentA']);
+
+        $this->patchJson('/api/daily-reports/'.$reports['agentA'], ['comment' => 'blocked'])
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'KPI_SUBMITTED_EDIT_FORBIDDEN');
+
+        UserDailyReportReminderSetting::query()->create([
+            'user_id' => $users['agentA']->id,
+            'enabled' => false,
+            'remind_time' => '18:30',
+            'timezone' => 'Asia/Dushanbe',
+            'channels' => ['in_app'],
+            'allow_edit_submitted_daily_report' => true,
+        ]);
+
+        $this->patchJson('/api/daily-reports/'.$reports['agentA'], ['comment' => 'allowed'])
+            ->assertOk()
+            ->assertJsonPath('comment', 'allowed');
     }
 
     private function seedContext(): array

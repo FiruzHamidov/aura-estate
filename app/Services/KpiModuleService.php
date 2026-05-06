@@ -12,9 +12,11 @@ use App\Models\KpiPlan;
 use App\Models\KpiQualityIssue;
 use App\Models\KpiTelegramReportConfig;
 use App\Models\User;
+use App\Services\Crm\AuditLogger;
 use App\Services\DailyReportService;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Schema;
@@ -28,7 +30,10 @@ class KpiModuleService
     private const STATUS_WEAK = 'weak';
     private const STATUS_URGENT = 'urgent';
 
-    public function __construct(private readonly DailyReportService $dailyReportService)
+    public function __construct(
+        private readonly DailyReportService $dailyReportService,
+        private readonly AuditLogger $auditLogger
+    )
     {
     }
 
@@ -81,13 +86,6 @@ class KpiModuleService
     public function plansForUser(int $userId, Carbon $date): Collection
     {
         $user = User::query()->with('role')->findOrFail($userId);
-        $role = (string) ($user->role?->slug ?? 'mop');
-        $base = $this->plans($role)->keyBy('metric_key');
-
-        if (! Schema::hasTable('kpi_plans')) {
-            return $base->values();
-        }
-
         $personalRows = KpiPlan::query()
             ->where('user_id', $userId)
             ->where(function ($q) use ($date) {
@@ -96,28 +94,34 @@ class KpiModuleService
             ->where(function ($q) use ($date) {
                 $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $date->toDateString());
             })
-            ->get()
-            ->keyBy('metric_key');
+            ->get();
 
-        return $base->map(function (array $row) use ($personalRows, $userId) {
-            $personal = $personalRows->get($row['metric_key']);
-            if (! $personal) {
-                $row['metric'] = $row['metric_key'];
-                $row['plan_source'] = 'role_default';
-                return $row;
-            }
+        if ($personalRows->isNotEmpty()) {
+            return $this->serializePlanRows($personalRows, 'personal');
+        }
 
-            $row['user_id'] = $userId;
-            $row['metric'] = $row['metric_key'];
-            $row['daily_plan'] = (float) $personal->daily_plan;
-            $row['weight'] = (float) $personal->weight;
-            $row['comment'] = (string) ($personal->comment ?? $row['comment']);
-            $row['effective_from'] = optional($personal->effective_from)->toDateString();
-            $row['effective_to'] = optional($personal->effective_to)->toDateString();
-            $row['plan_source'] = 'personal';
+        $role = (string) ($user->role?->slug ?? 'mop');
+        $commonRows = $this->findCommonPlanRows(
+            $role,
+            $date,
+            $user->branch_id ? (int) $user->branch_id : null,
+            $user->branch_group_id ? (int) $user->branch_group_id : null
+        );
 
-            return $row;
-        })->values();
+        if ($commonRows->isNotEmpty()) {
+            return $this->serializePlanRows($commonRows, 'common');
+        }
+
+        return collect();
+    }
+
+    public function effectivePlanForUser(int $userId, Carbon $date): array
+    {
+        $rows = $this->plansForUser($userId, $date);
+        return [
+            'source' => $rows->first()['source'] ?? null,
+            'items' => $rows->values(),
+        ];
     }
 
     public function upsertUserPlans(User $actor, int $userId, array $payload): Collection
@@ -148,7 +152,7 @@ class KpiModuleService
         }
 
         foreach ((array) $payload['items'] as $item) {
-            KpiPlan::query()->create([
+            $newPlan = KpiPlan::query()->create([
                 'role_slug' => (string) ($user->role?->slug ?? 'mop'),
                 'user_id' => $userId,
                 'metric_key' => (string) $item['metric_key'],
@@ -158,9 +162,129 @@ class KpiModuleService
                 'effective_from' => $from,
                 'effective_to' => $to,
             ]);
+
+            $this->auditLogger->log(
+                $newPlan,
+                $actor,
+                'kpi_personal_plan_upserted',
+                [],
+                [
+                    'target_user_id' => $userId,
+                    'target_role' => (string) ($user->role?->slug ?? 'mop'),
+                    'scope' => [
+                        'branch_id' => $user->branch_id ? (int) $user->branch_id : null,
+                        'branch_group_id' => $user->branch_group_id ? (int) $user->branch_group_id : null,
+                    ],
+                    'metric_key' => (string) $item['metric_key'],
+                    'daily_plan' => (float) $item['daily_plan'],
+                    'weight' => (float) $item['weight'],
+                    'comment' => $item['comment'] ?? null,
+                    'effective_from' => $from,
+                    'effective_to' => $to,
+                ],
+                'KPI personal plan upserted'
+            );
         }
 
         return $this->plansForUser($userId, Carbon::parse($from, self::TZ));
+    }
+
+    public function commonPlans(string $role, Carbon $date, ?int $branchId, ?int $branchGroupId): Collection
+    {
+        $rows = $this->findCommonPlanRows($role, $date, $branchId, $branchGroupId);
+        if ($rows->isEmpty()) {
+            return collect();
+        }
+
+        return $this->serializePlanRows($rows, 'common');
+    }
+
+    public function upsertCommonPlans(User $actor, array $payload): Collection
+    {
+        $role = (string) $payload['role'];
+        $from = (string) $payload['effective_from'];
+        $to = $payload['effective_to'] ?? null;
+        $branchId = isset($payload['branch_id']) ? (int) $payload['branch_id'] : null;
+        $branchGroupId = isset($payload['branch_group_id']) ? (int) $payload['branch_group_id'] : null;
+
+        $existing = KpiPlan::query()
+            ->whereNull('user_id')
+            ->where('role_slug', $role)
+            ->where('branch_id', $branchId)
+            ->where('branch_group_id', $branchGroupId)
+            ->where(function ($q) use ($from, $to) {
+                $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $from);
+            })
+            ->where(function ($q) use ($to) {
+                if ($to === null) {
+                    $q->whereNotNull('id');
+                    return;
+                }
+
+                $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $to);
+            })
+            ->get();
+
+        $samePeriod = $existing->every(function (KpiPlan $plan) use ($from, $to) {
+            return optional($plan->effective_from)->toDateString() === $from
+                && optional($plan->effective_to)->toDateString() === $to;
+        });
+
+        if ($existing->isNotEmpty() && ! $samePeriod) {
+            throw new \DomainException('Plan period conflicts with an existing common KPI plan interval.');
+        }
+
+        KpiPlan::query()
+            ->whereNull('user_id')
+            ->where('role_slug', $role)
+            ->where('branch_id', $branchId)
+            ->where('branch_group_id', $branchGroupId)
+            ->whereDate('effective_from', $from)
+            ->where(function ($q) use ($to) {
+                if ($to === null) {
+                    $q->whereNull('effective_to');
+                    return;
+                }
+
+                $q->whereDate('effective_to', $to);
+            })
+            ->delete();
+
+        foreach ((array) $payload['items'] as $item) {
+            $newPlan = KpiPlan::query()->create([
+                'role_slug' => $role,
+                'user_id' => null,
+                'branch_id' => $branchId,
+                'branch_group_id' => $branchGroupId,
+                'metric_key' => (string) $item['metric_key'],
+                'daily_plan' => (float) $item['daily_plan'],
+                'weight' => (float) $item['weight'],
+                'comment' => $item['comment'] ?? null,
+                'effective_from' => $from,
+                'effective_to' => $to,
+            ]);
+
+            $this->auditLogger->log(
+                $newPlan,
+                $actor,
+                'kpi_common_plan_upserted',
+                [],
+                [
+                    'role' => $role,
+                    'branch_id' => $branchId,
+                    'branch_group_id' => $branchGroupId,
+                    'metric_key' => (string) $item['metric_key'],
+                    'daily_plan' => (float) $item['daily_plan'],
+                    'weight' => (float) $item['weight'],
+                    'comment' => $item['comment'] ?? null,
+                    'effective_from' => $from,
+                    'effective_to' => $to,
+                ],
+                'KPI common plan upserted'
+            );
+        }
+
+        return $this->commonPlans($role, Carbon::parse($from, self::TZ), $branchId, $branchGroupId);
     }
 
     public function dailyRows(User $authUser, Carbon $date, array $filters): Collection
@@ -899,15 +1023,100 @@ class KpiModuleService
         }
     }
 
+    private function findCommonPlanRows(string $role, Carbon $date, ?int $branchId, ?int $branchGroupId): EloquentCollection
+    {
+        $queryBase = KpiPlan::query()
+            ->whereNull('user_id')
+            ->where('role_slug', $role)
+            ->where(function ($q) use ($date) {
+                $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $date->toDateString());
+            })
+            ->where(function ($q) use ($date) {
+                $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $date->toDateString());
+            });
+
+        $scopes = [];
+
+        if (in_array($role, ['agent', 'intern'], true)) {
+            if ($branchGroupId !== null) {
+                $scopes[] = ['branch_group_id' => $branchGroupId, 'branch_id' => $branchId];
+            }
+            if ($branchId !== null) {
+                $scopes[] = ['branch_group_id' => null, 'branch_id' => $branchId];
+            }
+            $scopes[] = ['branch_group_id' => null, 'branch_id' => null];
+        } elseif ($role === 'mop') {
+            if ($branchGroupId !== null) {
+                $scopes[] = ['branch_group_id' => $branchGroupId, 'branch_id' => $branchId];
+            }
+            if ($branchId !== null) {
+                $scopes[] = ['branch_group_id' => null, 'branch_id' => $branchId];
+            }
+            $scopes[] = ['branch_group_id' => null, 'branch_id' => null];
+        } else {
+            if ($branchId !== null) {
+                $scopes[] = ['branch_group_id' => null, 'branch_id' => $branchId];
+            }
+            $scopes[] = ['branch_group_id' => null, 'branch_id' => null];
+        }
+
+        foreach ($scopes as $scope) {
+            $q = (clone $queryBase);
+            if ($scope['branch_group_id'] !== null) {
+                $q->where('branch_group_id', $scope['branch_group_id']);
+            } else {
+                $q->whereNull('branch_group_id');
+            }
+
+            if ($scope['branch_id'] !== null) {
+                $q->where('branch_id', $scope['branch_id']);
+            } else {
+                $q->whereNull('branch_id');
+            }
+
+            $rows = $q->orderBy('id')->get();
+            if ($rows->isNotEmpty()) {
+                return $rows;
+            }
+        }
+
+        return new EloquentCollection();
+    }
+
+    private function serializePlanRows(EloquentCollection $rows, string $source): Collection
+    {
+        return $rows->map(function (KpiPlan $row) use ($source) {
+            return [
+                'id' => $row->id,
+                'role' => (string) $row->role_slug,
+                'metric' => (string) $row->metric_key,
+                'metric_key' => (string) $row->metric_key,
+                'daily_plan' => (float) $row->daily_plan,
+                'weight' => (float) $row->weight,
+                'comment' => (string) ($row->comment ?? ''),
+                'effective_from' => optional($row->effective_from)->toDateString(),
+                'effective_to' => optional($row->effective_to)->toDateString(),
+                'branch_id' => $row->branch_id ? (int) $row->branch_id : null,
+                'branch_group_id' => $row->branch_group_id ? (int) $row->branch_group_id : null,
+                'user_id' => $row->user_id ? (int) $row->user_id : null,
+                'source' => $source,
+                'plan_source' => $source,
+            ];
+        })->values();
+    }
+
     private function ensurePlanScopeAccess(User $actor, User $target): void
     {
         $actor->loadMissing('role');
+        $target->loadMissing('role');
         $role = (string) ($actor->role?->slug ?? '');
+        $targetRole = (string) ($target->role?->slug ?? '');
 
         $allowed = match ($role) {
             'admin', 'superadmin', 'owner' => true,
             'rop', 'branch_director' => (int) $actor->branch_id === (int) $target->branch_id,
-            'mop' => (int) $actor->branch_group_id === (int) $target->branch_group_id,
+            'mop' => in_array($targetRole, ['agent', 'intern'], true)
+                && (int) $actor->branch_group_id === (int) $target->branch_group_id,
             default => (int) $actor->id === (int) $target->id,
         };
 

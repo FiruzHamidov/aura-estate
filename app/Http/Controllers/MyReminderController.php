@@ -21,6 +21,7 @@ class MyReminderController extends Controller
                 'remind_time' => '18:30',
                 'timezone' => 'Asia/Dushanbe',
                 'channels' => [NotificationChannel::IN_APP],
+                'allow_edit_submitted_daily_report' => false,
             ]
         );
 
@@ -34,6 +35,7 @@ class MyReminderController extends Controller
             'remind_time' => 'required|date_format:H:i',
             'timezone' => 'required|timezone',
             'channels' => 'nullable|array|min:1',
+            'allow_edit_submitted_daily_report' => 'nullable|boolean',
             'channels.*' => ['string', Rule::in([
                 NotificationChannel::IN_APP,
                 NotificationChannel::TELEGRAM,
@@ -48,6 +50,9 @@ class MyReminderController extends Controller
             'remind_time' => $validated['remind_time'],
             'timezone' => $validated['timezone'],
             'channels' => array_values($validated['channels'] ?? [NotificationChannel::IN_APP]),
+            'allow_edit_submitted_daily_report' => array_key_exists('allow_edit_submitted_daily_report', $validated)
+                ? (bool) $validated['allow_edit_submitted_daily_report']
+                : (bool) $setting->allow_edit_submitted_daily_report,
         ]);
         $setting->save();
 
@@ -61,6 +66,7 @@ class MyReminderController extends Controller
             'remind_time' => (string) $setting->remind_time,
             'timezone' => (string) $setting->timezone,
             'channels' => array_values($setting->channels ?? [NotificationChannel::IN_APP]),
+            'allow_edit_submitted_daily_report' => (bool) ($setting->allow_edit_submitted_daily_report ?? false),
         ];
     }
 

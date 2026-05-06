@@ -94,6 +94,7 @@ class KpiDailyReminderAndProgressTest extends TestCase
             $table->string('remind_time', 5)->default('18:30');
             $table->string('timezone', 64)->default('Asia/Dushanbe');
             $table->json('channels')->nullable();
+            $table->boolean('allow_edit_submitted_daily_report')->default(false);
             $table->timestamps();
         });
 
@@ -128,7 +129,8 @@ class KpiDailyReminderAndProgressTest extends TestCase
             ->assertJsonPath('enabled', false)
             ->assertJsonPath('remind_time', '18:30')
             ->assertJsonPath('timezone', 'Asia/Dushanbe')
-            ->assertJsonPath('channels.0', 'in_app');
+            ->assertJsonPath('channels.0', 'in_app')
+            ->assertJsonPath('allow_edit_submitted_daily_report', false);
 
         $this->putJson('/api/me/reminders/daily-report', [
             'enabled' => true,
@@ -137,7 +139,8 @@ class KpiDailyReminderAndProgressTest extends TestCase
             'channels' => ['in_app', 'telegram'],
         ])->assertOk()
             ->assertJsonPath('enabled', true)
-            ->assertJsonPath('channels.1', 'telegram');
+            ->assertJsonPath('channels.1', 'telegram')
+            ->assertJsonPath('allow_edit_submitted_daily_report', false);
 
         DB::table('daily_reports')->updateOrInsert(
             ['user_id' => $agent->id, 'report_date' => '2026-05-05'],
