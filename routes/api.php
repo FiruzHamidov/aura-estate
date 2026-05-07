@@ -145,6 +145,10 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::get('/me/reminders/daily-report', [MyReminderController::class, 'showDailyReport']);
     Route::put('/me/reminders/daily-report', [MyReminderController::class, 'updateDailyReport']);
     Route::get('/kpi/daily/my-progress', [KpiModuleController::class, 'myDailyProgress']);
+    Route::get('/kpi/daily/my-report', [DailyReportController::class, 'myReport']);
+    Route::post('/kpi/daily/my-report', [DailyReportController::class, 'submitMyReport']);
+    Route::get('/kpi/daily/report', [DailyReportController::class, 'scopeReport']);
+    Route::patch('/kpi/daily/report', [DailyReportController::class, 'updateScopeReport']);
 
     Route::get('/user/profile', [UserController::class, 'profile']);
     Route::put('/user/profile', [UserController::class, 'updateProfile']);

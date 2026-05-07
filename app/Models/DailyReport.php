@@ -28,6 +28,10 @@ class DailyReport extends Model
         'is_finalized',
         'finalized_at',
         'finalized_by',
+        'updated_by',
+        'updated_by_role',
+        'updated_reason',
+        'edit_source',
     ];
 
     protected $casts = [

@@ -12,9 +12,12 @@ use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Validation\ValidationException;
 
 class DailyReportController extends Controller
 {
+    private const STRICT_KPI_KEYS = ['objects', 'shows', 'ads', 'calls', 'sales'];
+
     public function __construct(
         private readonly DailyReportService $dailyReports,
         private readonly RbacBranchScope $branchScope
@@ -150,6 +153,229 @@ class DailyReportController extends Controller
             ],
             'can_edit_submitted' => $this->canEditSubmittedDailyReport($user, $user, $date, $report),
         ]);
+    }
+
+    public function myReport(Request $request)
+    {
+        $user = $this->authUser();
+        $this->ensureDailyMyReportRole($user);
+
+        $validated = $request->validate([
+            'date' => 'required|date_format:Y-m-d',
+        ]);
+
+        $date = (string) $validated['date'];
+        $report = DailyReport::query()
+            ->where('user_id', $user->id)
+            ->whereDate('report_date', $date)
+            ->first();
+
+        $auto = $this->dailyReports->autoMetrics($user, $date);
+
+        return response()->json([
+            'report_date' => $date,
+            'metrics' => [
+                'objects' => $this->metricPayload((int) ($auto['new_properties_count'] ?? 0), 'system', 'objects'),
+                'shows' => $this->metricPayload((int) ($auto['shows_count'] ?? 0), 'system', 'shows'),
+                'ads' => $this->metricPayload((int) ($report?->ad_count ?? 0), 'manual', 'ads'),
+                'calls' => $this->metricPayload((int) ($report?->calls_count ?? 0), 'manual', 'calls'),
+                'sales' => $this->metricPayload((float) ($auto['sales_count'] ?? 0), 'system', 'sales'),
+            ],
+            'manual' => [
+                'ads' => (int) ($report?->ad_count ?? 0),
+                'calls' => (int) ($report?->calls_count ?? 0),
+                'comment' => $report?->comment ?? '',
+                'plans_for_tomorrow' => $report?->plans_for_tomorrow ?? '',
+            ],
+            'submitted' => $report?->submitted_at !== null,
+            'submitted_at' => $report?->submitted_at,
+            'meta' => [
+                'locked' => $this->isDateLocked($user, $date),
+            ],
+        ]);
+    }
+
+    public function submitMyReport(Request $request)
+    {
+        $user = $this->authUser();
+        $this->ensureDailyMyReportRole($user);
+
+        $this->validateStrictMetricKeys($request);
+
+        $validated = $request->validate([
+            'report_date' => 'required|date_format:Y-m-d',
+            'ads' => 'required|integer|min:0',
+            'calls' => 'required|integer|min:0',
+            'comment' => 'nullable|string|max:2000',
+            'plans_for_tomorrow' => 'nullable|string|max:2000',
+        ]);
+
+        $reportDate = (string) $validated['report_date'];
+        $this->ensureCanEditByPeriodRules($user, $user, $reportDate, null, true);
+        $metrics = $this->dailyReports->autoMetrics($user, $reportDate);
+
+        $payload = [
+            'role_slug' => $user->role?->slug,
+            'ad_count' => (int) $validated['ads'],
+            'calls_count' => (int) $validated['calls'],
+            'meetings_count' => (int) ($metrics['meetings_count'] ?? 0),
+            'shows_count' => (int) ($metrics['shows_count'] ?? 0),
+            'new_clients_count' => (int) ($metrics['new_clients_count'] ?? 0),
+            'new_properties_count' => (int) ($metrics['new_properties_count'] ?? 0),
+            'deals_count' => (int) ($metrics['deals_count'] ?? 0),
+            'comment' => $validated['comment'] ?? '',
+            'plans_for_tomorrow' => $validated['plans_for_tomorrow'] ?? '',
+            'submitted_at' => now(),
+        ];
+
+        if (\Illuminate\Support\Facades\Schema::hasColumn('daily_reports', 'sales_count')) {
+            $payload['sales_count'] = (float) ($metrics['sales_count'] ?? 0);
+        }
+
+        $existing = DailyReport::query()
+            ->where('user_id', $user->id)
+            ->whereDate('report_date', $reportDate)
+            ->first();
+
+        if ($existing) {
+            $existing->update($payload);
+        } else {
+            DailyReport::query()->create(array_merge($payload, [
+                'user_id' => $user->id,
+                'report_date' => $reportDate,
+            ]));
+        }
+
+        return $this->myReport(new Request(['date' => $reportDate]));
+    }
+
+    public function scopeReport(Request $request)
+    {
+        $actor = $this->authUser();
+        $validated = $request->validate([
+            'date' => 'required|date_format:Y-m-d',
+            'employee_id' => 'required|integer|exists:users,id',
+        ]);
+
+        $targetUser = User::query()->with('role')->findOrFail((int) $validated['employee_id']);
+        $this->ensureCanReadScopedReport($actor, $targetUser);
+
+        $date = (string) $validated['date'];
+        $report = DailyReport::query()
+            ->where('user_id', $targetUser->id)
+            ->whereDate('report_date', $date)
+            ->first();
+
+        $auto = $this->dailyReports->autoMetrics($targetUser, $date);
+
+        return response()->json([
+            'report_date' => $date,
+            'employee_id' => $targetUser->id,
+            'employee_name' => $targetUser->name,
+            'employee_role' => (string) ($targetUser->role?->slug ?? ''),
+            'editable' => $this->canActorEditTargetInScope($actor, $targetUser)
+                && $this->canEditSubmittedDailyReport($actor, $targetUser, $date, $report),
+            'metrics' => [
+                'objects' => $this->metricPayload((int) ($auto['new_properties_count'] ?? 0), 'system', 'objects'),
+                'shows' => $this->metricPayload((int) ($auto['shows_count'] ?? 0), 'system', 'shows'),
+                'ads' => $this->metricPayload((int) ($report?->ad_count ?? 0), 'manual', 'ads'),
+                'calls' => $this->metricPayload((int) ($report?->calls_count ?? 0), 'manual', 'calls'),
+                'sales' => $this->metricPayload((float) ($auto['sales_count'] ?? 0), 'system', 'sales'),
+            ],
+            'manual' => [
+                'ads' => (int) ($report?->ad_count ?? 0),
+                'calls' => (int) ($report?->calls_count ?? 0),
+                'comment' => $report?->comment ?? '',
+                'plans_for_tomorrow' => $report?->plans_for_tomorrow ?? '',
+            ],
+            'submitted' => $report?->submitted_at !== null,
+            'submitted_at' => $report?->submitted_at,
+            'meta' => [
+                'locked' => $this->isDateLocked($targetUser, $date),
+                'scope' => [
+                    'actor_role' => $actor->role?->slug,
+                    'actor_branch_id' => $actor->branch_id,
+                    'actor_branch_group_id' => $actor->branch_group_id,
+                ],
+            ],
+        ]);
+    }
+
+    public function updateScopeReport(Request $request)
+    {
+        $actor = $this->authUser();
+        $this->validateStrictMetricKeys($request, [
+            'report_date',
+            'employee_id',
+            'ads',
+            'calls',
+            'comment',
+            'plans_for_tomorrow',
+            'updated_reason',
+            'edit_source',
+        ]);
+
+        $validated = $request->validate([
+            'report_date' => 'required|date_format:Y-m-d',
+            'employee_id' => 'required|integer|exists:users,id',
+            'ads' => 'required|integer|min:0',
+            'calls' => 'required|integer|min:0',
+            'comment' => 'nullable|string|max:2000',
+            'plans_for_tomorrow' => 'nullable|string|max:2000',
+            'updated_reason' => 'nullable|string|max:500',
+            'edit_source' => 'nullable|string|max:64',
+        ]);
+
+        $targetUser = User::query()->with('role')->findOrFail((int) $validated['employee_id']);
+        $this->ensureCanEditScopedReport($actor, $targetUser);
+
+        $reportDate = (string) $validated['report_date'];
+        $report = DailyReport::query()
+            ->where('user_id', $targetUser->id)
+            ->whereDate('report_date', $reportDate)
+            ->first();
+
+        $this->ensureCanEditByPeriodRules($actor, $targetUser, $reportDate, $report, true);
+        if (! $this->canEditSubmittedDailyReport($actor, $targetUser, $reportDate, $report)) {
+            $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Submitted daily report cannot be edited by current settings.');
+        }
+
+        $metrics = $this->dailyReports->autoMetrics($targetUser, $reportDate);
+        $payload = [
+            'role_slug' => $targetUser->role?->slug,
+            'ad_count' => (int) $validated['ads'],
+            'calls_count' => (int) $validated['calls'],
+            'meetings_count' => (int) ($metrics['meetings_count'] ?? 0),
+            'shows_count' => (int) ($metrics['shows_count'] ?? 0),
+            'new_clients_count' => (int) ($metrics['new_clients_count'] ?? 0),
+            'new_properties_count' => (int) ($metrics['new_properties_count'] ?? 0),
+            'deals_count' => (int) ($metrics['deals_count'] ?? 0),
+            'comment' => $validated['comment'] ?? '',
+            'plans_for_tomorrow' => $validated['plans_for_tomorrow'] ?? '',
+            'submitted_at' => $report?->submitted_at ?? now(),
+            'updated_by' => $actor->id,
+            'updated_by_role' => (string) ($actor->role?->slug ?? ''),
+            'updated_reason' => $validated['updated_reason'] ?? null,
+            'edit_source' => $validated['edit_source'] ?? 'supervisor',
+        ];
+
+        if (\Illuminate\Support\Facades\Schema::hasColumn('daily_reports', 'sales_count')) {
+            $payload['sales_count'] = (float) ($metrics['sales_count'] ?? 0);
+        }
+
+        if ($report) {
+            $report->update($payload);
+        } else {
+            DailyReport::query()->create(array_merge($payload, [
+                'user_id' => $targetUser->id,
+                'report_date' => $reportDate,
+            ]));
+        }
+
+        return $this->scopeReport(new Request([
+            'date' => $reportDate,
+            'employee_id' => $targetUser->id,
+        ]));
     }
 
     public function store(Request $request)
@@ -358,7 +584,8 @@ class DailyReportController extends Controller
         User $actor,
         User $targetUser,
         string $reportDate,
-        ?DailyReport $report
+        ?DailyReport $report,
+        bool $enforceDeadline = false
     ): void {
         $role = $actor->role?->slug;
         $isPrivileged = in_array($role, ['admin', 'superadmin', 'owner', 'rop', 'branch_director'], true);
@@ -368,7 +595,7 @@ class DailyReportController extends Controller
             $this->denyKpi('KPI_FINALIZED_EDIT_FORBIDDEN', 'Finalized KPI report cannot be edited.');
         }
 
-        if (!$isRestricted) {
+        if (!$isRestricted && !$enforceDeadline) {
             return;
         }
 
@@ -376,6 +603,134 @@ class DailyReportController extends Controller
             $this->denyKpi('KPI_FORBIDDEN_LOCKED_PERIOD', 'Period is locked for your role.');
         }
 
+        if ($enforceDeadline) {
+            $reportDeadline = Carbon::parse($reportDate, $this->timezone())->endOfDay();
+            if (Carbon::now($this->timezone())->gt($reportDeadline)) {
+                $this->denyKpi('KPI_FORBIDDEN_DEADLINE_PASSED', 'Deadline for this report date has passed.');
+            }
+        }
+
+    }
+
+    private function ensureDailyMyReportRole(User $user): void
+    {
+        if (! in_array($user->role?->slug, ['agent', 'mop'], true)) {
+            $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Role is not allowed for this action.');
+        }
+    }
+
+    private function ensureCanReadScopedReport(User $actor, User $targetUser): void
+    {
+        $actorRole = (string) ($actor->role?->slug ?? '');
+        $targetRole = (string) ($targetUser->role?->slug ?? '');
+
+        if ($actorRole === 'agent') {
+            if ((int) $actor->id !== (int) $targetUser->id) {
+                $this->denyKpi('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
+            }
+
+            return;
+        }
+
+        if ($actorRole === 'mop') {
+            if ($targetRole !== 'agent') {
+                $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Role is not allowed for this action.');
+            }
+
+            if ((int) $actor->branch_group_id !== (int) $targetUser->branch_group_id) {
+                $this->denyKpi('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
+            }
+
+            return;
+        }
+
+        if (in_array($actorRole, ['rop', 'branch_director', 'admin', 'superadmin', 'owner'], true)) {
+            if (! in_array($targetRole, ['agent', 'mop'], true)) {
+                $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Target role is not supported for this action.');
+            }
+
+            if (in_array($actorRole, ['rop', 'branch_director'], true)
+                && (int) $actor->branch_id !== (int) $targetUser->branch_id) {
+                $this->denyKpi('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
+            }
+
+            return;
+        }
+
+        $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Role is not allowed for this action.');
+    }
+
+    private function ensureCanEditScopedReport(User $actor, User $targetUser): void
+    {
+        $this->ensureCanReadScopedReport($actor, $targetUser);
+        if (! $this->canActorEditTargetInScope($actor, $targetUser)) {
+            $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Role is not allowed for this action.');
+        }
+    }
+
+    private function canActorEditTargetInScope(User $actor, User $targetUser): bool
+    {
+        $actorRole = (string) ($actor->role?->slug ?? '');
+        $targetRole = (string) ($targetUser->role?->slug ?? '');
+
+        if ($actorRole === 'mop') {
+            return $targetRole === 'agent' && (int) $actor->branch_group_id === (int) $targetUser->branch_group_id;
+        }
+
+        if (in_array($actorRole, ['rop', 'branch_director'], true)) {
+            return in_array($targetRole, ['agent', 'mop'], true) && (int) $actor->branch_id === (int) $targetUser->branch_id;
+        }
+
+        if (in_array($actorRole, ['admin', 'superadmin', 'owner'], true)) {
+            return in_array($targetRole, ['agent', 'mop'], true);
+        }
+
+        return (int) $actor->id === (int) $targetUser->id;
+    }
+
+    private function validateStrictMetricKeys(Request $request, array $knownPayloadFields = ['report_date', 'ads', 'calls', 'comment', 'plans_for_tomorrow']): void
+    {
+        $legacyKpiLike = ['objects_count', 'shows_count', 'sales_count', 'deals_count', 'deals', 'call', 'show', 'deal'];
+
+        $errors = [];
+        foreach (array_keys($request->all()) as $field) {
+            if (in_array($field, $knownPayloadFields, true)) {
+                continue;
+            }
+
+            if (in_array($field, self::STRICT_KPI_KEYS, true) || in_array($field, $legacyKpiLike, true)) {
+                $errors[$field] = ['This metric is not writable for this endpoint.'];
+                continue;
+            }
+
+            if (str_contains($field, 'count') || str_contains($field, 'metric') || str_contains($field, 'kpi')) {
+                $errors[$field] = ['Unknown KPI key.'];
+            }
+        }
+
+        if ($errors !== []) {
+            throw ValidationException::withMessages($errors);
+        }
+    }
+
+    private function metricPayload(int|float $fact, string $source, string $metricKey): array
+    {
+        $payload = [
+            'fact' => $fact,
+            'source' => $source,
+        ];
+
+        $target = config('kpi.v2.targets.'.$metricKey);
+        if (is_int($target) || is_float($target)) {
+            $payload['target'] = $target;
+        }
+
+        return $payload;
+    }
+
+    private function timezone(): string
+    {
+        return (string) config('app.timezone', 'Asia/Dushanbe');
     }
 
     private function denyKpi(string $code, string $message, int $status = 403, array $details = []): void
