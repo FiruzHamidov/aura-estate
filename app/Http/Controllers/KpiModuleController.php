@@ -66,8 +66,10 @@ class KpiModuleController extends Controller
         $this->ensureManageAccess($this->authUser(), ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
 
         $validated = $request->validate([
-            'effective_from' => 'required|date_format:Y-m-d',
-            'effective_to' => 'nullable|date_format:Y-m-d|after_or_equal:effective_from',
+            'effective_from' => 'required|date',
+            'effective_to' => 'nullable|date|after_or_equal:effective_from',
+            'replace_if_conflict' => 'sometimes|boolean',
+            'conflict_strategy' => ['sometimes', Rule::in(['error', 'replace'])],
             'items' => 'required|array|min:1',
             'items.*.metric' => ['nullable', 'required_without:items.*.metric_key', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
             'items.*.metric_key' => ['nullable', 'required_without:items.*.metric', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
@@ -77,6 +79,10 @@ class KpiModuleController extends Controller
         ]);
 
         $validated['items'] = $this->normalizePlanItems((array) $validated['items']);
+        $validated['effective_from'] = Carbon::parse((string) $validated['effective_from'], 'Asia/Dushanbe')->toDateString();
+        if (isset($validated['effective_to']) && $validated['effective_to'] !== null) {
+            $validated['effective_to'] = Carbon::parse((string) $validated['effective_to'], 'Asia/Dushanbe')->toDateString();
+        }
         $this->assertWeightSumOrKpiError($validated['items']);
 
         try {
@@ -94,8 +100,8 @@ class KpiModuleController extends Controller
         $this->ensureManageAccess($actor, ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
 
         $validated = $request->validate([
-            'effective_from' => 'required|date_format:Y-m-d',
-            'effective_to' => 'nullable|date_format:Y-m-d|after_or_equal:effective_from',
+            'effective_from' => 'required|date',
+            'effective_to' => 'nullable|date|after_or_equal:effective_from',
             'replace_if_conflict' => 'sometimes|boolean',
             'conflict_strategy' => ['sometimes', Rule::in(['error', 'replace'])],
             'scope' => 'required|array',
@@ -110,6 +116,10 @@ class KpiModuleController extends Controller
             'rows.*.user_id' => 'required|integer|exists:users,id',
             'rows.*.items' => 'required|array|min:1',
         ]);
+        $validated['effective_from'] = Carbon::parse((string) $validated['effective_from'], 'Asia/Dushanbe')->toDateString();
+        if (isset($validated['effective_to']) && $validated['effective_to'] !== null) {
+            $validated['effective_to'] = Carbon::parse((string) $validated['effective_to'], 'Asia/Dushanbe')->toDateString();
+        }
 
         $scope = (array) $validated['scope'];
         $scopeRoles = $this->extractScopeRoles($scope);
