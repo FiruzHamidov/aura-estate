@@ -12,6 +12,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
@@ -96,7 +97,41 @@ class UserController extends Controller
         });
     }
 
-    private function applyIndexFilters(Builder $query, array $validated, User $authUser, bool $applyStatusFilter = true): Builder
+    private function parseBooleanQueryFlag(Request $request, string $key): bool
+    {
+        if (! $request->exists($key)) {
+            return false;
+        }
+
+        $raw = $request->query($key);
+
+        if (is_bool($raw)) {
+            return $raw;
+        }
+
+        if (is_int($raw) || is_float($raw) || is_string($raw)) {
+            $parsed = filter_var($raw, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+
+            if ($parsed !== null) {
+                return $parsed;
+            }
+        }
+
+        Log::warning('Invalid include_unassigned value received for users index; defaulting to false.', [
+            'actor_user_id' => Auth::id(),
+            'value' => $raw,
+        ]);
+
+        return false;
+    }
+
+    private function applyIndexFilters(
+        Builder $query,
+        array $validated,
+        User $authUser,
+        bool $applyStatusFilter = true,
+        bool $includeUnassigned = false
+    ): Builder
     {
         if (! empty($validated['name'])) {
             $query->where('name', 'like', '%'.trim($validated['name']).'%');
@@ -118,6 +153,12 @@ class UserController extends Controller
 
         if (! empty($validated['branch_group_id'])) {
             $query->where('branch_group_id', $validated['branch_group_id']);
+
+            // Variant A: when group filter is set for branch-scoped managers,
+            // unassigned users (branch_id IS NULL) are always excluded.
+            if ($includeUnassigned && $this->isBranchScopedManager($this->roleSlug($authUser)) && ! empty($authUser->branch_id)) {
+                $query->where('branch_id', $authUser->branch_id);
+            }
         }
 
         if (! empty($validated['role'])) {
@@ -287,17 +328,17 @@ class UserController extends Controller
             'roles' => 'nullable|array',
             'roles.*' => 'string|exists:roles,slug',
             'report_agents' => 'nullable|boolean',
-            'include_unassigned' => 'nullable|boolean',
+            'include_unassigned' => 'nullable',
             'status' => ['nullable', Rule::in(['active', 'inactive'])],
             'page' => 'nullable|integer|min:1',
             'per_page' => 'nullable|integer|min:1|max:100',
         ]);
 
         $includeUnassigned = $this->isBranchScopedManager($this->roleSlug($authUser))
-            && ! empty($validated['include_unassigned']);
+            && $this->parseBooleanQueryFlag($request, 'include_unassigned');
 
         $query = $this->visibleUsersQuery($authUser, $includeUnassigned);
-        $baseQuery = $this->applyIndexFilters($query, $validated, $authUser, false);
+        $baseQuery = $this->applyIndexFilters($query, $validated, $authUser, false, $includeUnassigned);
         $tabCounts = $this->statusCountsForIndex(clone $baseQuery);
         $query = clone $baseQuery;
 
