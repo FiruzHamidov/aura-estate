@@ -1228,6 +1228,108 @@ class ClientAccessTest extends TestCase
         ]);
     }
 
+    public function test_mop_can_create_property_in_own_branch_group(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $groupA = $this->createBranchGroup($branch, 'Group A');
+
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $mop = $this->createUser($mopRole, $branch, 'MOP A', $groupA);
+
+        $propertyType = PropertyType::create(['name' => 'Apartment']);
+        $propertyStatus = PropertyStatus::create(['name' => 'Available']);
+
+        Sanctum::actingAs($mop);
+
+        $response = $this->postJson('/api/properties', [
+            'title' => 'MOP create',
+            'type_id' => $propertyType->id,
+            'status_id' => $propertyStatus->id,
+            'price' => 260000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ]);
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('created_by', $mop->id)
+            ->assertJsonPath('branch_group_id', $groupA->id);
+    }
+
+    public function test_mop_cannot_create_property_with_foreign_branch_group_in_payload(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $groupA = $this->createBranchGroup($branch, 'Group A');
+        $groupB = $this->createBranchGroup($branch, 'Group B');
+
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $mop = $this->createUser($mopRole, $branch, 'MOP A', $groupA);
+
+        $propertyType = PropertyType::create(['name' => 'Apartment']);
+        $propertyStatus = PropertyStatus::create(['name' => 'Available']);
+
+        Sanctum::actingAs($mop);
+
+        $this->postJson('/api/properties', [
+            'title' => 'MOP create denied by foreign group',
+            'type_id' => $propertyType->id,
+            'status_id' => $propertyStatus->id,
+            'price' => 260000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'branch_group_id' => $groupB->id,
+        ])
+            ->assertForbidden()
+            ->assertJsonPath('message', 'Доступ запрещён');
+    }
+
+    public function test_mop_cannot_create_property_without_branch_group(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $mop = $this->createUser($mopRole, $branch, 'MOP without group');
+
+        $propertyType = PropertyType::create(['name' => 'Apartment']);
+        $propertyStatus = PropertyStatus::create(['name' => 'Available']);
+
+        Sanctum::actingAs($mop);
+
+        $this->postJson('/api/properties', [
+            'title' => 'MOP create denied',
+            'type_id' => $propertyType->id,
+            'status_id' => $propertyStatus->id,
+            'price' => 260000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ])
+            ->assertForbidden()
+            ->assertJsonPath('message', 'Доступ запрещён');
+    }
+
+    public function test_client_cannot_create_property_due_to_non_client_middleware(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $clientRole = Role::create(['name' => 'Client', 'slug' => 'client']);
+        $client = $this->createUser($clientRole, $branch, 'Client User');
+
+        $propertyType = PropertyType::create(['name' => 'Apartment']);
+        $propertyStatus = PropertyStatus::create(['name' => 'Available']);
+
+        Sanctum::actingAs($client);
+
+        $this->postJson('/api/properties', [
+            'title' => 'Client create denied',
+            'type_id' => $propertyType->id,
+            'status_id' => $propertyStatus->id,
+            'price' => 260000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ])
+            ->assertForbidden()
+            ->assertJsonPath('message', 'Forbidden');
+    }
+
     public function test_mop_can_manage_only_properties_from_own_branch_group(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
@@ -1272,6 +1374,30 @@ class ClientAccessTest extends TestCase
             'currency' => 'TJS',
             'offer_type' => 'sale',
         ])->assertForbidden();
+
+        $photoAId = DB::table('property_photos')->insertGetId([
+            'property_id' => $propertyA->id,
+            'file_path' => 'properties/a.jpg',
+            'position' => 0,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $photoBId = DB::table('property_photos')->insertGetId([
+            'property_id' => $propertyB->id,
+            'file_path' => 'properties/b.jpg',
+            'position' => 0,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->putJson('/api/properties/' . $propertyA->id . '/photos/reorder', [
+            'photo_order' => [$photoAId],
+        ])->assertOk();
+
+        $this->putJson('/api/properties/' . $propertyB->id . '/photos/reorder', [
+            'photo_order' => [$photoBId],
+        ])->assertForbidden();
     }
 
     public function test_mop_without_branch_group_cannot_manage_property(): void
@@ -1294,6 +1420,54 @@ class ClientAccessTest extends TestCase
         Sanctum::actingAs($mop);
 
         $this->deleteJson('/api/properties/' . $property->id)->assertForbidden();
+
+        $photoId = DB::table('property_photos')->insertGetId([
+            'property_id' => $property->id,
+            'file_path' => 'properties/no-group.jpg',
+            'position' => 0,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->putJson('/api/properties/' . $property->id . '/photos/reorder', [
+            'photo_order' => [$photoId],
+        ])
+            ->assertForbidden()
+            ->assertJsonPath('message', 'Доступ запрещён');
+    }
+
+    public function test_intern_cannot_reorder_property_photos(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $group = $this->createBranchGroup($branch, 'Group A');
+
+        $internRole = Role::create(['name' => 'Intern', 'slug' => 'intern']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $intern = $this->createUser($internRole, $branch, 'Intern A', $group);
+        $agent = $this->createUser($agentRole, $branch, 'Agent A', $group);
+
+        $propertyType = PropertyType::create(['name' => 'Apartment']);
+        $propertyStatus = PropertyStatus::create(['name' => 'Available']);
+        $property = $this->createProperty($propertyType, $propertyStatus, $agent, [
+            'branch_group_id' => $group->id,
+        ]);
+
+        $photoId = DB::table('property_photos')->insertGetId([
+            'property_id' => $property->id,
+            'file_path' => 'properties/intern.jpg',
+            'position' => 0,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        Sanctum::actingAs($intern);
+
+        $this->putJson('/api/properties/' . $property->id . '/photos/reorder', [
+            'photo_order' => [$photoId],
+        ])
+            ->assertForbidden()
+            ->assertJsonPath('message', 'Доступ запрещён');
     }
 
     public function test_properties_branch_group_filter_uses_property_group_and_user_fallback(): void

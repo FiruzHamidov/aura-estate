@@ -82,6 +82,17 @@ class KpiModuleApiFeatureTest extends TestCase
         Schema::create('kpi_quality_issues', function (Blueprint $t) { $t->id(); $t->string('title',255); $t->string('severity',32)->default('medium'); $t->timestamp('detected_at')->nullable(); $t->string('status',32)->default('open'); $t->json('details')->nullable(); $t->timestamps(); });
         Schema::create('kpi_early_risk_alerts', function (Blueprint $t) { $t->id(); $t->unsignedBigInteger('user_id')->nullable(); $t->date('alert_date'); $t->string('status',32)->default('acknowledged'); $t->string('message',500)->nullable(); $t->json('meta')->nullable(); $t->timestamps(); });
         Schema::create('kpi_acceptance_runs', function (Blueprint $t) { $t->id(); $t->string('run_type',64)->default('daily'); $t->string('status',32)->default('success'); $t->timestamp('started_at')->nullable(); $t->timestamp('finished_at')->nullable(); $t->json('details')->nullable(); $t->timestamps();});
+        Schema::create('kpi_rop_plans', function (Blueprint $t) {
+            $t->id();
+            $t->string('role_slug', 64);
+            $t->unsignedBigInteger('branch_id')->nullable();
+            $t->unsignedBigInteger('branch_group_id')->nullable();
+            $t->string('month', 7);
+            $t->json('items');
+            $t->unsignedBigInteger('created_by')->nullable();
+            $t->unsignedBigInteger('updated_by')->nullable();
+            $t->timestamps();
+        });
 
         Schema::create('personal_access_tokens', function (Blueprint $t) { $t->id(); $t->morphs('tokenable'); $t->string('name'); $t->string('token',64)->unique(); $t->text('abilities')->nullable(); $t->timestamp('last_used_at')->nullable(); $t->timestamp('expires_at')->nullable(); $t->timestamps(); });
     }
@@ -934,5 +945,201 @@ class KpiModuleApiFeatureTest extends TestCase
             ->assertJsonPath('data.metric_keys.4', 'sales')
             ->assertJsonPath('data.mapping.objects.label', 'Объекты')
             ->assertJsonPath('data.mapping.sales.description', 'Количество завершённых сделок за период.');
+    }
+
+    public function test_personal_and_common_read_filter_out_non_whitelist_metrics(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+
+        $admin = User::create(['name' => 'Admin', 'phone' => '900000901', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900000902', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        KpiPlan::query()->create([
+            'role_slug' => 'agent',
+            'user_id' => $agent->id,
+            'metric_key' => 'calls',
+            'daily_plan' => 10,
+            'weight' => 1,
+            'effective_from' => '2026-05-01',
+        ]);
+        KpiPlan::query()->create([
+            'role_slug' => 'agent',
+            'user_id' => $agent->id,
+            'metric_key' => 'legacy_metric',
+            'daily_plan' => 999,
+            'weight' => 1,
+            'effective_from' => '2026-05-01',
+        ]);
+
+        $personal = $this->getJson('/api/kpi/plans?user_id='.$agent->id.'&date=2026-05-06')->assertOk();
+        $this->assertSame(['calls'], collect($personal->json('plans'))->pluck('metric_key')->values()->all());
+
+        KpiPlan::query()->create([
+            'role_slug' => 'agent',
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'metric_key' => 'objects',
+            'daily_plan' => 1,
+            'weight' => 1,
+            'effective_from' => '2026-05-01',
+        ]);
+        KpiPlan::query()->create([
+            'role_slug' => 'agent',
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'metric_key' => 'foo',
+            'daily_plan' => 1,
+            'weight' => 1,
+            'effective_from' => '2026-05-01',
+        ]);
+
+        $common = $this->getJson('/api/kpi/plans/common?role=agent&date=2026-05-06&branch_id='.$branch->id.'&branch_group_id='.$group->id)->assertOk();
+        $this->assertSame(['objects'], collect($common->json('plans'))->pluck('metric_key')->values()->all());
+    }
+
+    public function test_personal_upsert_rejects_unknown_metric_with_422(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+
+        $admin = User::create(['name' => 'Admin', 'phone' => '900000903', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900000904', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        $response = $this->patchJson('/api/kpi/plans/'.$agent->id, [
+            'effective_from' => '2026-05-01',
+            'items' => [
+                ['metric' => 'legacy_metric', 'daily_plan' => 1, 'weight' => 1],
+            ],
+        ])->assertStatus(422)
+            ->assertJsonPath('code', 'KPI_VALIDATION_FAILED');
+
+        $this->assertArrayHasKey('items.0.metric', (array) $response->json('details.errors'));
+    }
+
+    public function test_bulk_upsert_unknown_metric_returns_row_level_kpi_validation_failed(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+
+        $admin = User::create(['name' => 'Admin', 'phone' => '900000905', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900000906', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        $response = $this->postJson('/api/kpi/plans/bulk-upsert', [
+            'effective_from' => '2026-05-06',
+            'scope' => ['branch_id' => $branch->id, 'branch_group_id' => $group->id, 'role' => 'agent'],
+            'rows' => [[
+                'user_id' => $agent->id,
+                'items' => [
+                    ['metric_key' => 'legacy_metric', 'daily_plan' => 1, 'weight' => 1],
+                ],
+            ]],
+        ])->assertOk()
+            ->assertJsonPath('success_count', 0)
+            ->assertJsonPath('failed_count', 1)
+            ->assertJsonPath('results.0.code', 'KPI_VALIDATION_FAILED');
+
+        $this->assertArrayHasKey('items.0.metric_key', (array) $response->json('results.0.details.errors'));
+    }
+
+    public function test_rop_plans_crud_and_copy_with_period_conflict(): void
+    {
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '900000907', 'role_id' => $ropRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($rop);
+
+        $payload = [
+            'role' => 'agent',
+            'month' => '2026-06',
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'items' => [
+                ['metric_key' => 'objects', 'plan_value' => 10, 'weight' => 0.2],
+                ['metric_key' => 'shows', 'plan_value' => 10, 'weight' => 0.2],
+                ['metric_key' => 'ads', 'plan_value' => 10, 'weight' => 0.2],
+                ['metric_key' => 'calls', 'plan_value' => 10, 'weight' => 0.2],
+                ['metric_key' => 'sales', 'plan_value' => 10, 'weight' => 0.2],
+            ],
+        ];
+
+        $created = $this->postJson('/api/kpi/rop-plans', $payload)
+            ->assertCreated()
+            ->assertJsonPath('month', '2026-06')
+            ->assertJsonPath('meta.source', 'rop_plan');
+
+        $id = (int) $created->json('id');
+
+        $this->getJson('/api/kpi/rop-plans?month=2026-06&role=agent&branch_id='.$branch->id.'&branch_group_id='.$group->id)
+            ->assertOk()
+            ->assertJsonPath('meta.exists', true)
+            ->assertJsonPath('plans.0.id', $id);
+
+        $this->patchJson('/api/kpi/rop-plans/'.$id, [
+            'items' => [
+                ['metric_key' => 'objects', 'plan_value' => 20, 'weight' => 0.2],
+                ['metric_key' => 'shows', 'plan_value' => 10, 'weight' => 0.2],
+                ['metric_key' => 'ads', 'plan_value' => 10, 'weight' => 0.2],
+                ['metric_key' => 'calls', 'plan_value' => 10, 'weight' => 0.2],
+                ['metric_key' => 'sales', 'plan_value' => 10, 'weight' => 0.2],
+            ],
+        ])->assertOk()->assertJsonPath('items.0.metric_key', 'objects');
+
+        $copy = $this->postJson('/api/kpi/rop-plans/'.$id.'/copy', ['month' => '2026-07'])
+            ->assertCreated()
+            ->assertJsonPath('month', '2026-07');
+        $this->assertNotSame($id, (int) $copy->json('id'));
+
+        $this->postJson('/api/kpi/rop-plans', $payload)
+            ->assertStatus(409)
+            ->assertJsonPath('code', 'KPI_PLAN_PERIOD_CONFLICT');
+    }
+
+    public function test_rop_plans_reject_unknown_metric_and_keep_original_error_field_name(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900000908', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        $response = $this->postJson('/api/kpi/rop-plans', [
+            'role' => 'agent',
+            'month' => '2026-06',
+            'items' => [
+                ['metric' => 'legacy_metric', 'plan_value' => 10, 'weight' => 1],
+            ],
+        ])->assertStatus(422)
+            ->assertJsonPath('code', 'KPI_VALIDATION_FAILED');
+
+        $this->assertArrayHasKey('items.0.metric', (array) $response->json('details.errors'));
+    }
+
+    public function test_mop_cannot_create_rop_plan(): void
+    {
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $mop = User::create(['name' => 'MOP', 'phone' => '900000909', 'role_id' => $mopRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($mop);
+
+        $this->postJson('/api/kpi/rop-plans', [
+            'role' => 'agent',
+            'month' => '2026-06',
+            'items' => [
+                ['metric_key' => 'calls', 'plan_value' => 10, 'weight' => 1],
+            ],
+        ])->assertStatus(403)
+            ->assertJsonPath('code', 'KPI_FORBIDDEN_ROLE_ACTION');
     }
 }

@@ -37,8 +37,13 @@ components:
       properties:
         id: { type: integer }
         role: { $ref: '#/components/schemas/KpiRole' }
-        metric: { type: string, description: Legacy alias of metric_key }
-        metric_key: { type: string }
+        metric:
+          type: string
+          description: Legacy alias of metric_key
+          enum: [objects, shows, ads, calls, sales]
+        metric_key:
+          type: string
+          enum: [objects, shows, ads, calls, sales]
         daily_plan: { type: number }
         weight: { type: number }
         comment: { type: string }
@@ -53,8 +58,12 @@ components:
     KpiPlanItem:
       type: object
       properties:
-        metric: { type: string }
-        metric_key: { type: string }
+        metric:
+          type: string
+          enum: [objects, shows, ads, calls, sales]
+        metric_key:
+          type: string
+          enum: [objects, shows, ads, calls, sales]
         daily_plan: { type: number }
         weight: { type: number }
         comment: { type: string }
@@ -226,6 +235,23 @@ paths:
                     properties:
                       exists: { type: boolean }
                       source: { type: string, enum: [common] }
+              examples:
+                common_read:
+                  value:
+                    data:
+                      - metric_key: objects
+                        metric: objects
+                        daily_plan: 1
+                        weight: 0.2
+                    plans:
+                      - metric_key: objects
+                        metric: objects
+                        daily_plan: 1
+                        weight: 0.2
+                    source: common
+                    meta:
+                      exists: true
+                      source: common
         '403':
           description: Forbidden
           content:
@@ -296,6 +322,23 @@ paths:
                         type: string
                         nullable: true
                         enum: [personal, common, null]
+              examples:
+                personal_read:
+                  value:
+                    data:
+                      - metric_key: calls
+                        metric: calls
+                        daily_plan: 30
+                        weight: 0.2
+                    plans:
+                      - metric_key: calls
+                        metric: calls
+                        daily_plan: 30
+                        weight: 0.2
+                    source: personal
+                    meta:
+                      exists: true
+                      source: personal
         '401':
           description: Unauthenticated
           content:
@@ -323,6 +366,76 @@ paths:
         '200': { description: OK }
         '401': { description: Unauthenticated }
         '403': { description: Forbidden in current scope / role action }
+        '409': { description: Plan period conflict }
+        '422': { description: Validation failed }
+  /kpi/rop-plans:
+    get:
+      summary: List monthly ROP KPI plans by scope
+      parameters:
+        - in: query
+          name: month
+          required: true
+          schema: { type: string, pattern: '^\d{4}-(0[1-9]|1[0-2])$' }
+        - in: query
+          name: role
+          required: false
+          schema: { $ref: '#/components/schemas/KpiRole' }
+        - in: query
+          name: branch_id
+          required: false
+          schema: { type: integer }
+        - in: query
+          name: branch_group_id
+          required: false
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+        '403': { description: Forbidden }
+        '422': { description: Validation failed }
+    post:
+      summary: Create monthly ROP KPI plan
+      responses:
+        '201': { description: Created }
+        '403': { description: Forbidden }
+        '409': { description: Plan period conflict }
+        '422': { description: Validation failed }
+  /kpi/rop-plans/{id}:
+    get:
+      summary: Get monthly ROP KPI plan details
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+        '403': { description: Forbidden }
+        '404': { description: Not found }
+    patch:
+      summary: Update monthly ROP KPI plan
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200': { description: OK }
+        '403': { description: Forbidden }
+        '404': { description: Not found }
+        '409': { description: Plan period conflict }
+        '422': { description: Validation failed }
+  /kpi/rop-plans/{id}/copy:
+    post:
+      summary: Copy ROP plan as new plan
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '201': { description: Created }
+        '403': { description: Forbidden }
+        '404': { description: Not found }
         '409': { description: Plan period conflict }
         '422': { description: Validation failed }
     put:

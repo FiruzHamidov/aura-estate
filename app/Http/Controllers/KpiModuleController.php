@@ -14,6 +14,7 @@ use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
@@ -106,11 +107,6 @@ class KpiModuleController extends Controller
             'rows' => 'required|array|min:1|max:500',
             'rows.*.user_id' => 'required|integer|exists:users,id',
             'rows.*.items' => 'required|array|min:1',
-            'rows.*.items.*.metric' => ['nullable', 'required_without:rows.*.items.*.metric_key', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
-            'rows.*.items.*.metric_key' => ['nullable', 'required_without:rows.*.items.*.metric', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
-            'rows.*.items.*.daily_plan' => 'required|numeric|min:0',
-            'rows.*.items.*.weight' => 'required|numeric|min:0|max:1',
-            'rows.*.items.*.comment' => 'nullable|string|max:500',
         ]);
 
         $scope = (array) $validated['scope'];
@@ -134,6 +130,7 @@ class KpiModuleController extends Controller
             try {
                 $target = User::query()->with('role')->findOrFail($userId);
                 $rowRole = (string) ($target->role?->slug ?? '');
+                $this->validateBulkRowItems($items);
 
                 $this->kpiPlanScopePolicy->ensureCanManageBulkScope($actor, array_merge($scope, ['role' => $rowRole]));
 
@@ -901,6 +898,41 @@ class KpiModuleController extends Controller
         }
 
         return [];
+    }
+
+    private function validateBulkRowItems(array $items): void
+    {
+        $allowedMetricKeys = (array) config('kpi.v2.metric_keys', []);
+        $validator = Validator::make(
+            ['items' => $items],
+            [
+                'items' => 'required|array|min:1',
+                'items.*.metric' => ['nullable', 'required_without:items.*.metric_key', 'string', 'max:64'],
+                'items.*.metric_key' => ['nullable', 'required_without:items.*.metric', 'string', 'max:64'],
+                'items.*.daily_plan' => 'required|numeric|min:0',
+                'items.*.weight' => 'required|numeric|min:0|max:1',
+                'items.*.comment' => 'nullable|string|max:500',
+            ]
+        );
+
+        $validator->after(function ($validator) use ($items, $allowedMetricKeys) {
+            foreach ($items as $idx => $item) {
+                $metricKey = $item['metric_key'] ?? null;
+                $metric = $item['metric'] ?? null;
+
+                if (is_string($metricKey) && $metricKey !== '' && ! in_array($metricKey, $allowedMetricKeys, true)) {
+                    $validator->errors()->add("items.{$idx}.metric_key", 'The selected items.'.$idx.'.metric_key is invalid.');
+                }
+
+                if (is_string($metric) && $metric !== '' && ! in_array($metric, $allowedMetricKeys, true)) {
+                    $validator->errors()->add("items.{$idx}.metric", 'The selected items.'.$idx.'.metric is invalid.');
+                }
+            }
+        });
+
+        if ($validator->fails()) {
+            throw ValidationException::withMessages($validator->errors()->toArray());
+        }
     }
 
     private function extractRolesFromRequest(array $validated): array

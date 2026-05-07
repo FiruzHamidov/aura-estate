@@ -31,6 +31,7 @@ class KpiModuleService
     private const STATUS_CONTROL = 'control';
     private const STATUS_WEAK = 'weak';
     private const STATUS_URGENT = 'urgent';
+    private const PLAN_METRIC_WHITELIST = ['objects', 'shows', 'ads', 'calls', 'sales'];
 
     public function __construct(
         private readonly DailyReportService $dailyReportService,
@@ -1384,7 +1385,9 @@ class KpiModuleService
 
     private function serializePlanRows(EloquentCollection $rows, string $source): Collection
     {
-        return $rows->map(function (KpiPlan $row) use ($source) {
+        return $rows
+            ->filter(fn (KpiPlan $row) => in_array((string) $row->metric_key, self::PLAN_METRIC_WHITELIST, true))
+            ->map(function (KpiPlan $row) use ($source) {
             return [
                 'id' => $row->id,
                 'role' => (string) $row->role_slug,
