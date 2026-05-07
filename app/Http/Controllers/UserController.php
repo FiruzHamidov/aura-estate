@@ -57,7 +57,7 @@ class UserController extends Controller
         return in_array($roleSlug, ['mop'], true);
     }
 
-    private function visibleUsersQuery(User $authUser)
+    private function visibleUsersQuery(User $authUser, bool $includeUnassigned = false)
     {
         $roleSlug = $this->roleSlug($authUser);
 
@@ -71,7 +71,13 @@ class UserController extends Controller
             return $query->whereRaw('1 = 0');
         }
 
-        $query->where('branch_id', $authUser->branch_id);
+        $query->where(function (Builder $branchQuery) use ($authUser, $includeUnassigned) {
+            $branchQuery->where('branch_id', $authUser->branch_id);
+
+            if ($includeUnassigned) {
+                $branchQuery->orWhereNull('branch_id');
+            }
+        });
 
         return $query;
     }
@@ -108,8 +114,6 @@ class UserController extends Controller
             if (! empty($validated['branch_id'])) {
                 $query->where('branch_id', $validated['branch_id']);
             }
-        } elseif (! empty($authUser->branch_id)) {
-            $query->where('branch_id', $authUser->branch_id);
         }
 
         if (! empty($validated['branch_group_id'])) {
@@ -283,12 +287,16 @@ class UserController extends Controller
             'roles' => 'nullable|array',
             'roles.*' => 'string|exists:roles,slug',
             'report_agents' => 'nullable|boolean',
+            'include_unassigned' => 'nullable|boolean',
             'status' => ['nullable', Rule::in(['active', 'inactive'])],
             'page' => 'nullable|integer|min:1',
             'per_page' => 'nullable|integer|min:1|max:100',
         ]);
 
-        $query = $this->visibleUsersQuery($authUser);
+        $includeUnassigned = $this->isBranchScopedManager($this->roleSlug($authUser))
+            && ! empty($validated['include_unassigned']);
+
+        $query = $this->visibleUsersQuery($authUser, $includeUnassigned);
         $baseQuery = $this->applyIndexFilters($query, $validated, $authUser, false);
         $tabCounts = $this->statusCountsForIndex(clone $baseQuery);
         $query = clone $baseQuery;

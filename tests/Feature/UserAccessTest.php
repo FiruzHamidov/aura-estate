@@ -177,6 +177,126 @@ class UserAccessTest extends TestCase
         $this->getJson('/api/user/' . $director->id)->assertForbidden();
     }
 
+    public function test_rop_user_index_can_include_unassigned_users_when_requested(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $rop = User::create([
+            'name' => 'ROP A',
+            'phone' => '900000015',
+            'password' => bcrypt('password'),
+            'role_id' => $ropRole->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+
+        $sameBranchUser = User::create([
+            'name' => 'Agent A',
+            'phone' => '900000016',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+
+        $unassignedUser = User::create([
+            'name' => 'No Branch Agent',
+            'phone' => '900000017',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => null,
+            'status' => 'inactive',
+        ]);
+
+        User::create([
+            'name' => 'Agent B',
+            'phone' => '900000018',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branchB->id,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($rop);
+
+        $defaultResponse = $this->getJson('/api/user');
+        $defaultResponse->assertOk();
+        $defaultResponse->assertJsonMissing(['id' => $unassignedUser->id]);
+
+        $response = $this->getJson('/api/user?include_unassigned=1');
+        $response->assertOk();
+        $response->assertJsonCount(3, 'data');
+        $response->assertJsonFragment(['id' => $sameBranchUser->id]);
+        $response->assertJsonFragment(['id' => $unassignedUser->id]);
+        $response->assertJsonMissing(['phone' => '900000018']);
+        $response->assertJsonPath('total', 3);
+        $response->assertJsonPath('last_page', 1);
+        $response->assertJsonPath('active_count', 2);
+        $response->assertJsonPath('inactive_count', 1);
+    }
+
+    public function test_branch_director_user_index_can_include_unassigned_users_when_requested(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $directorRole = Role::create(['name' => 'Director', 'slug' => 'branch_director']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $director = User::create([
+            'name' => 'Director A',
+            'phone' => '900000019',
+            'password' => bcrypt('password'),
+            'role_id' => $directorRole->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+
+        $sameBranchUser = User::create([
+            'name' => 'Agent A',
+            'phone' => '900000020',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+
+        $unassignedUser = User::create([
+            'name' => 'No Branch Agent',
+            'phone' => '900000121',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => null,
+            'status' => 'inactive',
+        ]);
+
+        User::create([
+            'name' => 'Agent B',
+            'phone' => '900000122',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branchB->id,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($director);
+
+        $response = $this->getJson('/api/user?include_unassigned=1');
+        $response->assertOk();
+        $response->assertJsonCount(3, 'data');
+        $response->assertJsonFragment(['id' => $sameBranchUser->id]);
+        $response->assertJsonFragment(['id' => $unassignedUser->id]);
+        $response->assertJsonMissing(['phone' => '900000122']);
+        $response->assertJsonPath('total', 3);
+        $response->assertJsonPath('last_page', 1);
+        $response->assertJsonPath('active_count', 2);
+        $response->assertJsonPath('inactive_count', 1);
+    }
+
     public function test_rop_cannot_assign_privileged_role_and_branch_is_forced_for_branch_scoped_roles(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
@@ -458,6 +578,42 @@ class UserAccessTest extends TestCase
         $response->assertJsonPath('data.0.id', $agentB->id);
 
         $this->getJson('/api/user/' . $agentB->id)->assertOk();
+    }
+
+    public function test_superadmin_visibility_is_unchanged_when_include_unassigned_is_passed(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+
+        $superadminRole = Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $superadmin = User::create([
+            'name' => 'Superadmin',
+            'phone' => '900000054',
+            'password' => bcrypt('password'),
+            'role_id' => $superadminRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $unassigned = User::create([
+            'name' => 'Unassigned Agent',
+            'phone' => '900000055',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => null,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($superadmin);
+
+        $this->getJson('/api/user')
+            ->assertOk()
+            ->assertJsonFragment(['id' => $unassigned->id]);
+
+        $this->getJson('/api/user?include_unassigned=1')
+            ->assertOk()
+            ->assertJsonFragment(['id' => $unassigned->id]);
     }
 
     public function test_marketing_cannot_assign_admin_or_superadmin_roles(): void
