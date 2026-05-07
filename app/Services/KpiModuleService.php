@@ -19,6 +19,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use App\Support\KpiPlanScopePolicy;
 use Throwable;
@@ -199,6 +200,176 @@ class KpiModuleService
         }
 
         return $this->serializePlanRows($rows, 'common');
+    }
+
+    public function listPlans(User $actor, array $filters): array
+    {
+        $page = max((int) ($filters['page'] ?? 1), 1);
+        $perPage = max((int) ($filters['per_page'] ?? 20), 1);
+
+        $query = KpiPlan::query()
+            ->from('kpi_plans as kp')
+            ->leftJoin('users as u', 'u.id', '=', 'kp.user_id')
+            ->selectRaw("MIN(kp.id) as plan_id")
+            ->selectRaw("CASE WHEN kp.user_id IS NULL THEN 'common' ELSE 'personal' END as type")
+            ->selectRaw('kp.user_id')
+            ->selectRaw('u.name as user_name')
+            ->selectRaw('kp.role_slug as role')
+            ->selectRaw('kp.branch_id')
+            ->selectRaw('kp.branch_group_id')
+            ->selectRaw("CASE WHEN kp.user_id IS NULL THEN 'common' ELSE 'personal' END as source")
+            ->selectRaw('kp.effective_from')
+            ->selectRaw('kp.effective_to')
+            ->selectRaw('MAX(kp.updated_at) as updated_at')
+            ->selectRaw('COUNT(*) as items_count')
+            ->groupBy(
+                'kp.user_id',
+                'u.name',
+                'kp.role_slug',
+                'kp.branch_id',
+                'kp.branch_group_id',
+                'kp.effective_from',
+                'kp.effective_to'
+            )
+            ->orderByDesc(DB::raw('MAX(kp.updated_at)'));
+
+        if (($filters['type'] ?? null) === 'personal') {
+            $query->whereNotNull('kp.user_id');
+        } elseif (($filters['type'] ?? null) === 'common') {
+            $query->whereNull('kp.user_id');
+        }
+
+        if (isset($filters['user_id'])) {
+            $query->where('kp.user_id', (int) $filters['user_id']);
+        }
+
+        $roles = collect((array) ($filters['roles'] ?? []))
+            ->filter(fn ($role) => is_string($role) && $role !== '')
+            ->values();
+        if ($roles->isNotEmpty()) {
+            $query->whereIn('kp.role_slug', $roles->all());
+        } elseif (isset($filters['role'])) {
+            $query->where('kp.role_slug', (string) $filters['role']);
+        }
+
+        foreach (['branch_id', 'branch_group_id'] as $scopeField) {
+            if (isset($filters[$scopeField])) {
+                $query->where('kp.'.$scopeField, (int) $filters[$scopeField]);
+            }
+        }
+
+        if (! empty($filters['effective_from_from'])) {
+            $query->whereDate('kp.effective_from', '>=', (string) $filters['effective_from_from']);
+        }
+        if (! empty($filters['effective_from_to'])) {
+            $query->whereDate('kp.effective_from', '<=', (string) $filters['effective_from_to']);
+        }
+        if (! empty($filters['effective_to_from'])) {
+            $query->whereDate('kp.effective_to', '>=', (string) $filters['effective_to_from']);
+        }
+        if (! empty($filters['effective_to_to'])) {
+            $query->whereDate('kp.effective_to', '<=', (string) $filters['effective_to_to']);
+        }
+
+        $actor->loadMissing('role');
+        $role = (string) ($actor->role?->slug ?? '');
+        if (in_array($role, ['rop', 'branch_director'], true)) {
+            $query->where(function ($scope) use ($actor) {
+                $scope->where(function ($q) use ($actor) {
+                    $q->whereNotNull('kp.user_id')->where('u.branch_id', (int) $actor->branch_id);
+                })->orWhere(function ($q) use ($actor) {
+                    $q->whereNull('kp.user_id')->where(function ($q2) use ($actor) {
+                        $q2->where('kp.branch_id', (int) $actor->branch_id)->orWhereNull('kp.branch_id');
+                    });
+                });
+            });
+        } elseif ($role === 'mop') {
+            $query->where(function ($scope) use ($actor) {
+                $scope->where(function ($q) use ($actor) {
+                    $q->whereNotNull('kp.user_id')->where('u.branch_group_id', (int) $actor->branch_group_id);
+                })->orWhere(function ($q) use ($actor) {
+                    $q->whereNull('kp.user_id')->where(function ($q2) use ($actor) {
+                        $q2->where('kp.branch_group_id', (int) $actor->branch_group_id)
+                            ->orWhereNull('kp.branch_group_id');
+                    });
+                });
+            });
+        }
+
+        $paginator = $query->paginate($perPage, ['*'], 'page', $page);
+        $data = collect($paginator->items())->map(function ($row) {
+            return [
+                'plan_id' => (int) $row->plan_id,
+                'type' => (string) $row->type,
+                'user_id' => $row->user_id !== null ? (int) $row->user_id : null,
+                'user_name' => $row->user_name !== null ? (string) $row->user_name : null,
+                'role' => $row->role !== null ? (string) $row->role : null,
+                'branch_id' => $row->branch_id !== null ? (int) $row->branch_id : null,
+                'branch_group_id' => $row->branch_group_id !== null ? (int) $row->branch_group_id : null,
+                'source' => $row->source !== null ? (string) $row->source : null,
+                'effective_from' => $row->effective_from,
+                'effective_to' => $row->effective_to,
+                'updated_at' => $row->updated_at,
+                'updated_by' => null,
+                'items_count' => (int) $row->items_count,
+            ];
+        })->values()->all();
+
+        return [
+            'data' => $data,
+            'meta' => [
+                'page' => (int) $paginator->currentPage(),
+                'per_page' => (int) $paginator->perPage(),
+                'total' => (int) $paginator->total(),
+                'last_page' => (int) $paginator->lastPage(),
+            ],
+        ];
+    }
+
+    public function planById(int $planId, ?string $forcedType = null): ?array
+    {
+        $seed = KpiPlan::query()->find($planId);
+        if (! $seed) {
+            return null;
+        }
+
+        $type = $seed->user_id === null ? 'common' : 'personal';
+        if ($forcedType !== null && $forcedType !== $type) {
+            return null;
+        }
+
+        $query = KpiPlan::query()
+            ->where('role_slug', $seed->role_slug)
+            ->where('user_id', $seed->user_id)
+            ->where('branch_id', $seed->branch_id)
+            ->where('branch_group_id', $seed->branch_group_id);
+
+        if ($seed->effective_from === null) {
+            $query->whereNull('effective_from');
+        } else {
+            $query->whereDate('effective_from', optional($seed->effective_from)->toDateString());
+        }
+
+        if ($seed->effective_to === null) {
+            $query->whereNull('effective_to');
+        } else {
+            $query->whereDate('effective_to', optional($seed->effective_to)->toDateString());
+        }
+
+        $rows = $query->orderBy('id')->get();
+        if ($rows->isEmpty()) {
+            return null;
+        }
+
+        return [
+            'source' => $type,
+            'type' => $type,
+            'user_id' => $seed->user_id ? (int) $seed->user_id : null,
+            'role' => (string) $seed->role_slug,
+            'branch_id' => $seed->branch_id ? (int) $seed->branch_id : null,
+            'branch_group_id' => $seed->branch_group_id ? (int) $seed->branch_group_id : null,
+            'items' => $this->serializePlanRows($rows, $type)->values()->all(),
+        ];
     }
 
     public function upsertCommonPlans(User $actor, array $payload): Collection
@@ -1224,6 +1395,7 @@ class KpiModuleService
                 'comment' => (string) ($row->comment ?? ''),
                 'effective_from' => optional($row->effective_from)->toDateString(),
                 'effective_to' => optional($row->effective_to)->toDateString(),
+                'updated_at' => optional($row->updated_at)?->toISOString(),
                 'branch_id' => $row->branch_id ? (int) $row->branch_id : null,
                 'branch_group_id' => $row->branch_group_id ? (int) $row->branch_group_id : null,
                 'user_id' => $row->user_id ? (int) $row->user_id : null,

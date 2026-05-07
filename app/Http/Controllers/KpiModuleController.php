@@ -259,9 +259,92 @@ class KpiModuleController extends Controller
         return response()->json([
             'data' => $data,
             'plans' => $data,
+            'source' => 'common',
             'meta' => [
                 'exists' => $data->isNotEmpty(),
                 'source' => 'common',
+            ],
+        ]);
+    }
+
+    public function listPlans(Request $request)
+    {
+        $validated = $request->validate([
+            'type' => ['nullable', Rule::in(['personal', 'common'])],
+            'user_id' => 'nullable|integer|exists:users,id',
+            'role' => ['nullable', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'roles' => 'nullable|array|min:1',
+            'roles.*' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'branch_id' => 'nullable|integer|exists:branches,id',
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
+            'effective_from_from' => 'nullable|date_format:Y-m-d',
+            'effective_from_to' => 'nullable|date_format:Y-m-d',
+            'effective_to_from' => 'nullable|date_format:Y-m-d',
+            'effective_to_to' => 'nullable|date_format:Y-m-d',
+            'page' => 'nullable|integer|min:1',
+            'per_page' => 'nullable|integer|min:1|max:200',
+        ]);
+
+        if (isset($validated['user_id'])) {
+            $target = User::query()->findOrFail((int) $validated['user_id']);
+            $this->kpiPlanScopePolicy->ensureCanReadUserPlan($this->authUser(), $target);
+        }
+
+        $roles = collect((array) ($validated['roles'] ?? []))->values();
+        if ($roles->isNotEmpty() || isset($validated['role'])) {
+            foreach (($roles->isNotEmpty() ? $roles : collect([(string) $validated['role']])) as $role) {
+                $this->kpiPlanScopePolicy->ensureCanReadCommonPlan($this->authUser(), [
+                    'role' => (string) $role,
+                    'branch_id' => $validated['branch_id'] ?? null,
+                    'branch_group_id' => $validated['branch_group_id'] ?? null,
+                ]);
+            }
+        }
+
+        return response()->json($this->service->listPlans($this->authUser(), $validated));
+    }
+
+    public function showPlan(Request $request, int $planId)
+    {
+        $plan = $this->service->planById($planId, 'personal');
+        if ($plan === null) {
+            return $this->kpiError('KPI_PLAN_NOT_FOUND', 'KPI plan not found.', 404);
+        }
+
+        $target = User::query()->findOrFail((int) $plan['user_id']);
+        $this->kpiPlanScopePolicy->ensureCanReadUserPlan($this->authUser(), $target);
+
+        return response()->json([
+            'plans' => $plan['items'],
+            'data' => $plan['items'],
+            'source' => $plan['source'],
+            'meta' => [
+                'exists' => true,
+                'source' => $plan['source'],
+            ],
+        ]);
+    }
+
+    public function showCommonPlan(Request $request, int $planId)
+    {
+        $plan = $this->service->planById($planId, 'common');
+        if ($plan === null) {
+            return $this->kpiError('KPI_PLAN_NOT_FOUND', 'KPI plan not found.', 404);
+        }
+
+        $this->kpiPlanScopePolicy->ensureCanReadCommonPlan($this->authUser(), [
+            'role' => $plan['role'],
+            'branch_id' => $plan['branch_id'],
+            'branch_group_id' => $plan['branch_group_id'],
+        ]);
+
+        return response()->json([
+            'plans' => $plan['items'],
+            'data' => $plan['items'],
+            'source' => $plan['source'],
+            'meta' => [
+                'exists' => true,
+                'source' => $plan['source'],
             ],
         ]);
     }

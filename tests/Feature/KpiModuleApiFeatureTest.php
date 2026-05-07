@@ -240,6 +240,75 @@ class KpiModuleApiFeatureTest extends TestCase
             ->assertJsonPath('data.0.source', 'common');
     }
 
+    public function test_common_read_includes_unified_source_and_meta_source(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900000250', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        KpiPlan::query()->create([
+            'role_slug' => 'agent',
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'metric_key' => 'calls',
+            'daily_plan' => 20,
+            'weight' => 1,
+            'effective_from' => '2026-05-01',
+        ]);
+
+        $this->getJson('/api/kpi/plans/common?role=agent&date=2026-05-06&branch_id='.$branch->id.'&branch_group_id='.$group->id)
+            ->assertOk()
+            ->assertJsonPath('source', 'common')
+            ->assertJsonPath('meta.source', 'common')
+            ->assertJsonStructure(['plans' => [['updated_at']]]);
+    }
+
+    public function test_kpi_plan_list_and_details_endpoints_return_grouped_contract(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900000251', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900000252', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        KpiPlan::query()->create([
+            'role_slug' => 'agent',
+            'user_id' => $agent->id,
+            'metric_key' => 'calls',
+            'daily_plan' => 10,
+            'weight' => 0.5,
+            'effective_from' => '2026-05-01',
+            'effective_to' => null,
+        ]);
+        KpiPlan::query()->create([
+            'role_slug' => 'agent',
+            'user_id' => $agent->id,
+            'metric_key' => 'sales',
+            'daily_plan' => 1,
+            'weight' => 0.5,
+            'effective_from' => '2026-05-01',
+            'effective_to' => null,
+        ]);
+
+        $list = $this->getJson('/api/kpi/plans/list?type=personal&user_id='.$agent->id.'&page=1&per_page=20')
+            ->assertOk()
+            ->assertJsonPath('meta.page', 1)
+            ->assertJsonPath('meta.per_page', 20)
+            ->assertJsonPath('data.0.type', 'personal')
+            ->assertJsonPath('data.0.items_count', 2);
+
+        $planId = (int) $list->json('data.0.plan_id');
+        $this->getJson('/api/kpi/plans/'.$planId)
+            ->assertOk()
+            ->assertJsonPath('meta.exists', true)
+            ->assertJsonPath('meta.source', 'personal')
+            ->assertJsonCount(2, 'plans');
+    }
+
     public function test_upsert_common_plan_validates_weights_and_writes_audit(): void
     {
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);

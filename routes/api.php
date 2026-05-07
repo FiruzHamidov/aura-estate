@@ -158,11 +158,14 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::patch('/kpi-plans', [KpiModuleController::class, 'updatePlans'])->middleware('rop.branch.scope');
     Route::get('/kpi/plans', [KpiModuleController::class, 'plans'])->middleware('rop.branch.scope');
     Route::get('/kpi/plans/common', [KpiModuleController::class, 'commonPlans'])->middleware('rop.branch.scope');
+    Route::get('/kpi/plans/common/{planId}', [KpiModuleController::class, 'showCommonPlan'])->middleware('rop.branch.scope');
     Route::put('/kpi/plans/common', [KpiModuleController::class, 'upsertCommonPlans'])->middleware('rop.branch.scope');
     Route::patch('/kpi/plans/common', [KpiModuleController::class, 'upsertCommonPlans'])->middleware('rop.branch.scope');
     Route::post('/kpi/plans/common/apply-to-users', [KpiModuleController::class, 'applyCommonPlansToUsers'])->middleware('rop.branch.scope');
+    Route::get('/kpi/plans/list', [KpiModuleController::class, 'listPlans'])->middleware('rop.branch.scope');
     Route::get('/kpi/plans/eligible-users', [KpiModuleController::class, 'eligibleUsers'])->middleware('rop.branch.scope');
     Route::post('/kpi/plans/bulk-upsert', [KpiModuleController::class, 'bulkUpsertUserPlans'])->middleware('rop.branch.scope');
+    Route::get('/kpi/plans/{planId}', [KpiModuleController::class, 'showPlan'])->middleware('rop.branch.scope');
     Route::put('/kpi/plans/{userId}', [KpiModuleController::class, 'updateUserPlans'])->middleware('rop.branch.scope');
     Route::patch('/kpi/plans/{userId}', [KpiModuleController::class, 'updateUserPlans'])->middleware('rop.branch.scope');
     Route::get('/kpi/daily', [KpiModuleController::class, 'daily'])->middleware('rop.branch.scope');
