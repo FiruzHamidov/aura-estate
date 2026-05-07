@@ -135,8 +135,10 @@ class KpiModuleService
 
         $from = (string) $payload['effective_from'];
         $to = $payload['effective_to'] ?? null;
+        $replaceIfConflict = (bool) ($payload['replace_if_conflict'] ?? false);
+        $conflictStrategy = (string) ($payload['conflict_strategy'] ?? ($replaceIfConflict ? 'replace' : 'error'));
 
-        $conflicts = KpiPlan::query()
+        $conflictsQuery = KpiPlan::query()
             ->where('user_id', $userId)
             ->where(function ($q) use ($from, $to) {
                 $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $from);
@@ -148,47 +150,54 @@ class KpiModuleService
                 }
 
                 $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $to);
-            })
-            ->exists();
+            });
 
-        if ($conflicts) {
+        $hasConflicts = (clone $conflictsQuery)->exists();
+
+        if ($hasConflicts && $conflictStrategy !== 'replace') {
             throw new \DomainException('Plan period conflicts with an existing personal KPI plan interval.');
         }
 
-        foreach ((array) $payload['items'] as $item) {
-            $newPlan = KpiPlan::query()->create([
-                'role_slug' => (string) ($user->role?->slug ?? 'mop'),
-                'user_id' => $userId,
-                'metric_key' => (string) $item['metric_key'],
-                'daily_plan' => (float) $item['daily_plan'],
-                'weight' => (float) $item['weight'],
-                'comment' => $item['comment'] ?? null,
-                'effective_from' => $from,
-                'effective_to' => $to,
-            ]);
+        DB::transaction(function () use ($conflictsQuery, $hasConflicts, $conflictStrategy, $user, $userId, $payload, $from, $to, $actor): void {
+            if ($hasConflicts && $conflictStrategy === 'replace') {
+                $conflictsQuery->delete();
+            }
 
-            $this->auditLogger->log(
-                $newPlan,
-                $actor,
-                'kpi_personal_plan_upserted',
-                [],
-                [
-                    'target_user_id' => $userId,
-                    'target_role' => (string) ($user->role?->slug ?? 'mop'),
-                    'scope' => [
-                        'branch_id' => $user->branch_id ? (int) $user->branch_id : null,
-                        'branch_group_id' => $user->branch_group_id ? (int) $user->branch_group_id : null,
-                    ],
+            foreach ((array) $payload['items'] as $item) {
+                $newPlan = KpiPlan::query()->create([
+                    'role_slug' => (string) ($user->role?->slug ?? 'mop'),
+                    'user_id' => $userId,
                     'metric_key' => (string) $item['metric_key'],
                     'daily_plan' => (float) $item['daily_plan'],
                     'weight' => (float) $item['weight'],
                     'comment' => $item['comment'] ?? null,
                     'effective_from' => $from,
                     'effective_to' => $to,
-                ],
-                'KPI personal plan upserted'
-            );
-        }
+                ]);
+
+                $this->auditLogger->log(
+                    $newPlan,
+                    $actor,
+                    'kpi_personal_plan_upserted',
+                    [],
+                    [
+                        'target_user_id' => $userId,
+                        'target_role' => (string) ($user->role?->slug ?? 'mop'),
+                        'scope' => [
+                            'branch_id' => $user->branch_id ? (int) $user->branch_id : null,
+                            'branch_group_id' => $user->branch_group_id ? (int) $user->branch_group_id : null,
+                        ],
+                        'metric_key' => (string) $item['metric_key'],
+                        'daily_plan' => (float) $item['daily_plan'],
+                        'weight' => (float) $item['weight'],
+                        'comment' => $item['comment'] ?? null,
+                        'effective_from' => $from,
+                        'effective_to' => $to,
+                    ],
+                    'KPI personal plan upserted'
+                );
+            }
+        });
 
         return $this->plansForUser($userId, Carbon::parse($from, self::TZ));
     }

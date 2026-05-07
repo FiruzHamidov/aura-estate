@@ -618,6 +618,108 @@ class KpiModuleApiFeatureTest extends TestCase
         ]);
     }
 
+    public function test_bulk_upsert_keeps_conflict_error_by_default(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+
+        $admin = User::create(['name' => 'Admin', 'phone' => '900000455', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900000456', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        $items = [
+            ['metric' => 'objects', 'daily_plan' => 1, 'weight' => 0.2],
+            ['metric' => 'shows', 'daily_plan' => 2, 'weight' => 0.2],
+            ['metric' => 'ads', 'daily_plan' => 10, 'weight' => 0.2],
+            ['metric' => 'calls', 'daily_plan' => 30, 'weight' => 0.2],
+            ['metric' => 'sales', 'daily_plan' => 1, 'weight' => 0.2],
+        ];
+
+        $this->postJson('/api/kpi/plans/bulk-upsert', [
+            'effective_from' => '2026-05-01',
+            'effective_to' => null,
+            'scope' => ['branch_id' => $branch->id, 'branch_group_id' => $group->id, 'role' => 'agent'],
+            'rows' => [['user_id' => $agent->id, 'items' => $items]],
+        ])->assertOk()->assertJsonPath('success_count', 1);
+
+        $this->postJson('/api/kpi/plans/bulk-upsert', [
+            'effective_from' => '2026-05-02',
+            'effective_to' => null,
+            'scope' => ['branch_id' => $branch->id, 'branch_group_id' => $group->id, 'role' => 'agent'],
+            'rows' => [['user_id' => $agent->id, 'items' => $items]],
+        ])->assertOk()
+            ->assertJsonPath('success_count', 0)
+            ->assertJsonPath('failed_count', 1)
+            ->assertJsonPath('results.0.code', 'KPI_PLAN_PERIOD_CONFLICT');
+    }
+
+    public function test_bulk_upsert_replace_if_conflict_replaces_existing_personal_plan_idempotently(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+
+        $admin = User::create(['name' => 'Admin', 'phone' => '900000457', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900000458', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        $seedItems = [
+            ['metric' => 'objects', 'daily_plan' => 1, 'weight' => 0.2],
+            ['metric' => 'shows', 'daily_plan' => 2, 'weight' => 0.2],
+            ['metric' => 'ads', 'daily_plan' => 10, 'weight' => 0.2],
+            ['metric' => 'calls', 'daily_plan' => 30, 'weight' => 0.2],
+            ['metric' => 'sales', 'daily_plan' => 1, 'weight' => 0.2],
+        ];
+
+        $replaceItems = [
+            ['metric' => 'objects', 'daily_plan' => 20, 'weight' => 0.2],
+            ['metric' => 'shows', 'daily_plan' => 40, 'weight' => 0.2],
+            ['metric' => 'ads', 'daily_plan' => 220, 'weight' => 0.2],
+            ['metric' => 'calls', 'daily_plan' => 600, 'weight' => 0.2],
+            ['metric' => 'sales', 'daily_plan' => 20, 'weight' => 0.2],
+        ];
+
+        $this->postJson('/api/kpi/plans/bulk-upsert', [
+            'effective_from' => '2026-05-01',
+            'effective_to' => null,
+            'scope' => ['branch_id' => $branch->id, 'branch_group_id' => $group->id, 'role' => 'agent'],
+            'rows' => [['user_id' => $agent->id, 'items' => $seedItems]],
+        ])->assertOk()->assertJsonPath('success_count', 1);
+
+        $payload = [
+            'effective_from' => '2026-05-06',
+            'effective_to' => null,
+            'replace_if_conflict' => true,
+            'scope' => ['branch_id' => $branch->id, 'branch_group_id' => $group->id, 'role' => 'agent'],
+            'rows' => [['user_id' => $agent->id, 'items' => $replaceItems]],
+        ];
+
+        $this->postJson('/api/kpi/plans/bulk-upsert', $payload)
+            ->assertOk()
+            ->assertJsonPath('success_count', 1)
+            ->assertJsonPath('failed_count', 0)
+            ->assertJsonPath('results.0.ok', true);
+
+        $this->postJson('/api/kpi/plans/bulk-upsert', $payload)
+            ->assertOk()
+            ->assertJsonPath('success_count', 1)
+            ->assertJsonPath('failed_count', 0)
+            ->assertJsonPath('results.0.ok', true);
+
+        $this->assertSame(5, KpiPlan::query()->where('user_id', $agent->id)->count());
+        $this->assertSame(
+            '600.0000',
+            (string) KpiPlan::query()
+                ->where('user_id', $agent->id)
+                ->where('metric_key', 'calls')
+                ->whereDate('effective_from', '2026-05-06')
+                ->value('daily_plan')
+        );
+    }
+
     public function test_mop_cannot_manage_common_plan_even_in_own_group(): void
     {
         $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);

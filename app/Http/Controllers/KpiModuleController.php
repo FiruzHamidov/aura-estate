@@ -96,6 +96,8 @@ class KpiModuleController extends Controller
         $validated = $request->validate([
             'effective_from' => 'required|date_format:Y-m-d',
             'effective_to' => 'nullable|date_format:Y-m-d|after_or_equal:effective_from',
+            'replace_if_conflict' => 'sometimes|boolean',
+            'conflict_strategy' => ['sometimes', Rule::in(['error', 'replace'])],
             'scope' => 'required|array',
             'scope.role' => ['nullable', Rule::in(['agent', 'intern', 'mop', 'rop'])],
             'scope.roles' => 'nullable|array|min:1',
@@ -143,10 +145,14 @@ class KpiModuleController extends Controller
                 }
 
                 $this->validateWeightSum($items);
+                $replaceIfConflict = (bool) ($validated['replace_if_conflict'] ?? false);
+                $conflictStrategy = (string) ($validated['conflict_strategy'] ?? ($replaceIfConflict ? 'replace' : 'error'));
                 $this->service->upsertUserPlans($actor, $userId, [
                     'effective_from' => $validated['effective_from'],
                     'effective_to' => $validated['effective_to'] ?? null,
                     'items' => $items,
+                    'replace_if_conflict' => $replaceIfConflict,
+                    'conflict_strategy' => $conflictStrategy,
                 ]);
 
                 $results[] = ['user_id' => $userId, 'ok' => true];
