@@ -720,6 +720,40 @@ class KpiModuleApiFeatureTest extends TestCase
         );
     }
 
+    public function test_bulk_upsert_personal_plan_is_visible_in_list_with_branch_group_filter(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+
+        $admin = User::create(['name' => 'Admin', 'phone' => '900000601', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900000602', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        $items = [
+            ['metric' => 'objects', 'daily_plan' => 20, 'weight' => 0.2],
+            ['metric' => 'shows', 'daily_plan' => 40, 'weight' => 0.2],
+            ['metric' => 'ads', 'daily_plan' => 220, 'weight' => 0.2],
+            ['metric' => 'calls', 'daily_plan' => 600, 'weight' => 0.2],
+            ['metric' => 'sales', 'daily_plan' => 20, 'weight' => 0.2],
+        ];
+
+        $this->postJson('/api/kpi/plans/bulk-upsert', [
+            'effective_from' => '2026-05-01',
+            'effective_to' => null,
+            'replace_if_conflict' => true,
+            'scope' => ['branch_id' => $branch->id, 'branch_group_id' => $group->id, 'role' => 'agent'],
+            'rows' => [['user_id' => $agent->id, 'items' => $items]],
+        ])->assertOk()->assertJsonPath('success_count', 1);
+
+        $listResponse = $this->getJson('/api/kpi/plans/list?type=personal&branch_group_id='.$group->id.'&page=1&per_page=20')
+            ->assertOk();
+
+        $foundUserIds = collect($listResponse->json('data'))->pluck('user_id')->filter()->values()->all();
+        $this->assertContains($agent->id, $foundUserIds);
+    }
+
     public function test_mop_cannot_manage_common_plan_even_in_own_group(): void
     {
         $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);

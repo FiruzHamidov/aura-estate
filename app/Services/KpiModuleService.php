@@ -167,6 +167,8 @@ class KpiModuleService
                 $newPlan = KpiPlan::query()->create([
                     'role_slug' => (string) ($user->role?->slug ?? 'mop'),
                     'user_id' => $userId,
+                    'branch_id' => $user->branch_id ? (int) $user->branch_id : null,
+                    'branch_group_id' => $user->branch_group_id ? (int) $user->branch_group_id : null,
                     'metric_key' => (string) $item['metric_key'],
                     'daily_plan' => (float) $item['daily_plan'],
                     'weight' => (float) $item['weight'],
