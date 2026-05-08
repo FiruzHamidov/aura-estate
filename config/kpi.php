@@ -2,6 +2,9 @@
 
 return [
     'working_days_per_week' => 6,
+    'daily_report' => [
+        'enforce_submission' => (bool) env('DAILY_REPORT_ENFORCE_SUBMISSION', true),
+    ],
 
     // Daily targets + weight for KPI formula.
     'metrics' => [

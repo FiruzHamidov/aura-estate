@@ -14,6 +14,10 @@ class EnsureDailyReportSubmitted
 
     public function handle(Request $request, Closure $next)
     {
+        if (! (bool) config('kpi.daily_report.enforce_submission', true)) {
+            return $next($request);
+        }
+
         if ($this->isAllowedWhileBlocked($request)) {
             return $next($request);
         }
