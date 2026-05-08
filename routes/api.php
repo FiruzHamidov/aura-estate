@@ -296,6 +296,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
 
         Route::apiResource('roles', RoleController::class);
         Route::post('/user/{user}/photo', [UserController::class, 'updatePhoto']);
+        Route::post('/user/{user}/restore', [UserController::class, 'restore']);
         Route::apiResource('user', UserController::class);
         Route::get('/clients/settings', [ClientController::class, 'settings']);
         Route::put('/clients/settings', [ClientController::class, 'updateSettings']);

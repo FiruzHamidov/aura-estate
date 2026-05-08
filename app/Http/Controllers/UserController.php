@@ -6,6 +6,7 @@ use App\Models\BranchGroup;
 use App\Models\Property;
 use App\Models\Role;
 use App\Models\User;
+use App\Services\Crm\AuditLogger;
 use App\Services\DailyReportService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
@@ -662,6 +663,43 @@ class UserController extends Controller
         });
 
         return response()->json(['message' => 'Пользователь уволен, доступ в систему отключён, объекты перераспределены.']);
+    }
+
+    public function restore(User $user)
+    {
+        $authUser = $this->authUser();
+        $authRole = $this->roleSlug($authUser);
+
+        $canRestore = in_array($authRole, ['superadmin', 'admin', 'rop', 'branch_director'], true);
+        abort_unless($canRestore, 403, 'Forbidden');
+
+        if ($this->isBranchScopedManager($authRole)) {
+            abort_unless((int) $user->branch_id === (int) $authUser->branch_id, 403, 'Forbidden');
+        }
+
+        if ($user->status === User::STATUS_ACTIVE) {
+            return response()->json(['message' => 'Пользователь уже активен']);
+        }
+
+        $oldStatus = $user->status;
+        $user->status = User::STATUS_ACTIVE;
+        $user->save();
+
+        app(AuditLogger::class)->log(
+            subject: $user,
+            actor: $authUser,
+            event: 'user_restored',
+            oldValues: ['status' => $oldStatus],
+            newValues: ['status' => $user->status],
+            message: 'Пользователь восстановлен',
+            context: [
+                'restored_user_id' => $user->id,
+                'restored_by_user_id' => $authUser->id,
+                'restored_at' => now()->toIso8601String(),
+            ]
+        );
+
+        return response()->json(['message' => 'Пользователь восстановлен']);
     }
 
     public function updatePassword(Request $request)

@@ -73,6 +73,19 @@ class UserAccessTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('crm_audit_logs', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('auditable_id');
+            $table->string('auditable_type');
+            $table->unsignedBigInteger('actor_id')->nullable();
+            $table->string('event');
+            $table->json('old_values')->nullable();
+            $table->json('new_values')->nullable();
+            $table->json('context')->nullable();
+            $table->text('message')->nullable();
+            $table->timestamps();
+        });
+
         Schema::create('property_statuses', function (Blueprint $table) {
             $table->id();
             $table->string('name');
@@ -1412,5 +1425,125 @@ class UserAccessTest extends TestCase
         $inactiveResponse->assertJsonMissing(['id' => $activeAgent->id]);
         $inactiveResponse->assertJsonMissing(['id' => $activeMop->id]);
         $inactiveResponse->assertJsonMissing(['phone' => '900000109']);
+    }
+
+    public function test_restore_user_reactivates_inactive_user_and_writes_audit_log(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $rop = User::create([
+            'name' => 'ROP',
+            'phone' => '900000110',
+            'password' => bcrypt('password'),
+            'role_id' => $ropRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $inactiveUser = User::create([
+            'name' => 'Inactive Agent',
+            'phone' => '900000111',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'inactive',
+        ]);
+
+        Sanctum::actingAs($rop);
+
+        $response = $this->postJson('/api/user/'.$inactiveUser->id.'/restore');
+
+        $response->assertOk()
+            ->assertJson(['message' => 'Пользователь восстановлен']);
+
+        $this->assertDatabaseHas('users', [
+            'id' => $inactiveUser->id,
+            'status' => 'active',
+        ]);
+
+        $this->assertDatabaseHas('crm_audit_logs', [
+            'auditable_id' => $inactiveUser->id,
+            'auditable_type' => $inactiveUser->getMorphClass(),
+            'actor_id' => $rop->id,
+            'event' => 'user_restored',
+            'message' => 'Пользователь восстановлен',
+        ]);
+    }
+
+    public function test_restore_user_is_idempotent_for_already_active_user(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $admin = User::create([
+            'name' => 'Admin',
+            'phone' => '900000112',
+            'password' => bcrypt('password'),
+            'role_id' => $adminRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        $activeUser = User::create([
+            'name' => 'Active Agent',
+            'phone' => '900000113',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branch->id,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($admin);
+
+        $response = $this->postJson('/api/user/'.$activeUser->id.'/restore');
+
+        $response->assertOk()
+            ->assertJson(['message' => 'Пользователь уже активен']);
+
+        $this->assertDatabaseCount('crm_audit_logs', 0);
+    }
+
+    public function test_restore_user_forbidden_for_other_branch_rop_and_non_privileged_roles(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $ropA = User::create([
+            'name' => 'ROP A',
+            'phone' => '900000114',
+            'password' => bcrypt('password'),
+            'role_id' => $ropRole->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+
+        $agentA = User::create([
+            'name' => 'Agent A',
+            'phone' => '900000115',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+
+        $inactiveUserInB = User::create([
+            'name' => 'Inactive Agent B',
+            'phone' => '900000116',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branchB->id,
+            'status' => 'inactive',
+        ]);
+
+        Sanctum::actingAs($ropA);
+        $this->postJson('/api/user/'.$inactiveUserInB->id.'/restore')->assertForbidden();
+
+        Sanctum::actingAs($agentA);
+        $this->postJson('/api/user/'.$inactiveUserInB->id.'/restore')->assertForbidden();
     }
 }
