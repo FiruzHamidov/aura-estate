@@ -158,7 +158,7 @@ class DailyReportController extends Controller
     public function myReport(Request $request)
     {
         $user = $this->authUser();
-        $this->ensureDailyMyReportRole($user);
+        $this->ensureDailyMyReportReadRole($user);
 
         $validated = $request->validate([
             'date' => 'required|date_format:Y-m-d',
@@ -198,7 +198,7 @@ class DailyReportController extends Controller
     public function submitMyReport(Request $request)
     {
         $user = $this->authUser();
-        $this->ensureDailyMyReportRole($user);
+        $this->ensureDailyMyReportEditRole($user);
 
         $this->validateStrictMetricKeys($request);
 
@@ -211,7 +211,8 @@ class DailyReportController extends Controller
         ]);
 
         $reportDate = (string) $validated['report_date'];
-        $this->ensureCanEditByPeriodRules($user, $user, $reportDate, null, true);
+        // For self-submission, allow submitting reports for any date (subject to lock rules).
+        $this->ensureCanEditByPeriodRules($user, $user, $reportDate, null, false);
         $metrics = $this->dailyReports->autoMetrics($user, $reportDate);
 
         $payload = [
@@ -238,13 +239,13 @@ class DailyReportController extends Controller
             ->first();
 
         if ($existing) {
-            $existing->update($payload);
-        } else {
-            DailyReport::query()->create(array_merge($payload, [
-                'user_id' => $user->id,
-                'report_date' => $reportDate,
-            ]));
+            $this->denyKpi('KPI_SUBMITTED_EDIT_FORBIDDEN', 'Submitted daily report cannot be edited by current settings.');
         }
+
+        DailyReport::query()->create(array_merge($payload, [
+            'user_id' => $user->id,
+            'report_date' => $reportDate,
+        ]));
 
         return $this->myReport(new Request(['date' => $reportDate]));
     }
@@ -474,7 +475,7 @@ class DailyReportController extends Controller
         match ($authUser->role?->slug) {
             'admin', 'superadmin', 'owner' => null,
             'rop', 'branch_director' => $query->whereHas('user', fn (Builder $userQuery) => $userQuery->where('branch_id', $authUser->branch_id)),
-            'mop' => $query->whereHas('user', fn (Builder $userQuery) => $userQuery->where('branch_group_id', $authUser->branch_group_id)),
+            'mop', 'intern' => $query->where('user_id', $authUser->id),
             default => $query->where('user_id', $authUser->id),
         };
     }
@@ -516,19 +517,11 @@ class DailyReportController extends Controller
     {
         $role = $authUser->role?->slug;
 
-        if ((int) $authUser->id === (int) $targetUser->id) {
-            return;
-        }
-
         if (in_array($role, ['admin', 'superadmin', 'owner'], true)) {
             return;
         }
 
         if (in_array($role, ['rop', 'branch_director'], true) && (int) $authUser->branch_id === (int) $targetUser->branch_id) {
-            return;
-        }
-
-        if ($role === 'mop' && (int) $authUser->branch_group_id === (int) $targetUser->branch_group_id) {
             return;
         }
 
@@ -612,9 +605,16 @@ class DailyReportController extends Controller
 
     }
 
-    private function ensureDailyMyReportRole(User $user): void
+    private function ensureDailyMyReportReadRole(User $user): void
     {
-        if (! in_array($user->role?->slug, ['agent', 'mop'], true)) {
+        if (! in_array($user->role?->slug, ['agent', 'mop', 'intern', 'rop', 'branch_director', 'admin', 'superadmin', 'owner'], true)) {
+            $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Role is not allowed for this action.');
+        }
+    }
+
+    private function ensureDailyMyReportEditRole(User $user): void
+    {
+        if (! in_array($user->role?->slug, ['agent', 'mop', 'intern', 'rop', 'branch_director', 'admin', 'superadmin', 'owner'], true)) {
             $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Role is not allowed for this action.');
         }
     }
@@ -632,12 +632,8 @@ class DailyReportController extends Controller
             return;
         }
 
-        if ($actorRole === 'mop') {
-            if ($targetRole !== 'agent') {
-                $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Role is not allowed for this action.');
-            }
-
-            if ((int) $actor->branch_group_id !== (int) $targetUser->branch_group_id) {
+        if (in_array($actorRole, ['mop', 'intern'], true)) {
+            if ((int) $actor->id !== (int) $targetUser->id) {
                 $this->denyKpi('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
             }
 
@@ -672,10 +668,6 @@ class DailyReportController extends Controller
     {
         $actorRole = (string) ($actor->role?->slug ?? '');
         $targetRole = (string) ($targetUser->role?->slug ?? '');
-
-        if ($actorRole === 'mop') {
-            return $targetRole === 'agent' && (int) $actor->branch_group_id === (int) $targetUser->branch_group_id;
-        }
 
         if (in_array($actorRole, ['rop', 'branch_director'], true)) {
             return in_array($targetRole, ['agent', 'mop'], true) && (int) $actor->branch_id === (int) $targetUser->branch_id;

@@ -78,7 +78,7 @@ class KpiDailySupervisorScopeFeatureTest extends TestCase
         });
     }
 
-    public function test_mop_can_read_and_edit_agent_in_same_group_but_not_other_scope(): void
+    public function test_mop_cannot_read_or_edit_other_users_reports(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-05-05 12:00:00', 'Asia/Dushanbe'));
         [$users, $reports] = $this->seedContext();
@@ -86,9 +86,8 @@ class KpiDailySupervisorScopeFeatureTest extends TestCase
         Sanctum::actingAs($users['mop_a1']);
 
         $this->getJson('/api/kpi/daily/report?date=2026-05-05&employee_id='.$users['agent_a1']->id)
-            ->assertOk()
-            ->assertJsonPath('employee_role', 'agent')
-            ->assertJsonPath('editable', true);
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'KPI_FORBIDDEN_SCOPE');
 
         $this->getJson('/api/kpi/daily/report?date=2026-05-05&employee_id='.$users['agent_b1']->id)
             ->assertStatus(403)
@@ -103,15 +102,8 @@ class KpiDailySupervisorScopeFeatureTest extends TestCase
             'plans_for_tomorrow' => 'next',
             'updated_reason' => 'correction',
             'edit_source' => 'manager_panel',
-        ])->assertOk()
-            ->assertJsonPath('manual.ads', 44)
-            ->assertJsonPath('employee_id', $users['agent_a1']->id);
-
-        $report = DailyReport::query()->findOrFail($reports['agent_a1']);
-        $this->assertSame($users['mop_a1']->id, (int) $report->updated_by);
-        $this->assertSame('mop', $report->updated_by_role);
-        $this->assertSame('correction', $report->updated_reason);
-        $this->assertSame('manager_panel', $report->edit_source);
+        ])->assertStatus(403)
+            ->assertJsonPath('code', 'KPI_FORBIDDEN_SCOPE');
     }
 
     public function test_rop_can_read_and_edit_mop_in_same_branch_and_forbidden_for_other_branch(): void

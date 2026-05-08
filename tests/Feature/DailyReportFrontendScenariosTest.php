@@ -55,7 +55,7 @@ class DailyReportFrontendScenariosTest extends TestCase
         });
     }
 
-    public function test_patch_daily_report_allows_scope_roles_and_denies_out_of_scope_with_code(): void
+    public function test_patch_daily_report_allows_only_rop_plus_and_denies_mop(): void
     {
         [$users, $reports] = $this->seedContext();
 
@@ -69,8 +69,8 @@ class DailyReportFrontendScenariosTest extends TestCase
 
         Sanctum::actingAs($users['mopA1']);
         $this->patchJson('/api/daily-reports/'.$reports['agentA'], ['comment' => 'mop edit'])
-            ->assertOk()
-            ->assertJsonPath('comment', 'mop edit');
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'DAILY_REPORT_EDIT_FORBIDDEN');
         $this->patchJson('/api/daily-reports/'.$reports['agentA2'], ['comment' => 'x'])
             ->assertStatus(403)
             ->assertJsonPath('code', 'DAILY_REPORT_EDIT_FORBIDDEN');
@@ -114,14 +114,14 @@ class DailyReportFrontendScenariosTest extends TestCase
         $this->getJson('/api/kpi/daily?date=2026-05-01')->assertOk();
     }
 
-    public function test_agent_cannot_edit_own_submitted_report_without_flag_and_can_with_flag(): void
+    public function test_agent_cannot_edit_own_submitted_report_even_with_flag(): void
     {
         [$users, $reports] = $this->seedContext();
         Sanctum::actingAs($users['agentA']);
 
         $this->patchJson('/api/daily-reports/'.$reports['agentA'], ['comment' => 'blocked'])
             ->assertStatus(403)
-            ->assertJsonPath('code', 'KPI_SUBMITTED_EDIT_FORBIDDEN');
+            ->assertJsonPath('code', 'DAILY_REPORT_EDIT_FORBIDDEN');
 
         UserDailyReportReminderSetting::query()->create([
             'user_id' => $users['agentA']->id,
@@ -133,8 +133,8 @@ class DailyReportFrontendScenariosTest extends TestCase
         ]);
 
         $this->patchJson('/api/daily-reports/'.$reports['agentA'], ['comment' => 'allowed'])
-            ->assertOk()
-            ->assertJsonPath('comment', 'allowed');
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'DAILY_REPORT_EDIT_FORBIDDEN');
     }
 
     private function seedContext(): array

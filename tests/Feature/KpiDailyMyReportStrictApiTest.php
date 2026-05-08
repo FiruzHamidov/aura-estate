@@ -75,8 +75,8 @@ class KpiDailyMyReportStrictApiTest extends TestCase
     {
         Carbon::setTestNow(Carbon::parse('2026-05-05 12:00:00', 'Asia/Dushanbe'));
 
-        $agent = $this->makeUser('agent');
-        Sanctum::actingAs($agent);
+        $rop = $this->makeUser('rop');
+        Sanctum::actingAs($rop);
 
         $this->postJson('/api/kpi/daily/my-report', [
             'report_date' => '2026-05-05',
@@ -113,15 +113,16 @@ class KpiDailyMyReportStrictApiTest extends TestCase
             'calls' => 14,
             'comment' => 'updated',
             'plans_for_tomorrow' => 'updated plan',
-        ])->assertOk()->assertJsonPath('manual.ads', 9);
+        ])->assertStatus(403)
+            ->assertJsonPath('code', 'KPI_SUBMITTED_EDIT_FORBIDDEN');
 
         $this->assertTrue(
             DailyReport::query()
-                ->where('user_id', $agent->id)
+                ->where('user_id', $rop->id)
                 ->whereDate('report_date', '2026-05-05')
-                ->where('ad_count', 9)
-                ->where('calls_count', 14)
-                ->where('comment', 'updated')
+                ->where('ad_count', 7)
+                ->where('calls_count', 13)
+                ->where('comment', 'done')
                 ->exists()
         );
     }
@@ -130,7 +131,7 @@ class KpiDailyMyReportStrictApiTest extends TestCase
     {
         Carbon::setTestNow(Carbon::parse('2026-05-05 12:00:00', 'Asia/Dushanbe'));
 
-        Sanctum::actingAs($this->makeUser('agent'));
+        Sanctum::actingAs($this->makeUser('rop'));
 
         $this->postJson('/api/kpi/daily/my-report', [
             'report_date' => '2026-05-05',
@@ -144,7 +145,7 @@ class KpiDailyMyReportStrictApiTest extends TestCase
             ->assertJsonStructure(['trace_id']);
     }
 
-    public function test_submit_deadline_and_role_restrictions(): void
+    public function test_submit_historical_date_and_role_restrictions(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-05-06 00:01:00', 'Asia/Dushanbe'));
 
@@ -153,13 +154,21 @@ class KpiDailyMyReportStrictApiTest extends TestCase
             'report_date' => '2026-05-05',
             'ads' => 1,
             'calls' => 2,
+        ])->assertOk()
+            ->assertJsonPath('report_date', '2026-05-05')
+            ->assertJsonPath('manual.ads', 1)
+            ->assertJsonPath('manual.calls', 2);
+
+        $this->postJson('/api/kpi/daily/my-report', [
+            'report_date' => '2026-05-05',
+            'ads' => 2,
+            'calls' => 3,
         ])->assertStatus(403)
-            ->assertJsonPath('code', 'KPI_FORBIDDEN_DEADLINE_PASSED');
+            ->assertJsonPath('code', 'KPI_SUBMITTED_EDIT_FORBIDDEN');
 
         Sanctum::actingAs($this->makeUser('admin'));
         $this->getJson('/api/kpi/daily/my-report?date=2026-05-06')
-            ->assertStatus(403)
-            ->assertJsonPath('code', 'KPI_FORBIDDEN_ROLE_ACTION');
+            ->assertOk();
     }
 
     private function makeUser(string $roleSlug): User
