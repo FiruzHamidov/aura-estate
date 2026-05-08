@@ -4,6 +4,12 @@ return [
     'working_days_per_week' => 6,
     'daily_report' => [
         'enforce_submission' => (bool) env('DAILY_REPORT_ENFORCE_SUBMISSION', true),
+        'enforced_roles' => array_values(array_filter(array_map(
+            static fn (string $role): string => trim($role),
+            explode(',', (string) env('DAILY_REPORT_ENFORCED_ROLES', 'agent,mop,intern'))
+        ))),
+        // Time in app timezone after which yesterday's missing daily report becomes required.
+        'missing_report_check_time' => (string) env('DAILY_REPORT_MISSING_CHECK_TIME', '11:00'),
     ],
 
     // Daily targets + weight for KPI formula.

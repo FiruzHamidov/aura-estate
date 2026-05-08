@@ -11,14 +11,12 @@ use Illuminate\Support\Facades\Schema;
 
 class DailyReportService
 {
-    public const REQUIRED_ROLE_SLUGS = ['agent', 'rop', 'mop', 'intern'];
-
     public function statusForUser(User $user): array
     {
         $user->loadMissing('role');
 
         $roleSlug = $user->role?->slug;
-        $required = in_array($roleSlug, self::REQUIRED_ROLE_SLUGS, true);
+        $required = in_array($roleSlug, $this->requiredRoleSlugs(), true);
         $missingReportDate = $this->missingReportDate($user);
 
         return [
@@ -33,7 +31,7 @@ class DailyReportService
     {
         $user->loadMissing('role');
 
-        if (! in_array($user->role?->slug, self::REQUIRED_ROLE_SLUGS, true)) {
+        if (! in_array($user->role?->slug, $this->requiredRoleSlugs(), true)) {
             return null;
         }
 
@@ -42,8 +40,9 @@ class DailyReportService
         }
 
         $now = Carbon::now($this->timezone());
+        [$cutoffHour, $cutoffMinute] = $this->missingReportCutoffTime();
 
-        if ($now->lt($now->copy()->setTime(11, 0))) {
+        if ($now->lt($now->copy()->setTime($cutoffHour, $cutoffMinute))) {
             return null;
         }
 
@@ -56,6 +55,46 @@ class DailyReportService
             ->exists();
 
         return $submitted ? null : $reportDate;
+    }
+
+    /**
+     * Single source of truth for roles required to submit daily report.
+     *
+     * @return list<string>
+     */
+    private function requiredRoleSlugs(): array
+    {
+        $roles = config('kpi.daily_report.enforced_roles', ['agent', 'mop', 'intern']);
+
+        if (! is_array($roles)) {
+            return ['agent', 'mop', 'intern'];
+        }
+
+        $normalized = array_values(array_filter(array_map(
+            static fn ($role) => is_string($role) ? trim($role) : '',
+            $roles
+        )));
+
+        return $normalized !== [] ? $normalized : ['agent', 'mop', 'intern'];
+    }
+
+    /**
+     * @return array{0:int,1:int}
+     */
+    private function missingReportCutoffTime(): array
+    {
+        $raw = (string) config('kpi.daily_report.missing_report_check_time', '11:00');
+        if (preg_match('/^(\d{1,2}):(\d{2})$/', $raw, $matches) !== 1) {
+            return [11, 0];
+        }
+
+        $hour = (int) $matches[1];
+        $minute = (int) $matches[2];
+        if ($hour < 0 || $hour > 23 || $minute < 0 || $minute > 59) {
+            return [11, 0];
+        }
+
+        return [$hour, $minute];
     }
 
     public function defaultReportDate(User $user): string

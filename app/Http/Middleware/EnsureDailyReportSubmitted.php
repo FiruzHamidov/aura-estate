@@ -14,6 +14,40 @@ class EnsureDailyReportSubmitted
 
     public function handle(Request $request, Closure $next)
     {
+        if (! (bool) config('kpi.daily_report.enforce_submission', true)) {
+            return $next($request);
+        }
+
+        $user = $request->user();
+
+        if (! $user) {
+            return $next($request);
+        }
+
+        $user->loadMissing('role');
+        $roleSlug = (string) ($user->role?->slug ?? '');
+        $enforcedRoles = config('kpi.daily_report.enforced_roles', ['agent', 'mop', 'intern']);
+
+        if (! in_array($roleSlug, $enforcedRoles, true)) {
+            return $next($request);
+        }
+
+        if ($this->isAllowedWhileBlocked($request)) {
+            return $next($request);
+        }
+
+        $missingReportDate = $this->dailyReports->missingReportDate($user);
+
+        if ($missingReportDate !== null) {
+            return response()->json([
+                'message' => 'Сдайте ежедневный отчет',
+                'code' => 'daily_report_required',
+                'missing_report_date' => $missingReportDate,
+                'daily_report_required' => true,
+                'blocked_until_report_submitted' => true,
+            ], 403);
+        }
+
         return $next($request);
     }
 

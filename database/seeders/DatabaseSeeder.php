@@ -31,6 +31,7 @@ class DatabaseSeeder extends Seeder
             DeveloperSeeder::class,
             DemoNewBuildingSeeder::class,
             KpiModuleSeeder::class,
+            MotivationRulesSeeder::class,
         ]);
     }
 }

@@ -64,6 +64,7 @@ use App\Http\Controllers\StoryController;
 use App\Http\Controllers\AdminStoryController;
 use App\Http\Controllers\KpiPeriodLockController;
 use App\Http\Controllers\MyReminderController;
+use App\Http\Controllers\MotivationController;
 use Illuminate\Support\Facades\Route;
 
 // --- ПИНГ ---
@@ -159,6 +160,14 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::get('/daily-reports/my/{date}', [DailyReportController::class, 'showMine']);
     Route::get('/daily-reports', [DailyReportController::class, 'index'])->middleware('rop.branch.scope');
     Route::get('/kpi-reports', [KpiReportController::class, 'index'])->middleware('rop.branch.scope');
+    Route::get('/motivation/rules', [MotivationController::class, 'rules']);
+    Route::get('/motivation/my-overview', [MotivationController::class, 'myOverview']);
+    Route::post('/motivation/rules', [MotivationController::class, 'storeRule']);
+    Route::patch('/motivation/rules/{rule}', [MotivationController::class, 'updateRule']);
+    Route::get('/motivation/achievements', [MotivationController::class, 'achievements']);
+    Route::post('/motivation/recalculate', [MotivationController::class, 'recalculate']);
+    Route::post('/motivation/reward-issues/{achievement}/assign', [MotivationController::class, 'assignRewardIssue']);
+    Route::patch('/motivation/reward-issues/{rewardIssue}', [MotivationController::class, 'updateRewardIssue']);
     Route::get('/kpi-plans', [KpiModuleController::class, 'plans']);
     Route::patch('/kpi-plans', [KpiModuleController::class, 'updatePlans'])->middleware('rop.branch.scope');
     Route::get('/kpi/plans', [KpiModuleController::class, 'plans'])->middleware('rop.branch.scope');
