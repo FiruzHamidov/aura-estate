@@ -121,8 +121,17 @@ class ClientNeedController extends Controller
             $data['budget_total'] = (float) $budgetCash + (float) $budgetMortgage;
         }
 
-        if (array_key_exists('wants_mortgage', $data) && $data['wants_mortgage'] !== null) {
-            $data['wants_mortgage'] = filter_var($data['wants_mortgage'], FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE);
+        if (array_key_exists('wants_mortgage', $data)) {
+            if ($data['wants_mortgage'] === null) {
+                unset($data['wants_mortgage']);
+            } else {
+                $parsed = filter_var($data['wants_mortgage'], FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE);
+                if ($parsed === null) {
+                    unset($data['wants_mortgage']);
+                } else {
+                    $data['wants_mortgage'] = $parsed;
+                }
+            }
         }
 
         return $data;
