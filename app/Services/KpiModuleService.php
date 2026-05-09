@@ -1067,15 +1067,16 @@ class KpiModuleService
             ->groupBy('user_id');
 
         $mapping = (array) config('kpi.v2.metric_mapping', []);
-        $targetMap = (array) config('kpi.v2.targets', []);
+        $defaultTargetMap = (array) config('kpi.v2.targets', []);
         $weightMap = (array) config('kpi.v2.weights', []);
         $daysInPeriod = max(1, $from->diffInDays($to) + 1);
         $globalSourceError = false;
 
-        $data = collect($usersPaginator->items())->map(function (User $user) use ($reports, $periodType, $from, $mapping, $targetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, &$globalSourceError) {
+        $data = collect($usersPaginator->items())->map(function (User $user) use ($reports, $periodType, $from, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, &$globalSourceError) {
             $rows = collect($reports->get($user->id, collect()));
             $autoByDate = [];
             $sourceErrors = [];
+            $targetMap = $this->resolvePeriodTargetMapForUser($user, $from, $defaultTargetMap);
 
             foreach ($rows as $row) {
                 try {
@@ -1251,6 +1252,26 @@ class KpiModuleService
         }
 
         return $metrics;
+    }
+
+    private function resolvePeriodTargetMapForUser(User $user, Carbon $date, array $defaultTargetMap): array
+    {
+        $targets = $defaultTargetMap;
+
+        try {
+            $effective = $this->effectivePlanForUser((int) $user->id, $date);
+            foreach ((array) ($effective['items'] ?? []) as $item) {
+                $metricKey = (string) ($item['metric_key'] ?? '');
+                if ($metricKey === '') {
+                    continue;
+                }
+                $targets[$metricKey] = (float) ($item['daily_plan'] ?? ($targets[$metricKey] ?? 0));
+            }
+        } catch (Throwable) {
+            // Fallback to default KPI targets when personal/common plan is unavailable.
+        }
+
+        return $targets;
     }
 
     private function weeklyUsersScopeQuery(User $authUser, array $filters): Builder
