@@ -15,6 +15,7 @@ class KpiPlan extends Model
         'branch_id',
         'branch_group_id',
         'metric_key',
+        'plan_period',
         'daily_plan',
         'weight',
         'comment',

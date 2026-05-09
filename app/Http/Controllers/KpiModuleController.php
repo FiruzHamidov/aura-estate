@@ -73,7 +73,8 @@ class KpiModuleController extends Controller
             'items' => 'required|array|min:1',
             'items.*.metric' => ['nullable', 'required_without:items.*.metric_key', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
             'items.*.metric_key' => ['nullable', 'required_without:items.*.metric', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
-            'items.*.daily_plan' => 'required|numeric|min:0',
+            'items.*.daily_plan' => 'nullable|required_without:items.*.monthly_plan|numeric|min:0',
+            'items.*.monthly_plan' => 'nullable|required_without:items.*.daily_plan|numeric|min:0',
             'items.*.weight' => 'required|numeric|min:0|max:1',
             'items.*.comment' => 'nullable|string|max:500',
         ]);
@@ -224,7 +225,8 @@ class KpiModuleController extends Controller
             'role' => 'nullable|string|max:64',
             'items' => 'required|array|min:1',
             'items.*.metric_key' => ['required', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
-            'items.*.daily_plan' => 'required|numeric|min:0',
+            'items.*.daily_plan' => 'nullable|required_without:items.*.monthly_plan|numeric|min:0',
+            'items.*.monthly_plan' => 'nullable|required_without:items.*.daily_plan|numeric|min:0',
             'items.*.weight' => 'required|numeric|min:0|max:1',
             'items.*.comment' => 'nullable|string|max:500',
         ]);
@@ -375,7 +377,8 @@ class KpiModuleController extends Controller
             'items' => 'required|array|min:1',
             'items.*.metric' => ['nullable', 'required_without:items.*.metric_key', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
             'items.*.metric_key' => ['nullable', 'required_without:items.*.metric', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
-            'items.*.daily_plan' => 'required|numeric|min:0',
+            'items.*.daily_plan' => 'nullable|required_without:items.*.monthly_plan|numeric|min:0',
+            'items.*.monthly_plan' => 'nullable|required_without:items.*.daily_plan|numeric|min:0',
             'items.*.weight' => 'required|numeric|min:0|max:1',
             'items.*.comment' => 'nullable|string|max:500',
         ]);
@@ -926,7 +929,8 @@ class KpiModuleController extends Controller
                 'items' => 'required|array|min:1',
                 'items.*.metric' => ['nullable', 'required_without:items.*.metric_key', 'string', 'max:64'],
                 'items.*.metric_key' => ['nullable', 'required_without:items.*.metric', 'string', 'max:64'],
-                'items.*.daily_plan' => 'required|numeric|min:0',
+                'items.*.daily_plan' => 'nullable|required_without:items.*.monthly_plan|numeric|min:0',
+                'items.*.monthly_plan' => 'nullable|required_without:items.*.daily_plan|numeric|min:0',
                 'items.*.weight' => 'required|numeric|min:0|max:1',
                 'items.*.comment' => 'nullable|string|max:500',
             ]

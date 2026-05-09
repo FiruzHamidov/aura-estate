@@ -78,11 +78,11 @@ class KpiModuleService
         foreach ($items as $item) {
             KpiPlan::query()->updateOrCreate(
                 ['role_slug' => $role, 'metric_key' => $item['metric_key']],
-                [
-                    'daily_plan' => $item['daily_plan'],
+                $this->buildPlanWritePayload([
+                    'daily_plan' => $this->planValueFromItem((array) $item),
                     'weight' => $item['weight'],
                     'comment' => $item['comment'] ?? null,
-                ]
+                ])
             );
         }
 
@@ -184,18 +184,18 @@ class KpiModuleService
             }
 
             foreach ((array) $payload['items'] as $item) {
-                $newPlan = KpiPlan::query()->create([
+                $newPlan = KpiPlan::query()->create($this->buildPlanWritePayload([
                     'role_slug' => (string) ($user->role?->slug ?? 'mop'),
                     'user_id' => $userId,
                     'branch_id' => $user->branch_id ? (int) $user->branch_id : null,
                     'branch_group_id' => $user->branch_group_id ? (int) $user->branch_group_id : null,
                     'metric_key' => (string) $item['metric_key'],
-                    'daily_plan' => (float) $item['daily_plan'],
+                    'daily_plan' => $this->planValueFromItem((array) $item),
                     'weight' => (float) $item['weight'],
                     'comment' => $item['comment'] ?? null,
                     'effective_from' => $from,
                     'effective_to' => $to,
-                ]);
+                ]));
 
                 $this->auditLogger->log(
                     $newPlan,
@@ -210,7 +210,7 @@ class KpiModuleService
                             'branch_group_id' => $user->branch_group_id ? (int) $user->branch_group_id : null,
                         ],
                         'metric_key' => (string) $item['metric_key'],
-                        'daily_plan' => (float) $item['daily_plan'],
+                        'monthly_plan' => $this->planValueFromItem((array) $item),
                         'weight' => (float) $item['weight'],
                         'comment' => $item['comment'] ?? null,
                         'effective_from' => $from,
@@ -456,18 +456,18 @@ class KpiModuleService
             ->delete();
 
         foreach ((array) $payload['items'] as $item) {
-            $newPlan = KpiPlan::query()->create([
+            $newPlan = KpiPlan::query()->create($this->buildPlanWritePayload([
                 'role_slug' => $role,
                 'user_id' => null,
                 'branch_id' => $branchId,
                 'branch_group_id' => $branchGroupId,
                 'metric_key' => (string) $item['metric_key'],
-                'daily_plan' => (float) $item['daily_plan'],
+                'daily_plan' => $this->planValueFromItem((array) $item),
                 'weight' => (float) $item['weight'],
                 'comment' => $item['comment'] ?? null,
                 'effective_from' => $from,
                 'effective_to' => $to,
-            ]);
+            ]));
 
             $this->auditLogger->log(
                 $newPlan,
@@ -479,7 +479,7 @@ class KpiModuleService
                     'branch_id' => $branchId,
                     'branch_group_id' => $branchGroupId,
                     'metric_key' => (string) $item['metric_key'],
-                    'daily_plan' => (float) $item['daily_plan'],
+                    'monthly_plan' => $this->planValueFromItem((array) $item),
                     'weight' => (float) $item['weight'],
                     'comment' => $item['comment'] ?? null,
                     'effective_from' => $from,
@@ -969,6 +969,13 @@ class KpiModuleService
 
                 $daysInPeriod = max(1, $from->diffInDays($to) + 1);
                 $metrics = $this->buildMetricsForRows($rows, $autoByDate, $sourceErrors, $mapping, $targetMap, $periodType, $daysInPeriod);
+                if (
+                    $periodType === 'day'
+                    && $user
+                    && in_array((string) ($metrics['sales']['plan_source'] ?? 'system'), ['personal', 'common'], true)
+                ) {
+                    $this->overrideDailySalesMetricWithMonthlyCompletion($metrics, $user, $from);
+                }
                 $kpiValue = $this->kpiValueFromMetrics($metrics, $weightMap);
                 $kpiPercent = round($kpiValue * 100, 1);
                 $status = $this->statusForKpiPercent($kpiPercent);
@@ -1255,11 +1262,22 @@ class KpiModuleService
     ): array {
         $metrics = [];
         $daysInPeriod = max(1, $daysInPeriodOverride ?? $rows->count());
+        $from = $rows->isNotEmpty()
+            ? $rows->min(fn (DailyReport $row) => $row->report_date)?->copy()
+            : null;
+        $daysInMonth = $from ? max(1, $from->daysInMonth) : $daysInPeriod;
 
         foreach ($mapping as $metricKey => $cfg) {
             $column = $this->resolveMetricSourceColumn((string) ($cfg['source_column'] ?? ''));
             $sourceType = (string) ($cfg['source_type'] ?? 'manual');
-            $target = ((float) ($targetMap[$metricKey] ?? 0)) * ($periodType === 'day' ? 1 : $daysInPeriod);
+            $monthlyTarget = (float) ($targetMap[$metricKey] ?? 0);
+            $target = match ($periodType) {
+                'month' => $monthlyTarget,
+                'week' => ($monthlyTarget / $daysInMonth) * $daysInPeriod,
+                default => $metricKey === 'sales'
+                    ? $monthlyTarget
+                    : ($monthlyTarget / $daysInMonth),
+            };
 
             $manualValue = (float) $rows->sum($column);
             $factValue = 0.0;
@@ -1308,7 +1326,10 @@ class KpiModuleService
 
     private function resolvePeriodTargetMapForUser(User $user, Carbon $date, array $defaultTargetMap): array
     {
-        $targets = $defaultTargetMap;
+        $daysInMonth = max(1, $date->daysInMonth);
+        $targets = collect($defaultTargetMap)
+            ->mapWithKeys(fn ($value, $key) => [(string) $key => (float) $value * $daysInMonth])
+            ->all();
         $sources = [];
         $planDailyValues = [];
         $planMeta = [];
@@ -1762,6 +1783,7 @@ class KpiModuleService
                 'metric' => (string) $row->metric_key,
                 'metric_key' => (string) $row->metric_key,
                 'daily_plan' => (float) $row->daily_plan,
+                'monthly_plan' => (float) $row->daily_plan,
                 'weight' => (float) $row->weight,
                 'comment' => (string) ($row->comment ?? ''),
                 'effective_from' => optional($row->effective_from)->toDateString(),
@@ -1770,10 +1792,66 @@ class KpiModuleService
                 'branch_id' => $row->branch_id ? (int) $row->branch_id : null,
                 'branch_group_id' => $row->branch_group_id ? (int) $row->branch_group_id : null,
                 'user_id' => $row->user_id ? (int) $row->user_id : null,
+                'plan_period' => (string) ($row->plan_period ?? 'month'),
                 'source' => $source,
                 'plan_source' => $source,
             ];
         })->values();
+    }
+
+    private function planValueFromItem(array $item): float
+    {
+        if (array_key_exists('monthly_plan', $item)) {
+            return (float) $item['monthly_plan'];
+        }
+
+        return (float) ($item['daily_plan'] ?? 0);
+    }
+
+    private function buildPlanWritePayload(array $payload): array
+    {
+        if ($this->supportsPlanPeriodColumn()) {
+            $payload['plan_period'] = 'month';
+        }
+
+        return $payload;
+    }
+
+    private function supportsPlanPeriodColumn(): bool
+    {
+        static $supports = null;
+        if ($supports !== null) {
+            return $supports;
+        }
+
+        $supports = Schema::hasTable('kpi_plans') && Schema::hasColumn('kpi_plans', 'plan_period');
+
+        return $supports;
+    }
+
+    private function overrideDailySalesMetricWithMonthlyCompletion(array &$metrics, User $user, Carbon $date): void
+    {
+        if (! isset($metrics['sales'])) {
+            return;
+        }
+
+        $monthStart = $date->copy()->startOfMonth()->toDateString();
+        $monthEnd = $date->copy()->endOfMonth()->toDateString();
+
+        $query = DailyReport::query()
+            ->where('user_id', (int) $user->id)
+            ->whereBetween('report_date', [$monthStart, $monthEnd]);
+
+        $salesFact = Schema::hasColumn('daily_reports', 'sales_count')
+            ? (float) $query->sum('sales_count')
+            : (float) $query->sum('deals_count');
+
+        $target = (float) ($metrics['sales']['target_value'] ?? 0);
+        $progress = $target > 0 ? round(($salesFact / $target) * 100, 2) : 0.0;
+
+        $metrics['sales']['fact_value'] = $this->normalizeNumber($salesFact);
+        $metrics['sales']['final_value'] = $this->normalizeNumber($salesFact);
+        $metrics['sales']['progress_pct'] = $progress;
     }
 
     private function ensurePlanScopeAccess(User $actor, User $target): void
