@@ -221,6 +221,61 @@ class KpiModuleApiFeatureTest extends TestCase
             ->assertJsonPath('data.0.sales_display', '0.00');
     }
 
+    public function test_weekly_v2_returns_all_scope_employees_with_daily_report_stats_and_zero_kpi_rows(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $internRole = Role::create(['name' => 'Intern', 'slug' => 'intern']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+
+        $admin = User::create(['name' => 'Admin', 'phone' => '900000701', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent 1', 'phone' => '900000702', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $intern = User::create(['name' => 'Intern 1', 'phone' => '900000703', 'role_id' => $internRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        DailyReport::create([
+            'user_id' => $agent->id,
+            'role_slug' => 'agent',
+            'report_date' => '2026-05-04',
+            'calls_count' => 5,
+            'submitted_at' => now(),
+        ]);
+        DailyReport::create([
+            'user_id' => $agent->id,
+            'role_slug' => 'agent',
+            'report_date' => '2026-05-05',
+            'calls_count' => 3,
+            'submitted_at' => now(),
+        ]);
+
+        Sanctum::actingAs($admin);
+
+        $response = $this->getJson('/api/kpi/weekly?year=2026&week=19&v=2&branch_id='.$branch->id)
+            ->assertOk()
+            ->assertJsonPath('meta.period_type', 'week');
+
+        $rows = collect((array) $response->json('data'))->keyBy('employee_id');
+
+        $this->assertTrue($rows->has($agent->id), 'Agent row must exist in weekly scope.');
+        $this->assertTrue($rows->has($intern->id), 'Intern row must exist in weekly scope even without reports.');
+
+        $agentRow = (array) $rows->get($agent->id);
+        $internRow = (array) $rows->get($intern->id);
+
+        $this->assertSame(2, (int) ($agentRow['submitted_days_count'] ?? -1));
+        $this->assertSame(7, (int) ($agentRow['required_days_count'] ?? 0));
+        $this->assertIsArray($agentRow['missing_report_dates'] ?? null);
+        $this->assertFalse((bool) ($agentRow['sunday_submitted'] ?? true));
+
+        $this->assertSame(0.0, (float) ($internRow['objects'] ?? -1));
+        $this->assertSame(0.0, (float) ($internRow['shows'] ?? -1));
+        $this->assertSame(0.0, (float) ($internRow['ads'] ?? -1));
+        $this->assertSame(0.0, (float) ($internRow['calls'] ?? -1));
+        $this->assertSame(0.0, (float) ($internRow['sales'] ?? -1));
+        $this->assertSame(0, (int) ($internRow['submitted_days_count'] ?? -1));
+        $this->assertSame(7, (int) ($internRow['required_days_count'] ?? 0));
+    }
+
     public function test_effective_plan_returns_common_when_personal_absent(): void
     {
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);

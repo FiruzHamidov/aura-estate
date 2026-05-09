@@ -3,13 +3,16 @@
 namespace App\Http\Controllers;
 
 use App\Models\DailyReport;
+use App\Models\KpiPlan;
 use App\Models\KpiPeriodLock;
 use App\Models\User;
 use App\Models\UserDailyReportReminderSetting;
 use App\Services\DailyReportService;
+use App\Services\KpiModuleService;
 use App\Support\RbacBranchScope;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\ValidationException;
@@ -20,6 +23,7 @@ class DailyReportController extends Controller
 
     public function __construct(
         private readonly DailyReportService $dailyReports,
+        private readonly KpiModuleService $kpiModuleService,
         private readonly RbacBranchScope $branchScope
     )
     {
@@ -96,13 +100,20 @@ class DailyReportController extends Controller
             $query->whereHas('user', fn (Builder $userQuery) => $userQuery->where('branch_group_id', $validated['branch_group_id']));
         }
 
-        return response()->json(
-            $query
-                ->orderByDesc('report_date')
-                ->orderByDesc('id')
-                ->paginate((int) ($validated['per_page'] ?? 15))
-                ->withQueryString()
+        /** @var LengthAwarePaginator $paginator */
+        $paginator = $query
+            ->orderByDesc('report_date')
+            ->orderByDesc('id')
+            ->paginate((int) ($validated['per_page'] ?? 15))
+            ->withQueryString();
+
+        $paginator->setCollection(
+            $paginator->getCollection()->map(function (DailyReport $report) {
+                return $this->serializeTeamReportRow($report);
+            })
         );
+
+        return response()->json($paginator);
     }
 
     public function my(Request $request)
@@ -174,13 +185,7 @@ class DailyReportController extends Controller
 
         return response()->json([
             'report_date' => $date,
-            'metrics' => [
-                'objects' => $this->metricPayload((int) ($auto['new_properties_count'] ?? 0), 'system', 'objects'),
-                'shows' => $this->metricPayload((int) ($auto['shows_count'] ?? 0), 'system', 'shows'),
-                'ads' => $this->metricPayload((int) ($report?->ad_count ?? 0), 'manual', 'ads'),
-                'calls' => $this->metricPayload((int) ($report?->calls_count ?? 0), 'manual', 'calls'),
-                'sales' => $this->metricPayload((float) ($auto['sales_count'] ?? 0), 'system', 'sales'),
-            ],
+            'metrics' => $this->buildMetricsPayload($user, $date, $report, $auto),
             'manual' => [
                 'ads' => (int) ($report?->ad_count ?? 0),
                 'calls' => (int) ($report?->calls_count ?? 0),
@@ -276,13 +281,7 @@ class DailyReportController extends Controller
             'employee_role' => (string) ($targetUser->role?->slug ?? ''),
             'editable' => $this->canActorEditTargetInScope($actor, $targetUser)
                 && $this->canEditSubmittedDailyReport($actor, $targetUser, $date, $report),
-            'metrics' => [
-                'objects' => $this->metricPayload((int) ($auto['new_properties_count'] ?? 0), 'system', 'objects'),
-                'shows' => $this->metricPayload((int) ($auto['shows_count'] ?? 0), 'system', 'shows'),
-                'ads' => $this->metricPayload((int) ($report?->ad_count ?? 0), 'manual', 'ads'),
-                'calls' => $this->metricPayload((int) ($report?->calls_count ?? 0), 'manual', 'calls'),
-                'sales' => $this->metricPayload((float) ($auto['sales_count'] ?? 0), 'system', 'sales'),
-            ],
+            'metrics' => $this->buildMetricsPayload($targetUser, $date, $report, $auto),
             'manual' => [
                 'ads' => (int) ($report?->ad_count ?? 0),
                 'calls' => (int) ($report?->calls_count ?? 0),
@@ -705,19 +704,101 @@ class DailyReportController extends Controller
         }
     }
 
-    private function metricPayload(int|float $fact, string $source, string $metricKey): array
+    private function metricPayload(int|float $fact, int|float|null $target, string $source, ?string $planSource): array
     {
-        $payload = [
+        return [
+            'fact_value' => $fact,
+            'final_value' => $fact,
+            'target_value' => $target,
+            'plan_source' => $planSource,
+            // Backward-compatible aliases for legacy frontend consumers.
             'fact' => $fact,
+            'target' => $target,
             'source' => $source,
         ];
+    }
 
-        $target = config('kpi.v2.targets.'.$metricKey);
-        if (is_int($target) || is_float($target)) {
-            $payload['target'] = $target;
+    private function buildMetricsPayload(User $user, string $reportDate, ?DailyReport $report, ?array $auto = null): array
+    {
+        $autoMetrics = $auto ?? $this->dailyReports->autoMetrics($user, $reportDate);
+        $planMap = $this->resolvePlanMap($user, $reportDate);
+
+        return [
+            'objects' => $this->metricPayload((int) ($autoMetrics['new_properties_count'] ?? 0), $planMap['objects']['target_value'], 'system', $planMap['objects']['plan_source']),
+            'shows' => $this->metricPayload((int) ($autoMetrics['shows_count'] ?? 0), $planMap['shows']['target_value'], 'system', $planMap['shows']['plan_source']),
+            'ads' => $this->metricPayload((int) ($report?->ad_count ?? 0), $planMap['ads']['target_value'], 'manual', $planMap['ads']['plan_source']),
+            'calls' => $this->metricPayload((int) ($report?->calls_count ?? 0), $planMap['calls']['target_value'], 'manual', $planMap['calls']['plan_source']),
+            'sales' => $this->metricPayload((float) ($autoMetrics['sales_count'] ?? 0), $planMap['sales']['target_value'], 'system', $planMap['sales']['plan_source']),
+        ];
+    }
+
+    private function resolvePlanMap(User $user, string $reportDate): array
+    {
+        $plans = [
+            'objects' => ['target_value' => null, 'plan_source' => null],
+            'shows' => ['target_value' => null, 'plan_source' => null],
+            'ads' => ['target_value' => null, 'plan_source' => null],
+            'calls' => ['target_value' => null, 'plan_source' => null],
+            'sales' => ['target_value' => null, 'plan_source' => null],
+        ];
+
+        if (\Illuminate\Support\Facades\Schema::hasTable('kpi_plans')) {
+            $effective = $this->kpiModuleService->effectivePlanForUser($user->id, Carbon::parse($reportDate, $this->timezone()));
+            foreach ((array) ($effective['items'] ?? []) as $item) {
+                $key = (string) ($item['metric_key'] ?? '');
+                if (! array_key_exists($key, $plans)) {
+                    continue;
+                }
+
+                $plan = $item['daily_plan'] ?? null;
+                if (is_int($plan) || is_float($plan) || is_numeric($plan)) {
+                    $plans[$key] = [
+                        'target_value' => $plan + 0,
+                        'plan_source' => (string) ($item['plan_source'] ?? $item['source'] ?? $effective['source'] ?? 'common'),
+                    ];
+                }
+            }
         }
 
-        return $payload;
+        return $plans;
+    }
+
+    private function serializeTeamReportRow(DailyReport $report): array
+    {
+        $report->loadMissing(['user.role', 'user.branch', 'user.branchGroup']);
+        $user = $report->user;
+        $reportDate = $report->report_date->toDateString();
+
+        $autoMetrics = $user ? $this->dailyReports->autoMetrics($user, $reportDate) : [
+            'new_properties_count' => (int) ($report->new_properties_count ?? 0),
+            'shows_count' => (int) ($report->shows_count ?? 0),
+            'sales_count' => (float) ($report->sales_count ?? 0),
+        ];
+
+        return [
+            'id' => $report->id,
+            'user_id' => $report->user_id,
+            'role_slug' => $report->role_slug,
+            'report_date' => $reportDate,
+            'metrics' => $user ? $this->buildMetricsPayload($user, $reportDate, $report, $autoMetrics) : [
+                'objects' => $this->metricPayload((int) ($autoMetrics['new_properties_count'] ?? 0), null, 'system', null),
+                'shows' => $this->metricPayload((int) ($autoMetrics['shows_count'] ?? 0), null, 'system', null),
+                'ads' => $this->metricPayload((int) ($report->ad_count ?? 0), null, 'manual', null),
+                'calls' => $this->metricPayload((int) ($report->calls_count ?? 0), null, 'manual', null),
+                'sales' => $this->metricPayload((float) ($autoMetrics['sales_count'] ?? 0), null, 'system', null),
+            ],
+            'manual' => [
+                'ads' => (int) ($report->ad_count ?? 0),
+                'calls' => (int) ($report->calls_count ?? 0),
+                'comment' => (string) ($report->comment ?? ''),
+                'plans_for_tomorrow' => (string) ($report->plans_for_tomorrow ?? ''),
+            ],
+            'submitted' => $report->submitted_at !== null,
+            'submitted_at' => $report->submitted_at,
+            'created_at' => $report->created_at,
+            'updated_at' => $report->updated_at,
+            'user' => $user,
+        ];
     }
 
     private function timezone(): string

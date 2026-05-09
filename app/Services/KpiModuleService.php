@@ -29,6 +29,7 @@ class KpiModuleService
     private const TZ = 'Asia/Dushanbe';
     private const STATUS_DONE = 'done';
     private const STATUS_CONTROL = 'control';
+    private const STATUS_RISK = 'risk';
     private const STATUS_WEAK = 'weak';
     private const STATUS_URGENT = 'urgent';
     private const PLAN_METRIC_WHITELIST = ['objects', 'shows', 'ads', 'calls', 'sales'];
@@ -90,6 +91,18 @@ class KpiModuleService
     public function plansForUser(int $userId, Carbon $date): Collection
     {
         $user = User::query()->with('role')->findOrFail($userId);
+        $merged = collect();
+
+        $commonRows = $this->findCommonPlanRows(
+            (string) ($user->role?->slug ?? 'mop'),
+            $date,
+            $user->branch_id ? (int) $user->branch_id : null,
+            $user->branch_group_id ? (int) $user->branch_group_id : null
+        );
+        if ($commonRows->isNotEmpty()) {
+            $merged = $this->serializePlanRows($commonRows, 'common')->keyBy('metric_key');
+        }
+
         $personalRows = KpiPlan::query()
             ->where('user_id', $userId)
             ->where(function ($q) use ($date) {
@@ -101,22 +114,13 @@ class KpiModuleService
             ->get();
 
         if ($personalRows->isNotEmpty()) {
-            return $this->serializePlanRows($personalRows, 'personal');
+            $personal = $this->serializePlanRows($personalRows, 'personal')->keyBy('metric_key');
+            foreach ($personal as $metricKey => $item) {
+                $merged->put($metricKey, $item);
+            }
         }
 
-        $role = (string) ($user->role?->slug ?? 'mop');
-        $commonRows = $this->findCommonPlanRows(
-            $role,
-            $date,
-            $user->branch_id ? (int) $user->branch_id : null,
-            $user->branch_group_id ? (int) $user->branch_group_id : null
-        );
-
-        if ($commonRows->isNotEmpty()) {
-            return $this->serializePlanRows($commonRows, 'common');
-        }
-
-        return collect();
+        return $merged->values();
     }
 
     public function effectivePlanForUser(int $userId, Carbon $date): array
@@ -903,6 +907,18 @@ class KpiModuleService
         string $periodKey,
         bool $withBreakdown
     ): array {
+        if (in_array($periodType, ['week', 'month'], true)) {
+            return $this->buildScopedPeriodV2Response(
+                $authUser,
+                $from,
+                $to,
+                $filters,
+                $periodType,
+                $withBreakdown,
+                $periodType === 'week'
+            );
+        }
+
         $query = DailyReport::query()
             ->with(['user.role', 'user.branch', 'user.branchGroup'])
             ->whereDate('report_date', '>=', $from->toDateString())
@@ -920,7 +936,7 @@ class KpiModuleService
 
         $data = collect($paginator->items())
             ->groupBy('user_id')
-            ->map(function (Collection $rows) use ($periodType, $from, $mapping, $targetMap, $weightMap, $withBreakdown, &$globalSourceError) {
+            ->map(function (Collection $rows) use ($periodType, $from, $to, $mapping, $targetMap, $weightMap, $withBreakdown, &$globalSourceError) {
                 $first = $rows->first();
                 $user = $first?->user;
                 $autoByDate = [];
@@ -935,7 +951,8 @@ class KpiModuleService
                     }
                 }
 
-                $metrics = $this->buildMetricsForRows($rows, $autoByDate, $sourceErrors, $mapping, $targetMap, $periodType);
+                $daysInPeriod = max(1, $from->diffInDays($to) + 1);
+                $metrics = $this->buildMetricsForRows($rows, $autoByDate, $sourceErrors, $mapping, $targetMap, $periodType, $daysInPeriod);
                 $kpiValue = $this->kpiValueFromMetrics($metrics, $weightMap);
                 $kpiPercent = round($kpiValue * 100, 1);
                 $status = $this->statusForKpiPercent($kpiPercent);
@@ -955,6 +972,7 @@ class KpiModuleService
                     'group_name' => $user?->branchGroup?->name,
                     'branch_id' => $user?->branch_id,
                     'branch_name' => $user?->branch?->name,
+                    'role' => (string) ($user?->role?->slug ?? ''),
                     'metrics' => $metrics,
                     'objects_raw' => (float) ($metrics['objects']['final_value'] ?? 0),
                     'objects_display' => $this->displayNumber((float) ($metrics['objects']['final_value'] ?? 0)),
@@ -968,8 +986,14 @@ class KpiModuleService
                     'sales_display' => $this->displayNumber((float) ($metrics['sales']['final_value'] ?? 0)),
                     'sales_count_raw' => (float) ($metrics['sales']['final_value'] ?? 0),
                     'sales_count_display' => $this->displayNumber((float) ($metrics['sales']['final_value'] ?? 0)),
+                    'objects' => (float) ($metrics['objects']['final_value'] ?? 0),
+                    'shows' => (float) ($metrics['shows']['final_value'] ?? 0),
+                    'ads' => (float) ($metrics['ads']['final_value'] ?? 0),
+                    'calls' => (float) ($metrics['calls']['final_value'] ?? 0),
+                    'sales' => (float) ($metrics['sales']['final_value'] ?? 0),
                     'kpi_value' => $kpiValue,
                     'kpi_percent' => $kpiPercent,
+                    'average_kpi_percent' => $kpiPercent,
                     'status' => $status,
                     'locked' => $locked,
                 ];
@@ -993,6 +1017,7 @@ class KpiModuleService
 
         return [
             'data' => $data,
+            'rows' => $data,
             'meta' => [
                 'version' => '2',
                 'period_type' => $periodType,
@@ -1016,16 +1041,168 @@ class KpiModuleService
         ];
     }
 
+    private function buildScopedPeriodV2Response(
+        User $authUser,
+        Carbon $from,
+        Carbon $to,
+        array $filters,
+        string $periodType,
+        bool $withBreakdown,
+        bool $includeWeeklyStats
+    ): array {
+        $perPage = (int) ($filters['per_page'] ?? 50);
+        $page = max(1, (int) ($filters['page'] ?? 1));
+
+        $usersPaginator = $this->weeklyUsersScopeQuery($authUser, $filters)
+            ->orderBy('users.name')
+            ->paginate($perPage, ['*'], 'page', $page);
+        $userIds = collect($usersPaginator->items())->pluck('id')->map(fn ($id) => (int) $id)->values();
+
+        $reports = DailyReport::query()
+            ->with(['user.role', 'user.branch', 'user.branchGroup'])
+            ->whereDate('report_date', '>=', $from->toDateString())
+            ->whereDate('report_date', '<=', $to->toDateString())
+            ->when($userIds->isNotEmpty(), fn (Builder $q) => $q->whereIn('user_id', $userIds->all()))
+            ->get()
+            ->groupBy('user_id');
+
+        $mapping = (array) config('kpi.v2.metric_mapping', []);
+        $targetMap = (array) config('kpi.v2.targets', []);
+        $weightMap = (array) config('kpi.v2.weights', []);
+        $daysInPeriod = max(1, $from->diffInDays($to) + 1);
+        $globalSourceError = false;
+
+        $data = collect($usersPaginator->items())->map(function (User $user) use ($reports, $periodType, $from, $mapping, $targetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, &$globalSourceError) {
+            $rows = collect($reports->get($user->id, collect()));
+            $autoByDate = [];
+            $sourceErrors = [];
+
+            foreach ($rows as $row) {
+                try {
+                    $autoByDate[$row->report_date->toDateString()] = $this->dailyReportService->autoMetrics($user, $row->report_date->toDateString());
+                } catch (Throwable) {
+                    $autoByDate[$row->report_date->toDateString()] = [];
+                    $sourceErrors[$row->report_date->toDateString()] = true;
+                }
+            }
+
+            $metrics = $this->buildMetricsForRows($rows, $autoByDate, $sourceErrors, $mapping, $targetMap, $periodType, $daysInPeriod);
+            $kpiValue = $this->kpiValueFromMetrics($metrics, $weightMap);
+            $kpiPercent = round($kpiValue * 100, 1);
+            $status = $this->statusForKpiPercent($kpiPercent);
+            $locked = $this->isPeriodLockedForUser($periodType, $from, $user);
+            $rowSourceError = collect($metrics)->contains(fn (array $metric) => (bool) $metric['source_error']);
+            $globalSourceError = $globalSourceError || $rowSourceError;
+            $dailyReportStats = $includeWeeklyStats
+                ? $this->weeklyDailyReportStats($rows, $from)
+                : null;
+
+            $payload = [
+                'period_key' => $periodType === 'week' ? $from->format('o-\WW') : $from->format('Y-m'),
+                'week' => $periodType === 'week' ? (int) $from->isoWeek() : null,
+                'month' => $periodType === 'month' ? (int) $from->month : null,
+                'year' => $periodType === 'week' ? (int) $from->isoWeekYear() : (int) $from->year,
+                'employee_id' => (int) $user->id,
+                'employee_name' => (string) $user->name,
+                'role' => (string) ($user->role?->slug ?? ''),
+                'agent_id' => $user->role?->slug === 'agent' ? (int) $user->id : null,
+                'agent_name' => $user->role?->slug === 'agent' ? (string) $user->name : null,
+                'mop_id' => $user->role?->slug === 'mop' ? (int) $user->id : null,
+                'mop_name' => $user->role?->slug === 'mop' ? (string) $user->name : null,
+                'group_id' => $user->branch_group_id,
+                'group_name' => $user->branchGroup?->name,
+                'branch_id' => $user->branch_id,
+                'branch_name' => $user->branch?->name,
+                'branch_group_id' => $user->branch_group_id,
+                'metrics' => $metrics,
+                'objects_raw' => (float) ($metrics['objects']['final_value'] ?? 0),
+                'objects_display' => $this->displayNumber((float) ($metrics['objects']['final_value'] ?? 0)),
+                'shows_raw' => (float) ($metrics['shows']['final_value'] ?? 0),
+                'shows_display' => $this->displayNumber((float) ($metrics['shows']['final_value'] ?? 0)),
+                'ads_raw' => (float) ($metrics['ads']['final_value'] ?? 0),
+                'ads_display' => $this->displayNumber((float) ($metrics['ads']['final_value'] ?? 0)),
+                'calls_raw' => (float) ($metrics['calls']['final_value'] ?? 0),
+                'calls_display' => $this->displayNumber((float) ($metrics['calls']['final_value'] ?? 0)),
+                'sales_raw' => (float) ($metrics['sales']['final_value'] ?? 0),
+                'sales_display' => $this->displayNumber((float) ($metrics['sales']['final_value'] ?? 0)),
+                'sales_count_raw' => (float) ($metrics['sales']['final_value'] ?? 0),
+                'sales_count_display' => $this->displayNumber((float) ($metrics['sales']['final_value'] ?? 0)),
+                'objects' => (float) ($metrics['objects']['final_value'] ?? 0),
+                'shows' => (float) ($metrics['shows']['final_value'] ?? 0),
+                'ads' => (float) ($metrics['ads']['final_value'] ?? 0),
+                'calls' => (float) ($metrics['calls']['final_value'] ?? 0),
+                'sales' => (float) ($metrics['sales']['final_value'] ?? 0),
+                'kpi_value' => $kpiValue,
+                'kpi_percent' => $kpiPercent,
+                'average_kpi_percent' => $kpiPercent,
+                'status' => $status,
+                'locked' => $locked,
+            ];
+
+            if ($includeWeeklyStats && $dailyReportStats !== null) {
+                $payload['submitted_days_count'] = $dailyReportStats['submitted_days_count'];
+                $payload['required_days_count'] = $dailyReportStats['required_days_count'];
+                $payload['missing_report_dates'] = $dailyReportStats['missing_report_dates'];
+                $payload['sunday_submitted'] = $dailyReportStats['sunday_submitted'];
+            }
+
+            if ($withBreakdown) {
+                $payload['breakdown_by_day'] = $this->breakdownByDay($rows, $mapping, $targetMap, $sourceErrors);
+            }
+
+            return $payload;
+        })->values();
+
+        $completeness = $this->completenessPct($data);
+        $qualityIssuesCount = Schema::hasTable('kpi_quality_issues')
+            ? KpiQualityIssue::query()
+                ->where('status', 'open')
+                ->whereDate('detected_at', '>=', $from->toDateString())
+                ->whereDate('detected_at', '<=', $to->toDateString())
+                ->count()
+            : 0;
+
+        if ($periodType === 'month') {
+            $data = $data->sortByDesc(fn (array $row) => (float) ($row['average_kpi_percent'] ?? 0))->values();
+        }
+
+        return [
+            'data' => $data,
+            'rows' => $data,
+            'meta' => [
+                'version' => '2',
+                'period_type' => $periodType,
+                'period_key' => null,
+                'date_from' => $from->toDateString(),
+                'date_to' => $to->toDateString(),
+                'locked' => $this->isPeriodLocked($periodType, $from, $filters),
+                'quality' => [
+                    'duplicate_check_passed' => true,
+                    'completeness_pct' => $completeness,
+                    'source_error' => $globalSourceError,
+                    'issues_count' => $qualityIssuesCount,
+                ],
+                'pagination' => [
+                    'page' => $usersPaginator->currentPage(),
+                    'per_page' => $usersPaginator->perPage(),
+                    'total' => $usersPaginator->total(),
+                    'last_page' => $usersPaginator->lastPage(),
+                ],
+            ],
+        ];
+    }
+
     private function buildMetricsForRows(
         Collection $rows,
         array $autoByDate,
         array $sourceErrors,
         array $mapping,
         array $targetMap,
-        string $periodType
+        string $periodType,
+        ?int $daysInPeriodOverride = null
     ): array {
         $metrics = [];
-        $daysInPeriod = max(1, $rows->count());
+        $daysInPeriod = max(1, $daysInPeriodOverride ?? $rows->count());
 
         foreach ($mapping as $metricKey => $cfg) {
             $column = $this->resolveMetricSourceColumn((string) ($cfg['source_column'] ?? ''));
@@ -1074,6 +1251,85 @@ class KpiModuleService
         }
 
         return $metrics;
+    }
+
+    private function weeklyUsersScopeQuery(User $authUser, array $filters): Builder
+    {
+        $authUser->loadMissing('role');
+        $managerialRoles = ['admin', 'superadmin', 'owner', 'rop', 'branch_director'];
+        $includedTargetRoles = ['agent', 'intern', 'mop'];
+
+        $query = User::query()
+            ->select('users.*')
+            ->with(['role:id,slug', 'branch:id,name', 'branchGroup:id,branch_id,name'])
+            ->whereHas('role', fn (Builder $q) => $q->whereIn('slug', $includedTargetRoles));
+
+        if (! empty($filters['assignee_id'])) {
+            $query->where('users.id', (int) $filters['assignee_id']);
+        }
+        if (! empty($filters['agent_id'])) {
+            $query->where('users.id', (int) $filters['agent_id']);
+        }
+        if (! empty($filters['mop_id'])) {
+            $query->where('users.id', (int) $filters['mop_id']);
+        }
+        if (! empty($filters['branch_id'])) {
+            $query->where('users.branch_id', (int) $filters['branch_id']);
+        }
+        if (! empty($filters['branch_group_id'])) {
+            $query->where('users.branch_group_id', (int) $filters['branch_group_id']);
+        }
+
+        if (! empty($filters['role']) && ! in_array((string) ($authUser->role?->slug ?? ''), $managerialRoles, true)) {
+            $query->whereHas('role', fn (Builder $q) => $q->where('slug', (string) $filters['role']));
+        }
+
+        match ($authUser->role?->slug) {
+            'admin', 'superadmin', 'owner' => null,
+            'rop', 'branch_director' => $query->where('users.branch_id', (int) $authUser->branch_id),
+            'mop' => $query->where('users.branch_group_id', (int) $authUser->branch_group_id),
+            default => $query->where('users.id', (int) $authUser->id),
+        };
+
+        return $query;
+    }
+
+    private function weeklyDailyReportStats(Collection $rows, Carbon $weekStart): array
+    {
+        $submittedByDate = $rows
+            ->groupBy(fn (DailyReport $row) => $row->report_date->toDateString())
+            ->map(fn (Collection $dayRows) => $dayRows->contains(fn (DailyReport $row) => $row->submitted_at !== null));
+
+        $submittedDaysCount = 0;
+        $missingDates = [];
+        $sundaySubmitted = false;
+
+        for ($offset = 0; $offset < 7; $offset++) {
+            $day = $weekStart->copy()->addDays($offset);
+            $date = $day->toDateString();
+            $isSubmitted = (bool) ($submittedByDate[$date] ?? false);
+
+            if ($day->isSunday()) {
+                $sundaySubmitted = $isSubmitted;
+                if ($isSubmitted) {
+                    $submittedDaysCount++;
+                }
+                continue;
+            }
+
+            if ($isSubmitted) {
+                $submittedDaysCount++;
+            } else {
+                $missingDates[] = $date;
+            }
+        }
+
+        return [
+            'submitted_days_count' => $submittedDaysCount,
+            'required_days_count' => 7,
+            'missing_report_dates' => $missingDates,
+            'sunday_submitted' => $sundaySubmitted,
+        ];
     }
 
     private function breakdownByDay(Collection $rows, array $mapping, array $targetMap, array $sourceErrors): array
@@ -1127,6 +1383,9 @@ class KpiModuleService
         }
         if ($kpiPercent >= 60) {
             return self::STATUS_WEAK;
+        }
+        if ($kpiPercent >= 40) {
+            return self::STATUS_RISK;
         }
 
         return self::STATUS_URGENT;

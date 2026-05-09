@@ -11,6 +11,7 @@ use App\Models\User;
 use App\Support\ClientAccess;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 
 class ClientNeedController extends Controller
@@ -189,6 +190,10 @@ class ClientNeedController extends Controller
             ->values()
             ->all();
 
+        if (!Schema::hasTable('client_need_property_type')) {
+            return;
+        }
+
         $need->propertyTypes()->sync($propertyTypeIds);
 
         if ($propertyTypeIds === []) {
@@ -216,6 +221,10 @@ class ClientNeedController extends Controller
             ->unique()
             ->values()
             ->all();
+
+        if (!Schema::hasTable('client_need_repair_type')) {
+            return;
+        }
 
         $need->repairTypes()->sync($repairTypeIds);
 
@@ -251,6 +260,19 @@ class ClientNeedController extends Controller
         return $data;
     }
 
+    private function filterNeedColumns(array $data): array
+    {
+        static $columns = null;
+
+        if ($columns === null) {
+            $columns = array_flip(Schema::getColumnListing((new ClientNeed)->getTable()));
+        }
+
+        return collect($data)
+            ->filter(fn ($_value, $key) => isset($columns[$key]))
+            ->all();
+    }
+
     public function index(Client $client)
     {
         $authUser = $this->authUser();
@@ -281,6 +303,7 @@ class ClientNeedController extends Controller
         $repairTypeIds = $validated['repair_type_ids'] ?? [];
         unset($validated['property_type_ids']);
         unset($validated['repair_type_ids']);
+        $validated = $this->filterNeedColumns($validated);
 
         $need = ClientNeed::create($validated);
         $this->syncPropertyTypes($need, $propertyTypeIds);
@@ -320,6 +343,7 @@ class ClientNeedController extends Controller
             $repairTypeIds = $validated['repair_type_ids'];
             unset($validated['repair_type_ids']);
         }
+        $validated = $this->filterNeedColumns($validated);
 
         $clientNeed->update($validated);
 

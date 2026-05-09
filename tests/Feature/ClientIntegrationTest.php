@@ -147,7 +147,7 @@ class ClientIntegrationTest extends TestCase
             $table->integer('rooms')->nullable();
             $table->string('youtube_link')->nullable();
             $table->decimal('total_area', 10, 2)->nullable();
-            $table->integer('land_size')->nullable();
+            $table->decimal('land_size', 10, 2)->nullable();
             $table->decimal('living_area', 10, 2)->nullable();
             $table->integer('floor')->nullable();
             $table->integer('total_floors')->nullable();

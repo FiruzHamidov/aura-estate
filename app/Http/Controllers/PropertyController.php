@@ -1410,7 +1410,7 @@ class PropertyController extends Controller
             'rooms' => 'nullable|integer|min:1|max:10',
             'youtube_link' => 'nullable|url',
             'total_area' => 'nullable|numeric',
-            'land_size' => 'sometimes|nullable|integer|min:0|max:65535',
+            'land_size' => 'sometimes|nullable|numeric|min:0|max:65535',
             'living_area' => 'nullable|numeric',
             'floor' => 'nullable|integer',
             'total_floors' => 'nullable|integer',

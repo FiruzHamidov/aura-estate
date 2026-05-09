@@ -39,6 +39,20 @@ class DailyReportFrontendScenariosTest extends TestCase
             $t->unsignedInteger('deposits_count')->default(0); $t->unsignedInteger('deals_count')->default(0);
             $t->text('comment')->nullable(); $t->text('plans_for_tomorrow')->nullable(); $t->timestamp('submitted_at')->nullable(); $t->timestamps();
         });
+        Schema::create('kpi_plans', function (Blueprint $t) {
+            $t->id();
+            $t->string('role_slug', 32);
+            $t->unsignedBigInteger('user_id')->nullable();
+            $t->unsignedBigInteger('branch_id')->nullable();
+            $t->unsignedBigInteger('branch_group_id')->nullable();
+            $t->string('metric_key', 64);
+            $t->decimal('daily_plan', 10, 4);
+            $t->decimal('weight', 8, 4)->default(1);
+            $t->string('comment')->nullable();
+            $t->date('effective_from')->nullable();
+            $t->date('effective_to')->nullable();
+            $t->timestamps();
+        });
         Schema::create('user_daily_report_reminder_settings', function (Blueprint $t) {
             $t->id();
             $t->unsignedBigInteger('user_id')->unique();
@@ -114,6 +128,63 @@ class DailyReportFrontendScenariosTest extends TestCase
         $this->getJson('/api/kpi/daily?date=2026-05-01')->assertOk();
     }
 
+    public function test_daily_reports_row_contains_stable_metrics_with_kpi_v2_contract_and_plan_sources(): void
+    {
+        [$users, $reports] = $this->seedContext();
+        Sanctum::actingAs($users['admin']);
+
+        foreach (['objects' => 3, 'shows' => 4, 'ads' => 5, 'calls' => 6, 'sales' => 2] as $metric => $plan) {
+            \App\Models\KpiPlan::query()->create([
+                'role_slug' => 'agent',
+                'user_id' => null,
+                'branch_id' => $users['agentA']->branch_id,
+                'branch_group_id' => $users['agentA']->branch_group_id,
+                'metric_key' => $metric,
+                'daily_plan' => $plan,
+                'weight' => 1,
+                'effective_from' => '2026-05-01',
+                'effective_to' => '2026-05-01',
+            ]);
+        }
+        // Personal override for one metric only: other metrics must still come from common plan.
+        \App\Models\KpiPlan::query()->create([
+            'role_slug' => 'agent',
+            'user_id' => $users['agentA']->id,
+            'branch_id' => $users['agentA']->branch_id,
+            'branch_group_id' => $users['agentA']->branch_group_id,
+            'metric_key' => 'objects',
+            'daily_plan' => 9,
+            'weight' => 1,
+            'effective_from' => '2026-05-01',
+            'effective_to' => '2026-05-01',
+        ]);
+
+        DailyReport::query()->whereKey($reports['agentA'])->update([
+            'ad_count' => 9,
+            'calls_count' => 11,
+            'new_properties_count' => 7,
+            'shows_count' => 8,
+            'report_date' => '2026-05-01',
+        ]);
+
+        $response = $this->getJson('/api/daily-reports?report_date=2026-05-01&per_page=10&page=1');
+        $response->assertOk()
+            ->assertJsonPath('current_page', 1)
+            ->assertJsonPath('per_page', 10);
+
+        $rows = collect($response->json('data'));
+        $agentRow = $rows->firstWhere('user_id', $users['agentA']->id);
+        $this->assertNotNull($agentRow);
+        $this->assertSame(9, (int) data_get($agentRow, 'metrics.ads.final_value'));
+        $this->assertSame(11, (int) data_get($agentRow, 'metrics.calls.final_value'));
+        $this->assertSame(9, (int) data_get($agentRow, 'metrics.ads.fact_value'));
+        $this->assertSame(11, (int) data_get($agentRow, 'metrics.calls.fact_value'));
+        $this->assertArrayHasKey('target_value', (array) data_get($agentRow, 'metrics.objects'));
+        $this->assertArrayHasKey('plan_source', (array) data_get($agentRow, 'metrics.objects'));
+        $this->assertArrayHasKey('target_value', (array) data_get($agentRow, 'metrics.sales'));
+        $this->assertArrayHasKey('plan_source', (array) data_get($agentRow, 'metrics.sales'));
+    }
+
     public function test_agent_cannot_edit_own_submitted_report_even_with_flag(): void
     {
         [$users, $reports] = $this->seedContext();
@@ -135,6 +206,25 @@ class DailyReportFrontendScenariosTest extends TestCase
         $this->patchJson('/api/daily-reports/'.$reports['agentA'], ['comment' => 'allowed'])
             ->assertStatus(403)
             ->assertJsonPath('code', 'DAILY_REPORT_EDIT_FORBIDDEN');
+    }
+
+    public function test_daily_reports_row_marks_missing_plan_with_null_source_and_target(): void
+    {
+        [$users] = $this->seedContext();
+        Sanctum::actingAs($users['admin']);
+
+        \App\Models\KpiPlan::query()->delete();
+
+        $response = $this->getJson('/api/daily-reports?report_date=2026-05-01&per_page=10&page=1');
+        $response->assertOk();
+
+        $rows = collect($response->json('data'));
+        $agentRow = $rows->firstWhere('user_id', $users['agentA']->id);
+        $this->assertNotNull($agentRow);
+        $this->assertNull(data_get($agentRow, 'metrics.objects.target_value'));
+        $this->assertNull(data_get($agentRow, 'metrics.objects.plan_source'));
+        $this->assertNull(data_get($agentRow, 'metrics.sales.target_value'));
+        $this->assertNull(data_get($agentRow, 'metrics.sales.plan_source'));
     }
 
     private function seedContext(): array

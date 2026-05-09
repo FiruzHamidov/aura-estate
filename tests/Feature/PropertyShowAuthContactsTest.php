@@ -109,7 +109,7 @@ class PropertyShowAuthContactsTest extends TestCase
             $table->tinyInteger('rooms')->nullable();
             $table->string('youtube_link')->nullable();
             $table->float('total_area')->nullable();
-            $table->unsignedInteger('land_size')->nullable();
+            $table->decimal('land_size', 10, 2)->nullable();
             $table->float('living_area')->nullable();
             $table->integer('floor')->nullable();
             $table->integer('total_floors')->nullable();
