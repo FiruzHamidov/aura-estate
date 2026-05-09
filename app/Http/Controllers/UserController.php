@@ -174,7 +174,7 @@ class UserController extends Controller
             $query->whereHas('role', fn ($roleQuery) => $roleQuery->whereIn('slug', self::REPORT_AGENT_ROLE_SLUGS));
         }
 
-        if ($applyStatusFilter && ! empty($validated['status'])) {
+        if ($applyStatusFilter && ! empty($validated['status']) && $validated['status'] !== 'all') {
             $this->applyStatusFilter($query, $validated['status']);
         }
 
@@ -330,7 +330,7 @@ class UserController extends Controller
             'roles.*' => 'string|exists:roles,slug',
             'report_agents' => 'nullable|boolean',
             'include_unassigned' => 'nullable',
-            'status' => ['nullable', Rule::in(['active', 'inactive'])],
+            'status' => ['nullable', Rule::in(['active', 'inactive', 'all'])],
             'page' => 'nullable|integer|min:1',
             'per_page' => 'nullable|integer|min:1|max:100',
         ]);
@@ -343,7 +343,7 @@ class UserController extends Controller
         $tabCounts = $this->statusCountsForIndex(clone $baseQuery);
         $query = clone $baseQuery;
 
-        if (! empty($validated['status'])) {
+        if (! empty($validated['status']) && $validated['status'] !== 'all') {
             $this->applyStatusFilter($query, $validated['status']);
         }
 

@@ -898,6 +898,97 @@ class UserAccessTest extends TestCase
         $response->assertJsonPath('inactive_count', 1);
     }
 
+    public function test_user_index_supports_status_all_with_branch_and_group_filters(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $groupA1 = BranchGroup::create([
+            'branch_id' => $branchA->id,
+            'name' => 'Group A1',
+            'contact_visibility_mode' => BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY,
+        ]);
+        $groupA2 = BranchGroup::create([
+            'branch_id' => $branchA->id,
+            'name' => 'Group A2',
+            'contact_visibility_mode' => BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY,
+        ]);
+        $groupB1 = BranchGroup::create([
+            'branch_id' => $branchB->id,
+            'name' => 'Group B1',
+            'contact_visibility_mode' => BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY,
+        ]);
+
+        $superadminRole = Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $managerRole = Role::create(['name' => 'Manager', 'slug' => 'manager']);
+        $operatorRole = Role::create(['name' => 'Operator', 'slug' => 'operator']);
+
+        $superadmin = User::create([
+            'name' => 'Superadmin',
+            'phone' => '900000171',
+            'password' => bcrypt('password'),
+            'role_id' => $superadminRole->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+
+        $activeAgent = User::create([
+            'name' => 'Active Agent A1',
+            'phone' => '900000172',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branchA->id,
+            'branch_group_id' => $groupA1->id,
+            'status' => 'active',
+        ]);
+
+        $inactiveManager = User::create([
+            'name' => 'Inactive Manager A1',
+            'phone' => '900000173',
+            'password' => bcrypt('password'),
+            'role_id' => $managerRole->id,
+            'branch_id' => $branchA->id,
+            'branch_group_id' => $groupA1->id,
+            'status' => 'inactive',
+        ]);
+
+        User::create([
+            'name' => 'Active Operator A2',
+            'phone' => '900000174',
+            'password' => bcrypt('password'),
+            'role_id' => $operatorRole->id,
+            'branch_id' => $branchA->id,
+            'branch_group_id' => $groupA2->id,
+            'status' => 'active',
+        ]);
+
+        User::create([
+            'name' => 'Active Agent B1',
+            'phone' => '900000175',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'branch_id' => $branchB->id,
+            'branch_group_id' => $groupB1->id,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($superadmin);
+
+        $response = $this->getJson('/api/user?status=all&branch_id='.$branchA->id.'&branch_group_id='.$groupA1->id.'&page=1&per_page=100');
+
+        $response->assertOk();
+        $response->assertJsonCount(2, 'data');
+        $response->assertJsonFragment(['id' => $activeAgent->id]);
+        $response->assertJsonFragment(['id' => $inactiveManager->id]);
+        $response->assertJsonPath('meta.current_page', 1);
+        $response->assertJsonPath('meta.last_page', 1);
+        $response->assertJsonPath('meta.per_page', 100);
+        $response->assertJsonPath('meta.total', 2);
+        $response->assertJsonPath('data.0.role.slug', $inactiveManager->role->slug);
+        $response->assertJsonPath('data.0.role.name', $inactiveManager->role->name);
+    }
+
     public function test_branch_director_cannot_assign_group_from_another_branch_and_user_payload_includes_group(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);

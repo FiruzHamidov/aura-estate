@@ -11,7 +11,7 @@
 - `roles[]` (string[], optional)
 - `report_agents` (boolean, optional)
 - `include_unassigned` (boolean-like, optional, default `0`)
-- `status` (`active|inactive`, optional)
+- `status` (`active|inactive|all`, optional)
 - `page` (integer, optional)
 - `per_page` (integer, optional)
 
