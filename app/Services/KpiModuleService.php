@@ -20,6 +20,7 @@ use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use App\Support\KpiPlanScopePolicy;
 use Throwable;
@@ -126,8 +127,23 @@ class KpiModuleService
     public function effectivePlanForUser(int $userId, Carbon $date): array
     {
         $rows = $this->plansForUser($userId, $date);
+        $sources = $rows
+            ->map(fn (array $row) => (string) ($row['plan_source'] ?? $row['source'] ?? ''))
+            ->filter()
+            ->unique()
+            ->values();
+
+        $source = null;
+        if ($sources->count() === 1) {
+            $source = (string) $sources->first();
+        } elseif ($sources->contains('personal')) {
+            $source = 'personal';
+        } elseif ($sources->contains('common')) {
+            $source = 'common';
+        }
+
         return [
-            'source' => $rows->first()['source'] ?? null,
+            'source' => $source,
             'items' => $rows->values(),
         ];
     }
@@ -1071,12 +1087,19 @@ class KpiModuleService
         $weightMap = (array) config('kpi.v2.weights', []);
         $daysInPeriod = max(1, $from->diffInDays($to) + 1);
         $globalSourceError = false;
+        $debugPlanTrace = (bool) ($filters['debug_plan_trace'] ?? false);
+        $traceId = (string) (request()->attributes->get('trace_id') ?? '');
+        $planTraceRows = [];
 
-        $data = collect($usersPaginator->items())->map(function (User $user) use ($reports, $periodType, $from, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, &$globalSourceError) {
+        $data = collect($usersPaginator->items())->map(function (User $user) use ($reports, $periodType, $from, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, &$globalSourceError, &$planTraceRows) {
             $rows = collect($reports->get($user->id, collect()));
             $autoByDate = [];
             $sourceErrors = [];
-            $targetMap = $this->resolvePeriodTargetMapForUser($user, $from, $defaultTargetMap);
+            $targetResolution = $this->resolvePeriodTargetMapForUser($user, $from, $defaultTargetMap);
+            $targetMap = $targetResolution['targets'];
+            $metricPlanSourceMap = $targetResolution['sources'];
+            $metricPlanDailyMap = $targetResolution['plan_daily_values'];
+            $metricPlanMetaMap = $targetResolution['plan_meta'];
 
             foreach ($rows as $row) {
                 try {
@@ -1087,13 +1110,25 @@ class KpiModuleService
                 }
             }
 
-            $metrics = $this->buildMetricsForRows($rows, $autoByDate, $sourceErrors, $mapping, $targetMap, $periodType, $daysInPeriod);
+            $metrics = $this->buildMetricsForRows($rows, $autoByDate, $sourceErrors, $mapping, $targetMap, $periodType, $daysInPeriod, $metricPlanSourceMap);
             $kpiValue = $this->kpiValueFromMetrics($metrics, $weightMap);
             $kpiPercent = round($kpiValue * 100, 1);
             $status = $this->statusForKpiPercent($kpiPercent);
             $locked = $this->isPeriodLockedForUser($periodType, $from, $user);
             $rowSourceError = collect($metrics)->contains(fn (array $metric) => (bool) $metric['source_error']);
             $globalSourceError = $globalSourceError || $rowSourceError;
+
+            foreach ($metrics as $metricKey => $metricPayload) {
+                $planTraceRows[] = [
+                    'employee_id' => (int) $user->id,
+                    'role' => (string) ($user->role?->slug ?? ''),
+                    'metric' => (string) $metricKey,
+                    'target_value' => $metricPayload['target_value'],
+                    'plan_source' => (string) ($metricPayload['plan_source'] ?? 'system'),
+                    'plan_daily_value' => $metricPlanDailyMap[$metricKey] ?? null,
+                    'plan_meta' => $metricPlanMetaMap[$metricKey] ?? null,
+                ];
+            }
             $dailyReportStats = $includeWeeklyStats
                 ? $this->weeklyDailyReportStats($rows, $from)
                 : null;
@@ -1167,6 +1202,17 @@ class KpiModuleService
             $data = $data->sortByDesc(fn (array $row) => (float) ($row['average_kpi_percent'] ?? 0))->values();
         }
 
+        if ($debugPlanTrace || $traceId !== '') {
+            Log::info('kpi.v2.plan_source_trace', [
+                'trace_id' => $traceId !== '' ? $traceId : null,
+                'period_type' => $periodType,
+                'date_from' => $from->toDateString(),
+                'date_to' => $to->toDateString(),
+                'filters' => Arr::only($filters, ['role', 'branch_id', 'branch_group_id', 'assignee_id', 'agent_id', 'mop_id', 'page', 'per_page']),
+                'sample' => array_slice($planTraceRows, 0, 100),
+            ]);
+        }
+
         return [
             'data' => $data,
             'rows' => $data,
@@ -1189,6 +1235,10 @@ class KpiModuleService
                     'total' => $usersPaginator->total(),
                     'last_page' => $usersPaginator->lastPage(),
                 ],
+                'debug' => $debugPlanTrace ? [
+                    'trace_id' => $traceId !== '' ? $traceId : null,
+                    'plan_source_samples' => array_slice($planTraceRows, 0, 100),
+                ] : null,
             ],
         ];
     }
@@ -1200,7 +1250,8 @@ class KpiModuleService
         array $mapping,
         array $targetMap,
         string $periodType,
-        ?int $daysInPeriodOverride = null
+        ?int $daysInPeriodOverride = null,
+        array $metricPlanSourceMap = []
     ): array {
         $metrics = [];
         $daysInPeriod = max(1, $daysInPeriodOverride ?? $rows->count());
@@ -1248,6 +1299,7 @@ class KpiModuleService
                 'progress_pct' => $progress,
                 'source' => $source,
                 'source_error' => $sourceError,
+                'plan_source' => (string) ($metricPlanSourceMap[$metricKey] ?? 'system'),
             ];
         }
 
@@ -1257,27 +1309,52 @@ class KpiModuleService
     private function resolvePeriodTargetMapForUser(User $user, Carbon $date, array $defaultTargetMap): array
     {
         $targets = $defaultTargetMap;
+        $sources = [];
+        $planDailyValues = [];
+        $planMeta = [];
 
         try {
-            $effective = $this->effectivePlanForUser((int) $user->id, $date);
-            foreach ((array) ($effective['items'] ?? []) as $item) {
+            $effective = $this->plansForUser((int) $user->id, $date);
+            foreach ($effective as $item) {
                 $metricKey = (string) ($item['metric_key'] ?? '');
                 if ($metricKey === '') {
                     continue;
                 }
                 $targets[$metricKey] = (float) ($item['daily_plan'] ?? ($targets[$metricKey] ?? 0));
+                $sources[$metricKey] = (string) ($item['plan_source'] ?? $item['source'] ?? 'common');
+                $planDailyValues[$metricKey] = $item['daily_plan'] ?? null;
+                $planMeta[$metricKey] = [
+                    'plan_id' => isset($item['id']) ? (int) $item['id'] : null,
+                    'user_id' => isset($item['user_id']) ? (int) $item['user_id'] : null,
+                    'branch_id' => isset($item['branch_id']) ? (int) $item['branch_id'] : null,
+                    'branch_group_id' => isset($item['branch_group_id']) ? (int) $item['branch_group_id'] : null,
+                    'effective_from' => $item['effective_from'] ?? null,
+                    'effective_to' => $item['effective_to'] ?? null,
+                ];
             }
         } catch (Throwable) {
             // Fallback to default KPI targets when personal/common plan is unavailable.
         }
 
-        return $targets;
+        foreach (array_keys($targets) as $metricKey) {
+            if (! isset($sources[$metricKey])) {
+                $sources[$metricKey] = 'system';
+                $planDailyValues[$metricKey] = null;
+                $planMeta[$metricKey] = null;
+            }
+        }
+
+        return [
+            'targets' => $targets,
+            'sources' => $sources,
+            'plan_daily_values' => $planDailyValues,
+            'plan_meta' => $planMeta,
+        ];
     }
 
     private function weeklyUsersScopeQuery(User $authUser, array $filters): Builder
     {
         $authUser->loadMissing('role');
-        $managerialRoles = ['admin', 'superadmin', 'owner', 'rop', 'branch_director'];
         $includedTargetRoles = ['agent', 'intern', 'mop'];
 
         $query = User::query()
@@ -1301,7 +1378,7 @@ class KpiModuleService
             $query->where('users.branch_group_id', (int) $filters['branch_group_id']);
         }
 
-        if (! empty($filters['role']) && ! in_array((string) ($authUser->role?->slug ?? ''), $managerialRoles, true)) {
+        if (! empty($filters['role'])) {
             $query->whereHas('role', fn (Builder $q) => $q->where('slug', (string) $filters['role']));
         }
 

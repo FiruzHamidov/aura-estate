@@ -1333,4 +1333,75 @@ class KpiModuleApiFeatureTest extends TestCase
         ])->assertStatus(403)
             ->assertJsonPath('code', 'KPI_FORBIDDEN_ROLE_ACTION');
     }
+
+    public function test_monthly_v2_uses_personal_plan_and_exposes_plan_source_per_metric(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900001901', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900001902', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        KpiPlan::query()->create([
+            'role_slug' => 'agent',
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'metric_key' => 'calls',
+            'daily_plan' => 10,
+            'weight' => 1,
+            'effective_from' => '2026-05-01',
+            'effective_to' => null,
+        ]);
+        KpiPlan::query()->create([
+            'role_slug' => 'agent',
+            'user_id' => $agent->id,
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'metric_key' => 'calls',
+            'daily_plan' => 25,
+            'weight' => 1,
+            'effective_from' => '2026-05-01',
+            'effective_to' => null,
+        ]);
+
+        Sanctum::actingAs($admin);
+
+        $response = $this->getJson('/api/kpi/monthly?year=2026&month=5&role=agent&v=2&debug_plan_trace=1')
+            ->assertOk();
+
+        $row = collect((array) $response->json('data'))
+            ->firstWhere('employee_id', $agent->id);
+        $this->assertNotNull($row);
+        $this->assertSame('personal', (string) ($row['metrics']['calls']['plan_source'] ?? ''));
+        $this->assertSame(775, (int) ($row['metrics']['calls']['target_value'] ?? 0));
+
+        $samples = collect((array) $response->json('meta.debug.plan_source_samples'));
+        $sample = $samples->first(fn (array $s) => (int) ($s['employee_id'] ?? 0) === $agent->id && (string) ($s['metric'] ?? '') === 'calls');
+        $this->assertNotNull($sample);
+        $this->assertSame('personal', (string) ($sample['plan_source'] ?? ''));
+        $this->assertSame(25, (int) ($sample['plan_daily_value'] ?? 0));
+    }
+
+    public function test_weekly_v2_role_filter_applies_before_pagination_for_admin(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $mopRole = Role::create(['name' => 'Mop', 'slug' => 'mop']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900001911', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        User::create(['name' => 'Agent', 'phone' => '900001912', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        User::create(['name' => 'Mop', 'phone' => '900001913', 'role_id' => $mopRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        Sanctum::actingAs($admin);
+
+        $response = $this->getJson('/api/kpi/weekly?year=2026&week=19&role=agent&v=2&page=1&per_page=50')
+            ->assertOk()
+            ->assertJsonPath('meta.pagination.total', 1)
+            ->assertJsonPath('meta.pagination.last_page', 1);
+
+        $roles = collect((array) $response->json('data'))->pluck('role')->unique()->values()->all();
+        $this->assertSame(['agent'], $roles);
+    }
 }
