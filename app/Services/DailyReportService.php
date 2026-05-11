@@ -252,7 +252,7 @@ class DailyReportService
         }
 
         $soldProperties = DB::table('properties')
-            ->select(['id', 'agent_id'])
+            ->select(['id', 'agent_id', 'sale_user_id'])
             ->whereIn('moderation_status', ['sold', 'rented', 'sold_by_owner'])
             ->whereBetween('sold_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
             ->get();
@@ -262,7 +262,14 @@ class DailyReportService
         }
 
         if (! Schema::hasTable('property_agent_sales')) {
-            return (float) $soldProperties->where('agent_id', $user->id)->count();
+            return (float) $soldProperties->filter(function ($property) use ($user) {
+                $saleUserId = (int) ($property->sale_user_id ?? 0);
+                if ($saleUserId > 0) {
+                    return $saleUserId === (int) $user->id;
+                }
+
+                return (int) ($property->agent_id ?? 0) === (int) $user->id;
+            })->count();
         }
 
         $propertyIds = $soldProperties->pluck('id')->all();
@@ -306,13 +313,21 @@ class DailyReportService
                 continue;
             }
 
-            // Fallback only when explicit participants are absent.
+            // Primary source is sale_user_id; fallback for legacy rows.
+            $saleUserId = (int) ($property->sale_user_id ?? 0);
+            if ($saleUserId > 0) {
+                if ($saleUserId === (int) $user->id) {
+                    $credit += 1.0;
+                }
+                continue;
+            }
+
             if ((int) ($property->agent_id ?? 0) === (int) $user->id) {
                 $credit += 1.0;
             } elseif ((int) ($property->agent_id ?? 0) === 0) {
                 $this->reportSalesQualityIssue('SALES_WITHOUT_AGENTS', $property->id, [
                     'metric_key' => 'sales',
-                    'source' => 'properties.agent_id',
+                    'source' => 'properties.sale_user_id',
                 ]);
             }
         }

@@ -282,7 +282,7 @@ class MotivationService
         $endUtc = $toTz->copy()->setTimezone('UTC');
 
         $soldProperties = DB::table('properties')
-            ->select(['id', 'agent_id'])
+            ->select(['id', 'agent_id', 'sale_user_id'])
             ->whereIn('moderation_status', ['sold', 'rented', 'sold_by_owner'])
             ->whereBetween('sold_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
             ->get();
@@ -310,6 +310,12 @@ class MotivationService
                     $credits[(int) $participantId] = round((float) ($credits[(int) $participantId] ?? 0) + $share, 4);
                 }
 
+                continue;
+            }
+
+            $saleUserId = (int) ($property->sale_user_id ?? 0);
+            if ($saleUserId > 0) {
+                $credits[$saleUserId] = round((float) ($credits[$saleUserId] ?? 0) + 1.0, 4);
                 continue;
             }
 

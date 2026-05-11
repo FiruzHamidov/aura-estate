@@ -212,6 +212,7 @@ class PropertyReportController extends Controller
         $this->ensureReportsAllowed($request);
 
         $soldStatuses = ['sold', 'rented', 'sold_by_owner'];
+        $salesUserExpr = 'COALESCE(sale_user_id, agent_id, created_by)';
 
         $addedQ = Property::query()
             ->whereBetween('created_at', [$start, $end]);
@@ -223,9 +224,16 @@ class PropertyReportController extends Controller
         $closedQ = Property::query()
             ->whereIn('moderation_status', $soldStatuses)
             ->whereBetween('sold_at', [$start, $end]);
-        $this->applyBranchAccessFilter($request, $closedQ, 'created_by');
+        $this->applyBranchAccessByUserColumn($request, $closedQ, 'sale_user_id');
         if ($request->filled('agent_id')) {
-            $closedQ->whereIn('created_by', $this->toArray($request->input('agent_id')));
+            $agentIds = $this->toArray($request->input('agent_id'));
+            $closedQ->where(function ($query) use ($agentIds) {
+                $query->whereIn('sale_user_id', $agentIds)
+                    ->orWhere(function ($legacy) use ($agentIds) {
+                        $legacy->whereNull('sale_user_id')
+                            ->whereIn('created_by', $agentIds);
+                    });
+            });
         }
 
         $depositQ = Property::query()
@@ -272,11 +280,11 @@ class PropertyReportController extends Controller
 
         $closedByAgentRows = (clone $closedQ)
             ->select([
-                'created_by',
+                DB::raw($salesUserExpr.' as sales_user_id'),
                 DB::raw('COUNT(*) as closed_count'),
             ])
-            ->whereNotNull('created_by')
-            ->groupBy('created_by')
+            ->whereRaw($salesUserExpr.' IS NOT NULL')
+            ->groupBy(DB::raw($salesUserExpr))
             ->orderByDesc('closed_count')
             ->limit(10)
             ->get();
@@ -284,11 +292,11 @@ class PropertyReportController extends Controller
         $soldByAgentRows = (clone $closedQ)
             ->where('moderation_status', 'sold')
             ->select([
-                'created_by',
+                DB::raw($salesUserExpr.' as sales_user_id'),
                 DB::raw('COUNT(*) as sold_by_agent_count'),
             ])
-            ->whereNotNull('created_by')
-            ->groupBy('created_by')
+            ->whereRaw($salesUserExpr.' IS NOT NULL')
+            ->groupBy(DB::raw($salesUserExpr))
             ->orderByDesc('sold_by_agent_count')
             ->limit(10)
             ->get();
@@ -296,11 +304,11 @@ class PropertyReportController extends Controller
         $rentedByAgentRows = (clone $closedQ)
             ->where('moderation_status', 'rented')
             ->select([
-                'created_by',
+                DB::raw($salesUserExpr.' as sales_user_id'),
                 DB::raw('COUNT(*) as rented_count'),
             ])
-            ->whereNotNull('created_by')
-            ->groupBy('created_by')
+            ->whereRaw($salesUserExpr.' IS NOT NULL')
+            ->groupBy(DB::raw($salesUserExpr))
             ->orderByDesc('rented_count')
             ->limit(10)
             ->get();
@@ -308,9 +316,9 @@ class PropertyReportController extends Controller
         $userIds = collect()
             ->merge($topShowsRows->pluck('agent_id'))
             ->merge($addedByAgentRows->pluck('created_by'))
-            ->merge($closedByAgentRows->pluck('created_by'))
-            ->merge($soldByAgentRows->pluck('created_by'))
-            ->merge($rentedByAgentRows->pluck('created_by'))
+            ->merge($closedByAgentRows->pluck('sales_user_id'))
+            ->merge($soldByAgentRows->pluck('sales_user_id'))
+            ->merge($rentedByAgentRows->pluck('sales_user_id'))
             ->filter()
             ->unique()
             ->values();
@@ -339,25 +347,25 @@ class PropertyReportController extends Controller
 
         $topClosed = $closedByAgentRows->map(function ($r) use ($users) {
             return [
-                'agent_id' => (int)$r->created_by,
-                'agent_name' => $users[$r->created_by]->name ?? '—',
-                'branch_id' => $users[$r->created_by]->branch_id ?? null,
+                'agent_id' => (int)$r->sales_user_id,
+                'agent_name' => $users[$r->sales_user_id]->name ?? '—',
+                'branch_id' => $users[$r->sales_user_id]->branch_id ?? null,
                 'closed_count' => (int)$r->closed_count,
             ];
         })->values();
 
         $topSoldAgent = $soldByAgentRows->map(function ($r) use ($users) {
             return [
-                'agent_id' => (int)$r->created_by,
-                'agent_name' => $users[$r->created_by]->name ?? '—',
+                'agent_id' => (int)$r->sales_user_id,
+                'agent_name' => $users[$r->sales_user_id]->name ?? '—',
                 'sold_by_agent_count' => (int)$r->sold_by_agent_count,
             ];
         })->values();
 
         $topRented = $rentedByAgentRows->map(function ($r) use ($users) {
             return [
-                'agent_id' => (int)$r->created_by,
-                'agent_name' => $users[$r->created_by]->name ?? '—',
+                'agent_id' => (int)$r->sales_user_id,
+                'agent_name' => $users[$r->sales_user_id]->name ?? '—',
                 'rented_count' => (int)$r->rented_count,
             ];
         })->values();
@@ -1688,8 +1696,8 @@ class PropertyReportController extends Controller
         $soldRequest['sold_at_from'] = $request->input('date_from');
         $soldRequest['sold_at_to'] = $request->input('date_to');
 
-        // For the agent report we must filter by the assigned agent, not by the listing creator.
-        [$q] = $this->applyCommonFilters(new Request($soldRequest), $base, 'agent_id');
+        // Sales attribution is based on sale_user_id (legacy fallback is handled in KPI services).
+        [$q] = $this->applyCommonFilters(new Request($soldRequest), $base, 'sale_user_id');
 
         $rows = (clone $q)
             ->select([
