@@ -183,9 +183,11 @@ class DailyReportController extends Controller
 
         $auto = $this->dailyReports->autoMetrics($user, $date);
 
+        $metricsBundle = $this->buildMetricsPayloadBundle($user, $date, $report, $auto);
+
         return response()->json([
             'report_date' => $date,
-            'metrics' => $this->buildMetricsPayload($user, $date, $report, $auto),
+            'metrics' => $metricsBundle['metrics'],
             'manual' => [
                 'ads' => (int) ($report?->ad_count ?? 0),
                 'calls' => (int) ($report?->calls_count ?? 0),
@@ -196,6 +198,9 @@ class DailyReportController extends Controller
             'submitted_at' => $report?->submitted_at,
             'meta' => [
                 'locked' => $this->isDateLocked($user, $date),
+                'debug' => [
+                    'plan_resolution' => $metricsBundle['plan_resolution_debug'],
+                ],
             ],
         ]);
     }
@@ -274,6 +279,8 @@ class DailyReportController extends Controller
 
         $auto = $this->dailyReports->autoMetrics($targetUser, $date);
 
+        $metricsBundle = $this->buildMetricsPayloadBundle($targetUser, $date, $report, $auto);
+
         return response()->json([
             'report_date' => $date,
             'employee_id' => $targetUser->id,
@@ -281,7 +288,7 @@ class DailyReportController extends Controller
             'employee_role' => (string) ($targetUser->role?->slug ?? ''),
             'editable' => $this->canActorEditTargetInScope($actor, $targetUser)
                 && $this->canEditSubmittedDailyReport($actor, $targetUser, $date, $report),
-            'metrics' => $this->buildMetricsPayload($targetUser, $date, $report, $auto),
+            'metrics' => $metricsBundle['metrics'],
             'manual' => [
                 'ads' => (int) ($report?->ad_count ?? 0),
                 'calls' => (int) ($report?->calls_count ?? 0),
@@ -296,6 +303,9 @@ class DailyReportController extends Controller
                     'actor_role' => $actor->role?->slug,
                     'actor_branch_id' => $actor->branch_id,
                     'actor_branch_group_id' => $actor->branch_group_id,
+                ],
+                'debug' => [
+                    'plan_resolution' => $metricsBundle['plan_resolution_debug'],
                 ],
             ],
         ]);
@@ -720,47 +730,131 @@ class DailyReportController extends Controller
 
     private function buildMetricsPayload(User $user, string $reportDate, ?DailyReport $report, ?array $auto = null): array
     {
+        return $this->buildMetricsPayloadBundle($user, $reportDate, $report, $auto)['metrics'];
+    }
+
+    private function buildMetricsPayloadBundle(User $user, string $reportDate, ?DailyReport $report, ?array $auto = null): array
+    {
         $autoMetrics = $auto ?? $this->dailyReports->autoMetrics($user, $reportDate);
-        $planMap = $this->resolvePlanMap($user, $reportDate);
+        $planBundle = $this->resolvePlanMap($user, $reportDate);
+        $planMap = (array) ($planBundle['plans'] ?? []);
 
         return [
+            'metrics' => [
             'objects' => $this->metricPayload((int) ($autoMetrics['new_properties_count'] ?? 0), $planMap['objects']['target_value'], 'system', $planMap['objects']['plan_source']),
             'shows' => $this->metricPayload((int) ($autoMetrics['shows_count'] ?? 0), $planMap['shows']['target_value'], 'system', $planMap['shows']['plan_source']),
             'ads' => $this->metricPayload((int) ($report?->ad_count ?? 0), $planMap['ads']['target_value'], 'manual', $planMap['ads']['plan_source']),
             'calls' => $this->metricPayload((int) ($report?->calls_count ?? 0), $planMap['calls']['target_value'], 'manual', $planMap['calls']['plan_source']),
             'sales' => $this->metricPayload((float) ($autoMetrics['sales_count'] ?? 0), $planMap['sales']['target_value'], 'system', $planMap['sales']['plan_source']),
+            ],
+            'plan_resolution_debug' => [
+                'employee_id' => (int) $user->id,
+                'date' => $reportDate,
+                'metrics' => (array) ($planBundle['debug_metrics'] ?? []),
+            ],
         ];
     }
 
     private function resolvePlanMap(User $user, string $reportDate): array
     {
         $plans = [
-            'objects' => ['target_value' => null, 'plan_source' => null],
-            'shows' => ['target_value' => null, 'plan_source' => null],
-            'ads' => ['target_value' => null, 'plan_source' => null],
-            'calls' => ['target_value' => null, 'plan_source' => null],
-            'sales' => ['target_value' => null, 'plan_source' => null],
+            'objects' => ['target_value' => null, 'plan_source' => null, 'source_record_id' => null],
+            'shows' => ['target_value' => null, 'plan_source' => null, 'source_record_id' => null],
+            'ads' => ['target_value' => null, 'plan_source' => null, 'source_record_id' => null],
+            'calls' => ['target_value' => null, 'plan_source' => null, 'source_record_id' => null],
+            'sales' => ['target_value' => null, 'plan_source' => null, 'source_record_id' => null],
         ];
 
         if (\Illuminate\Support\Facades\Schema::hasTable('kpi_plans')) {
-            $effective = $this->kpiModuleService->effectivePlanForUser($user->id, Carbon::parse($reportDate, $this->timezone()));
-            foreach ((array) ($effective['items'] ?? []) as $item) {
-                $key = (string) ($item['metric_key'] ?? '');
-                if (! array_key_exists($key, $plans)) {
+            $user->loadMissing('role');
+            $roleSlug = (string) ($user->role?->slug ?? '');
+            $branchId = $user->branch_id ? (int) $user->branch_id : null;
+            $branchGroupId = $user->branch_group_id ? (int) $user->branch_group_id : null;
+
+            foreach (array_keys($plans) as $metricKey) {
+                $personal = KpiPlan::query()
+                    ->where('metric_key', $metricKey)
+                    ->where('user_id', (int) $user->id)
+                    ->where(function ($q) use ($reportDate) {
+                        $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $reportDate);
+                    })
+                    ->where(function ($q) use ($reportDate) {
+                        $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $reportDate);
+                    })
+                    ->orderByDesc('id')
+                    ->first();
+
+                if ($personal !== null) {
+                    $plans[$metricKey] = [
+                        'target_value' => (float) $personal->daily_plan,
+                        'plan_source' => 'personal',
+                        'source_record_id' => (int) $personal->id,
+                    ];
                     continue;
                 }
 
-                $plan = $item['daily_plan'] ?? null;
-                if (is_int($plan) || is_float($plan) || is_numeric($plan)) {
-                    $plans[$key] = [
-                        'target_value' => $plan + 0,
-                        'plan_source' => (string) ($item['plan_source'] ?? $item['source'] ?? $effective['source'] ?? 'common'),
+                $scopedQueryBase = KpiPlan::query()
+                    ->where('metric_key', $metricKey)
+                    ->whereNull('user_id')
+                    ->where('role_slug', $roleSlug)
+                    ->where(function ($q) use ($reportDate) {
+                        $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $reportDate);
+                    })
+                    ->where(function ($q) use ($reportDate) {
+                        $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $reportDate);
+                    });
+
+                $scopeCandidates = [];
+                if ($branchGroupId !== null && $branchId !== null) {
+                    $scopeCandidates[] = ['branch_group_id' => $branchGroupId, 'branch_id' => $branchId];
+                }
+                if ($branchId !== null) {
+                    $scopeCandidates[] = ['branch_group_id' => null, 'branch_id' => $branchId];
+                }
+                $scopeCandidates[] = ['branch_group_id' => null, 'branch_id' => null];
+
+                foreach ($scopeCandidates as $scope) {
+                    $query = clone $scopedQueryBase;
+                    if ($scope['branch_group_id'] === null) {
+                        $query->whereNull('branch_group_id');
+                    } else {
+                        $query->where('branch_group_id', (int) $scope['branch_group_id']);
+                    }
+
+                    if ($scope['branch_id'] === null) {
+                        $query->whereNull('branch_id');
+                    } else {
+                        $query->where('branch_id', (int) $scope['branch_id']);
+                    }
+
+                    $planRow = $query->orderByDesc('id')->first();
+                    if ($planRow === null) {
+                        continue;
+                    }
+
+                    $plans[$metricKey] = [
+                        'target_value' => (float) $planRow->daily_plan,
+                        'plan_source' => ($scope['branch_id'] !== null || $scope['branch_group_id'] !== null) ? 'rop' : 'common',
+                        'source_record_id' => (int) $planRow->id,
                     ];
+                    break;
                 }
             }
         }
 
-        return $plans;
+        $debugMetrics = [];
+        foreach ($plans as $metricKey => $metricPlan) {
+            $debugMetrics[$metricKey] = [
+                'resolved_from' => $metricPlan['plan_source'] ?? 'system',
+                'target_value' => $metricPlan['target_value'],
+                'source_record_id' => $metricPlan['source_record_id'] ?? null,
+            ];
+        }
+
+        return [
+            'plans' => $plans,
+            'debug_metrics' => $debugMetrics,
+        ];
     }
 
     private function serializeTeamReportRow(DailyReport $report): array

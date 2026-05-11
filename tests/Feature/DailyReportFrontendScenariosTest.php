@@ -227,6 +227,80 @@ class DailyReportFrontendScenariosTest extends TestCase
         $this->assertNull(data_get($agentRow, 'metrics.sales.plan_source'));
     }
 
+    public function test_my_and_scope_daily_report_resolve_personal_then_common_plan_and_expose_debug_meta(): void
+    {
+        [$users] = $this->seedContext();
+
+        foreach (['objects' => 5, 'shows' => 3, 'ads' => 15, 'calls' => 30, 'sales' => 1] as $metric => $plan) {
+            \App\Models\KpiPlan::query()->create([
+                'role_slug' => 'agent',
+                'user_id' => null,
+                'branch_id' => $users['agentA']->branch_id,
+                'branch_group_id' => $users['agentA']->branch_group_id,
+                'metric_key' => $metric,
+                'daily_plan' => $plan,
+                'weight' => 1,
+                'effective_from' => '2026-05-01',
+                'effective_to' => '2026-05-01',
+            ]);
+        }
+
+        \App\Models\KpiPlan::query()->create([
+            'role_slug' => 'agent',
+            'user_id' => $users['agentA']->id,
+            'branch_id' => $users['agentA']->branch_id,
+            'branch_group_id' => $users['agentA']->branch_group_id,
+            'metric_key' => 'objects',
+            'daily_plan' => 9,
+            'weight' => 1,
+            'effective_from' => '2026-05-01',
+            'effective_to' => '2026-05-01',
+        ]);
+
+        Sanctum::actingAs($users['agentA']);
+        $this->getJson('/api/kpi/daily/my-report?date=2026-05-01')
+            ->assertOk()
+            ->assertJsonPath('metrics.objects.target_value', 9)
+            ->assertJsonPath('metrics.objects.plan_source', 'personal')
+            ->assertJsonPath('metrics.shows.target_value', 3)
+            ->assertJsonPath('metrics.shows.plan_source', 'rop')
+            ->assertJsonPath('metrics.ads.target_value', 15)
+            ->assertJsonPath('metrics.calls.target_value', 30)
+            ->assertJsonPath('metrics.sales.target_value', 1)
+            ->assertJsonPath('meta.debug.plan_resolution.employee_id', $users['agentA']->id)
+            ->assertJsonPath('meta.debug.plan_resolution.date', '2026-05-01')
+            ->assertJsonPath('meta.debug.plan_resolution.metrics.objects.resolved_from', 'personal')
+            ->assertJsonPath('meta.debug.plan_resolution.metrics.shows.resolved_from', 'rop');
+
+        Sanctum::actingAs($users['ropA']);
+        $this->getJson('/api/kpi/daily/report?date=2026-05-01&employee_id='.$users['agentA']->id)
+            ->assertOk()
+            ->assertJsonPath('metrics.objects.target_value', 9)
+            ->assertJsonPath('metrics.objects.plan_source', 'personal')
+            ->assertJsonPath('metrics.shows.target_value', 3)
+            ->assertJsonPath('meta.debug.plan_resolution.employee_id', $users['agentA']->id)
+            ->assertJsonPath('meta.debug.plan_resolution.metrics.objects.resolved_from', 'personal');
+    }
+
+    public function test_my_daily_report_without_plan_returns_null_target_with_debug_meta(): void
+    {
+        [$users] = $this->seedContext();
+        \App\Models\KpiPlan::query()->delete();
+
+        Sanctum::actingAs($users['agentA']);
+        $this->getJson('/api/kpi/daily/my-report?date=2026-05-01')
+            ->assertOk()
+            ->assertJsonPath('metrics.objects.target_value', null)
+            ->assertJsonPath('metrics.shows.target_value', null)
+            ->assertJsonPath('metrics.ads.target_value', null)
+            ->assertJsonPath('metrics.calls.target_value', null)
+            ->assertJsonPath('metrics.sales.target_value', null)
+            ->assertJsonPath('meta.debug.plan_resolution.employee_id', $users['agentA']->id)
+            ->assertJsonPath('meta.debug.plan_resolution.date', '2026-05-01')
+            ->assertJsonPath('meta.debug.plan_resolution.metrics.objects.resolved_from', 'system')
+            ->assertJsonPath('meta.debug.plan_resolution.metrics.objects.target_value', null);
+    }
+
     private function seedContext(): array
     {
         $roles = [

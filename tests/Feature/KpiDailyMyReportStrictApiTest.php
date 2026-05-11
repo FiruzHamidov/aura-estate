@@ -58,6 +58,21 @@ class KpiDailyMyReportStrictApiTest extends TestCase
             $t->timestamps();
             $t->unique(['user_id', 'report_date']);
         });
+        Schema::create('kpi_plans', function (Blueprint $t) {
+            $t->id();
+            $t->string('role_slug')->nullable();
+            $t->unsignedBigInteger('user_id')->nullable();
+            $t->unsignedBigInteger('branch_id')->nullable();
+            $t->unsignedBigInteger('branch_group_id')->nullable();
+            $t->string('metric_key');
+            $t->decimal('daily_plan', 10, 2)->default(0);
+            $t->decimal('weight', 10, 2)->default(1);
+            $t->string('plan_period')->default('month');
+            $t->text('comment')->nullable();
+            $t->date('effective_from')->nullable();
+            $t->date('effective_to')->nullable();
+            $t->timestamps();
+        });
 
         Schema::create('personal_access_tokens', function (Blueprint $t) {
             $t->id();
@@ -169,6 +184,26 @@ class KpiDailyMyReportStrictApiTest extends TestCase
         Sanctum::actingAs($this->makeUser('admin'));
         $this->getJson('/api/kpi/daily/my-report?date=2026-05-06')
             ->assertOk();
+    }
+
+    public function test_my_report_without_plan_returns_null_target_and_debug_meta(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-05-11 12:00:00', 'Asia/Dushanbe'));
+
+        $agent = $this->makeUser('agent');
+        Sanctum::actingAs($agent);
+
+        $this->getJson('/api/kpi/daily/my-report?date=2026-05-11')
+            ->assertOk()
+            ->assertJsonPath('metrics.objects.target_value', null)
+            ->assertJsonPath('metrics.shows.target_value', null)
+            ->assertJsonPath('metrics.ads.target_value', null)
+            ->assertJsonPath('metrics.calls.target_value', null)
+            ->assertJsonPath('metrics.sales.target_value', null)
+            ->assertJsonPath('meta.debug.plan_resolution.employee_id', $agent->id)
+            ->assertJsonPath('meta.debug.plan_resolution.date', '2026-05-11')
+            ->assertJsonPath('meta.debug.plan_resolution.metrics.objects.resolved_from', 'system')
+            ->assertJsonPath('meta.debug.plan_resolution.metrics.objects.target_value', null);
     }
 
     private function makeUser(string $roleSlug): User
