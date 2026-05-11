@@ -51,6 +51,8 @@ class PropertyController extends Controller
             'buildingType',
             'ownerClient.type',
             'buyerClient.type',
+            'depositUser',
+            'saleUser',
         ];
     }
 
@@ -1380,8 +1382,10 @@ class PropertyController extends Controller
         Property $property
     ) {
         $user = $this->authorizePropertyMutation($property);
+        $isDepositStatus = $request->moderation_status === 'deposit';
+        $isSaleStatus = in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true);
 
-        DB::transaction(function () use ($request, $property, $user) {
+        DB::transaction(function () use ($request, $property, $user, $isDepositStatus, $isSaleStatus) {
 
             /**
              * 1️⃣ ОБНОВЛЯЕМ ВСЁ, ЧТО ПРИШЛО
@@ -1401,6 +1405,7 @@ class PropertyController extends Controller
                 'deposit_currency',
                 'deposit_received_at',
                 'deposit_taken_at',
+                'deposit_user_id',
 
                 // money
                 'money_holder',
@@ -1417,12 +1422,21 @@ class PropertyController extends Controller
                 'actual_sale_price',
                 'actual_sale_currency',
                 'planned_contract_signed_at',
+                'sale_user_id',
             ];
 
             $payload = collect($fillable)
                 ->filter(fn ($field) => $request->has($field))
                 ->mapWithKeys(fn ($field) => [$field => $request->$field])
                 ->toArray();
+
+            if ($isDepositStatus && !array_key_exists('deposit_user_id', $payload)) {
+                $payload['deposit_user_id'] = $property->deposit_user_id ?? $user->id;
+            }
+
+            if ($isSaleStatus && !array_key_exists('sale_user_id', $payload)) {
+                $payload['sale_user_id'] = $property->sale_user_id ?? $user->id;
+            }
 
             $payload = $this->applyListingTypeAccessRules($user, $payload);
             $this->ensureVisibleClientsForProperty($payload, $property);
@@ -1535,6 +1549,7 @@ class PropertyController extends Controller
             'deposit_currency' => 'nullable|in:TJS,USD',
             'deposit_received_at' => 'nullable|date',
             'deposit_taken_at' => 'nullable|date',
+            'deposit_user_id' => 'nullable|exists:users,id',
             'planned_contract_signed_at' => 'nullable|date',
             'company_expected_income' => 'nullable|numeric|min:0',
             'company_expected_income_currency' => 'nullable|in:TJS,USD',
@@ -1547,6 +1562,7 @@ class PropertyController extends Controller
             'money_holder' => 'nullable|in:company,agent,owner,developer,client',
             'money_received_at' => 'nullable|date',
             'contract_signed_at' => 'nullable|date',
+            'sale_user_id' => 'nullable|exists:users,id',
             'agents' => 'nullable|array|max:3',
             'agents.*.agent_id' => 'nullable|exists:users,id|distinct',
             'agents.*.role' => 'nullable|in:main,assistant,partner',
@@ -1985,9 +2001,11 @@ class PropertyController extends Controller
         SavePropertyDealRequest $request,
         Property                $property
     ) {
-        $this->authorizePropertyMutation($property);
+        $user = $this->authorizePropertyMutation($property);
+        $isDepositStatus = $request->moderation_status === 'deposit';
+        $isSaleStatus = in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true);
 
-        DB::transaction(function () use ($request, $property) {
+        DB::transaction(function () use ($request, $property, $user, $isDepositStatus, $isSaleStatus) {
             $payload = [
                 'buyer_client_id' => $request->buyer_client_id,
                 'buyer_full_name' => $request->buyer_full_name,
@@ -2003,10 +2021,14 @@ class PropertyController extends Controller
                 'deposit_currency' => $request->deposit_currency ?? 'TJS',
                 'deposit_received_at' => $request->deposit_received_at,
                 'deposit_taken_at' => $request->deposit_taken_at,
+                'deposit_user_id' => $request->input('deposit_user_id')
+                    ?? ($isDepositStatus ? $user->id : $property->deposit_user_id),
                 'moderation_status' => $request->moderation_status,
                 'sold_at' => in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true)
                     ? now()
                     : $property->sold_at,
+                'sale_user_id' => $request->input('sale_user_id')
+                    ?? ($isSaleStatus ? $user->id : $property->sale_user_id),
             ];
 
             $this->ensureVisibleClientsForProperty($payload, $property);

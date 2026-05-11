@@ -297,7 +297,7 @@ class ClientNeedController extends Controller
     public function store(Request $request, Client $client)
     {
         $authUser = $this->authUser();
-        $this->clientAccess->ensureCanMutateClients($authUser);
+        $this->clientAccess->ensureCanMutateClients($authUser, 'client_needs.create');
 
         $validated = $this->validatePayload($request);
         $validated = $this->normalizePropertyTypes($validated);
@@ -305,7 +305,7 @@ class ClientNeedController extends Controller
         $validated = $this->normalizeFinance($validated);
         $validated['status_id'] ??= ClientNeedStatus::defaultId();
         $validated = $this->clientAccess->normalizeNeedMutationData($validated, $authUser, $client);
-        $this->clientAccess->validateNeedMutationTargets($authUser, $client, $validated);
+        $this->clientAccess->validateNeedMutationTargets($authUser, $client, $validated, 'client_needs.create');
         $validated = $this->applyClosedState($validated);
         $validated['currency'] ??= 'TJS';
 
@@ -332,7 +332,7 @@ class ClientNeedController extends Controller
     public function update(Request $request, ClientNeed $clientNeed)
     {
         $authUser = $this->authUser();
-        $this->clientAccess->ensureCanMutateClients($authUser);
+        $this->clientAccess->ensureCanMutateClients($authUser, 'client_needs.update');
         $clientNeed->loadMissing('client');
         $this->clientAccess->ensureNeedVisible($authUser, $clientNeed);
 
@@ -341,7 +341,7 @@ class ClientNeedController extends Controller
         $validated = $this->normalizeRepairTypes($validated);
         $validated = $this->normalizeFinance($validated, $clientNeed);
         $validated = $this->clientAccess->normalizeNeedMutationData($validated, $authUser, $clientNeed->client);
-        $this->clientAccess->validateNeedMutationTargets($authUser, $clientNeed->client, $validated);
+        $this->clientAccess->validateNeedMutationTargets($authUser, $clientNeed->client, $validated, 'client_needs.update');
         $validated = $this->applyClosedState($validated, $clientNeed);
 
         $propertyTypeIds = null;
@@ -371,7 +371,7 @@ class ClientNeedController extends Controller
     public function destroy(ClientNeed $clientNeed)
     {
         $authUser = $this->authUser();
-        $this->clientAccess->ensureCanMutateClients($authUser);
+        $this->clientAccess->ensureCanMutateClients($authUser, 'client_needs.delete');
         $this->clientAccess->ensureNeedVisible($authUser, $clientNeed);
 
         $clientNeed->delete();

@@ -67,6 +67,7 @@ class Property extends Model
         'rejection_comment',
         'status_comment',
         'sold_at',
+        'sale_user_id',
         'actual_sale_price',
         'actual_sale_currency',
         'company_commission_amount',
@@ -78,6 +79,7 @@ class Property extends Model
         'deposit_currency',
         'deposit_received_at',
         'deposit_taken_at',
+        'deposit_user_id',
         'buyer_full_name',
         'buyer_phone',
         'buyer_client_id',
@@ -149,6 +151,16 @@ class Property extends Model
     public function buyerClient()
     {
         return $this->belongsTo(Client::class, 'buyer_client_id');
+    }
+
+    public function depositUser()
+    {
+        return $this->belongsTo(User::class, 'deposit_user_id');
+    }
+
+    public function saleUser()
+    {
+        return $this->belongsTo(User::class, 'sale_user_id');
     }
 
     public function deals()

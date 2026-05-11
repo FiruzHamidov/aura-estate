@@ -42,7 +42,12 @@ class ClientAccess
 
     public function isAgentScopedRole(?string $roleSlug): bool
     {
-        return in_array($roleSlug, ['agent', 'manager', 'operator', 'mop'], true);
+        return in_array($roleSlug, ['agent', 'manager', 'operator'], true);
+    }
+
+    public function isMopRole(?string $roleSlug): bool
+    {
+        return $roleSlug === 'mop';
     }
 
     public function isInternRole(?string $roleSlug): bool
@@ -152,11 +157,15 @@ class ClientAccess
             $builder->orWhere(function (Builder $scopedQuery) use ($authUser, $roleSlug) {
                 $scopedQuery->where('branch_id', $authUser->branch_id);
 
-                if (!$this->isAgentScopedRole($roleSlug)) {
+                if (!$this->isAgentScopedRole($roleSlug) && !$this->isMopRole($roleSlug)) {
                     return;
                 }
 
                 $scopedQuery = $this->applyGroupVisibilityScope($scopedQuery, $authUser);
+
+                if ($this->isMopRole($roleSlug)) {
+                    return;
+                }
 
                 if ($this->visibilityMode() === self::VISIBILITY_OWN_ONLY) {
                     $this->filterSellerVisibilityForAgent(
@@ -173,24 +182,24 @@ class ClientAccess
         });
     }
 
-    public function ensureVisible(User $authUser, Client $client): void
+    public function ensureVisible(User $authUser, Client $client, string $ability = 'clients.view'): void
     {
         $allowed = $this->visibleQuery($authUser)
             ->whereKey($client->id)
             ->exists();
 
         if (!$allowed) {
-            $this->denyWithCode('RBAC_SCOPE_VIOLATION', 'Forbidden in current scope.');
+            $this->denyWithCode('RBAC_SCOPE_VIOLATION', 'Forbidden in current scope.', 403, $authUser, $ability);
         }
     }
 
-    public function ensureNeedVisible(User $authUser, ClientNeed $clientNeed): void
+    public function ensureNeedVisible(User $authUser, ClientNeed $clientNeed, string $ability = 'client_needs.view'): void
     {
         $clientNeed->loadMissing('client');
 
         abort_unless($clientNeed->client, 404, 'Client not found.');
 
-        $this->ensureVisible($authUser, $clientNeed->client);
+        $this->ensureVisible($authUser, $clientNeed->client, $ability);
     }
 
     public function normalizeMutationData(array $data, User $authUser): array
@@ -251,11 +260,25 @@ class ClientAccess
             $targetGroup = BranchGroup::query()->find($data['branch_group_id']);
 
             if (!$targetGroup) {
-                abort(422, 'branch_group_id is invalid.');
+                $this->denyWithCode(
+                    'RBAC_VALIDATION_FAILED',
+                    'branch_group_id is invalid.',
+                    422,
+                    $authUser,
+                    'clients.create',
+                    ['field' => 'branch_group_id']
+                );
             }
 
             if (empty($branchId) || (int) $targetGroup->branch_id !== (int) $branchId) {
-                abort(422, 'branch_group_id must belong to the client branch.');
+                $this->denyWithCode(
+                    'RBAC_VALIDATION_FAILED',
+                    'branch_group_id must belong to the client branch.',
+                    422,
+                    $authUser,
+                    'clients.create',
+                    ['field' => 'branch_group_id']
+                );
             }
         }
 
@@ -264,7 +287,14 @@ class ClientAccess
         }
 
         if ((int) $branchId !== (int) $authUser->branch_id) {
-            abort(422, 'branch_id must match your branch.');
+            $this->denyWithCode(
+                'RBAC_VALIDATION_FAILED',
+                'branch_id must match your branch.',
+                422,
+                $authUser,
+                'clients.create',
+                ['field' => 'branch_id']
+            );
         }
 
         foreach (['created_by', 'responsible_agent_id'] as $field) {
@@ -275,7 +305,14 @@ class ClientAccess
             $targetUser = User::query()->find($data[$field]);
 
             if (!$targetUser || (int) $targetUser->branch_id !== (int) $authUser->branch_id) {
-                abort(422, sprintf('%s must belong to your branch.', $field));
+                $this->denyWithCode(
+                    'RBAC_VALIDATION_FAILED',
+                    sprintf('%s must belong to your branch.', $field),
+                    422,
+                    $authUser,
+                    'clients.create',
+                    ['field' => $field]
+                );
             }
         }
     }
@@ -289,7 +326,12 @@ class ClientAccess
         return $data;
     }
 
-    public function validateNeedMutationTargets(User $authUser, Client $client, array $data): void
+    public function validateNeedMutationTargets(
+        User $authUser,
+        Client $client,
+        array $data,
+        string $ability = 'client_needs.create'
+    ): void
     {
         $this->ensureVisible($authUser, $client);
 
@@ -307,9 +349,27 @@ class ClientAccess
             $targetUser = User::query()->find($data[$field]);
 
             if (!$targetUser || (int) $targetUser->branch_id !== (int) $client->branch_id) {
-                abort(422, sprintf('%s must belong to the client branch.', $field));
+                $this->denyWithCode(
+                    'RBAC_VALIDATION_FAILED',
+                    sprintf('%s must belong to the client branch.', $field),
+                    422,
+                    $authUser,
+                    $ability,
+                    ['field' => $field]
+                );
             }
         }
+    }
+
+    public function ensureCanCreateClientByContactKind(User $authUser, string $contactKind): void
+    {
+        $ability = match ($contactKind) {
+            Client::CONTACT_KIND_SELLER => 'clients.seller.create',
+            Client::CONTACT_KIND_BOTH => 'clients.both.create',
+            default => 'clients.buyer.create',
+        };
+
+        $this->ensureCanMutateClients($authUser, $ability);
     }
 
     public function canManageCollaborators(User $authUser, Client $client): bool
@@ -326,14 +386,27 @@ class ClientAccess
     public function ensureCanManageCollaborators(User $authUser, Client $client): void
     {
         if (!$this->canManageCollaborators($authUser, $client)) {
-            $this->denyWithCode('FORBIDDEN_ACTION', 'Forbidden action.');
+            $this->denyWithCode('FORBIDDEN_ACTION', 'Forbidden action.', 403, $authUser, 'clients.collaborators.manage');
         }
     }
 
-    public function ensureCanMutateClients(User $authUser): void
+    public function ensureCanMutateClients(User $authUser, string $ability = 'clients.create'): void
     {
-        if ($this->roleSlug($authUser) === 'mop') {
-            $this->denyWithCode('FORBIDDEN_ACTION', 'Role cannot mutate CRM contacts.');
+        $allowedRoles = [
+            'superadmin',
+            'admin',
+            'marketing',
+            'branch_director',
+            'rop',
+            'mop',
+            'agent',
+            'manager',
+            'operator',
+            'intern',
+        ];
+
+        if (!in_array($this->roleSlug($authUser), $allowedRoles, true)) {
+            $this->denyWithCode('FORBIDDEN_ACTION', 'Role cannot mutate CRM contacts.', 403, $authUser, $ability);
         }
     }
 
@@ -379,12 +452,31 @@ class ClientAccess
         });
     }
 
-    public function denyWithCode(string $code, string $message, int $status = 403): never
+    public function denyWithCode(
+        string $code,
+        string $message,
+        int $status = 403,
+        ?User $authUser = null,
+        ?string $ability = null,
+        array $details = []
+    ): never
     {
+        $scope = null;
+        if ($authUser) {
+            $scope = [
+                'role' => $this->roleSlug($authUser),
+                'branch_id' => $authUser->branch_id,
+                'branch_group_id' => $authUser->branch_group_id,
+            ];
+        }
+
         throw new HttpResponseException(response()->json([
             'code' => $code,
             'message' => $message,
-            'details' => (object) [],
+            'details' => (object) array_filter(array_merge($details, [
+                'ability' => $ability,
+                'scope' => $scope,
+            ]), fn ($value) => $value !== null),
             'trace_id' => request()->attributes->get('trace_id'),
         ], $status));
     }

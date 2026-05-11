@@ -1575,53 +1575,55 @@ class ClientAccessTest extends TestCase
             ->assertJsonStructure(['trace_id']);
     }
 
-    public function test_mop_cannot_mutate_clients_and_needs_even_for_visible_client(): void
+    public function test_mop_can_create_and_view_seller_client_in_own_branch_group_and_get_consistent_duplicate_behavior(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);
         $groupA = $this->createBranchGroup($branch, 'Group A');
 
         $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
-        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
-
         $mop = $this->createUser($mopRole, $branch, 'MOP A', $groupA);
-        $agent = $this->createUser($agentRole, $branch, 'Agent A', $groupA);
-        $client = $this->createClient($branch, $agent, $agent, 'Visible Client', 1, Client::CONTACT_KIND_BUYER, $groupA);
-
-        $needId = DB::table('client_needs')->insertGetId([
-            'client_id' => $client->id,
-            'type_id' => 1,
-            'status_id' => 1,
-            'currency' => 'TJS',
-            'created_by' => $agent->id,
-            'responsible_agent_id' => $agent->id,
-            'created_at' => now(),
-            'updated_at' => now(),
-        ]);
 
         Sanctum::actingAs($mop);
 
-        $this->patchJson('/api/clients/' . $client->id, ['full_name' => 'Updated by MOP'])
-            ->assertForbidden()
-            ->assertJsonPath('code', 'FORBIDDEN_ACTION');
+        $phone = '+992 90 444 5500';
 
-        $this->deleteJson('/api/clients/' . $client->id)
-            ->assertForbidden()
-            ->assertJsonPath('code', 'FORBIDDEN_ACTION');
+        $create = $this->postJson('/api/clients', [
+            'full_name' => 'Seller by MOP',
+            'phone' => $phone,
+            'contact_kind' => Client::CONTACT_KIND_SELLER,
+        ]);
 
-        $this->postJson('/api/clients/' . $client->id . '/needs', [
-            'type_id' => 1,
-            'status_id' => 1,
-        ])->assertForbidden()
-            ->assertJsonPath('code', 'FORBIDDEN_ACTION');
+        $create
+            ->assertCreated()
+            ->assertJsonPath('contact_kind', Client::CONTACT_KIND_SELLER)
+            ->assertJsonPath('branch_group_id', $groupA->id)
+            ->assertJsonPath('created_by', $mop->id);
 
-        $this->patchJson('/api/client-needs/' . $needId, [
-            'comment' => 'Updated by MOP',
-        ])->assertForbidden()
-            ->assertJsonPath('code', 'FORBIDDEN_ACTION');
+        $clientId = (int) $create->json('id');
+        $this->assertGreaterThan(0, $clientId);
 
-        $this->deleteJson('/api/client-needs/' . $needId)
-            ->assertForbidden()
-            ->assertJsonPath('code', 'FORBIDDEN_ACTION');
+        $this->getJson('/api/clients?contact_kind=seller')
+            ->assertOk()
+            ->assertJsonFragment(['id' => $clientId]);
+
+        $this->postJson('/api/clients/duplicate-check', [
+            'phone' => $phone,
+        ])
+            ->assertOk()
+            ->assertJsonPath('has_duplicates', true)
+            ->assertJsonPath('visible_matches_count', 1)
+            ->assertJsonPath('hidden_matches_count', 0);
+
+        $duplicateCreate = $this->postJson('/api/clients', [
+            'full_name' => 'Seller by MOP duplicate',
+            'phone' => $phone,
+            'contact_kind' => Client::CONTACT_KIND_SELLER,
+        ]);
+
+        $duplicateCreate
+            ->assertStatus(409)
+            ->assertJsonPath('duplicate_summary.has_duplicates', true)
+            ->assertJsonPath('duplicate_summary.visible_matches_count', 1);
     }
 
     private function createUser(Role $role, Branch $branch, string $name, ?BranchGroup $branchGroup = null): User

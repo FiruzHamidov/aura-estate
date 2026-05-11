@@ -40,6 +40,7 @@ class SavePropertyDealRequest extends FormRequest
             'deposit_currency'     => 'required_if:moderation_status,deposit|in:TJS,USD',
             'deposit_received_at'  => 'required_if:moderation_status,deposit|date',
             'deposit_taken_at'     => 'nullable|date',
+            'deposit_user_id'      => 'nullable|exists:users,id',
 
             'money_holder' => 'required_if:moderation_status,deposit|in:company,agent,owner,developer,client',
 
@@ -61,6 +62,7 @@ class SavePropertyDealRequest extends FormRequest
 
             'money_received_at'  => 'nullable|date',
             'contract_signed_at' => 'nullable|date',
+            'sale_user_id'       => 'nullable|exists:users,id',
 
             /**
              * =========================
