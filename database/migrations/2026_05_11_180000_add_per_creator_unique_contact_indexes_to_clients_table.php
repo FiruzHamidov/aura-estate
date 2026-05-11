@@ -22,30 +22,46 @@ return new class extends Migration
         // Keep the earliest client and clear conflicting normalized contacts on duplicates.
         DB::statement('
             UPDATE clients c
+            INNER JOIN (
+                SELECT id
+                FROM (
+                    SELECT c1.id
+                    FROM clients c1
+                    INNER JOIN (
+                        SELECT created_by, phone_normalized, MIN(id) AS keep_id
+                        FROM clients
+                        WHERE created_by IS NOT NULL
+                          AND phone_normalized IS NOT NULL
+                        GROUP BY created_by, phone_normalized
+                        HAVING COUNT(*) > 1
+                    ) d ON d.created_by = c1.created_by
+                       AND d.phone_normalized = c1.phone_normalized
+                    WHERE c1.id <> d.keep_id
+                ) dup_phone_ids
+            ) to_clear ON to_clear.id = c.id
             SET c.phone_normalized = NULL
-            WHERE c.created_by IS NOT NULL
-              AND c.phone_normalized IS NOT NULL
-              AND EXISTS (
-                    SELECT 1
-                    FROM clients c2
-                    WHERE c2.created_by = c.created_by
-                      AND c2.phone_normalized = c.phone_normalized
-                      AND c2.id < c.id
-              )
         ');
 
         DB::statement('
             UPDATE clients c
+            INNER JOIN (
+                SELECT id
+                FROM (
+                    SELECT c1.id
+                    FROM clients c1
+                    INNER JOIN (
+                        SELECT created_by, email_normalized, MIN(id) AS keep_id
+                        FROM clients
+                        WHERE created_by IS NOT NULL
+                          AND email_normalized IS NOT NULL
+                        GROUP BY created_by, email_normalized
+                        HAVING COUNT(*) > 1
+                    ) d ON d.created_by = c1.created_by
+                       AND d.email_normalized = c1.email_normalized
+                    WHERE c1.id <> d.keep_id
+                ) dup_email_ids
+            ) to_clear ON to_clear.id = c.id
             SET c.email_normalized = NULL
-            WHERE c.created_by IS NOT NULL
-              AND c.email_normalized IS NOT NULL
-              AND EXISTS (
-                    SELECT 1
-                    FROM clients c2
-                    WHERE c2.created_by = c.created_by
-                      AND c2.email_normalized = c.email_normalized
-                      AND c2.id < c.id
-              )
         ');
 
         Schema::table('clients', function (Blueprint $table) {
