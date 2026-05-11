@@ -749,6 +749,16 @@ class PropertyController extends Controller
             return array_values(array_filter(array_map('trim', explode(',', $value)), fn($v) => $v !== ''));
         };
 
+        if ($request->filled('branch_id')) {
+            $branchIds = array_values(array_filter(
+                array_map('intval', $toArray($request->input('branch_id')))
+            ));
+
+            if (!empty($branchIds)) {
+                $this->applyBranchIdFilter($query, $branchIds);
+            }
+        }
+
         if ($request->filled('branch_group_id')) {
             $branchGroupIds = array_values(array_filter(
                 array_map('intval', $toArray($request->input('branch_group_id')))
@@ -1031,6 +1041,65 @@ class PropertyController extends Controller
                     })
                     ->whereIn('created_by', User::query()
                         ->whereIn('branch_group_id', $branchGroupIds)
+                        ->select('id'));
+            });
+        });
+    }
+
+    private function applyBranchIdFilter(Builder $query, array $branchIds): void
+    {
+        $branchIds = array_values(array_filter(array_map('intval', $branchIds)));
+
+        if (empty($branchIds)) {
+            $query->whereRaw('1 = 0');
+            return;
+        }
+
+        $hasPropertyBranchId = Schema::hasColumn('properties', 'branch_id');
+        $hasUsersBranchId = Schema::hasColumn('users', 'branch_id');
+
+        if (!$hasPropertyBranchId && !$hasUsersBranchId) {
+            $query->whereRaw('1 = 0');
+            return;
+        }
+
+        $query->where(function (Builder $branchQuery) use ($branchIds, $hasPropertyBranchId, $hasUsersBranchId) {
+            if ($hasPropertyBranchId) {
+                $branchQuery->whereIn('branch_id', $branchIds);
+            }
+
+            if (!$hasUsersBranchId) {
+                return;
+            }
+
+            $branchQuery->orWhere(function (Builder $agentQuery) use ($branchIds, $hasPropertyBranchId) {
+                if ($hasPropertyBranchId) {
+                    $agentQuery->whereNull('branch_id');
+                }
+
+                $agentQuery
+                    ->whereNotNull('agent_id')
+                    ->whereIn('agent_id', User::query()
+                        ->whereIn('branch_id', $branchIds)
+                        ->select('id'));
+            });
+
+            $branchQuery->orWhere(function (Builder $creatorQuery) use ($branchIds, $hasPropertyBranchId) {
+                if ($hasPropertyBranchId) {
+                    $creatorQuery->whereNull('branch_id');
+                }
+
+                $creatorQuery
+                    ->whereNotNull('created_by')
+                    ->where(function (Builder $agentFallbackQuery) {
+                        $agentFallbackQuery
+                            ->whereNull('agent_id')
+                            ->orWhereNotIn('agent_id', User::query()
+                                ->whereNotNull('branch_id')
+                                ->select('id'));
+                    })
+                    ->whereIn('created_by', User::query()
+                        ->whereIn('branch_id', $branchIds)
                         ->select('id'));
             });
         });
