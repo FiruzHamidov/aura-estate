@@ -22,6 +22,7 @@ class Client extends Model
         'phone',
         'phone_normalized',
         'email',
+        'email_normalized',
         'note',
         'branch_id',
         'branch_group_id',

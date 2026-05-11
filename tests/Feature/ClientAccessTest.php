@@ -13,6 +13,7 @@ use App\Models\Role;
 use App\Models\Setting;
 use App\Models\User;
 use App\Support\ClientAccess;
+use App\Support\ClientPhone;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -109,6 +110,7 @@ class ClientAccessTest extends TestCase
             $table->string('phone')->nullable();
             $table->string('phone_normalized')->nullable();
             $table->string('email')->nullable();
+            $table->string('email_normalized')->nullable();
             $table->text('note')->nullable();
             $table->unsignedBigInteger('branch_id')->nullable();
             $table->unsignedBigInteger('branch_group_id')->nullable();
@@ -121,6 +123,8 @@ class ClientAccessTest extends TestCase
             $table->json('meta')->nullable();
             $table->softDeletes();
             $table->timestamps();
+            $table->unique(['created_by', 'phone_normalized'], 'clients_unique_phone_per_creator');
+            $table->unique(['created_by', 'email_normalized'], 'clients_unique_email_per_creator');
         });
 
         Schema::create('client_collaborators', function (Blueprint $table) {
@@ -1623,7 +1627,95 @@ class ClientAccessTest extends TestCase
         $duplicateCreate
             ->assertStatus(409)
             ->assertJsonPath('duplicate_summary.has_duplicates', true)
-            ->assertJsonPath('duplicate_summary.visible_matches_count', 1);
+            ->assertJsonPath('duplicate_summary.message', 'Клиент с таким контактом уже добавлен вами.')
+            ->assertJsonPath('message', 'Клиент с таким контактом уже добавлен вами.');
+    }
+
+    public function test_duplicate_policy_is_scoped_per_creator_user_and_normalized_contacts(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $group = $this->createBranchGroup($branch, 'Group A');
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $agentA = $this->createUser($agentRole, $branch, 'Agent A', $group);
+        $agentB = $this->createUser($agentRole, $branch, 'Agent B', $group);
+        $agentC = $this->createUser($agentRole, $branch, 'Agent C', $group);
+        $agentD = $this->createUser($agentRole, $branch, 'Agent D', $group);
+        $agentE = $this->createUser($agentRole, $branch, 'Agent E', $group);
+        $agentF = $this->createUser($agentRole, $branch, 'Agent F', $group);
+        $agentG = $this->createUser($agentRole, $branch, 'Agent G', $group);
+        $agentH = $this->createUser($agentRole, $branch, 'Agent H', $group);
+        $agentI = $this->createUser($agentRole, $branch, 'Agent I', $group);
+        $agentJ = $this->createUser($agentRole, $branch, 'Agent J', $group);
+
+        $rawPhone = '918555581';
+        $normalizedPhone = ClientPhone::normalize($rawPhone);
+        $this->assertNotNull($normalizedPhone);
+
+        Sanctum::actingAs($agentA);
+        $this->postJson('/api/clients', [
+            'full_name' => 'A1',
+            'phone' => $rawPhone,
+        ])->assertCreated();
+
+        $this->postJson('/api/clients', [
+            'full_name' => 'A2 duplicate',
+            'phone' => $rawPhone,
+        ])->assertStatus(409)
+            ->assertJsonPath('duplicate_summary.has_duplicates', true)
+            ->assertJsonPath('message', 'Клиент с таким контактом уже добавлен вами.');
+
+        Sanctum::actingAs($agentB);
+        $this->postJson('/api/clients', [
+            'full_name' => 'B1',
+            'phone' => $rawPhone,
+        ])->assertCreated();
+
+        foreach ([$agentC, $agentD, $agentE, $agentF, $agentG, $agentH, $agentI, $agentJ] as $index => $user) {
+            Sanctum::actingAs($user);
+            $this->postJson('/api/clients', [
+                'full_name' => 'User '.($index + 3),
+                'phone' => $rawPhone,
+            ])->assertCreated();
+        }
+
+        Sanctum::actingAs($agentA);
+        $this->postJson('/api/clients', [
+            'full_name' => 'A normalized 1',
+            'phone' => '+992 91 855 55 81',
+        ])->assertStatus(409);
+        $this->postJson('/api/clients', [
+            'full_name' => 'A normalized 2',
+            'phone' => '992918555581',
+        ])->assertStatus(409);
+        $this->postJson('/api/clients', [
+            'full_name' => 'A normalized 3',
+            'phone' => '0918555581',
+        ])->assertStatus(409);
+
+        $this->postJson('/api/clients', [
+            'full_name' => 'A with same phone and other email',
+            'phone' => $rawPhone,
+            'email' => 'another@example.com',
+        ])->assertStatus(409);
+
+        $this->postJson('/api/clients', [
+            'full_name' => 'A unique phone with email',
+            'phone' => '918555582',
+            'email' => 'a@example.com',
+        ])->assertCreated();
+
+        $this->postJson('/api/clients', [
+            'full_name' => 'A duplicate by same email',
+            'phone' => '918555583',
+            'email' => 'A@EXAMPLE.COM',
+        ])->assertStatus(409)
+            ->assertJsonPath('duplicate_summary.has_duplicates', true);
+
+        $this->assertSame(
+            10,
+            Client::query()->where('phone_normalized', $normalizedPhone)->count()
+        );
     }
 
     private function createUser(Role $role, Branch $branch, string $name, ?BranchGroup $branchGroup = null): User

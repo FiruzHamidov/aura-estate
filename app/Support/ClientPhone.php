@@ -16,8 +16,20 @@ class ClientPhone
             return null;
         }
 
-        if (!str_starts_with($digits, '992') && strlen($digits) === 9) {
-            $digits = '992' . $digits;
+        if (str_starts_with($digits, '00')) {
+            $digits = substr($digits, 2);
+        }
+
+        if (str_starts_with($digits, '992')) {
+            return $digits;
+        }
+
+        if (strlen($digits) === 10 && str_starts_with($digits, '0')) {
+            return '992' . substr($digits, 1);
+        }
+
+        if (strlen($digits) === 9) {
+            return '992' . $digits;
         }
 
         return $digits;

@@ -14,6 +14,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Database\QueryException;
 use Illuminate\Validation\Rule;
 
 class ClientController extends Controller
@@ -52,6 +53,9 @@ class ClientController extends Controller
 
         if (array_key_exists('email', $data) && $data['email']) {
             $data['email'] = mb_strtolower(trim((string) $data['email']));
+            $data['email_normalized'] = $data['email'];
+        } elseif (array_key_exists('email', $data)) {
+            $data['email_normalized'] = null;
         }
 
         return $data;
@@ -150,9 +154,42 @@ class ClientController extends Controller
     private function duplicateConflictResponse(array $summary)
     {
         return response()->json([
-            'message' => $summary['message'] ?? 'Duplicate client already exists.',
+            'message' => $summary['message'] ?? 'Клиент с таким контактом уже добавлен вами.',
             'duplicate_summary' => $summary,
         ], 409);
+    }
+
+    private function uniqueConstraintDuplicateResponse(): \Illuminate\Http\JsonResponse
+    {
+        return response()->json([
+            'message' => 'Клиент с таким контактом уже добавлен вами.',
+            'duplicate_summary' => [
+                'has_duplicates' => true,
+                'visible_matches_count' => 0,
+                'hidden_matches_count' => 0,
+                'visible_matches' => [],
+                'attachable_hidden_matches_count' => 0,
+                'attachable_matches' => [],
+                'top_visible_match' => null,
+                'top_attachable_match' => null,
+                'message' => 'Клиент с таким контактом уже добавлен вами.',
+            ],
+        ], 409);
+    }
+
+    private function isClientContactUniqueViolation(QueryException $exception): bool
+    {
+        $sqlState = (string) ($exception->errorInfo[0] ?? '');
+        if (!in_array($sqlState, ['23000', '23505'], true)) {
+            return false;
+        }
+
+        $message = mb_strtolower($exception->getMessage());
+
+        return str_contains($message, 'clients_unique_phone_per_creator')
+            || str_contains($message, 'clients_unique_email_per_creator')
+            || str_contains($message, 'clients.created_by, clients.phone_normalized')
+            || str_contains($message, 'clients.created_by, clients.email_normalized');
     }
 
     private function appendActivitySummary(Client $client): void
@@ -543,6 +580,7 @@ class ClientController extends Controller
             'full_name',
             'phone',
             'email',
+            'email_normalized',
             'note',
             'branch_id',
             'branch_group_id',
@@ -557,6 +595,9 @@ class ClientController extends Controller
         ]);
 
         $data = $this->normalizeInput($data);
+        if (!Schema::hasColumn('clients', 'email_normalized')) {
+            unset($data['email_normalized']);
+        }
         $data = $this->clientAccess->normalizeMutationData($data, $authUser);
         $this->clientAccess->ensureCanCreateClientByContactKind($authUser, (string) ($data['contact_kind'] ?? Client::CONTACT_KIND_BUYER));
         $this->clientAccess->validateMutationTargets($authUser, $data);
@@ -570,7 +611,15 @@ class ClientController extends Controller
             return $this->duplicateConflictResponse($duplicateSummary);
         }
 
-        $client = Client::create($data);
+        try {
+            $client = Client::create($data);
+        } catch (QueryException $exception) {
+            if ($this->isClientContactUniqueViolation($exception)) {
+                return $this->uniqueConstraintDuplicateResponse();
+            }
+
+            throw $exception;
+        }
         $this->logClientCreated($client, $authUser);
 
         return response()->json($client->load($this->showRelations()), 201);
@@ -651,6 +700,7 @@ class ClientController extends Controller
             'full_name',
             'phone',
             'email',
+            'email_normalized',
             'note',
             'branch_id',
             'branch_group_id',
@@ -675,6 +725,9 @@ class ClientController extends Controller
             'source_comment' => $client->source_comment,
             'contact_kind' => $client->contact_kind,
         ], $data);
+        if (!Schema::hasColumn('clients', 'email_normalized')) {
+            unset($data['email_normalized']);
+        }
         $data = $this->clientAccess->normalizeMutationData($data, $authUser);
         $this->clientAccess->validateMutationTargets($authUser, $data);
 
@@ -689,7 +742,15 @@ class ClientController extends Controller
         }
 
         $before = $client->getAttributes();
-        $client->update($data);
+        try {
+            $client->update($data);
+        } catch (QueryException $exception) {
+            if ($this->isClientContactUniqueViolation($exception)) {
+                return $this->uniqueConstraintDuplicateResponse();
+            }
+
+            throw $exception;
+        }
         $this->logClientUpdated($client, $authUser, $before);
 
         return response()->json($client->fresh($this->showRelations()));

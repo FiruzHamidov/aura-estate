@@ -14,6 +14,7 @@ return new class extends Migration
             $table->string('phone')->nullable();
             $table->string('phone_normalized')->nullable()->index();
             $table->string('email')->nullable();
+            $table->string('email_normalized')->nullable()->index();
             $table->text('note')->nullable();
             $table->foreignId('branch_id')->nullable()->constrained('branches')->nullOnDelete();
             $table->foreignId('created_by')->nullable()->constrained('users')->nullOnDelete();
@@ -23,6 +24,8 @@ return new class extends Migration
             $table->json('meta')->nullable();
             $table->softDeletes();
             $table->timestamps();
+            $table->unique(['created_by', 'phone_normalized'], 'clients_unique_phone_per_creator');
+            $table->unique(['created_by', 'email_normalized'], 'clients_unique_email_per_creator');
         });
     }
 

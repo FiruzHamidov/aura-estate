@@ -7,6 +7,7 @@ use App\Models\User;
 use App\Services\Crm\ClientAttachService;
 use App\Support\ClientAccess;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\Schema;
 
 class ClientDeduplicator
 {
@@ -18,7 +19,7 @@ class ClientDeduplicator
 
     public function summarize(User $authUser, array $data, ?int $excludeClientId = null, array $context = []): array
     {
-        $matchesQuery = $this->matchesQuery($data, $excludeClientId);
+        $matchesQuery = $this->matchesQuery($data, (int) $authUser->id, $excludeClientId);
 
         $allMatchesCount = (clone $matchesQuery)->count();
 
@@ -107,7 +108,7 @@ class ClientDeduplicator
             'attachable_matches' => $attachablePayload,
             'top_visible_match' => $visiblePayload->first(),
             'top_attachable_match' => $attachablePayload->first(),
-            'message' => $this->message($visibleMatchesCount, $attachableMatchesCount, $hiddenMatchesCount),
+            'message' => 'Клиент с таким контактом уже добавлен вами.',
         ];
     }
 
@@ -116,48 +117,31 @@ class ClientDeduplicator
         return !empty($data['phone_normalized']) || !empty($data['email']);
     }
 
-    private function matchesQuery(array $data, ?int $excludeClientId = null): Builder
+    private function matchesQuery(array $data, int $creatorUserId, ?int $excludeClientId = null): Builder
     {
         if (!$this->hasIdentifiers($data)) {
             return Client::query()->whereRaw('1 = 0');
         }
 
-        $branchId = $data['branch_id'] ?? null;
-        $email = !empty($data['email']) ? mb_strtolower((string) $data['email']) : null;
+        $email = !empty($data['email_normalized']) ? (string) $data['email_normalized'] : null;
         $phone = $data['phone_normalized'] ?? null;
+        $hasEmailNormalizedColumn = Schema::hasColumn('clients', 'email_normalized');
 
         return Client::query()
-            ->when(
-                $branchId,
-                fn (Builder $query) => $query->where('branch_id', $branchId),
-                fn (Builder $query) => $query->whereNull('branch_id')
-            )
+            ->where('created_by', $creatorUserId)
             ->when($excludeClientId, fn (Builder $query) => $query->whereKeyNot($excludeClientId))
-            ->where(function (Builder $query) use ($phone, $email) {
+            ->where(function (Builder $query) use ($phone, $email, $hasEmailNormalizedColumn) {
                 if (!empty($phone)) {
                     $query->orWhere('phone_normalized', $phone);
                 }
 
                 if (!empty($email)) {
-                    $query->orWhereRaw('LOWER(email) = ?', [$email]);
+                    if ($hasEmailNormalizedColumn) {
+                        $query->orWhere('email_normalized', $email);
+                    } else {
+                        $query->orWhereRaw('LOWER(email) = ?', [$email]);
+                    }
                 }
             });
-    }
-
-    private function message(int $visibleMatchesCount, int $attachableMatchesCount, int $hiddenMatchesCount): ?string
-    {
-        if ($visibleMatchesCount > 0) {
-            return 'Duplicate client already exists.';
-        }
-
-        if ($attachableMatchesCount > 0) {
-            return 'Duplicate client exists and can be attached to the current context.';
-        }
-
-        if ($hiddenMatchesCount > 0) {
-            return 'Duplicate client exists but is not attachable for current user.';
-        }
-
-        return null;
     }
 }
