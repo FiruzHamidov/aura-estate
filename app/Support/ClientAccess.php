@@ -9,6 +9,7 @@ use App\Models\ClientType;
 use App\Models\Setting;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Exceptions\HttpResponseException;
 
 class ClientAccess
 {
@@ -36,12 +37,12 @@ class ClientAccess
 
     public function isBranchScopedRole(?string $roleSlug): bool
     {
-        return in_array($roleSlug, ['branch_director', 'rop', 'agent', 'manager', 'operator', 'intern'], true);
+        return in_array($roleSlug, ['branch_director', 'rop', 'agent', 'manager', 'operator', 'intern', 'mop'], true);
     }
 
     public function isAgentScopedRole(?string $roleSlug): bool
     {
-        return in_array($roleSlug, ['agent', 'manager', 'operator'], true);
+        return in_array($roleSlug, ['agent', 'manager', 'operator', 'mop'], true);
     }
 
     public function isInternRole(?string $roleSlug): bool
@@ -178,7 +179,9 @@ class ClientAccess
             ->whereKey($client->id)
             ->exists();
 
-        abort_unless($allowed, 403, 'Forbidden');
+        if (!$allowed) {
+            $this->denyWithCode('RBAC_SCOPE_VIOLATION', 'Forbidden in current scope.');
+        }
     }
 
     public function ensureNeedVisible(User $authUser, ClientNeed $clientNeed): void
@@ -322,7 +325,16 @@ class ClientAccess
 
     public function ensureCanManageCollaborators(User $authUser, Client $client): void
     {
-        abort_unless($this->canManageCollaborators($authUser, $client), 403, 'Forbidden');
+        if (!$this->canManageCollaborators($authUser, $client)) {
+            $this->denyWithCode('FORBIDDEN_ACTION', 'Forbidden action.');
+        }
+    }
+
+    public function ensureCanMutateClients(User $authUser): void
+    {
+        if ($this->roleSlug($authUser) === 'mop') {
+            $this->denyWithCode('FORBIDDEN_ACTION', 'Role cannot mutate CRM contacts.');
+        }
     }
 
     public function defaultClientTypeId(): int
@@ -345,7 +357,12 @@ class ClientAccess
 
     private function applyGroupVisibilityScope(Builder $query, User $authUser): Builder
     {
+        $roleSlug = $this->roleSlug($authUser);
         $authUser->loadMissing('branchGroup');
+
+        if ($roleSlug === 'mop' && empty($authUser->branch_group_id)) {
+            return $query->whereRaw('1 = 0');
+        }
 
         if (
             empty($authUser->branch_group_id)
@@ -360,6 +377,16 @@ class ClientAccess
                     $this->applyOwnContactConstraint($ownContactQuery, $authUser);
                 });
         });
+    }
+
+    public function denyWithCode(string $code, string $message, int $status = 403): never
+    {
+        throw new HttpResponseException(response()->json([
+            'code' => $code,
+            'message' => $message,
+            'details' => (object) [],
+            'trace_id' => request()->attributes->get('trace_id'),
+        ], $status));
     }
 
     private function filterSellerVisibilityForAgent(

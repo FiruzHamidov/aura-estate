@@ -1511,6 +1511,119 @@ class ClientAccessTest extends TestCase
         $this->assertNotContains($otherProperty->id, $ids);
     }
 
+    public function test_mop_sees_only_own_branch_group_clients_and_filter_params_do_not_expand_scope(): void
+    {
+        Setting::create([
+            'key' => ClientAccess::VISIBILITY_SETTING_KEY,
+            'value' => ClientAccess::VISIBILITY_ALL_BRANCH,
+        ]);
+
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+        $groupA = $this->createBranchGroup($branchA, 'Group A');
+        $groupB = $this->createBranchGroup($branchA, 'Group B');
+        $groupC = $this->createBranchGroup($branchB, 'Group C');
+
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $mop = $this->createUser($mopRole, $branchA, 'MOP A', $groupA);
+        $agentA = $this->createUser($agentRole, $branchA, 'Agent A', $groupA);
+        $agentB = $this->createUser($agentRole, $branchA, 'Agent B', $groupB);
+        $agentC = $this->createUser($agentRole, $branchB, 'Agent C', $groupC);
+
+        $allowed = $this->createClient($branchA, $agentA, $agentA, 'Allowed', 1, Client::CONTACT_KIND_BUYER, $groupA);
+        $otherGroup = $this->createClient($branchA, $agentB, $agentB, 'Other group', 1, Client::CONTACT_KIND_BUYER, $groupB);
+        $otherBranch = $this->createClient($branchB, $agentC, $agentC, 'Other branch', 1, Client::CONTACT_KIND_BUYER, $groupC);
+
+        Sanctum::actingAs($mop);
+
+        $response = $this->getJson('/api/clients')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $allowed->id)
+            ->assertJsonPath('total', 1);
+
+        $ids = collect($response->json('data'))->pluck('id')->all();
+        $this->assertNotContains($otherGroup->id, $ids);
+        $this->assertNotContains($otherBranch->id, $ids);
+
+        $this->getJson('/api/clients?branch_group_id=' . $groupB->id . '&responsible_agent_id=' . $agentB->id)
+            ->assertOk()
+            ->assertJsonCount(0, 'data')
+            ->assertJsonPath('total', 0);
+    }
+
+    public function test_mop_cannot_open_client_from_other_branch_group(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $groupA = $this->createBranchGroup($branch, 'Group A');
+        $groupB = $this->createBranchGroup($branch, 'Group B');
+
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $mop = $this->createUser($mopRole, $branch, 'MOP A', $groupA);
+        $agentB = $this->createUser($agentRole, $branch, 'Agent B', $groupB);
+        $foreignClient = $this->createClient($branch, $agentB, $agentB, 'Foreign', 1, Client::CONTACT_KIND_BUYER, $groupB);
+
+        Sanctum::actingAs($mop);
+
+        $this->getJson('/api/clients/' . $foreignClient->id)
+            ->assertForbidden()
+            ->assertJsonPath('code', 'RBAC_SCOPE_VIOLATION')
+            ->assertJsonStructure(['trace_id']);
+    }
+
+    public function test_mop_cannot_mutate_clients_and_needs_even_for_visible_client(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $groupA = $this->createBranchGroup($branch, 'Group A');
+
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $mop = $this->createUser($mopRole, $branch, 'MOP A', $groupA);
+        $agent = $this->createUser($agentRole, $branch, 'Agent A', $groupA);
+        $client = $this->createClient($branch, $agent, $agent, 'Visible Client', 1, Client::CONTACT_KIND_BUYER, $groupA);
+
+        $needId = DB::table('client_needs')->insertGetId([
+            'client_id' => $client->id,
+            'type_id' => 1,
+            'status_id' => 1,
+            'currency' => 'TJS',
+            'created_by' => $agent->id,
+            'responsible_agent_id' => $agent->id,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        Sanctum::actingAs($mop);
+
+        $this->patchJson('/api/clients/' . $client->id, ['full_name' => 'Updated by MOP'])
+            ->assertForbidden()
+            ->assertJsonPath('code', 'FORBIDDEN_ACTION');
+
+        $this->deleteJson('/api/clients/' . $client->id)
+            ->assertForbidden()
+            ->assertJsonPath('code', 'FORBIDDEN_ACTION');
+
+        $this->postJson('/api/clients/' . $client->id . '/needs', [
+            'type_id' => 1,
+            'status_id' => 1,
+        ])->assertForbidden()
+            ->assertJsonPath('code', 'FORBIDDEN_ACTION');
+
+        $this->patchJson('/api/client-needs/' . $needId, [
+            'comment' => 'Updated by MOP',
+        ])->assertForbidden()
+            ->assertJsonPath('code', 'FORBIDDEN_ACTION');
+
+        $this->deleteJson('/api/client-needs/' . $needId)
+            ->assertForbidden()
+            ->assertJsonPath('code', 'FORBIDDEN_ACTION');
+    }
+
     private function createUser(Role $role, Branch $branch, string $name, ?BranchGroup $branchGroup = null): User
     {
         return User::create([

@@ -516,6 +516,7 @@ class ClientController extends Controller
     public function store(Request $request)
     {
         $authUser = $this->authUser();
+        $this->clientAccess->ensureCanMutateClients($authUser);
 
         $request->validate([
             'full_name' => 'required|string|max:255',
@@ -611,6 +612,7 @@ class ClientController extends Controller
     public function update(Request $request, Client $client)
     {
         $authUser = $this->authUser();
+        $this->clientAccess->ensureCanMutateClients($authUser);
         $this->clientAccess->ensureVisible($authUser, $client);
 
         $request->validate([
@@ -747,6 +749,7 @@ class ClientController extends Controller
     public function storeCollaborator(Request $request, Client $client)
     {
         $authUser = $this->authUser();
+        $this->clientAccess->ensureCanMutateClients($authUser);
         $this->clientAccess->ensureVisible($authUser, $client);
         $this->clientAccess->ensureCanManageCollaborators($authUser, $client);
 
@@ -807,6 +810,7 @@ class ClientController extends Controller
     public function destroyCollaborator(Request $request, Client $client, User $user)
     {
         $authUser = $this->authUser();
+        $this->clientAccess->ensureCanMutateClients($authUser);
         $this->clientAccess->ensureVisible($authUser, $client);
         $this->clientAccess->ensureCanManageCollaborators($authUser, $client);
 
@@ -843,7 +847,9 @@ class ClientController extends Controller
 
     public function destroy(Client $client)
     {
-        $this->clientAccess->ensureVisible($this->authUser(), $client);
+        $authUser = $this->authUser();
+        $this->clientAccess->ensureCanMutateClients($authUser);
+        $this->clientAccess->ensureVisible($authUser, $client);
 
         $client->delete();
 

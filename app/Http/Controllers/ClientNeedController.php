@@ -297,6 +297,7 @@ class ClientNeedController extends Controller
     public function store(Request $request, Client $client)
     {
         $authUser = $this->authUser();
+        $this->clientAccess->ensureCanMutateClients($authUser);
 
         $validated = $this->validatePayload($request);
         $validated = $this->normalizePropertyTypes($validated);
@@ -331,6 +332,7 @@ class ClientNeedController extends Controller
     public function update(Request $request, ClientNeed $clientNeed)
     {
         $authUser = $this->authUser();
+        $this->clientAccess->ensureCanMutateClients($authUser);
         $clientNeed->loadMissing('client');
         $this->clientAccess->ensureNeedVisible($authUser, $clientNeed);
 
@@ -368,7 +370,9 @@ class ClientNeedController extends Controller
 
     public function destroy(ClientNeed $clientNeed)
     {
-        $this->clientAccess->ensureNeedVisible($this->authUser(), $clientNeed);
+        $authUser = $this->authUser();
+        $this->clientAccess->ensureCanMutateClients($authUser);
+        $this->clientAccess->ensureNeedVisible($authUser, $clientNeed);
 
         $clientNeed->delete();
 
