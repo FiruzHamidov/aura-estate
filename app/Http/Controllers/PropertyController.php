@@ -372,7 +372,6 @@ class PropertyController extends Controller
     {
         $authUser = auth()->user();
         $currentProperty = null;
-        $canAutoAttach = !$property?->exists;
 
         if (!$authUser) {
             return;
@@ -394,31 +393,27 @@ class PropertyController extends Controller
             }
 
             $client = Client::query()->findOrFail($data[$field]);
+            $attachContext = $property?->exists
+                ? $this->clientAttachService->normalizedContext([
+                    'context_type' => ClientAttachService::CONTEXT_PROPERTY,
+                    'context_id' => $property->getKey(),
+                    'property_relation' => $field === 'owner_client_id' ? 'owner' : 'buyer',
+                ])
+                : $this->clientAttachService->normalizedContext([
+                    'context_type' => ClientAttachService::CONTEXT_CLIENT,
+                ]);
 
             try {
                 $this->clientAccess->ensureVisible($authUser, $client);
             } catch (HttpExceptionInterface $exception) {
                 if (
-                    !$canAutoAttach
-                    || $exception->getStatusCode() !== 403
-                    || !$this->clientAttachService->canAttachClient(
-                        $authUser,
-                        $client,
-                        $this->clientAttachService->normalizedContext([
-                            'context_type' => ClientAttachService::CONTEXT_CLIENT,
-                        ])
-                    )
+                    $exception->getStatusCode() !== 403
+                    || !$this->clientAttachService->canAttachClient($authUser, $client, $attachContext)
                 ) {
                     throw $exception;
                 }
 
-                $this->clientAttachService->attach(
-                    $authUser,
-                    $client,
-                    $this->clientAttachService->normalizedContext([
-                        'context_type' => ClientAttachService::CONTEXT_CLIENT,
-                    ])
-                );
+                $this->clientAttachService->attach($authUser, $client, $attachContext);
             }
         }
     }
