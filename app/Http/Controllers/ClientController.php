@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Client;
+use App\Models\ClientNeedStatus;
 use App\Models\User;
 use App\Services\Crm\AuditLogger;
 use App\Services\Crm\ClientAttachService;
@@ -69,6 +70,7 @@ class ClientController extends Controller
             'creator',
             'responsibleAgent',
             'type',
+            'needStatus',
             'needs.type',
             'needs.status',
             'needs.creator',
@@ -384,6 +386,7 @@ class ClientController extends Controller
             'budget_mortgage_from' => 'nullable|numeric|min:0',
             'budget_mortgage_to' => 'nullable|numeric|min:0',
             'status' => ['nullable', Rule::in(['active', 'inactive'])],
+            'status_id' => 'nullable|integer|exists:client_need_statuses,id',
             'per_page' => 'nullable|integer|min:1|max:100',
         ]);
 
@@ -542,6 +545,9 @@ class ClientController extends Controller
         if (!empty($validated['status'])) {
             $query->where('status', $validated['status']);
         }
+        if (!empty($validated['status_id']) && Schema::hasColumn('clients', 'status_id')) {
+            $query->where('status_id', (int) $validated['status_id']);
+        }
 
         return response()->json(
             $query->orderByDesc('id')
@@ -572,6 +578,7 @@ class ClientController extends Controller
             'source_comment' => 'nullable|string',
             'contact_kind' => ['nullable', Rule::in(Client::contactKinds())],
             'status' => ['nullable', Rule::in(['active', 'inactive'])],
+            'status_id' => 'nullable|integer|exists:client_need_statuses,id',
             'bitrix_contact_id' => 'nullable|integer',
             'meta' => 'nullable|array',
         ]);
@@ -590,6 +597,7 @@ class ClientController extends Controller
             'source_comment',
             'contact_kind',
             'status',
+            'status_id',
             'bitrix_contact_id',
             'meta',
         ]);
@@ -597,6 +605,12 @@ class ClientController extends Controller
         $data = $this->normalizeInput($data);
         if (!Schema::hasColumn('clients', 'email_normalized')) {
             unset($data['email_normalized']);
+        }
+        if (!Schema::hasColumn('clients', 'status_id')) {
+            unset($data['status_id']);
+        }
+        if (array_key_exists('status_id', $data)) {
+            $data['status'] = $this->mapLegacyClientStatusFromNeedStatusId($data['status_id']);
         }
         $data = $this->clientAccess->normalizeMutationData($data, $authUser);
         $this->clientAccess->ensureCanCreateClientByContactKind($authUser, (string) ($data['contact_kind'] ?? Client::CONTACT_KIND_BUYER));
@@ -692,6 +706,7 @@ class ClientController extends Controller
             'source_comment' => 'sometimes|nullable|string',
             'contact_kind' => ['sometimes', 'nullable', Rule::in(Client::contactKinds())],
             'status' => ['sometimes', Rule::in(['active', 'inactive'])],
+            'status_id' => 'sometimes|nullable|integer|exists:client_need_statuses,id',
             'bitrix_contact_id' => 'sometimes|nullable|integer',
             'meta' => 'sometimes|nullable|array',
         ]);
@@ -710,6 +725,7 @@ class ClientController extends Controller
             'source_comment',
             'contact_kind',
             'status',
+            'status_id',
             'bitrix_contact_id',
             'meta',
         ]);
@@ -724,9 +740,16 @@ class ClientController extends Controller
             'source_id' => $client->source_id,
             'source_comment' => $client->source_comment,
             'contact_kind' => $client->contact_kind,
+            'status_id' => $client->status_id,
         ], $data);
         if (!Schema::hasColumn('clients', 'email_normalized')) {
             unset($data['email_normalized']);
+        }
+        if (!Schema::hasColumn('clients', 'status_id')) {
+            unset($data['status_id']);
+        }
+        if (array_key_exists('status_id', $data)) {
+            $data['status'] = $this->mapLegacyClientStatusFromNeedStatusId($data['status_id']);
         }
         $data = $this->clientAccess->normalizeMutationData($data, $authUser);
         $this->clientAccess->validateMutationTargets($authUser, $data);
@@ -754,6 +777,17 @@ class ClientController extends Controller
         $this->logClientUpdated($client, $authUser, $before);
 
         return response()->json($client->fresh($this->showRelations()));
+    }
+
+    private function mapLegacyClientStatusFromNeedStatusId(?int $statusId): string
+    {
+        if (empty($statusId)) {
+            return 'active';
+        }
+
+        $status = ClientNeedStatus::query()->find($statusId);
+
+        return (bool) ($status?->is_closed ?? false) ? 'inactive' : 'active';
     }
 
     public function activities(Request $request, Client $client)

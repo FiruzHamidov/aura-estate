@@ -507,7 +507,7 @@ class NotificationService
             'deal_deadline_soon' => $this->dispatchDealDeadlineSoon(),
             'deal_activity_overdue' => $this->dispatchDealActivityOverdue(),
             'booking_reminder_24h' => $this->dispatchBookingReminderWindow(NotificationType::BOOKING_REMINDER_24H, 24 * 60, 30),
-            'booking_reminder_1h' => $this->dispatchBookingReminderWindow(NotificationType::BOOKING_REMINDER_1H, 60, 15),
+            'booking_reminder_30m' => $this->dispatchBookingReminderWindow(NotificationType::BOOKING_REMINDER_30M, 30, 10),
             'motivation_manager_morning_digest' => $this->dispatchManagerMorningDigest(),
             'motivation_agent_day_plan' => $this->dispatchAgentDayPlan(),
             'motivation_manager_evening_digest' => $this->dispatchManagerEveningDigest(),
@@ -891,15 +891,50 @@ class NotificationService
         ]);
 
         if (in_array(NotificationChannel::TELEGRAM, $channels, true)) {
-            Log::info('Notification is marked for telegram delivery, but no delivery worker is implemented in NotificationService yet.', [
-                'notification_id' => $notification->id,
-                'recipient_user_id' => $recipient->id,
-                'type' => $type,
-                'telegram_chat_id' => $recipient->telegram_chat_id,
-            ]);
+            $this->deliverTelegramNotification($notification, $recipient);
         }
 
         return $notification;
+    }
+
+    private function deliverTelegramNotification(Notification $notification, User $recipient): void
+    {
+        if (! $this->telegramBot->isEnabled()) {
+            return;
+        }
+
+        if (! $recipient->telegram_chat_id) {
+            return;
+        }
+
+        try {
+            $this->telegramBot->sendUserMessage(
+                $recipient,
+                $this->formatTelegramNotificationText($notification)
+            );
+        } catch (\Throwable $e) {
+            Log::warning('Failed to send notification to telegram.', [
+                'notification_id' => $notification->id,
+                'recipient_user_id' => $recipient->id,
+                'type' => $notification->type,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    private function formatTelegramNotificationText(Notification $notification): string
+    {
+        $title = trim((string) $notification->title);
+        $body = trim((string) $notification->body);
+        $url = trim((string) $notification->action_url);
+
+        $parts = array_values(array_filter([$title, $body]));
+
+        if ($url !== '') {
+            $parts[] = $url;
+        }
+
+        return implode("\n", $parts);
     }
 
     private function dispatchLeadSlaDueSoon(): int
@@ -1142,13 +1177,17 @@ class NotificationService
             ->get();
 
         foreach ($bookings as $booking) {
-            $title = $type === NotificationType::BOOKING_REMINDER_24H
-                ? 'Показ через 24 часа'
-                : 'Показ скоро начнётся';
+            $title = match ($type) {
+                NotificationType::BOOKING_REMINDER_24H => 'Показ через 24 часа',
+                NotificationType::BOOKING_REMINDER_30M => 'Показ через 30 минут',
+                default => 'Показ скоро начнётся',
+            };
 
-            $body = $type === NotificationType::BOOKING_REMINDER_24H
-                ? 'Через сутки у вас запланирован показ. Уточните подтверждение с клиентом.'
-                : 'До показа остался примерно час. Проверьте адрес, время и связь с клиентом.';
+            $body = match ($type) {
+                NotificationType::BOOKING_REMINDER_24H => 'Через сутки у вас запланирован показ. Уточните подтверждение с клиентом.',
+                NotificationType::BOOKING_REMINDER_30M => 'До показа осталось около 30 минут. Проверьте адрес, время и связь с клиентом.',
+                default => 'Показ скоро начнётся.',
+            };
 
             $this->notifyUsers(
                 $this->recipients->bookingAgent($booking),
@@ -1158,6 +1197,7 @@ class NotificationService
                 $booking,
                 null,
                 [
+                    'channels' => [NotificationChannel::IN_APP, NotificationChannel::TELEGRAM],
                     'action_url' => '/bookings/'.$booking->id,
                     'action_type' => 'open_booking',
                     'dedupe_key' => 'booking:reminder:'.$type.':'.$booking->id,

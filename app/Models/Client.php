@@ -29,6 +29,7 @@ class Client extends Model
         'created_by',
         'responsible_agent_id',
         'client_type_id',
+        'status_id',
         'source_id',
         'source_comment',
         'contact_kind',
@@ -141,6 +142,11 @@ class Client extends Model
     public function source()
     {
         return $this->belongsTo(ClientSource::class, 'source_id');
+    }
+
+    public function needStatus()
+    {
+        return $this->belongsTo(ClientNeedStatus::class, 'status_id');
     }
 
     public function needs()

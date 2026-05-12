@@ -28,7 +28,7 @@ final class NotificationType
     public const BOOKING_CREATED = 'booking_created';
     public const BOOKING_UPDATED = 'booking_updated';
     public const BOOKING_REMINDER_24H = 'booking_reminder_24h';
-    public const BOOKING_REMINDER_1H = 'booking_reminder_1h';
+    public const BOOKING_REMINDER_30M = 'booking_reminder_30m';
 
     public const CHAT_NEW_MESSAGE = 'chat_new_message';
     public const CHAT_RESPONSE_OVERDUE = 'chat_response_overdue';
@@ -82,7 +82,7 @@ final class NotificationType
             self::BOOKING_CREATED,
             self::BOOKING_UPDATED,
             self::BOOKING_REMINDER_24H,
-            self::BOOKING_REMINDER_1H,
+            self::BOOKING_REMINDER_30M,
             self::CHAT_NEW_MESSAGE,
             self::CHAT_RESPONSE_OVERDUE,
             self::SELECTION_VIEWED,
