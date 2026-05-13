@@ -124,6 +124,19 @@ class PublicTeamController extends Controller
 
     private function salesByCountRows(Carbon $from, Carbon $to, ?int $branchId, int $limit): Collection
     {
+        $activitySub = Property::query()
+            ->joinSub(
+                $this->publicAgentsQuery($branchId)->select('users.id'),
+                'agents',
+                fn ($join) => $join->on('agents.id', '=', 'properties.created_by')
+            )
+            ->whereBetween('properties.created_at', [$from, $to])
+            ->whereNotIn('properties.moderation_status', ['sold', 'rented', 'sold_by_owner'])
+            ->selectRaw('properties.created_by as agent_id')
+            ->selectRaw('COUNT(*) as total_count')
+            ->selectRaw("SUM(CASE WHEN properties.moderation_status = 'approved' THEN 1 ELSE 0 END) as approved_count")
+            ->groupBy('properties.created_by');
+
         return DB::table('property_agent_sales as sales')
             ->join('properties', 'properties.id', '=', 'sales.property_id')
             ->joinSub(
@@ -131,11 +144,20 @@ class PublicTeamController extends Controller
                 'agents',
                 fn ($join) => $join->on('agents.id', '=', 'sales.agent_id')
             )
+            ->leftJoinSub(
+                $activitySub,
+                'activity',
+                fn ($join) => $join->on('activity.agent_id', '=', 'sales.agent_id')
+            )
             ->whereIn('properties.moderation_status', ['sold', 'rented'])
             ->whereBetween('properties.sold_at', [$from, $to])
             ->selectRaw('sales.agent_id, COUNT(DISTINCT sales.property_id) as sold_count')
+            ->selectRaw('MAX(COALESCE(activity.approved_count, 0)) as approved_count')
+            ->selectRaw('MAX(COALESCE(activity.total_count, 0)) as total_count')
             ->groupBy('sales.agent_id')
             ->orderByDesc('sold_count')
+            ->orderByDesc('approved_count')
+            ->orderByDesc('total_count')
             ->orderByDesc('sales.agent_id')
             ->limit($limit)
             ->get();

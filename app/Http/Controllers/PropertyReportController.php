@@ -661,6 +661,15 @@ class PropertyReportController extends Controller
             $clientsQ->whereIn($clientOwnerColumn, $this->toArray($request->input('agent_id')));
         }
 
+        $from = $request->input('date_from', $request->input('from'));
+        $to = $request->input('date_to', $request->input('to'));
+        if ($from) {
+            $clientsQ->whereDate('created_at', '>=', $from);
+        }
+        if ($to) {
+            $clientsQ->whereDate('created_at', '<=', $to);
+        }
+
         return $clientsQ
             ->groupBy($clientOwnerColumn)
             ->get()
@@ -950,9 +959,11 @@ class PropertyReportController extends Controller
             ];
         })
         ->sort(function ($a, $b) {
-            // 1) сначала по количеству проданных (sold)
-            if ($b['sold'] !== $a['sold']) {
-                return $b['sold'] <=> $a['sold'];
+            // 1) сначала по сумме "продано + арендовано"
+            $aSoldAndRented = $a['sold'] + $a['rented'];
+            $bSoldAndRented = $b['sold'] + $b['rented'];
+            if ($bSoldAndRented !== $aSoldAndRented) {
+                return $bSoldAndRented <=> $aSoldAndRented;
             }
 
             // 2) затем по количеству approved

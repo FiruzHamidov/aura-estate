@@ -304,4 +304,90 @@ class PublicTeamHallOfFameTest extends TestCase
         $this->assertNotContains($inactiveAgent->id, $leaderIds);
         $this->assertNotContains($manager->id, $leaderIds);
     }
+
+    public function test_best_sales_by_count_uses_manager_efficiency_tie_breakers(): void
+    {
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $agentOne = User::create([
+            'name' => 'Агент Один',
+            'phone' => '911000001',
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+
+        $agentTwo = User::create([
+            'name' => 'Агент Два',
+            'phone' => '911000002',
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+
+        $soldOneId = DB::table('properties')->insertGetId([
+            'title' => 'Sold A1',
+            'created_by' => $agentOne->id,
+            'moderation_status' => 'sold',
+            'sold_at' => '2026-04-10 10:00:00',
+            'created_at' => '2026-04-01 10:00:00',
+            'updated_at' => '2026-04-10 10:00:00',
+        ]);
+
+        $soldTwoId = DB::table('properties')->insertGetId([
+            'title' => 'Sold A2',
+            'created_by' => $agentTwo->id,
+            'moderation_status' => 'sold',
+            'sold_at' => '2026-04-11 10:00:00',
+            'created_at' => '2026-04-01 11:00:00',
+            'updated_at' => '2026-04-11 10:00:00',
+        ]);
+
+        DB::table('properties')->insert([
+            [
+                'title' => 'A1 approved',
+                'created_by' => $agentOne->id,
+                'moderation_status' => 'approved',
+                'sold_at' => null,
+                'created_at' => '2026-04-03 10:00:00',
+                'updated_at' => '2026-04-03 10:00:00',
+            ],
+            [
+                'title' => 'A2 approved #1',
+                'created_by' => $agentTwo->id,
+                'moderation_status' => 'approved',
+                'sold_at' => null,
+                'created_at' => '2026-04-04 10:00:00',
+                'updated_at' => '2026-04-04 10:00:00',
+            ],
+            [
+                'title' => 'A2 approved #2',
+                'created_by' => $agentTwo->id,
+                'moderation_status' => 'approved',
+                'sold_at' => null,
+                'created_at' => '2026-04-05 10:00:00',
+                'updated_at' => '2026-04-05 10:00:00',
+            ],
+        ]);
+
+        DB::table('property_agent_sales')->insert([
+            [
+                'property_id' => $soldOneId,
+                'agent_id' => $agentOne->id,
+                'created_at' => '2026-04-10 10:00:00',
+                'updated_at' => '2026-04-10 10:00:00',
+            ],
+            [
+                'property_id' => $soldTwoId,
+                'agent_id' => $agentTwo->id,
+                'created_at' => '2026-04-11 10:00:00',
+                'updated_at' => '2026-04-11 10:00:00',
+            ],
+        ]);
+
+        $response = $this->getJson('/api/public/team/hall-of-fame?date_from=2026-04-01&date_to=2026-04-30');
+        $response->assertOk();
+
+        // sold_count одинаковый, поэтому победитель определяется по approved, как в отчете эффективности.
+        $response->assertJsonPath('nominations.best_sales_by_count.winner.agent.id', $agentTwo->id);
+        $response->assertJsonPath('nominations.best_sales_by_count.winner.sold_count', 1);
+    }
 }
