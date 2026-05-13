@@ -9,6 +9,7 @@ use App\Models\Deal;
 use App\Models\Favorite;
 use App\Models\Lead;
 use App\Models\Notification;
+use App\Models\Property;
 use App\Models\Selection;
 use App\Models\User;
 use App\Models\UserDailyReportReminderSetting;
@@ -508,6 +509,7 @@ class NotificationService
             'deal_activity_overdue' => $this->dispatchDealActivityOverdue(),
             'booking_reminder_24h' => $this->dispatchBookingReminderWindow(NotificationType::BOOKING_REMINDER_24H, 24 * 60, 30),
             'booking_reminder_30m' => $this->dispatchBookingReminderWindow(NotificationType::BOOKING_REMINDER_30M, 30, 10),
+            'property_stale_thresholds' => $this->dispatchPropertyStaleThresholds(),
             'motivation_manager_morning_digest' => $this->dispatchManagerMorningDigest(),
             'motivation_agent_day_plan' => $this->dispatchAgentDayPlan(),
             'motivation_manager_evening_digest' => $this->dispatchManagerEveningDigest(),
@@ -696,6 +698,90 @@ class NotificationService
             );
 
             $sent++;
+        }
+
+        return $sent;
+    }
+
+    private function dispatchPropertyStaleThresholds(): int
+    {
+        if (! Schema::hasTable('properties')) {
+            return 0;
+        }
+
+        if (! Schema::hasColumn('properties', 'created_at')
+            || ! Schema::hasColumn('properties', 'moderation_status')
+            || ! Schema::hasColumn('properties', 'sold_at')) {
+            return 0;
+        }
+
+        if (! $this->isWithinDailyWindow('09:00', 10)) {
+            return 0;
+        }
+
+        $now = now();
+        $sent = 0;
+
+        $thresholds = [
+            14 => [
+                'type' => NotificationType::PROPERTY_STALE_14D,
+                'title' => 'Объявление 14+ дней без результата',
+                'body' => 'Объявление опубликовано более 14 дней. Проверьте цену, фото и описание.',
+                'recipient_mode' => 'agent',
+            ],
+            21 => [
+                'type' => NotificationType::PROPERTY_STALE_21D,
+                'title' => 'Эскалация: объявление 21+ дней',
+                'body' => 'Объявление более 21 дня без результата. Нужна эскалация и корректировка стратегии.',
+                'recipient_mode' => 'agent_and_branch_heads',
+            ],
+            30 => [
+                'type' => NotificationType::PROPERTY_STALE_30D,
+                'title' => 'Критично: объявление 30+ дней',
+                'body' => 'Объявление более 30 дней без результата. Нужны управленческие действия.',
+                'recipient_mode' => 'agent_and_branch_heads',
+            ],
+        ];
+
+        foreach ($thresholds as $days => $config) {
+            $from = $now->copy()->subDays($days + 1);
+            $to = $now->copy()->subDays($days);
+
+            $properties = Property::query()
+                ->with(['agent.role', 'creator.role'])
+                ->where('moderation_status', 'approved')
+                ->whereNull('sold_at')
+                ->whereBetween('created_at', [$from, $to])
+                ->get();
+
+            foreach ($properties as $property) {
+                $recipients = $config['recipient_mode'] === 'agent'
+                    ? $this->recipients->propertyAgent($property)
+                    : $this->recipients->propertyEscalationRecipients($property);
+
+                $this->notifyUsers(
+                    $recipients,
+                    $config['type'],
+                    $config['title'],
+                    $config['body'],
+                    $property,
+                    null,
+                    [
+                        'channels' => [NotificationChannel::IN_APP, NotificationChannel::TELEGRAM],
+                        'action_url' => $this->absoluteFrontendUrl('/properties/'.$property->id),
+                        'action_type' => 'open_property',
+                        'dedupe_key' => 'property:stale:'.$days.'d:'.$property->id,
+                        'quiet_window_minutes' => 365 * 24 * 60,
+                        'data' => [
+                            'property_id' => $property->id,
+                            'days_since_created' => $days,
+                            'moderation_status' => $property->moderation_status,
+                        ],
+                    ]
+                );
+
+                $sent++;
+            }
         }
 
         return $sent;

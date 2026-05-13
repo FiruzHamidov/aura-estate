@@ -6,6 +6,7 @@ use App\Models\Booking;
 use App\Models\Conversation;
 use App\Models\Deal;
 use App\Models\Lead;
+use App\Models\Property;
 use App\Models\Selection;
 use App\Models\User;
 use Illuminate\Support\Collection;
@@ -55,6 +56,32 @@ class NotificationRecipientResolver
 
         return collect([$booking->agent])
             ->filter(fn ($user) => $user instanceof User && $user->status === User::STATUS_ACTIVE)
+            ->values();
+    }
+
+    public function propertyAgent(Property $property): Collection
+    {
+        $property->loadMissing('agent.role', 'creator.role');
+
+        $owner = $property->agent instanceof User ? $property->agent : $property->creator;
+
+        return collect([$owner])
+            ->filter(fn ($user) => $user instanceof User && $user->status === User::STATUS_ACTIVE)
+            ->values();
+    }
+
+    public function propertyEscalationRecipients(Property $property): Collection
+    {
+        $agents = $this->propertyAgent($property);
+        $branchId = $property->branch_id
+            ?: $property->agent?->branch_id
+            ?: $property->creator?->branch_id;
+
+        $heads = $this->usersByRole(['rop', 'branch_director'], $branchId);
+
+        return $agents
+            ->merge($heads)
+            ->unique('id')
             ->values();
     }
 
