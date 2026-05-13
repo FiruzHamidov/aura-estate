@@ -131,7 +131,7 @@ class PublicTeamController extends Controller
                 'agents',
                 fn ($join) => $join->on('agents.id', '=', 'sales.agent_id')
             )
-            ->where('properties.moderation_status', 'sold')
+            ->whereIn('properties.moderation_status', ['sold', 'rented'])
             ->whereBetween('properties.sold_at', [$from, $to])
             ->selectRaw('sales.agent_id, COUNT(DISTINCT sales.property_id) as sold_count')
             ->groupBy('sales.agent_id')

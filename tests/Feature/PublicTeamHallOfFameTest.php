@@ -148,6 +148,17 @@ class PublicTeamHallOfFameTest extends TestCase
             'updated_at' => '2026-04-15 10:00:00',
         ]);
 
+        $propertyRentedId = DB::table('properties')->insertGetId([
+            'title' => 'P9',
+            'created_by' => $agentOne->id,
+            'moderation_status' => 'rented',
+            'actual_sale_price' => 2000,
+            'actual_sale_currency' => 'TJS',
+            'sold_at' => '2026-04-16 10:00:00',
+            'created_at' => '2026-04-09 10:00:00',
+            'updated_at' => '2026-04-16 10:00:00',
+        ]);
+
         DB::table('properties')->insert([
             [
                 'title' => 'P4',
@@ -230,6 +241,12 @@ class PublicTeamHallOfFameTest extends TestCase
                 'created_at' => '2026-04-15 10:00:00',
                 'updated_at' => '2026-04-15 10:00:00',
             ],
+            [
+                'property_id' => $propertyRentedId,
+                'agent_id' => $agentOne->id,
+                'created_at' => '2026-04-16 10:00:00',
+                'updated_at' => '2026-04-16 10:00:00',
+            ],
         ]);
 
         DB::table('bookings')->insert([
@@ -270,13 +287,13 @@ class PublicTeamHallOfFameTest extends TestCase
         $response->assertOk();
         $this->assertStringContainsString('public', (string) $response->headers->get('Cache-Control'));
         $response->assertJsonPath('nominations.best_sales_by_count.winner.agent.id', $agentOne->id);
-        $response->assertJsonPath('nominations.best_sales_by_count.winner.sold_count', 2);
+        $response->assertJsonPath('nominations.best_sales_by_count.winner.sold_count', 3);
         $response->assertJsonPath('nominations.best_sales_by_count.title', 'Лучший продажник');
         $response->assertJsonMissingPath('nominations.best_sales_by_amount');
         $response->assertJsonPath('nominations.most_showings_added.winner.agent.id', $agentTwo->id);
         $response->assertJsonPath('nominations.most_showings_added.winner.shows_count', 3);
         $response->assertJsonPath('nominations.most_properties_added.winner.agent.id', $agentOne->id);
-        $response->assertJsonPath('nominations.most_properties_added.winner.added_count', 4);
+        $response->assertJsonPath('nominations.most_properties_added.winner.added_count', 5);
         $response->assertJsonPath('nominations.most_properties_added.leaders.1.agent.id', $agentTwo->id);
         $response->assertJsonPath('nominations.most_properties_added.leaders.1.added_count', 2);
 

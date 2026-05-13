@@ -598,6 +598,10 @@ class NotificationService
 
     private function dispatchKpiEarlyRisk(): int
     {
+        if (! $this->isWithinDailyWindow('18:30', 5)) {
+            return 0;
+        }
+
         if (! Schema::hasTable('daily_reports')) {
             return 0;
         }
@@ -650,14 +654,6 @@ class NotificationService
                     $q->whereIn('role_id', function ($sub) {
                         $sub->select('id')->from('roles')->whereIn('slug', ['rop', 'branch_director']);
                     });
-
-                    if ($agent->branch_group_id) {
-                        $q->orWhere(function ($mopQ) use ($agent) {
-                            $mopQ->whereIn('role_id', function ($sub) {
-                                $sub->select('id')->from('roles')->where('slug', 'mop');
-                            })->where('branch_group_id', $agent->branch_group_id);
-                        });
-                    }
                 })
                 ->get();
 
@@ -684,9 +680,10 @@ class NotificationService
                 null,
                 [
                     'channels' => [NotificationChannel::IN_APP, NotificationChannel::TELEGRAM],
-                    'action_url' => '/kpi-reports?period_type=day&user_id='.$agent->id,
+                    'action_url' => $this->absoluteFrontendUrl('/kpi-reports?period_type=day&user_id='.$agent->id),
                     'action_type' => 'open_kpi_report',
                     'dedupe_key' => 'kpi:early-risk:'.$agent->id.':'.$latestReport->report_date->toDateString(),
+                    'quiet_window_minutes' => 24 * 60,
                     'data' => [
                         'agent_id' => $agent->id,
                         'agent_name' => $agent->name,
@@ -697,23 +694,6 @@ class NotificationService
                     ],
                 ]
             );
-
-            $telegramText = "Early risk KPI\nСотрудник: {$agent->name}\n{$latestReport->report_date->toDateString()}: ".number_format($kpis->get(0), 2)."\n{$previousReport?->report_date?->toDateString()}: ".number_format($kpis->get(1), 2);
-            foreach ($receivers as $receiver) {
-                if (! $receiver->telegram_chat_id || ! $this->telegramBot->isEnabled()) {
-                    continue;
-                }
-
-                try {
-                    $this->telegramBot->sendUserMessage($receiver, $telegramText);
-                } catch (\Throwable $e) {
-                    Log::warning('Failed to send early risk telegram message.', [
-                        'receiver_id' => $receiver->id,
-                        'agent_id' => $agent->id,
-                        'error' => $e->getMessage(),
-                    ]);
-                }
-            }
 
             $sent++;
         }
@@ -935,6 +915,33 @@ class NotificationService
         }
 
         return implode("\n", $parts);
+    }
+
+    private function absoluteFrontendUrl(string $path): string
+    {
+        if (str_starts_with($path, 'http://') || str_starts_with($path, 'https://')) {
+            return $path;
+        }
+
+        $base = (string) config('app.frontend_url', config('app.url', ''));
+        $base = rtrim($base, '/');
+        $normalizedPath = '/'.ltrim($path, '/');
+
+        if ($base === '') {
+            return $normalizedPath;
+        }
+
+        return $base.$normalizedPath;
+    }
+
+    private function isWithinDailyWindow(string $hhmm, int $windowMinutes): bool
+    {
+        [$hours, $minutes] = array_map('intval', explode(':', $hhmm));
+        $now = now();
+        $from = $now->copy()->setTime($hours, $minutes, 0);
+        $to = $from->copy()->addMinutes($windowMinutes);
+
+        return $now->gte($from) && $now->lt($to);
     }
 
     private function dispatchLeadSlaDueSoon(): int
