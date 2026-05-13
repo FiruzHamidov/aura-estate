@@ -9,6 +9,7 @@ use App\Models\Property;
 use App\Models\Role;
 use App\Models\User;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
@@ -670,11 +671,64 @@ class ClientIntegrationTest extends TestCase
 
         Sanctum::actingAs($agent);
 
-        $response = $this->getJson('/api/reports/properties/manager-efficiency?agent_id='.$agent->id.'&date_from=2026-03-01&date_to=2026-03-31&branch_id='.$agent->branch_id);
+        DB::table('clients')
+            ->where('id', $outsideClient->id)
+            ->update(['created_at' => '2000-01-01 00:00:00']);
+
+        $from = Carbon::now()->startOfMonth()->toDateString();
+        $to = Carbon::now()->endOfMonth()->toDateString();
+        $response = $this->getJson('/api/reports/properties/manager-efficiency?agent_id='.$agent->id.'&date_from='.$from.'&date_to='.$to.'&branch_id='.$agent->branch_id);
 
         $response->assertOk();
         $response->assertJsonPath('0.agent_id', $agent->id);
-        $response->assertJsonPath('0.unique_clients_count', 5);
+        $response->assertJsonPath('0.unique_clients_count', 0);
+    }
+
+    public function test_manager_efficiency_attributes_closed_deals_to_sale_agent(): void
+    {
+        [$creator] = $this->seedClientContext(withProperty: false);
+
+        $seller = User::create([
+            'name' => 'Seller Agent',
+            'phone' => (string) ++$this->phoneCounter,
+            'password' => bcrypt('password'),
+            'role_id' => $creator->role_id,
+            'branch_id' => $creator->branch_id,
+            'status' => 'active',
+        ]);
+
+        $property = Property::create([
+            'title' => 'Sold by another agent',
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 180000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'created_by' => $creator->id,
+            'agent_id' => $creator->id,
+            'listing_type' => 'regular',
+            'moderation_status' => 'sold',
+            'created_at' => '2026-03-01 09:00:00',
+            'updated_at' => '2026-03-20 09:00:00',
+            'sold_at' => '2026-03-20 09:00:00',
+        ]);
+
+        DB::table('property_agent_sales')->insert([
+            'property_id' => $property->id,
+            'agent_id' => $seller->id,
+            'created_at' => '2026-03-20 09:05:00',
+            'updated_at' => '2026-03-20 09:05:00',
+        ]);
+
+        Sanctum::actingAs($creator);
+
+        $response = $this->getJson('/api/reports/properties/manager-efficiency?date_from=2026-03-01&date_to=2026-03-31&branch_id='.$creator->branch_id);
+        $response->assertOk();
+
+        $rowsById = collect($response->json())->keyBy('agent_id');
+
+        $this->assertSame(1, (int) ($rowsById[$seller->id]['sold'] ?? 0));
+        $this->assertSame(0, (int) ($rowsById[$creator->id]['sold'] ?? 0));
     }
 
     public function test_agent_earnings_report_filters_by_agent_id_not_creator(): void

@@ -677,6 +677,19 @@ class PropertyReportController extends Controller
             ->all();
     }
 
+    private function resolveSaleAgentColumn(): ?string
+    {
+        if (Schema::hasColumn('properties', 'sale_agent_id')) {
+            return 'sale_agent_id';
+        }
+
+        if (Schema::hasColumn('properties', 'sale_user_id')) {
+            return 'sale_user_id';
+        }
+
+        return null;
+    }
+
     private function applyPropertyAgentReportFilters(Request $request, $query)
     {
         $filterRequest = new Request($request->except([
@@ -911,16 +924,73 @@ class PropertyReportController extends Controller
         $soldBase = Property::query()->whereIn('moderation_status', $soldStatuses);
         [$soldQ] = $this->applyCommonFilters(new Request($soldRequest), $soldBase);
 
-        $soldData = (clone $soldQ)
-            ->select([
-                $groupBy,
-                DB::raw("SUM(CASE WHEN moderation_status = 'sold' THEN 1 ELSE 0 END) as sold"),
-                DB::raw("SUM(CASE WHEN moderation_status = 'rented' THEN 1 ELSE 0 END) as rented"),
-                DB::raw("SUM(CASE WHEN moderation_status = 'sold_by_owner' THEN 1 ELSE 0 END) as sold_by_owner"),
-            ])
-            ->groupBy($groupBy)
-            ->get()
-            ->keyBy($groupBy);
+        $saleAgentColumn = $this->resolveSaleAgentColumn();
+        $soldSelect = ['id', 'moderation_status', 'agent_id'];
+        if ($saleAgentColumn) {
+            $soldSelect[] = $saleAgentColumn;
+        }
+
+        $soldProperties = (clone $soldQ)
+            ->select($soldSelect)
+            ->get();
+
+        $participantsByProperty = collect();
+        if (Schema::hasTable('property_agent_sales') && $soldProperties->isNotEmpty()) {
+            $participantsByProperty = DB::table('property_agent_sales')
+                ->select(['property_id', 'agent_id'])
+                ->whereIn('property_id', $soldProperties->pluck('id')->all())
+                ->whereNotNull('agent_id')
+                ->get()
+                ->groupBy('property_id')
+                ->map(fn ($rows) => collect($rows)->pluck('agent_id')->map(fn ($id) => (int) $id)->unique()->values()->all());
+        }
+
+        $soldCounters = [];
+        foreach ($soldProperties as $property) {
+            $participants = collect($participantsByProperty->get($property->id, []))
+                ->filter(fn ($id) => (int) $id > 0)
+                ->unique()
+                ->values()
+                ->all();
+
+            if (empty($participants)) {
+                $fallbackAgentId = $saleAgentColumn
+                    ? (int) ($property->{$saleAgentColumn} ?? 0)
+                    : 0;
+
+                if ($fallbackAgentId <= 0) {
+                    $fallbackAgentId = (int) ($property->agent_id ?? 0);
+                }
+
+                if ($fallbackAgentId > 0) {
+                    $participants = [$fallbackAgentId];
+                }
+            }
+
+            foreach ($participants as $participantId) {
+                if (!isset($soldCounters[$participantId])) {
+                    $soldCounters[$participantId] = [
+                        'sold' => 0,
+                        'rented' => 0,
+                        'sold_by_owner' => 0,
+                    ];
+                }
+
+                if ($property->moderation_status === 'sold') {
+                    $soldCounters[$participantId]['sold']++;
+                } elseif ($property->moderation_status === 'rented') {
+                    $soldCounters[$participantId]['rented']++;
+                } elseif ($property->moderation_status === 'sold_by_owner') {
+                    $soldCounters[$participantId]['sold_by_owner']++;
+                }
+            }
+        }
+
+        $soldData = collect($soldCounters)
+            ->map(function (array $counters, int $agentId) {
+                return (object) array_merge(['agent_id' => $agentId], $counters);
+            })
+            ->keyBy('agent_id');
 
         // --- 3) Объединяем в PHP
         $allKeys = $baseData->keys()->merge($soldData->keys())->unique();

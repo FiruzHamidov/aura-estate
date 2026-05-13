@@ -17,6 +17,19 @@ class PublicTeamController extends Controller
 {
     private const PUBLIC_ROLE_SLUGS = ['agent', 'mop'];
 
+    private function resolveSaleAgentColumn(): ?string
+    {
+        if (Schema::hasColumn('properties', 'sale_agent_id')) {
+            return 'sale_agent_id';
+        }
+
+        if (Schema::hasColumn('properties', 'sale_user_id')) {
+            return 'sale_user_id';
+        }
+
+        return null;
+    }
+
     public function hallOfFame(Request $request): JsonResponse
     {
         $validated = $request->validate([
@@ -124,6 +137,11 @@ class PublicTeamController extends Controller
 
     private function salesByCountRows(Carbon $from, Carbon $to, ?int $branchId, int $limit): Collection
     {
+        $saleAgentColumn = $this->resolveSaleAgentColumn();
+        $fallbackAgentExpr = $saleAgentColumn
+            ? "COALESCE(properties.{$saleAgentColumn}, properties.agent_id)"
+            : 'properties.agent_id';
+
         $activitySub = Property::query()
             ->joinSub(
                 $this->publicAgentsQuery($branchId)->select('users.id'),
@@ -137,28 +155,44 @@ class PublicTeamController extends Controller
             ->selectRaw("SUM(CASE WHEN properties.moderation_status = 'approved' THEN 1 ELSE 0 END) as approved_count")
             ->groupBy('properties.created_by');
 
-        return DB::table('property_agent_sales as sales')
+        $salesSub = DB::table('property_agent_sales as sales')
             ->join('properties', 'properties.id', '=', 'sales.property_id')
             ->joinSub(
                 $this->publicAgentsQuery($branchId)->select('users.id'),
                 'agents',
                 fn ($join) => $join->on('agents.id', '=', 'sales.agent_id')
             )
-            ->leftJoinSub(
-                $activitySub,
-                'activity',
-                fn ($join) => $join->on('activity.agent_id', '=', 'sales.agent_id')
+            ->whereIn('properties.moderation_status', ['sold', 'rented'])
+            ->whereBetween('properties.sold_at', [$from, $to])
+            ->selectRaw('sales.agent_id as agent_id, sales.property_id as property_id');
+
+        $fallbackSub = DB::table('properties')
+            ->leftJoin('property_agent_sales as sales', 'sales.property_id', '=', 'properties.id')
+            ->joinSub(
+                $this->publicAgentsQuery($branchId)->select('users.id'),
+                'agents',
+                fn ($join) => $join->on('agents.id', '=', DB::raw($fallbackAgentExpr))
             )
             ->whereIn('properties.moderation_status', ['sold', 'rented'])
             ->whereBetween('properties.sold_at', [$from, $to])
-            ->selectRaw('sales.agent_id, COUNT(DISTINCT sales.property_id) as sold_count')
+            ->whereNull('sales.property_id')
+            ->selectRaw("$fallbackAgentExpr as agent_id, properties.id as property_id");
+
+        return DB::query()
+            ->fromSub($salesSub->unionAll($fallbackSub), 'sales_union')
+            ->leftJoinSub(
+                $activitySub,
+                'activity',
+                fn ($join) => $join->on('activity.agent_id', '=', 'sales_union.agent_id')
+            )
+            ->selectRaw('sales_union.agent_id, COUNT(DISTINCT sales_union.property_id) as sold_count')
             ->selectRaw('MAX(COALESCE(activity.approved_count, 0)) as approved_count')
             ->selectRaw('MAX(COALESCE(activity.total_count, 0)) as total_count')
-            ->groupBy('sales.agent_id')
+            ->groupBy('sales_union.agent_id')
             ->orderByDesc('sold_count')
             ->orderByDesc('approved_count')
             ->orderByDesc('total_count')
-            ->orderByDesc('sales.agent_id')
+            ->orderByDesc('sales_union.agent_id')
             ->limit($limit)
             ->get();
     }
