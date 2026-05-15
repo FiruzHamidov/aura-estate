@@ -1097,8 +1097,9 @@ class KpiModuleService
         $debugPlanTrace = (bool) ($filters['debug_plan_trace'] ?? false);
         $traceId = (string) (request()->attributes->get('trace_id') ?? '');
         $planTraceRows = [];
+        $preloadedSalesByUserDate = $this->preloadSalesCreditsByUserDate($userIds->all(), $from, $to);
 
-        $data = collect($usersPaginator->items())->map(function (User $user) use ($reports, $periodType, $from, $to, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, &$globalSourceError, &$planTraceRows) {
+        $data = collect($usersPaginator->items())->map(function (User $user) use ($reports, $periodType, $from, $to, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, $preloadedSalesByUserDate, &$globalSourceError, &$planTraceRows) {
             $rows = collect($reports->get($user->id, collect()));
             $autoByDate = [];
             $sourceErrors = [];
@@ -1107,11 +1108,28 @@ class KpiModuleService
             $metricPlanSourceMap = $targetResolution['sources'];
             $metricPlanDailyMap = $targetResolution['plan_daily_values'];
             $metricPlanMetaMap = $targetResolution['plan_meta'];
+            $reportedDates = $rows
+                ->map(fn (DailyReport $row) => $row->report_date->toDateString())
+                ->flip();
 
             $periodStart = $from->copy()->startOfDay();
             $periodEnd = $to->copy()->startOfDay();
             for ($date = $periodStart; $date->lte($periodEnd); $date->addDay()) {
                 $dayKey = $date->toDateString();
+                if (! isset($reportedDates[$dayKey])) {
+                    $salesCredit = (float) ($preloadedSalesByUserDate[(int) $user->id][$dayKey] ?? 0.0);
+                    $autoByDate[$dayKey] = [
+                        'calls_count' => 0,
+                        'meetings_count' => 0,
+                        'shows_count' => 0,
+                        'new_clients_count' => 0,
+                        'new_properties_count' => 0,
+                        'deals_count' => (int) floor($salesCredit),
+                        'sales_count' => $salesCredit,
+                    ];
+                    continue;
+                }
+
                 try {
                     $autoByDate[$dayKey] = $this->dailyReportService->autoMetrics($user, $dayKey);
                 } catch (Throwable) {
@@ -1251,6 +1269,69 @@ class KpiModuleService
                 ] : null,
             ],
         ];
+    }
+
+    private function preloadSalesCreditsByUserDate(array $userIds, Carbon $from, Carbon $to): array
+    {
+        $userIds = array_values(array_unique(array_map('intval', $userIds)));
+        if ($userIds === [] || ! Schema::hasTable('properties') || ! Schema::hasColumn('properties', 'sold_at')) {
+            return [];
+        }
+
+        $soldProperties = DB::table('properties')
+            ->select(['id', 'sold_at', 'sale_user_id'])
+            ->whereIn('moderation_status', ['sold', 'rented'])
+            ->whereBetween('sold_at', [
+                $from->copy()->startOfDay()->setTimezone('UTC')->toDateTimeString(),
+                $to->copy()->endOfDay()->setTimezone('UTC')->toDateTimeString(),
+            ])
+            ->get();
+
+        if ($soldProperties->isEmpty()) {
+            return [];
+        }
+
+        $targetUsers = array_fill_keys($userIds, true);
+        $result = [];
+        $propertyIds = $soldProperties->pluck('id')->all();
+        $participantsByProperty = collect();
+
+        if (Schema::hasTable('property_agent_sales')) {
+            $participantsByProperty = DB::table('property_agent_sales')
+                ->select(['property_id', 'agent_id'])
+                ->whereIn('property_id', $propertyIds)
+                ->whereNotNull('agent_id')
+                ->get()
+                ->groupBy('property_id')
+                ->map(fn (Collection $rows) => $rows->pluck('agent_id')->map(fn ($id) => (int) $id)->unique()->values()->all());
+        }
+
+        foreach ($soldProperties as $property) {
+            $soldAt = $property->sold_at ? Carbon::parse((string) $property->sold_at, 'UTC')->setTimezone(self::TZ) : null;
+            if (! $soldAt) {
+                continue;
+            }
+            $dayKey = $soldAt->toDateString();
+
+            $participants = $participantsByProperty->get($property->id, []);
+            if (! empty($participants)) {
+                $denominator = max(1, count($participants));
+                foreach ($participants as $agentId) {
+                    if (! isset($targetUsers[$agentId])) {
+                        continue;
+                    }
+                    $result[$agentId][$dayKey] = round((float) ($result[$agentId][$dayKey] ?? 0.0) + (1 / $denominator), 4);
+                }
+                continue;
+            }
+
+            $saleUserId = (int) ($property->sale_user_id ?? 0);
+            if ($saleUserId > 0 && isset($targetUsers[$saleUserId])) {
+                $result[$saleUserId][$dayKey] = round((float) ($result[$saleUserId][$dayKey] ?? 0.0) + 1.0, 4);
+            }
+        }
+
+        return $result;
     }
 
     private function buildMetricsForRows(
