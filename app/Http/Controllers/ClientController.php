@@ -581,6 +581,9 @@ class ClientController extends Controller
             'status_id' => 'nullable|integer|exists:client_need_statuses,id',
             'bitrix_contact_id' => 'nullable|integer',
             'meta' => 'nullable|array',
+            'context_type' => ['nullable', Rule::in(ClientAttachService::contextTypes())],
+            'context_id' => 'nullable|integer',
+            'property_relation' => ['nullable', Rule::in(ClientAttachService::propertyRelations())],
         ]);
 
         $data = $request->only([
@@ -615,13 +618,41 @@ class ClientController extends Controller
         $data = $this->clientAccess->normalizeMutationData($data, $authUser);
         $this->clientAccess->ensureCanCreateClientByContactKind($authUser, (string) ($data['contact_kind'] ?? Client::CONTACT_KIND_BUYER));
         $this->clientAccess->validateMutationTargets($authUser, $data);
+        $attachContext = $this->attachService->normalizedContext($request->all());
+
         $duplicateSummary = $this->summarizeDuplicates(
             $authUser,
             $data,
             null,
-            $this->attachService->normalizedContext([])
+            $attachContext
         );
         if ($duplicateSummary['has_duplicates']) {
+            if (
+                ($attachContext['type'] ?? null) === ClientAttachService::CONTEXT_PROPERTY
+                && !empty($attachContext['id'])
+                && in_array((string) ($attachContext['property_relation'] ?? ''), ClientAttachService::propertyRelations(), true)
+            ) {
+                $existingClientId = (int) (
+                    $duplicateSummary['top_visible_match']['id']
+                    ?? $duplicateSummary['top_attachable_match']['id']
+                    ?? 0
+                );
+
+                if ($existingClientId > 0) {
+                    $existingClient = Client::query()->find($existingClientId);
+
+                    if ($existingClient) {
+                        $attachResult = $this->attachService->attach($authUser, $existingClient, $attachContext);
+
+                        return response()->json(array_merge($attachResult, [
+                            'message' => 'Клиент уже существует: привязали к объекту.',
+                            'attached_existing' => true,
+                            'duplicate_summary' => $duplicateSummary,
+                        ]));
+                    }
+                }
+            }
+
             return $this->duplicateConflictResponse($duplicateSummary);
         }
 

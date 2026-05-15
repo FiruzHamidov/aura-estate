@@ -161,6 +161,19 @@ class ClientAccessTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('bookings', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('crm_client_id')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('leads', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('client_id')->nullable();
+            $table->softDeletes();
+            $table->timestamps();
+        });
+
         Schema::create('property_types', function (Blueprint $table) {
             $table->id();
             $table->string('name');
@@ -1716,6 +1729,54 @@ class ClientAccessTest extends TestCase
             10,
             Client::query()->where('phone_normalized', $normalizedPhone)->count()
         );
+    }
+
+    public function test_store_with_property_context_attaches_existing_client_and_merges_contact_kind_for_owner(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $group = $this->createBranchGroup($branch, 'Group A');
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = $this->createUser($agentRole, $branch, 'Agent A', $group);
+
+        $propertyType = PropertyType::create(['name' => 'Apartment', 'slug' => 'apartment']);
+        $propertyStatus = PropertyStatus::create(['name' => 'Available', 'slug' => 'available']);
+        $property = $this->createProperty($propertyType, $propertyStatus, $agent);
+
+        $existingClient = Client::create([
+            'full_name' => 'Existing Buyer',
+            'phone' => '+992 90 777 1111',
+            'phone_normalized' => ClientPhone::normalize('+992 90 777 1111'),
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'created_by' => $agent->id,
+            'responsible_agent_id' => $agent->id,
+            'client_type_id' => 1,
+            'contact_kind' => Client::CONTACT_KIND_BUYER,
+            'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $response = $this->postJson('/api/clients', [
+            'full_name' => 'Seller With Same Phone',
+            'phone' => '+992 90 777 1111',
+            'contact_kind' => Client::CONTACT_KIND_SELLER,
+            'context_type' => 'property',
+            'context_id' => $property->id,
+            'property_relation' => 'owner',
+        ]);
+
+        $response->assertOk()
+            ->assertJsonPath('attached_existing', true)
+            ->assertJsonPath('client.id', $existingClient->id);
+
+        $property->refresh();
+        $existingClient->refresh();
+
+        $this->assertSame($existingClient->id, $property->owner_client_id);
+        $this->assertSame('Existing Buyer', $property->owner_name);
+        $this->assertSame('+992 90 777 1111', $property->owner_phone);
+        $this->assertSame(Client::CONTACT_KIND_BOTH, $existingClient->contact_kind);
     }
 
     private function createUser(Role $role, Branch $branch, string $name, ?BranchGroup $branchGroup = null): User

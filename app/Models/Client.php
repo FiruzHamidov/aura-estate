@@ -96,15 +96,7 @@ class Client extends Model
             return self::CONTACT_KIND_BOTH;
         }
 
-        if ($normalizedNext === self::CONTACT_KIND_SELLER) {
-            return $this->hasBuyerSignals()
-                ? self::CONTACT_KIND_BOTH
-                : self::CONTACT_KIND_SELLER;
-        }
-
-        return $this->hasSellerSignals()
-            ? self::CONTACT_KIND_BOTH
-            : self::CONTACT_KIND_BUYER;
+        return self::CONTACT_KIND_BOTH;
     }
 
     public function branch()
