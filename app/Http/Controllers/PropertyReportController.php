@@ -224,7 +224,7 @@ class PropertyReportController extends Controller
         $closedQ = Property::query()
             ->whereIn('moderation_status', $soldStatuses)
             ->whereBetween('sold_at', [$start, $end]);
-        $this->applyBranchAccessByUserColumn($request, $closedQ, 'sale_user_id');
+        $this->applyBranchAccessFilter($request, $closedQ, 'created_by');
         if ($request->filled('agent_id')) {
             $agentIds = $this->toArray($request->input('agent_id'));
             $closedQ->where(function ($query) use ($agentIds) {
@@ -646,19 +646,17 @@ class PropertyReportController extends Controller
 
     private function buildManagerUniqueClientsMap(Request $request, string $groupBy, array $soldStatuses): array
     {
-        $clientOwnerColumn = $groupBy === 'agent_id'
-            ? 'responsible_agent_id'
-            : 'created_by';
+        $clientOwnerExpr = 'created_by';
 
         $clientsQ = DB::table('clients')
-            ->selectRaw($clientOwnerColumn.' as agent_group_id')
+            ->selectRaw($clientOwnerExpr.' as agent_group_id')
             ->selectRaw('COUNT(DISTINCT id) as unique_clients_count')
-            ->whereNotNull($clientOwnerColumn);
+            ->whereRaw($clientOwnerExpr.' IS NOT NULL');
 
-        $this->applyBranchAccessByUserColumn($request, $clientsQ, $clientOwnerColumn);
+        $this->applyBranchAccessByUserColumn($request, $clientsQ, 'created_by');
 
         if ($request->filled('agent_id')) {
-            $clientsQ->whereIn($clientOwnerColumn, $this->toArray($request->input('agent_id')));
+            $clientsQ->whereIn(DB::raw($clientOwnerExpr), $this->toArray($request->input('agent_id')));
         }
 
         $from = $request->input('date_from', $request->input('from'));
@@ -671,7 +669,7 @@ class PropertyReportController extends Controller
         }
 
         return $clientsQ
-            ->groupBy($clientOwnerColumn)
+            ->groupBy(DB::raw($clientOwnerExpr))
             ->get()
             ->mapWithKeys(fn ($row) => [(int) $row->agent_group_id => (int) $row->unique_clients_count])
             ->all();
