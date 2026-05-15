@@ -1496,7 +1496,12 @@ class KpiModuleService
         }
 
         if (! empty($filters['role'])) {
-            $query->whereHas('role', fn (Builder $q) => $q->where('slug', (string) $filters['role']));
+            $roleFilter = (string) $filters['role'];
+            $roleSlugs = $roleFilter === 'agent'
+                ? ['agent', 'mop']
+                : [$roleFilter];
+
+            $query->whereHas('role', fn (Builder $q) => $q->whereIn('slug', $roleSlugs));
         }
 
         match ($authUser->role?->slug) {
