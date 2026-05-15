@@ -264,11 +264,7 @@ class DailyReportService
         if (! Schema::hasTable('property_agent_sales')) {
             return (float) $soldProperties->filter(function ($property) use ($user) {
                 $saleUserId = (int) ($property->sale_user_id ?? 0);
-                if ($saleUserId > 0) {
-                    return $saleUserId === (int) $user->id;
-                }
-
-                return (int) ($property->agent_id ?? 0) === (int) $user->id;
+                return $saleUserId > 0 && $saleUserId === (int) $user->id;
             })->count();
         }
 
@@ -322,14 +318,10 @@ class DailyReportService
                 continue;
             }
 
-            if ((int) ($property->agent_id ?? 0) === (int) $user->id) {
-                $credit += 1.0;
-            } elseif ((int) ($property->agent_id ?? 0) === 0) {
-                $this->reportSalesQualityIssue('SALES_WITHOUT_AGENTS', $property->id, [
-                    'metric_key' => 'sales',
-                    'source' => 'properties.sale_user_id',
-                ]);
-            }
+            $this->reportSalesQualityIssue('SALES_WITHOUT_AGENTS', $property->id, [
+                'metric_key' => 'sales',
+                'source' => 'properties.sale_user_id',
+            ]);
         }
 
         return round($credit, 4);

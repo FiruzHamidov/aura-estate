@@ -1098,7 +1098,7 @@ class KpiModuleService
         $traceId = (string) (request()->attributes->get('trace_id') ?? '');
         $planTraceRows = [];
 
-        $data = collect($usersPaginator->items())->map(function (User $user) use ($reports, $periodType, $from, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, &$globalSourceError, &$planTraceRows) {
+        $data = collect($usersPaginator->items())->map(function (User $user) use ($reports, $periodType, $from, $to, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, &$globalSourceError, &$planTraceRows) {
             $rows = collect($reports->get($user->id, collect()));
             $autoByDate = [];
             $sourceErrors = [];
@@ -1108,12 +1108,15 @@ class KpiModuleService
             $metricPlanDailyMap = $targetResolution['plan_daily_values'];
             $metricPlanMetaMap = $targetResolution['plan_meta'];
 
-            foreach ($rows as $row) {
+            $periodStart = $from->copy()->startOfDay();
+            $periodEnd = $to->copy()->startOfDay();
+            for ($date = $periodStart; $date->lte($periodEnd); $date->addDay()) {
+                $dayKey = $date->toDateString();
                 try {
-                    $autoByDate[$row->report_date->toDateString()] = $this->dailyReportService->autoMetrics($user, $row->report_date->toDateString());
+                    $autoByDate[$dayKey] = $this->dailyReportService->autoMetrics($user, $dayKey);
                 } catch (Throwable) {
-                    $autoByDate[$row->report_date->toDateString()] = [];
-                    $sourceErrors[$row->report_date->toDateString()] = true;
+                    $autoByDate[$dayKey] = [];
+                    $sourceErrors[$dayKey] = true;
                 }
             }
 
