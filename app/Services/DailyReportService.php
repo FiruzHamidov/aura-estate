@@ -252,7 +252,7 @@ class DailyReportService
         }
 
         $soldProperties = DB::table('properties')
-            ->select(['id', 'agent_id', 'sale_user_id'])
+            ->select(['id', 'agent_id', 'sale_user_id', 'created_by'])
             ->whereIn('moderation_status', ['sold', 'rented'])
             ->whereBetween('sold_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
             ->get();
@@ -264,7 +264,16 @@ class DailyReportService
         if (! Schema::hasTable('property_agent_sales')) {
             return (float) $soldProperties->filter(function ($property) use ($user) {
                 $saleUserId = (int) ($property->sale_user_id ?? 0);
-                return $saleUserId > 0 && $saleUserId === (int) $user->id;
+                if ($saleUserId > 0) {
+                    return $saleUserId === (int) $user->id;
+                }
+
+                $agentId = (int) ($property->agent_id ?? 0);
+                if ($agentId > 0) {
+                    return $agentId === (int) $user->id;
+                }
+
+                return (int) ($property->created_by ?? 0) === (int) $user->id;
             })->count();
         }
 
@@ -318,9 +327,25 @@ class DailyReportService
                 continue;
             }
 
+            $agentId = (int) ($property->agent_id ?? 0);
+            if ($agentId > 0) {
+                if ($agentId === (int) $user->id) {
+                    $credit += 1.0;
+                }
+                continue;
+            }
+
+            $creatorId = (int) ($property->created_by ?? 0);
+            if ($creatorId > 0) {
+                if ($creatorId === (int) $user->id) {
+                    $credit += 1.0;
+                }
+                continue;
+            }
+
             $this->reportSalesQualityIssue('SALES_WITHOUT_AGENTS', $property->id, [
                 'metric_key' => 'sales',
-                'source' => 'properties.sale_user_id',
+                'source' => 'properties.sale_user_id,agent_id,created_by',
             ]);
         }
 

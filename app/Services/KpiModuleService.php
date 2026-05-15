@@ -1279,7 +1279,7 @@ class KpiModuleService
         }
 
         $soldProperties = DB::table('properties')
-            ->select(['id', 'sold_at', 'sale_user_id'])
+            ->select(['id', 'sold_at', 'sale_user_id', 'agent_id', 'created_by'])
             ->whereIn('moderation_status', ['sold', 'rented'])
             ->whereBetween('sold_at', [
                 $from->copy()->startOfDay()->setTimezone('UTC')->toDateTimeString(),
@@ -1328,6 +1328,18 @@ class KpiModuleService
             $saleUserId = (int) ($property->sale_user_id ?? 0);
             if ($saleUserId > 0 && isset($targetUsers[$saleUserId])) {
                 $result[$saleUserId][$dayKey] = round((float) ($result[$saleUserId][$dayKey] ?? 0.0) + 1.0, 4);
+                continue;
+            }
+
+            $agentId = (int) ($property->agent_id ?? 0);
+            if ($agentId > 0 && isset($targetUsers[$agentId])) {
+                $result[$agentId][$dayKey] = round((float) ($result[$agentId][$dayKey] ?? 0.0) + 1.0, 4);
+                continue;
+            }
+
+            $creatorId = (int) ($property->created_by ?? 0);
+            if ($creatorId > 0 && isset($targetUsers[$creatorId])) {
+                $result[$creatorId][$dayKey] = round((float) ($result[$creatorId][$dayKey] ?? 0.0) + 1.0, 4);
             }
         }
 
