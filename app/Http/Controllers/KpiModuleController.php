@@ -792,6 +792,7 @@ class KpiModuleController extends Controller
         return $request->validate(array_merge($withDate ? ['date' => 'nullable|date_format:Y-m-d'] : [], [
             'v' => 'nullable|string|max:16',
             'debug_plan_trace' => 'nullable|boolean',
+            'include_breakdown' => 'nullable|boolean',
             'period_type' => ['nullable', Rule::in(['day', 'week', 'month'])],
             'role' => ['nullable', Rule::in(['admin', 'superadmin', 'owner', 'branch_director', 'rop', 'mop', 'agent', 'intern'])],
             'assignee_id' => 'nullable|integer|exists:users,id',

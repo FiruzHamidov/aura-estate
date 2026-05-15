@@ -911,7 +911,9 @@ class KpiModuleService
             ? $from->format('o-\WW')
             : $from->format('Y-m');
 
-        return $this->buildV2Response($authUser, $periodType, $from, $to, $filters, $periodKey, true);
+        $withBreakdown = (bool) ($filters['include_breakdown'] ?? false);
+
+        return $this->buildV2Response($authUser, $periodType, $from, $to, $filters, $periodKey, $withBreakdown);
     }
 
     private function buildV2Response(
