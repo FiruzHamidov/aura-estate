@@ -102,6 +102,7 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->unsignedBigInteger('user_id')->nullable();
             $table->string('action');
             $table->json('changes')->nullable();
+            $table->text('comment')->nullable();
             $table->timestamps();
         });
 
@@ -111,6 +112,17 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->string('file_path');
             $table->string('type')->nullable();
             $table->unsignedInteger('position')->default(0);
+            $table->timestamps();
+        });
+
+        Schema::create('property_agent_sales', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('property_id');
+            $table->unsignedBigInteger('agent_id');
+            $table->string('role')->nullable();
+            $table->decimal('agent_commission_amount', 15, 2)->nullable();
+            $table->string('agent_commission_currency', 3)->nullable();
+            $table->dateTime('agent_paid_at')->nullable();
             $table->timestamps();
         });
 
@@ -433,5 +445,51 @@ class PropertyConstructionFieldsTest extends TestCase
 
         $response->assertStatus(422);
         $response->assertJsonValidationErrors(['construction_status']);
+    }
+
+    public function test_rop_can_set_urgent_listing_type_without_auto_moderation(): void
+    {
+        $ropRole = Role::create([
+            'name' => 'ROP',
+            'slug' => 'rop',
+        ]);
+        $rop = User::create([
+            'name' => 'Rop User',
+            'phone' => '930000230',
+            'password' => bcrypt('password'),
+            'role_id' => $ropRole->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $status = \App\Models\PropertyStatus::create(['name' => 'Available']);
+
+        $property = \App\Models\Property::query()->create([
+            'title' => 'Moderation target',
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 140000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'moderation_status' => 'approved',
+            'listing_type' => 'regular',
+            'created_by' => $rop->id,
+            'agent_id' => $rop->id,
+        ]);
+
+        Sanctum::actingAs($rop);
+
+        $response = $this->patchJson("/api/properties/{$property->id}/moderation-listing", [
+            'moderation_status' => 'approved',
+            'listing_type' => 'urgent',
+        ]);
+
+        $response->assertOk();
+        $response->assertJsonPath('data.listing_type', 'urgent');
+        $response->assertJsonPath('data.moderation_status', 'approved');
+
+        $property->refresh();
+        $this->assertSame('urgent', $property->listing_type);
+        $this->assertSame('approved', $property->moderation_status);
+        $this->assertNull($property->status_comment);
     }
 }

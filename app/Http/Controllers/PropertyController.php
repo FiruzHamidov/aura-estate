@@ -83,7 +83,8 @@ class PropertyController extends Controller
 
     private function canManageVipAndUrgentListing(User $user): bool
     {
-        return $user->hasRole('branch_director')
+        return $user->hasRole('rop')
+            || $user->hasRole('branch_director')
             || $user->hasRole('admin')
             || $user->hasRole('superadmin');
     }
