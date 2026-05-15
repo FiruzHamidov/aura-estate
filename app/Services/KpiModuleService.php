@@ -1381,8 +1381,7 @@ class KpiModuleService
             $factValue = 0.0;
             $sourceError = false;
 
-            foreach ($rows as $row) {
-                $dateKey = $row->report_date->toDateString();
+            foreach (array_keys($autoByDate) as $dateKey) {
                 if (! empty($sourceErrors[$dateKey])) {
                     $sourceError = true;
                     continue;
