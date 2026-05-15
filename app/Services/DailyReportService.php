@@ -253,7 +253,7 @@ class DailyReportService
 
         $soldProperties = DB::table('properties')
             ->select(['id', 'agent_id', 'sale_user_id'])
-            ->whereIn('moderation_status', ['sold', 'rented', 'sold_by_owner'])
+            ->whereIn('moderation_status', ['sold', 'rented'])
             ->whereBetween('sold_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
             ->get();
 
