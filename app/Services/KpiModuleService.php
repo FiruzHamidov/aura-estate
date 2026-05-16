@@ -1601,12 +1601,7 @@ class KpiModuleService
         }
 
         if (! empty($filters['role'])) {
-            $roleFilter = (string) $filters['role'];
-            $roleSlugs = $roleFilter === 'agent'
-                ? ['agent', 'mop']
-                : [$roleFilter];
-
-            $query->whereHas('role', fn (Builder $q) => $q->whereIn('slug', $roleSlugs));
+            $query->whereHas('role', fn (Builder $q) => $q->where('slug', (string) $filters['role']));
         }
 
         match ($authUser->role?->slug) {
@@ -1672,6 +1667,7 @@ class KpiModuleService
                 }
 
                 return [
+                    'date' => $day,
                     'period_key' => $day,
                     'metrics' => $this->buildMetricsForRows($dayRows, $autoByDate, $sourceErrors, $mapping, $targetMap, 'day'),
                 ];
@@ -1821,7 +1817,7 @@ class KpiModuleService
         }
 
         if (! empty($filters['role'])) {
-            $query->where('role_slug', (string) $filters['role']);
+            $query->whereHas('user.role', fn (Builder $q) => $q->where('slug', (string) $filters['role']));
         }
 
         match ($authUser->role?->slug) {

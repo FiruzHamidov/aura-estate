@@ -1484,6 +1484,28 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertNotSame(104.0, (float) ($row['calls'] ?? 0));
     }
 
+    public function test_weekly_daily_v2_breakdown_contains_iso_date_field(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900001925', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900001926', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        DailyReport::create(['user_id' => $agent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-16', 'calls_count' => 3, 'submitted_at' => now()]);
+
+        Sanctum::actingAs($admin);
+
+        $response = $this->getJson('/api/kpi/weekly-daily?v=2&day=2026-05-16&include_breakdown=1')
+            ->assertOk();
+
+        $row = collect((array) $response->json('data'))->firstWhere('employee_id', $agent->id);
+        $this->assertNotNull($row);
+        $this->assertSame('2026-05-16', (string) data_get($row, 'breakdown_by_day.0.date'));
+        $this->assertSame('2026-05-16', (string) data_get($row, 'breakdown_by_day.0.period_key'));
+    }
+
     public function test_weekly_daily_v2_supports_branch_group_and_agent_filters(): void
     {
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
@@ -1629,6 +1651,48 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertSame('personal', (string) data_get($personalRow, 'metrics.objects.plan_source'));
         $this->assertIsNumeric($personalRow['overall_progress_pct'] ?? null);
         $this->assertContains((string) ($personalRow['status'] ?? ''), ['done', 'control', 'weak', 'risk', 'urgent']);
+    }
+
+    public function test_daily_v2_objects_count_uses_agent_id_only_for_legacy_rows_without_creator(): void
+    {
+        $this->createDailyKpiSystemTables();
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900002026', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900002027', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $other = User::create(['name' => 'Other', 'phone' => '900002028', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        \DB::table('properties')->insert([
+            [
+                'created_by' => $agent->id,
+                'agent_id' => $agent->id,
+                'moderation_status' => 'new',
+                'created_at' => '2026-05-16 10:00:00',
+                'updated_at' => '2026-05-16 10:00:00',
+            ],
+            [
+                'created_by' => $other->id,
+                'agent_id' => $agent->id,
+                'moderation_status' => 'new',
+                'created_at' => '2026-05-16 11:00:00',
+                'updated_at' => '2026-05-16 11:00:00',
+            ],
+            [
+                'created_by' => null,
+                'agent_id' => $agent->id,
+                'moderation_status' => 'new',
+                'created_at' => '2026-05-16 12:00:00',
+                'updated_at' => '2026-05-16 12:00:00',
+            ],
+        ]);
+
+        $response = $this->getJson('/api/kpi/daily?v=2&date=2026-05-16&agent_id='.$agent->id)->assertOk();
+        $row = (array) $response->json('data.0');
+
+        $this->assertSame(2, (int) data_get($row, 'metrics.objects.final_value'));
     }
 
     public function test_daily_v2_supports_mixed_source_with_manual_override_rule(): void

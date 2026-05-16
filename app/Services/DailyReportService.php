@@ -244,19 +244,36 @@ class DailyReportService
             return 0;
         }
 
-        if (! Schema::hasColumn('properties', 'created_by')
-            && ! Schema::hasColumn('properties', 'agent_id')) {
+        $hasCreatedBy = Schema::hasColumn('properties', 'created_by');
+        $hasAgentId = Schema::hasColumn('properties', 'agent_id');
+
+        if (! $hasCreatedBy && ! $hasAgentId) {
             return 0;
         }
 
         return (int) DB::table('properties')
             ->where(function ($query) use ($user) {
-                if (Schema::hasColumn('properties', 'created_by')) {
+                $hasCreatedBy = Schema::hasColumn('properties', 'created_by');
+                $hasAgentId = Schema::hasColumn('properties', 'agent_id');
+
+                if ($hasCreatedBy) {
                     $query->where('created_by', $user->id);
                 }
 
-                if (Schema::hasColumn('properties', 'agent_id')) {
-                    $query->orWhere('agent_id', $user->id);
+                if ($hasAgentId) {
+                    if (! $hasCreatedBy) {
+                        $query->orWhere('agent_id', $user->id);
+                        return;
+                    }
+
+                    // Fallback to agent_id only for legacy rows with empty creator.
+                    $query->orWhere(function ($legacy) use ($user) {
+                        $legacy->where('agent_id', $user->id)
+                            ->where(function ($creatorMissing) {
+                                $creatorMissing->whereNull('created_by')
+                                    ->orWhere('created_by', 0);
+                            });
+                    });
                 }
             })
             ->whereBetween('created_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
