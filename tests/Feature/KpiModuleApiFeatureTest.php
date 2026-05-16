@@ -1561,6 +1561,86 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertSame([], (array) $response->json('data'));
     }
 
+    public function test_weekly_v2_day_filter_returns_row_for_agent_without_reports(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900001961', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900001962', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        Sanctum::actingAs($admin);
+
+        $response = $this->getJson('/api/kpi/weekly?day=2026-05-16&agent_id='.$agent->id.'&v=2&include_breakdown=0')
+            ->assertOk()
+            ->assertJsonPath('meta.period_type', 'week')
+            ->assertJsonPath('meta.period_key', '2026-W20')
+            ->assertJsonPath('meta.timezone', 'Asia/Dushanbe')
+            ->assertJsonPath('meta.pagination.total', 1);
+
+        $row = collect((array) $response->json('rows'))->firstWhere('employee_id', $agent->id);
+        $this->assertNotNull($row);
+        $this->assertSame($agent->id, (int) ($row['employee_id'] ?? 0));
+        $this->assertSame('Agent', (string) ($row['employee_name'] ?? ''));
+        $this->assertSame(0.0, (float) data_get($row, 'metrics.objects.fact_value'));
+        $this->assertSame(0.0, (float) data_get($row, 'metrics.objects.final_value'));
+        $this->assertIsNumeric(data_get($row, 'metrics.objects.target_value'));
+        $this->assertSame('system', (string) data_get($row, 'metrics.objects.plan_source'));
+        $this->assertArrayNotHasKey('breakdown_by_day', (array) $row);
+    }
+
+    public function test_weekly_v2_day_filter_supports_user_id_without_reports(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900001963', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900001964', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        Sanctum::actingAs($admin);
+
+        $response = $this->getJson('/api/kpi/weekly?day=2026-05-16&user_id='.$agent->id.'&v=2&include_breakdown=0')
+            ->assertOk()
+            ->assertJsonPath('meta.period_type', 'week')
+            ->assertJsonPath('meta.period_key', '2026-W20')
+            ->assertJsonPath('meta.timezone', 'Asia/Dushanbe')
+            ->assertJsonPath('meta.pagination.total', 1);
+
+        $row = collect((array) $response->json('rows'))->firstWhere('employee_id', $agent->id);
+        $this->assertNotNull($row);
+        $this->assertSame(0.0, (float) data_get($row, 'metrics.objects.final_value'));
+        $this->assertIsNumeric(data_get($row, 'metrics.objects.target_value'));
+    }
+
+    public function test_monthly_v2_filter_returns_row_for_agent_without_reports(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900001965', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900001966', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        Sanctum::actingAs($admin);
+
+        $response = $this->getJson('/api/kpi/monthly?month=5&year=2026&agent_id='.$agent->id.'&v=2&include_breakdown=0')
+            ->assertOk()
+            ->assertJsonPath('meta.period_type', 'month')
+            ->assertJsonPath('meta.period_key', '2026-05')
+            ->assertJsonPath('meta.timezone', 'Asia/Dushanbe')
+            ->assertJsonPath('meta.pagination.total', 1);
+
+        $row = collect((array) $response->json('rows'))->firstWhere('employee_id', $agent->id);
+        $this->assertNotNull($row);
+        $this->assertSame(0.0, (float) data_get($row, 'metrics.objects.fact_value'));
+        $this->assertSame(0.0, (float) data_get($row, 'metrics.objects.final_value'));
+        $this->assertIsNumeric(data_get($row, 'metrics.objects.target_value'));
+        $this->assertSame('system', (string) data_get($row, 'metrics.objects.plan_source'));
+        $this->assertArrayNotHasKey('breakdown_by_day', (array) $row);
+    }
+
     public function test_daily_v2_requires_date_and_uses_strict_metric_keys_for_rop_list(): void
     {
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);

@@ -503,19 +503,40 @@ class KpiModuleController extends Controller
 
     public function weekly(Request $request)
     {
+        $baseFilters = $this->validateKpiFilters($request, false);
         $strictInput = $request->validate([
             'day' => 'nullable|date_format:Y-m-d',
             'agent_id' => 'nullable|integer|exists:users,id',
+            'user_id' => 'nullable|integer|exists:users,id',
             'include_breakdown' => 'nullable|boolean',
         ]);
 
         if (! empty($strictInput['day'])) {
             $day = Carbon::parse($strictInput['day'], 'Asia/Dushanbe')->startOfDay();
 
+            if ($this->wantsV2($request)) {
+                $start = $day->copy()->startOfWeek(Carbon::MONDAY)->startOfDay();
+                $end = $start->copy()->endOfWeek(Carbon::SUNDAY)->endOfDay();
+                $payload = $this->service->periodRowsV2(
+                    $this->authUser(),
+                    'week',
+                    $start,
+                    $end,
+                    array_merge($baseFilters, $strictInput)
+                );
+                $payload['meta'] = array_merge((array) ($payload['meta'] ?? []), [
+                    'period_type' => 'week',
+                    'period_key' => $start->format('o-\WW'),
+                    'timezone' => 'Asia/Dushanbe',
+                ]);
+
+                return response()->json($payload);
+            }
+
             return response()->json($this->service->weeklyStrict($this->authUser(), $day, $strictInput));
         }
 
-        $validated = array_merge($this->validateKpiFilters($request, false), $request->validate([
+        $validated = array_merge($baseFilters, $request->validate([
             'year' => 'nullable|integer|min:2000|max:2100',
             'week' => 'nullable|integer|min:1|max:53',
             'date_from' => 'nullable|date',
@@ -552,14 +573,34 @@ class KpiModuleController extends Controller
 
     public function monthly(Request $request)
     {
+        $baseFilters = $this->validateKpiFilters($request, false);
         $validated = $request->validate([
             'year' => 'required|integer|min:2000|max:2100',
             'month' => 'required|integer|min:1|max:12',
             'agent_id' => 'nullable|integer|exists:users,id',
+            'user_id' => 'nullable|integer|exists:users,id',
             'include_breakdown' => 'nullable|boolean',
         ]);
 
         $start = Carbon::createFromDate((int) $validated['year'], (int) $validated['month'], 1, 'Asia/Dushanbe')->startOfMonth();
+        $end = $start->copy()->endOfMonth()->endOfDay();
+
+        if ($this->wantsV2($request)) {
+            $payload = $this->service->periodRowsV2(
+                $this->authUser(),
+                'month',
+                $start,
+                $end,
+                array_merge($baseFilters, $validated)
+            );
+            $payload['meta'] = array_merge((array) ($payload['meta'] ?? []), [
+                'period_type' => 'month',
+                'period_key' => $start->format('Y-m'),
+                'timezone' => 'Asia/Dushanbe',
+            ]);
+
+            return response()->json($payload);
+        }
 
         return response()->json($this->service->monthlyStrict($this->authUser(), $start, $validated));
     }
