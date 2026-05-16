@@ -277,6 +277,114 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertSame(7, (int) ($internRow['required_days_count'] ?? 0));
     }
 
+    public function test_kpi_period_endpoints_exclude_inactive_by_default(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+
+        $admin = User::create(['name' => 'Admin', 'phone' => '900010001', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'active']);
+        $activeAgent = User::create(['name' => 'Active Agent', 'phone' => '900010002', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'active']);
+        $inactiveAgent = User::create(['name' => 'Inactive Agent', 'phone' => '900010003', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'inactive']);
+
+        DailyReport::create(['user_id' => $activeAgent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-04', 'calls_count' => 1, 'submitted_at' => now()]);
+        DailyReport::create(['user_id' => $inactiveAgent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-04', 'calls_count' => 1, 'submitted_at' => now()]);
+
+        Sanctum::actingAs($admin);
+
+        $dailyRows = collect((array) $this->getJson('/api/kpi/daily?date=2026-05-04&v=2')->assertOk()->json('data'));
+        $weeklyRows = collect((array) $this->getJson('/api/kpi/weekly?year=2026&week=19&v=2')->assertOk()->json('data'));
+        $monthlyRows = collect((array) $this->getJson('/api/kpi/monthly?year=2026&month=5&v=2')->assertOk()->json('data'));
+
+        $this->assertTrue($dailyRows->contains(fn (array $row) => (int) ($row['employee_id'] ?? 0) === $activeAgent->id));
+        $this->assertFalse($dailyRows->contains(fn (array $row) => (int) ($row['employee_id'] ?? 0) === $inactiveAgent->id));
+
+        $this->assertTrue($weeklyRows->contains(fn (array $row) => (int) ($row['employee_id'] ?? 0) === $activeAgent->id));
+        $this->assertFalse($weeklyRows->contains(fn (array $row) => (int) ($row['employee_id'] ?? 0) === $inactiveAgent->id));
+
+        $this->assertTrue($monthlyRows->contains(fn (array $row) => (int) ($row['employee_id'] ?? 0) === $activeAgent->id));
+        $this->assertFalse($monthlyRows->contains(fn (array $row) => (int) ($row['employee_id'] ?? 0) === $inactiveAgent->id));
+    }
+
+    public function test_kpi_period_endpoints_allow_include_inactive_for_privileged_role(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+
+        $admin = User::create(['name' => 'Admin', 'phone' => '900010101', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'active']);
+        $activeAgent = User::create(['name' => 'Active Agent', 'phone' => '900010102', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'active']);
+        $inactiveAgent = User::create(['name' => 'Inactive Agent', 'phone' => '900010103', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'inactive']);
+
+        DailyReport::create(['user_id' => $activeAgent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-04', 'calls_count' => 1, 'submitted_at' => now()]);
+        DailyReport::create(['user_id' => $inactiveAgent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-04', 'calls_count' => 1, 'submitted_at' => now()]);
+
+        Sanctum::actingAs($admin);
+
+        $dailyRows = collect((array) $this->getJson('/api/kpi/daily?date=2026-05-04&v=2&include_inactive=1')->assertOk()->json('data'));
+        $weeklyRows = collect((array) $this->getJson('/api/kpi/weekly?year=2026&week=19&v=2&include_inactive=1')->assertOk()->json('data'));
+        $monthlyRows = collect((array) $this->getJson('/api/kpi/monthly?year=2026&month=5&v=2&include_inactive=1')->assertOk()->json('data'));
+
+        $this->assertTrue($dailyRows->contains(fn (array $row) => (int) ($row['employee_id'] ?? 0) === $inactiveAgent->id));
+        $this->assertTrue($weeklyRows->contains(fn (array $row) => (int) ($row['employee_id'] ?? 0) === $inactiveAgent->id));
+        $this->assertTrue($monthlyRows->contains(fn (array $row) => (int) ($row['employee_id'] ?? 0) === $inactiveAgent->id));
+    }
+
+    public function test_kpi_period_endpoints_forbid_include_inactive_for_non_privileged_role(): void
+    {
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $mop = User::create(['name' => 'MOP', 'phone' => '900010201', 'role_id' => $mopRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'active']);
+
+        Sanctum::actingAs($mop);
+
+        $this->getJson('/api/kpi/daily?date=2026-05-04&v=2&include_inactive=1')
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'KPI_FORBIDDEN_INCLUDE_INACTIVE');
+
+        $this->getJson('/api/kpi/weekly?year=2026&week=19&v=2&include_inactive=1')
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'KPI_FORBIDDEN_INCLUDE_INACTIVE');
+
+        $this->getJson('/api/kpi/monthly?year=2026&month=5&v=2&include_inactive=1')
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'KPI_FORBIDDEN_INCLUDE_INACTIVE');
+    }
+
+    public function test_kpi_day_week_month_include_clients_count_in_rows(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+
+        $admin = User::create(['name' => 'Admin', 'phone' => '900010301', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'active']);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900010302', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'active']);
+
+        DailyReport::create(['user_id' => $agent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-04', 'new_clients_count' => 3, 'submitted_at' => now()]);
+        DailyReport::create(['user_id' => $agent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-05', 'new_clients_count' => 2, 'submitted_at' => now()]);
+
+        Sanctum::actingAs($admin);
+
+        $dailyRow = collect((array) $this->getJson('/api/kpi/daily?date=2026-05-04&v=2')->assertOk()->json('data'))
+            ->firstWhere('employee_id', $agent->id);
+        $this->assertNotNull($dailyRow);
+        $this->assertSame(3.0, (float) ($dailyRow['clients'] ?? -1));
+
+        $weeklyRow = collect((array) $this->getJson('/api/kpi/weekly?year=2026&week=19&v=2')->assertOk()->json('data'))
+            ->firstWhere('employee_id', $agent->id);
+        $this->assertNotNull($weeklyRow);
+        $this->assertSame(5.0, (float) ($weeklyRow['clients'] ?? -1));
+
+        $monthlyRow = collect((array) $this->getJson('/api/kpi/monthly?year=2026&month=5&v=2')->assertOk()->json('data'))
+            ->firstWhere('employee_id', $agent->id);
+        $this->assertNotNull($monthlyRow);
+        $this->assertSame(5.0, (float) ($monthlyRow['clients'] ?? -1));
+    }
+
     public function test_effective_plan_returns_common_when_personal_absent(): void
     {
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);

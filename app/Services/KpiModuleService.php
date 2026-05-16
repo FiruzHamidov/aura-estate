@@ -1106,6 +1106,8 @@ class KpiModuleService
                     'ads_display' => $this->displayNumber((float) ($metrics['ads']['final_value'] ?? 0)),
                     'calls_raw' => (float) ($metrics['calls']['final_value'] ?? 0),
                     'calls_display' => $this->displayNumber((float) ($metrics['calls']['final_value'] ?? 0)),
+                    'clients_raw' => (float) $rows->sum('new_clients_count'),
+                    'clients_display' => $this->displayNumber((float) $rows->sum('new_clients_count')),
                     'sales_raw' => (float) ($metrics['sales']['final_value'] ?? 0),
                     'sales_display' => $this->displayNumber((float) ($metrics['sales']['final_value'] ?? 0)),
                     'sales_count_raw' => (float) ($metrics['sales']['final_value'] ?? 0),
@@ -1114,6 +1116,7 @@ class KpiModuleService
                     'shows' => (float) ($metrics['shows']['final_value'] ?? 0),
                     'ads' => (float) ($metrics['ads']['final_value'] ?? 0),
                     'calls' => (float) ($metrics['calls']['final_value'] ?? 0),
+                    'clients' => (float) $rows->sum('new_clients_count'),
                     'sales' => (float) ($metrics['sales']['final_value'] ?? 0),
                     'kpi_value' => $kpiValue,
                     'kpi_percent' => $kpiPercent,
@@ -1287,6 +1290,8 @@ class KpiModuleService
                 'ads_display' => $this->displayNumber((float) ($metrics['ads']['final_value'] ?? 0)),
                 'calls_raw' => (float) ($metrics['calls']['final_value'] ?? 0),
                 'calls_display' => $this->displayNumber((float) ($metrics['calls']['final_value'] ?? 0)),
+                'clients_raw' => (float) $rows->sum('new_clients_count'),
+                'clients_display' => $this->displayNumber((float) $rows->sum('new_clients_count')),
                 'sales_raw' => (float) ($metrics['sales']['final_value'] ?? 0),
                 'sales_display' => $this->displayNumber((float) ($metrics['sales']['final_value'] ?? 0)),
                 'sales_count_raw' => (float) ($metrics['sales']['final_value'] ?? 0),
@@ -1295,6 +1300,7 @@ class KpiModuleService
                 'shows' => (float) ($metrics['shows']['final_value'] ?? 0),
                 'ads' => (float) ($metrics['ads']['final_value'] ?? 0),
                 'calls' => (float) ($metrics['calls']['final_value'] ?? 0),
+                'clients' => (float) $rows->sum('new_clients_count'),
                 'sales' => (float) ($metrics['sales']['final_value'] ?? 0),
                 'kpi_value' => $kpiValue,
                 'kpi_percent' => $kpiPercent,
@@ -1575,11 +1581,16 @@ class KpiModuleService
     {
         $authUser->loadMissing('role');
         $includedTargetRoles = ['agent', 'intern', 'mop'];
+        $includeInactive = (bool) ($filters['include_inactive'] ?? false);
 
         $query = User::query()
             ->select('users.*')
             ->with(['role:id,slug', 'branch:id,name', 'branchGroup:id,branch_id,name'])
             ->whereHas('role', fn (Builder $q) => $q->whereIn('slug', $includedTargetRoles));
+
+        if (! $includeInactive) {
+            $query->where('users.status', '!=', 'inactive');
+        }
 
         if (! empty($filters['assignee_id'])) {
             $query->where('users.id', (int) $filters['assignee_id']);
@@ -1792,6 +1803,11 @@ class KpiModuleService
     private function applyScope(Builder $query, User $authUser, array $filters): void
     {
         $authUser->loadMissing('role');
+        $includeInactive = (bool) ($filters['include_inactive'] ?? false);
+
+        if (! $includeInactive) {
+            $query->whereHas('user', fn (Builder $q) => $q->where('status', '!=', 'inactive'));
+        }
 
         if (! empty($filters['assignee_id'])) {
             $query->where('user_id', (int) $filters['assignee_id']);
@@ -1956,6 +1972,7 @@ class KpiModuleService
                     'shows' => $this->normalizeNumber((float) ($row['shows'] ?? 0)),
                     'ads' => $this->normalizeNumber((float) ($row['ads'] ?? 0)),
                     'calls' => $this->normalizeNumber((float) ($row['calls'] ?? 0)),
+                    'clients' => $this->normalizeNumber((float) ($row['clients'] ?? 0)),
                     'sales' => $this->normalizeNumber((float) ($row['sales'] ?? 0)),
                     'sales_count_display' => $this->normalizeNumber((float) ($row['sales'] ?? 0)),
                     'kpi_percent' => (float) ($row['kpi_percent'] ?? 0),

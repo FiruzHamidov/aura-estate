@@ -843,10 +843,11 @@ class KpiModuleController extends Controller
 
     private function validateKpiFilters(Request $request, bool $withDate): array
     {
-        return $request->validate(array_merge($withDate ? ['date' => 'nullable|date_format:Y-m-d'] : [], [
+        $validated = $request->validate(array_merge($withDate ? ['date' => 'nullable|date_format:Y-m-d'] : [], [
             'v' => 'nullable|string|max:16',
             'debug_plan_trace' => 'nullable|boolean',
             'include_breakdown' => 'nullable|boolean',
+            'include_inactive' => 'nullable|boolean',
             'period_type' => ['nullable', Rule::in(['day', 'week', 'month'])],
             'role' => ['nullable', Rule::in(['admin', 'superadmin', 'owner', 'branch_director', 'rop', 'mop', 'agent', 'intern'])],
             'assignee_id' => 'nullable|integer|exists:users,id',
@@ -861,6 +862,22 @@ class KpiModuleController extends Controller
             'page' => 'nullable|integer|min:1',
             'per_page' => 'nullable|integer|min:1|max:200',
         ]));
+
+        if ((bool) ($validated['include_inactive'] ?? false)) {
+            $role = (string) ($this->authUser()->role?->slug ?? '');
+            $allowed = ['admin', 'superadmin', 'owner', 'rop', 'branch_director'];
+
+            if (! in_array($role, $allowed, true)) {
+                abort(response()->json([
+                    'code' => 'KPI_FORBIDDEN_INCLUDE_INACTIVE',
+                    'message' => 'Forbidden include_inactive scope.',
+                    'details' => (object) [],
+                    'trace_id' => request()->attributes->get('trace_id'),
+                ], 403));
+            }
+        }
+
+        return $validated;
     }
 
     private function wantsV2(Request $request): bool
