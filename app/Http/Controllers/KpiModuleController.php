@@ -455,8 +455,11 @@ class KpiModuleController extends Controller
 
     public function daily(Request $request)
     {
-        $validated = $this->validateKpiFilters($request, true);
-        $date = isset($validated['date']) ? Carbon::parse($validated['date'], 'Asia/Dushanbe') : Carbon::now('Asia/Dushanbe');
+        $validated = array_merge(
+            $this->validateKpiFilters($request, false),
+            $request->validate(['date' => 'required|date_format:Y-m-d'])
+        );
+        $date = Carbon::parse($validated['date'], 'Asia/Dushanbe');
 
         if ($this->wantsV2($request)) {
             return response()->json($this->service->dailyRowsV2($this->authUser(), $date, $validated));

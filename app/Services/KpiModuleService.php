@@ -991,9 +991,8 @@ class KpiModuleService
     {
         $from = $this->rangeDateFromFilters($filters, $date->copy()->startOfDay());
         $to = $this->rangeDateToFilters($filters, $date->copy()->endOfDay());
-        $periodKey = $from->toDateString();
 
-        return $this->buildV2Response($authUser, 'day', $from, $to, $filters, $periodKey, false);
+        return $this->buildScopedPeriodV2Response($authUser, $from, $to, $filters, 'day', false, false);
     }
 
     public function periodRowsV2(User $authUser, string $periodType, Carbon $from, Carbon $to, array $filters): array
@@ -1210,17 +1209,17 @@ class KpiModuleService
             $metricPlanSourceMap = $targetResolution['sources'];
             $metricPlanDailyMap = $targetResolution['plan_daily_values'];
             $metricPlanMetaMap = $targetResolution['plan_meta'];
-            $reportedDates = $rows
-                ->map(fn (DailyReport $row) => $row->report_date->toDateString())
-                ->flip();
 
             $periodStart = $from->copy()->startOfDay();
             $periodEnd = $to->copy()->startOfDay();
             for ($date = $periodStart; $date->lte($periodEnd); $date->addDay()) {
                 $dayKey = $date->toDateString();
-                if (! isset($reportedDates[$dayKey])) {
+                try {
+                    $autoByDate[$dayKey] = $this->dailyReportService->autoMetrics($user, $dayKey);
+                } catch (Throwable) {
                     $salesCredit = (float) ($preloadedSalesByUserDate[(int) $user->id][$dayKey] ?? 0.0);
                     $autoByDate[$dayKey] = [
+                        'ad_count' => 0,
                         'calls_count' => 0,
                         'meetings_count' => 0,
                         'shows_count' => 0,
@@ -1229,13 +1228,6 @@ class KpiModuleService
                         'deals_count' => (int) floor($salesCredit),
                         'sales_count' => $salesCredit,
                     ];
-                    continue;
-                }
-
-                try {
-                    $autoByDate[$dayKey] = $this->dailyReportService->autoMetrics($user, $dayKey);
-                } catch (Throwable) {
-                    $autoByDate[$dayKey] = [];
                     $sourceErrors[$dayKey] = true;
                 }
             }
@@ -1262,6 +1254,8 @@ class KpiModuleService
             $dailyReportStats = $includeWeeklyStats
                 ? $this->weeklyDailyReportStats($rows, $from)
                 : null;
+            $submittedDailyReport = $periodType === 'day'
+                && $rows->contains(fn (DailyReport $row) => $row->report_date->toDateString() === $from->toDateString() && $row->submitted_at !== null);
 
             $payload = [
                 'period_key' => match ($periodType) {
@@ -1304,9 +1298,11 @@ class KpiModuleService
                 'sales' => (float) ($metrics['sales']['final_value'] ?? 0),
                 'kpi_value' => $kpiValue,
                 'kpi_percent' => $kpiPercent,
+                'overall_progress_pct' => $kpiPercent,
                 'average_kpi_percent' => $kpiPercent,
                 'status' => $status,
                 'locked' => $locked,
+                'submitted_daily_report' => (bool) $submittedDailyReport,
             ];
 
             if ($includeWeeklyStats && $dailyReportStats !== null) {
@@ -1498,7 +1494,8 @@ class KpiModuleService
                 $manualResult = 0.0;
                 $source = 'system';
             } elseif ($sourceType === 'mixed') {
-                $finalValue = $factValue + $manualValue;
+                // Mixed rule: manual override has priority, fallback to system value.
+                $finalValue = $manualValue > 0 ? $manualValue : $factValue;
                 $manualResult = $manualValue;
                 $source = 'mixed';
             } else {

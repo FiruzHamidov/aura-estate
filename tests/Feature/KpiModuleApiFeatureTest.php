@@ -13,6 +13,7 @@ use App\Models\KpiPlan;
 use App\Models\Role;
 use App\Models\User;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
@@ -208,17 +209,17 @@ class KpiModuleApiFeatureTest extends TestCase
         }
         $this->assertSame(0, (int) $metrics['objects']['final_value']);
         $this->assertSame(0, (int) $metrics['shows']['final_value']);
-        $this->assertSame(1, (int) $metrics['ads']['final_value']);
-        $this->assertSame(2, (int) $metrics['calls']['final_value']);
-        $this->assertSame(0, (int) $metrics['sales']['final_value']);
+        $this->assertSame(0, (int) $metrics['ads']['final_value']);
+        $this->assertSame(0, (int) $metrics['calls']['final_value']);
+        $this->assertSame(7, (int) $metrics['sales']['final_value']);
 
         $response->assertJsonPath('data.0.objects_raw', 0)
             ->assertJsonPath('data.0.shows_raw', 0)
-            ->assertJsonPath('data.0.ads_raw', 1)
-            ->assertJsonPath('data.0.calls_raw', 2)
-            ->assertJsonPath('data.0.sales_raw', 0)
+            ->assertJsonPath('data.0.ads_raw', 0)
+            ->assertJsonPath('data.0.calls_raw', 0)
+            ->assertJsonPath('data.0.sales_raw', 7)
             ->assertJsonPath('data.0.objects_display', '0.00')
-            ->assertJsonPath('data.0.sales_display', '0.00');
+            ->assertJsonPath('data.0.sales_display', '7.00');
     }
 
     public function test_weekly_v2_returns_all_scope_employees_with_daily_report_stats_and_zero_kpi_rows(): void
@@ -1536,5 +1537,154 @@ class KpiModuleApiFeatureTest extends TestCase
             ->assertJsonPath('meta.pagination.total', 0);
 
         $this->assertSame([], (array) $response->json('data'));
+    }
+
+    public function test_daily_v2_requires_date_and_uses_strict_metric_keys_for_rop_list(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900002001', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        $this->getJson('/api/kpi/daily?v=2')->assertStatus(422);
+    }
+
+    public function test_daily_v2_system_and_manual_sources_and_missing_report_contract(): void
+    {
+        $this->createDailyKpiSystemTables();
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900002011', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900002012', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        $callType = CrmTaskType::create(['code' => 'CALL', 'name' => 'Call', 'group' => 'kpi', 'is_kpi' => true, 'is_active' => true]);
+        $adType = CrmTaskType::create(['code' => 'AD_PUBLICATION', 'name' => 'Ad', 'group' => 'kpi', 'is_kpi' => true, 'is_active' => true]);
+        CrmTask::create(['task_type_id' => $callType->id, 'assignee_id' => $agent->id, 'creator_id' => $admin->id, 'title' => 'c1', 'status' => 'done', 'completed_at' => '2026-05-16 08:00:00']);
+        CrmTask::create(['task_type_id' => $adType->id, 'assignee_id' => $agent->id, 'creator_id' => $admin->id, 'title' => 'a1', 'status' => 'done', 'completed_at' => '2026-05-16 09:00:00']);
+        \DB::table('properties')->insert(['created_by' => $agent->id, 'agent_id' => $agent->id, 'moderation_status' => 'new', 'created_at' => '2026-05-16 10:00:00', 'updated_at' => '2026-05-16 10:00:00']);
+        \DB::table('bookings')->insert(['agent_id' => $agent->id, 'start_time' => '2026-05-16 11:00:00', 'created_at' => '2026-05-16 11:00:00', 'updated_at' => '2026-05-16 11:00:00']);
+
+        $noReport = $this->getJson('/api/kpi/daily?v=2&date=2026-05-16&agent_id='.$agent->id)->assertOk();
+        $rowNoReport = (array) $noReport->json('data.0');
+        $this->assertFalse((bool) ($rowNoReport['submitted_daily_report'] ?? true));
+        $this->assertSame(1, (int) data_get($rowNoReport, 'metrics.objects.final_value'));
+        $this->assertSame(1, (int) data_get($rowNoReport, 'metrics.shows.final_value'));
+        $this->assertSame(1, (int) data_get($rowNoReport, 'metrics.ads.final_value'));
+        $this->assertSame(1, (int) data_get($rowNoReport, 'metrics.calls.final_value'));
+        $this->assertSame(0, (int) data_get($rowNoReport, 'metrics.sales.final_value'));
+
+        DailyReport::create(['user_id' => $agent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-16', 'deals_count' => 2, 'submitted_at' => now()]);
+        $withReport = $this->getJson('/api/kpi/daily?v=2&date=2026-05-16&agent_id='.$agent->id)->assertOk();
+        $rowWithReport = (array) $withReport->json('data.0');
+        $this->assertTrue((bool) ($rowWithReport['submitted_daily_report'] ?? false));
+        $this->assertSame('manual', (string) data_get($rowWithReport, 'metrics.sales.source'));
+        $this->assertSame(2, (int) data_get($rowWithReport, 'metrics.sales.final_value'));
+        $this->assertSame('system', (string) data_get($rowWithReport, 'metrics.calls.source'));
+    }
+
+    public function test_daily_v2_plan_fallback_target_zero_and_status_calculation(): void
+    {
+        $this->createDailyKpiSystemTables();
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900002021', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900002022', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        Config::set('kpi.v2.targets.calls', 0);
+        KpiPlan::query()->create([
+            'role_slug' => 'agent',
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'metric_key' => 'objects',
+            'daily_plan' => 3,
+            'weight' => 0.2,
+            'effective_from' => '2026-05-01',
+        ]);
+        \DB::table('properties')->insert(['created_by' => $agent->id, 'agent_id' => $agent->id, 'moderation_status' => 'new', 'created_at' => '2026-05-16 10:00:00', 'updated_at' => '2026-05-16 10:00:00']);
+
+        $common = $this->getJson('/api/kpi/daily?v=2&date=2026-05-16&agent_id='.$agent->id)->assertOk();
+        $commonRow = (array) $common->json('data.0');
+        $this->assertSame('common', (string) data_get($commonRow, 'metrics.objects.plan_source'));
+        $this->assertSame(0.0, (float) data_get($commonRow, 'metrics.calls.progress_pct'));
+
+        KpiPlan::query()->create([
+            'role_slug' => 'agent',
+            'user_id' => $agent->id,
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'metric_key' => 'objects',
+            'daily_plan' => 5,
+            'weight' => 0.2,
+            'effective_from' => '2026-05-01',
+        ]);
+        $personal = $this->getJson('/api/kpi/daily?v=2&date=2026-05-16&agent_id='.$agent->id)->assertOk();
+        $personalRow = (array) $personal->json('data.0');
+        $this->assertSame('personal', (string) data_get($personalRow, 'metrics.objects.plan_source'));
+        $this->assertIsNumeric($personalRow['overall_progress_pct'] ?? null);
+        $this->assertContains((string) ($personalRow['status'] ?? ''), ['done', 'control', 'weak', 'risk', 'urgent']);
+    }
+
+    public function test_daily_v2_supports_mixed_source_with_manual_override_rule(): void
+    {
+        $this->createDailyKpiSystemTables();
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900002031', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900002032', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        $mapping = (array) config('kpi.v2.metric_mapping', []);
+        $mapping['sales']['source_type'] = 'mixed';
+        Config::set('kpi.v2.metric_mapping', $mapping);
+
+        \DB::table('properties')->insert([
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+            'sale_user_id' => $agent->id,
+            'moderation_status' => 'sold',
+            'sold_at' => '2026-05-16 12:00:00',
+            'created_at' => '2026-05-16 10:00:00',
+            'updated_at' => '2026-05-16 12:00:00',
+        ]);
+        DailyReport::create(['user_id' => $agent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-16', 'deals_count' => 3, 'submitted_at' => now()]);
+
+        $response = $this->getJson('/api/kpi/daily?v=2&date=2026-05-16&agent_id='.$agent->id)->assertOk();
+        $row = (array) $response->json('data.0');
+        $this->assertSame('mixed', (string) data_get($row, 'metrics.sales.source'));
+        $this->assertSame(1, (int) data_get($row, 'metrics.sales.fact_value'));
+        $this->assertSame(3, (int) data_get($row, 'metrics.sales.manual_value'));
+        $this->assertSame(3, (int) data_get($row, 'metrics.sales.final_value'));
+    }
+
+    private function createDailyKpiSystemTables(): void
+    {
+        if (! Schema::hasTable('bookings')) {
+            Schema::create('bookings', function (Blueprint $t) {
+                $t->id();
+                $t->unsignedBigInteger('agent_id')->nullable();
+                $t->timestamp('start_time')->nullable();
+                $t->timestamps();
+            });
+        }
+        if (! Schema::hasTable('properties')) {
+            Schema::create('properties', function (Blueprint $t) {
+                $t->id();
+                $t->unsignedBigInteger('created_by')->nullable();
+                $t->unsignedBigInteger('agent_id')->nullable();
+                $t->string('moderation_status')->default('new');
+                $t->timestamp('sold_at')->nullable();
+                $t->unsignedBigInteger('sale_user_id')->nullable();
+                $t->timestamps();
+            });
+        }
     }
 }

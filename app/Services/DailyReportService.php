@@ -110,6 +110,7 @@ class DailyReportService
         $salesCount = $this->countDeals($user, $startUtc, $endUtc);
 
         return [
+            'ad_count' => $this->countAds($user, $startUtc, $endUtc),
             'calls_count' => $this->countCalls($user, $startUtc, $endUtc),
             'meetings_count' => $showsCount,
             'shows_count' => $showsCount,
@@ -188,6 +189,25 @@ class DailyReportService
             ->where('actor_id', $user->id)
             ->where('event', 'call')
             ->whereBetween('created_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
+            ->count();
+    }
+
+    private function countAds(User $user, Carbon $startUtc, Carbon $endUtc): int
+    {
+        if (! Schema::hasTable('crm_tasks')
+            || ! Schema::hasTable('crm_task_types')
+            || ! Schema::hasColumn('crm_tasks', 'assignee_id')
+            || ! Schema::hasColumn('crm_tasks', 'status')
+            || ! Schema::hasColumn('crm_tasks', 'completed_at')) {
+            return 0;
+        }
+
+        return (int) DB::table('crm_tasks')
+            ->join('crm_task_types', 'crm_task_types.id', '=', 'crm_tasks.task_type_id')
+            ->where('crm_tasks.assignee_id', $user->id)
+            ->where('crm_tasks.status', 'done')
+            ->whereIn('crm_task_types.code', ['AD_PUBLICATION', 'AD_CREATE'])
+            ->whereBetween('crm_tasks.completed_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
             ->count();
     }
 
