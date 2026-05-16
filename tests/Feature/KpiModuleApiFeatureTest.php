@@ -306,6 +306,58 @@ class KpiModuleApiFeatureTest extends TestCase
             ->assertJsonPath('data.0.source', 'common');
     }
 
+    public function test_my_daily_progress_strict_contract_uses_canonical_metrics(): void
+    {
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900001001', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        DailyReport::create([
+            'user_id' => $agent->id,
+            'role_slug' => 'agent',
+            'report_date' => '2026-05-16',
+            'ad_count' => 8,
+            'calls_count' => 24,
+            'submitted_at' => now(),
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $this->getJson('/api/kpi/daily/my-progress?date=2026-05-16')
+            ->assertOk()
+            ->assertJsonPath('date', '2026-05-16')
+            ->assertJsonPath('timezone', 'Asia/Dushanbe')
+            ->assertJsonPath('submitted_daily_report', true)
+            ->assertJsonStructure([
+                'overall_progress_pct',
+                'status',
+                'metrics' => ['objects', 'shows', 'ads', 'calls', 'sales'],
+            ]);
+    }
+
+    public function test_weekly_and_monthly_strict_return_empty_rows_with_meta_period_key(): void
+    {
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900001101', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        Sanctum::actingAs($agent);
+
+        $this->getJson('/api/kpi/weekly?day=2026-05-16')
+            ->assertOk()
+            ->assertJsonPath('meta.period_type', 'week')
+            ->assertJsonPath('meta.period_key', '2026-W20')
+            ->assertJsonPath('rows', []);
+
+        $this->getJson('/api/kpi/monthly?year=2026&month=5')
+            ->assertOk()
+            ->assertJsonPath('meta.period_type', 'month')
+            ->assertJsonPath('meta.period_key', '2026-05')
+            ->assertJsonPath('rows', []);
+    }
+
     public function test_common_read_includes_unified_source_and_meta_source(): void
     {
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);

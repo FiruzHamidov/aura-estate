@@ -500,6 +500,18 @@ class KpiModuleController extends Controller
 
     public function weekly(Request $request)
     {
+        $strictInput = $request->validate([
+            'day' => 'nullable|date_format:Y-m-d',
+            'agent_id' => 'nullable|integer|exists:users,id',
+            'include_breakdown' => 'nullable|boolean',
+        ]);
+
+        if (! empty($strictInput['day'])) {
+            $day = Carbon::parse($strictInput['day'], 'Asia/Dushanbe')->startOfDay();
+
+            return response()->json($this->service->weeklyStrict($this->authUser(), $day, $strictInput));
+        }
+
         $validated = array_merge($this->validateKpiFilters($request, false), $request->validate([
             'year' => 'nullable|integer|min:2000|max:2100',
             'week' => 'nullable|integer|min:1|max:53',
@@ -537,28 +549,16 @@ class KpiModuleController extends Controller
 
     public function monthly(Request $request)
     {
-        $validated = array_merge($this->validateKpiFilters($request, false), $request->validate([
-            'year' => 'nullable|integer|min:2000|max:2100',
-            'month' => 'nullable|integer|min:1|max:12',
-            'date_from' => 'nullable|date',
-            'date_to' => 'nullable|date|after_or_equal:date_from',
-        ]));
+        $validated = $request->validate([
+            'year' => 'required|integer|min:2000|max:2100',
+            'month' => 'required|integer|min:1|max:12',
+            'agent_id' => 'nullable|integer|exists:users,id',
+            'include_breakdown' => 'nullable|boolean',
+        ]);
 
-        if (! empty($validated['date_from']) && ! empty($validated['date_to'])) {
-            $start = Carbon::parse($validated['date_from'], 'Asia/Dushanbe')->startOfDay();
-            $end = Carbon::parse($validated['date_to'], 'Asia/Dushanbe')->endOfDay();
-        } else {
-            $year = (int) ($validated['year'] ?? Carbon::now('Asia/Dushanbe')->year);
-            $month = (int) ($validated['month'] ?? Carbon::now('Asia/Dushanbe')->month);
-            $start = Carbon::createFromDate($year, $month, 1, 'Asia/Dushanbe')->startOfMonth();
-            $end = $start->copy()->endOfMonth();
-        }
+        $start = Carbon::createFromDate((int) $validated['year'], (int) $validated['month'], 1, 'Asia/Dushanbe')->startOfMonth();
 
-        if ($this->wantsV2($request)) {
-            return response()->json($this->service->periodRowsV2($this->authUser(), 'month', $start, $end, $validated));
-        }
-
-        return response()->json(['data' => $this->service->periodRows($this->authUser(), 'month', $start, $end, $validated), 'meta' => ['year' => (int) $validated['year'], 'month' => (int) $validated['month']]]);
+        return response()->json($this->service->monthlyStrict($this->authUser(), $start, $validated));
     }
 
     public function metricMapping()
@@ -788,14 +788,13 @@ class KpiModuleController extends Controller
     public function myDailyProgress(Request $request)
     {
         $validated = $request->validate([
-            'date' => 'nullable|date_format:Y-m-d',
+            'date' => 'required|date_format:Y-m-d',
+            'user_id' => 'nullable|integer|exists:users,id',
         ]);
 
-        $date = isset($validated['date'])
-            ? Carbon::parse($validated['date'], 'Asia/Dushanbe')
-            : Carbon::now('Asia/Dushanbe');
+        $date = Carbon::parse($validated['date'], 'Asia/Dushanbe');
 
-        return response()->json($this->service->myDailyProgress($this->authUser(), $date));
+        return response()->json($this->service->myDailyProgressStrict($this->authUser(), $date, $validated));
     }
 
     private function validateKpiFilters(Request $request, bool $withDate): array

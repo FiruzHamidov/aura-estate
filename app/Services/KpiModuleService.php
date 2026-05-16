@@ -695,6 +695,97 @@ class KpiModuleService
         ];
     }
 
+    public function myDailyProgressStrict(User $authUser, Carbon $date, array $filters = []): array
+    {
+        $targetUser = $this->resolveTargetUser($authUser, isset($filters['user_id']) ? (int) $filters['user_id'] : null);
+        $report = DailyReport::query()
+            ->where('user_id', (int) $targetUser->id)
+            ->whereDate('report_date', $date->toDateString())
+            ->first();
+
+        $auto = $this->dailyReportService->autoMetrics($targetUser, $date->toDateString());
+        $targetResolution = $this->resolvePeriodTargetMapForUser($targetUser, $date, (array) config('kpi.v2.targets', []));
+        $monthlyTargets = (array) ($targetResolution['targets'] ?? []);
+        $daysInMonth = max(1, (int) $date->daysInMonth);
+
+        $targetForDay = function (string $metricKey) use ($monthlyTargets, $daysInMonth): float {
+            $monthly = (float) ($monthlyTargets[$metricKey] ?? 0);
+            if ($metricKey === 'sales') {
+                return $monthly;
+            }
+
+            return $monthly / $daysInMonth;
+        };
+
+        $metrics = [
+            'objects' => $this->metricProgress(
+                (float) ($auto['new_properties_count'] ?? 0),
+                $targetForDay('objects')
+            ),
+            'shows' => $this->metricProgress(
+                (float) ($auto['shows_count'] ?? 0),
+                $targetForDay('shows')
+            ),
+            'ads' => $this->metricProgress(
+                (float) ($report?->ad_count ?? 0),
+                $targetForDay('ads')
+            ),
+            'calls' => $this->metricProgress(
+                (float) ($report?->calls_count ?? 0),
+                $targetForDay('calls')
+            ),
+            'sales' => $this->metricProgress(
+                (float) ($auto['sales_count'] ?? $auto['deals_count'] ?? 0),
+                $targetForDay('sales')
+            ),
+        ];
+
+        $overallProgressPct = round((float) collect($metrics)->avg('progress_pct'), 2);
+
+        return [
+            'date' => $date->toDateString(),
+            'timezone' => self::TZ,
+            'submitted_daily_report' => (bool) ($report?->submitted_at !== null),
+            'overall_progress_pct' => $overallProgressPct,
+            'status' => $this->statusForKpiPercent($overallProgressPct),
+            'metrics' => $metrics,
+        ];
+    }
+
+    public function weeklyStrict(User $authUser, Carbon $day, array $filters = []): array
+    {
+        $start = $day->copy()->startOfWeek(Carbon::MONDAY)->startOfDay();
+        $end = $start->copy()->endOfWeek(Carbon::SUNDAY)->endOfDay();
+        $periodKey = $start->format('o-\WW');
+        $strict = $this->strictPeriodRows($authUser, 'week', $start, $end, $filters);
+
+        return [
+            'meta' => [
+                'period_type' => 'week',
+                'period_key' => $periodKey,
+                'timezone' => self::TZ,
+            ],
+            'rows' => $strict,
+        ];
+    }
+
+    public function monthlyStrict(User $authUser, Carbon $monthStart, array $filters = []): array
+    {
+        $start = $monthStart->copy()->startOfMonth()->startOfDay();
+        $end = $start->copy()->endOfMonth()->endOfDay();
+        $periodKey = $start->format('Y-m');
+        $strict = $this->strictPeriodRows($authUser, 'month', $start, $end, $filters);
+
+        return [
+            'meta' => [
+                'period_type' => 'month',
+                'period_key' => $periodKey,
+                'timezone' => self::TZ,
+            ],
+            'rows' => $strict,
+        ];
+    }
+
     public function metricMapping(): array
     {
         $labels = [
@@ -1831,6 +1922,81 @@ class KpiModuleService
     private function ensureCanUpsertDailyForUser(User $authUser, User $targetUser): void
     {
         $this->ensurePlanScopeAccess($authUser, $targetUser);
+    }
+
+    private function strictPeriodRows(User $authUser, string $periodType, Carbon $from, Carbon $to, array $filters): array
+    {
+        $v2 = $this->periodRowsV2($authUser, $periodType, $from, $to, array_merge($filters, [
+            'per_page' => 200,
+            'page' => 1,
+        ]));
+        $rows = collect((array) ($v2['rows'] ?? []));
+
+        $reportedUserIds = DailyReport::query()
+            ->whereDate('report_date', '>=', $from->toDateString())
+            ->whereDate('report_date', '<=', $to->toDateString())
+            ->when(! empty($filters['agent_id']), fn (Builder $q) => $q->where('user_id', (int) $filters['agent_id']))
+            ->pluck('user_id')
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values();
+
+        if ($reportedUserIds->isEmpty()) {
+            return [];
+        }
+
+        return $rows
+            ->filter(function ($row) use ($reportedUserIds) {
+                if (! is_array($row)) {
+                    return false;
+                }
+
+                return in_array((int) ($row['employee_id'] ?? 0), $reportedUserIds->all(), true);
+            })
+            ->map(function (array $row) use ($periodType, $from) {
+                return [
+                    $periodType === 'week' ? 'week' : 'month' => $periodType === 'week' ? (int) $from->isoWeek() : (int) $from->month,
+                    'year' => $periodType === 'week' ? (int) $from->isoWeekYear() : (int) $from->year,
+                    'employee_id' => (int) ($row['employee_id'] ?? 0),
+                    'employee_name' => (string) ($row['employee_name'] ?? ''),
+                    'objects' => $this->normalizeNumber((float) ($row['objects'] ?? 0)),
+                    'shows' => $this->normalizeNumber((float) ($row['shows'] ?? 0)),
+                    'ads' => $this->normalizeNumber((float) ($row['ads'] ?? 0)),
+                    'calls' => $this->normalizeNumber((float) ($row['calls'] ?? 0)),
+                    'sales' => $this->normalizeNumber((float) ($row['sales'] ?? 0)),
+                    'sales_count_display' => $this->normalizeNumber((float) ($row['sales'] ?? 0)),
+                    'kpi_percent' => (float) ($row['kpi_percent'] ?? 0),
+                    'average_kpi_percent' => (float) ($row['average_kpi_percent'] ?? 0),
+                    'status' => (string) ($row['status'] ?? self::STATUS_URGENT),
+                ];
+            })
+            ->values()
+            ->all();
+    }
+
+    private function resolveTargetUser(User $authUser, ?int $targetUserId): User
+    {
+        if ($targetUserId === null || $targetUserId === (int) $authUser->id) {
+            return $authUser;
+        }
+
+        $target = User::query()->with('role')->findOrFail($targetUserId);
+        $authUser->loadMissing('role');
+        $role = (string) ($authUser->role?->slug ?? '');
+
+        if (in_array($role, ['admin', 'superadmin', 'owner'], true)) {
+            return $target;
+        }
+
+        if (in_array($role, ['rop', 'branch_director'], true) && (int) $target->branch_id === (int) $authUser->branch_id) {
+            return $target;
+        }
+
+        if ($role === 'mop' && (int) $target->branch_group_id === (int) $authUser->branch_group_id) {
+            return $target;
+        }
+
+        abort(403, 'Forbidden.');
     }
 
     private function findCommonPlanRows(string $role, Carbon $date, ?int $branchId, ?int $branchGroupId): EloquentCollection
