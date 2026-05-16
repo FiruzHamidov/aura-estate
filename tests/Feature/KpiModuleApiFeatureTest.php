@@ -1404,4 +1404,85 @@ class KpiModuleApiFeatureTest extends TestCase
         $roles = collect((array) $response->json('data'))->pluck('role')->unique()->values()->all();
         $this->assertSame(['agent'], $roles);
     }
+
+    public function test_weekly_daily_v2_returns_only_selected_day_data(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900001921', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900001922', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        DailyReport::create(['user_id' => $agent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-16', 'calls_count' => 5, 'ad_count' => 2, 'shows_count' => 1, 'new_properties_count' => 3, 'deals_count' => 1, 'submitted_at' => now()]);
+        DailyReport::create(['user_id' => $agent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-15', 'calls_count' => 99, 'ad_count' => 99, 'shows_count' => 99, 'new_properties_count' => 99, 'deals_count' => 99, 'submitted_at' => now()]);
+
+        Sanctum::actingAs($admin);
+
+        $response = $this->getJson('/api/kpi/weekly-daily?v=2&day=2026-05-16')
+            ->assertOk()
+            ->assertJsonPath('meta.period_type', 'day')
+            ->assertJsonPath('meta.period_key', '2026-05-16');
+
+        $row = collect((array) $response->json('data'))->firstWhere('employee_id', $agent->id);
+        $this->assertNotNull($row);
+        $this->assertSame(5.0, (float) ($row['calls'] ?? 0));
+        $this->assertSame(2.0, (float) ($row['ads'] ?? 0));
+        $this->assertNotSame(104.0, (float) ($row['calls'] ?? 0));
+    }
+
+    public function test_weekly_daily_v2_supports_branch_group_and_agent_filters(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branchA = Branch::create(['name' => 'A']);
+        $branchB = Branch::create(['name' => 'B']);
+        $groupA = BranchGroup::create(['branch_id' => $branchA->id, 'name' => 'GA']);
+        $groupB = BranchGroup::create(['branch_id' => $branchB->id, 'name' => 'GB']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900001931', 'role_id' => $adminRole->id, 'branch_id' => $branchA->id, 'branch_group_id' => $groupA->id]);
+        $agentA = User::create(['name' => 'Agent A', 'phone' => '900001932', 'role_id' => $agentRole->id, 'branch_id' => $branchA->id, 'branch_group_id' => $groupA->id]);
+        $agentB = User::create(['name' => 'Agent B', 'phone' => '900001933', 'role_id' => $agentRole->id, 'branch_id' => $branchB->id, 'branch_group_id' => $groupB->id]);
+
+        DailyReport::create(['user_id' => $agentA->id, 'role_slug' => 'agent', 'report_date' => '2026-05-16', 'calls_count' => 4, 'submitted_at' => now()]);
+        DailyReport::create(['user_id' => $agentB->id, 'role_slug' => 'agent', 'report_date' => '2026-05-16', 'calls_count' => 7, 'submitted_at' => now()]);
+
+        Sanctum::actingAs($admin);
+
+        $this->getJson('/api/kpi/weekly-daily?v=2&day=2026-05-16&branch_id='.$branchA->id.'&branch_group_id='.$groupA->id.'&agent_id='.$agentA->id)
+            ->assertOk()
+            ->assertJsonPath('meta.pagination.total', 1)
+            ->assertJsonPath('data.0.employee_id', $agentA->id);
+    }
+
+    public function test_weekly_daily_v2_rejects_invalid_day_format(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900001941', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        $this->getJson('/api/kpi/weekly-daily?v=2&day=16-05-2026')
+            ->assertStatus(422)
+            ->assertJsonPath('code', 'KPI_VALIDATION_FAILED');
+    }
+
+    public function test_weekly_daily_v2_returns_empty_rows_with_valid_pagination(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900001951', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900001952', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        DailyReport::create(['user_id' => $agent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-16', 'calls_count' => 2, 'submitted_at' => now()]);
+        Sanctum::actingAs($admin);
+
+        $response = $this->getJson('/api/kpi/weekly-daily?v=2&day=2026-05-17&agent_id='.$agent->id)
+            ->assertOk()
+            ->assertJsonPath('meta.pagination.total', 0);
+
+        $this->assertSame([], (array) $response->json('data'));
+    }
 }

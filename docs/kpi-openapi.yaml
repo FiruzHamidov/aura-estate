@@ -456,6 +456,49 @@ paths:
     post: { summary: Save daily KPI, responses: { '201': { description: Created }, '422': { description: Validation error } } }
   /kpi/weekly:
     get: { summary: Weekly KPI rows, responses: { '200': { description: OK } } }
+  /kpi/weekly-daily:
+    get:
+      summary: Daily KPI rows for weekly-daily page (v2)
+      parameters:
+        - in: query
+          name: v
+          required: true
+          schema: { type: string, enum: ['2'] }
+        - in: query
+          name: day
+          required: true
+          schema: { type: string, format: date }
+        - in: query
+          name: page
+          required: false
+          schema: { type: integer, minimum: 1, default: 1 }
+        - in: query
+          name: per_page
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 100 }
+        - in: query
+          name: branch_id
+          required: false
+          schema: { type: integer }
+        - in: query
+          name: branch_group_id
+          required: false
+          schema: { type: integer }
+        - in: query
+          name: agent_id
+          required: false
+          schema: { type: integer }
+        - in: query
+          name: user_id
+          required: false
+          schema: { type: integer }
+        - in: query
+          name: role
+          required: false
+          schema: { type: string }
+      responses:
+        '200': { description: OK }
+        '422': { description: Validation failed }
   /kpi/monthly:
     get: { summary: Monthly KPI rows, responses: { '200': { description: OK } } }
   /kpi/metric-mapping:

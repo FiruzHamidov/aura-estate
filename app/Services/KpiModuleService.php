@@ -916,6 +916,15 @@ class KpiModuleService
         return $this->buildV2Response($authUser, $periodType, $from, $to, $filters, $periodKey, $withBreakdown);
     }
 
+    public function weeklyDailyRowsV2(User $authUser, Carbon $day, array $filters): array
+    {
+        $from = $day->copy()->startOfDay();
+        $to = $day->copy()->endOfDay();
+        $withBreakdown = (bool) ($filters['include_breakdown'] ?? false);
+
+        return $this->buildV2Response($authUser, 'day', $from, $to, $filters, $from->toDateString(), $withBreakdown);
+    }
+
     private function buildV2Response(
         User $authUser,
         string $periodType,
@@ -1164,7 +1173,11 @@ class KpiModuleService
                 : null;
 
             $payload = [
-                'period_key' => $periodType === 'week' ? $from->format('o-\WW') : $from->format('Y-m'),
+                'period_key' => match ($periodType) {
+                    'day' => $from->toDateString(),
+                    'week' => $from->format('o-\WW'),
+                    default => $from->format('Y-m'),
+                },
                 'week' => $periodType === 'week' ? (int) $from->isoWeek() : null,
                 'month' => $periodType === 'month' ? (int) $from->month : null,
                 'year' => $periodType === 'week' ? (int) $from->isoWeekYear() : (int) $from->year,
@@ -1249,7 +1262,7 @@ class KpiModuleService
             'meta' => [
                 'version' => '2',
                 'period_type' => $periodType,
-                'period_key' => null,
+                'period_key' => $periodType === 'day' ? $from->toDateString() : null,
                 'date_from' => $from->toDateString(),
                 'date_to' => $to->toDateString(),
                 'locked' => $this->isPeriodLocked($periodType, $from, $filters),
@@ -1483,6 +1496,9 @@ class KpiModuleService
         if (! empty($filters['assignee_id'])) {
             $query->where('users.id', (int) $filters['assignee_id']);
         }
+        if (! empty($filters['user_id'])) {
+            $query->where('users.id', (int) $filters['user_id']);
+        }
         if (! empty($filters['agent_id'])) {
             $query->where('users.id', (int) $filters['agent_id']);
         }
@@ -1695,6 +1711,9 @@ class KpiModuleService
 
         if (! empty($filters['assignee_id'])) {
             $query->where('user_id', (int) $filters['assignee_id']);
+        }
+        if (! empty($filters['user_id'])) {
+            $query->where('user_id', (int) $filters['user_id']);
         }
 
         if (! empty($filters['agent_id'])) {

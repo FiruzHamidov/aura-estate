@@ -524,6 +524,17 @@ class KpiModuleController extends Controller
         return response()->json(['data' => $this->service->periodRows($this->authUser(), 'week', $start, $end, $validated), 'meta' => ['year' => (int) $validated['year'], 'week' => (int) $validated['week']]]);
     }
 
+    public function weeklyDaily(Request $request)
+    {
+        $validated = array_merge($this->validateKpiFilters($request, false), $request->validate([
+            'day' => 'required|date_format:Y-m-d',
+        ]));
+
+        $day = Carbon::parse($validated['day'], 'Asia/Dushanbe')->startOfDay();
+
+        return response()->json($this->service->weeklyDailyRowsV2($this->authUser(), $day, $validated));
+    }
+
     public function monthly(Request $request)
     {
         $validated = array_merge($this->validateKpiFilters($request, false), $request->validate([
@@ -796,6 +807,7 @@ class KpiModuleController extends Controller
             'period_type' => ['nullable', Rule::in(['day', 'week', 'month'])],
             'role' => ['nullable', Rule::in(['admin', 'superadmin', 'owner', 'branch_director', 'rop', 'mop', 'agent', 'intern'])],
             'assignee_id' => 'nullable|integer|exists:users,id',
+            'user_id' => 'nullable|integer|exists:users,id',
             'mop_id' => 'nullable|integer|exists:users,id',
             'agent_id' => 'nullable|integer|exists:users,id',
             'group_id' => 'nullable|integer|exists:branch_groups,id',

@@ -190,6 +190,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::get('/kpi/daily', [KpiModuleController::class, 'daily'])->middleware('rop.branch.scope');
     Route::post('/kpi/daily', [KpiModuleController::class, 'upsertDaily']);
     Route::get('/kpi/weekly', [KpiModuleController::class, 'weekly'])->middleware('rop.branch.scope');
+    Route::get('/kpi/weekly-daily', [KpiModuleController::class, 'weeklyDaily'])->middleware('rop.branch.scope');
     Route::get('/kpi/monthly', [KpiModuleController::class, 'monthly'])->middleware('rop.branch.scope');
     Route::get('/kpi/dashboard', [KpiModuleController::class, 'dashboard'])->middleware('rop.branch.scope');
     Route::get('/kpi/dashboard/debug', [KpiModuleController::class, 'dashboardDebug'])->middleware('rop.branch.scope');
