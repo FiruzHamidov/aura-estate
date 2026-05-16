@@ -76,14 +76,14 @@ return [
             ],
             'ads' => [
                 'source_column' => 'ad_count',
-                'source_type' => 'system',
+                'source_type' => 'manual',
                 'entities' => ['daily_reports.ad_count'],
                 'valid_statuses' => [],
                 'task_type_codes' => [],
             ],
             'calls' => [
                 'source_column' => 'calls_count',
-                'source_type' => 'system',
+                'source_type' => 'manual',
                 'entities' => ['daily_reports.calls_count'],
                 'valid_statuses' => [],
                 'task_type_codes' => [],
