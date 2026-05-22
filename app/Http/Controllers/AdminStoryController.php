@@ -65,6 +65,18 @@ class AdminStoryController extends Controller
         }
 
         if ($validated['action'] === 'republish') {
+            $activeStories = Story::query()
+                ->where('user_id', $story->user_id)
+                ->where('status', Story::STATUS_ACTIVE)
+                ->where('id', '!=', $story->id)
+                ->count();
+
+            abort_if(
+                $activeStories >= (int) config('stories.active_per_user_limit', 30),
+                422,
+                'You cannot have more active stories.'
+            );
+
             if ($story->type === Story::TYPE_REEL) {
                 $activeReels = Story::query()
                     ->where('user_id', $story->user_id)
@@ -73,7 +85,11 @@ class AdminStoryController extends Controller
                     ->where('id', '!=', $story->id)
                     ->count();
 
-                abort_if($activeReels >= 10, 422, 'You cannot have more than 10 active reel stories.');
+                abort_if(
+                    $activeReels >= (int) config('stories.active_reel_per_user_limit', 10),
+                    422,
+                    'You cannot have more active reel stories.'
+                );
             }
 
             $startsAt = now();
@@ -82,7 +98,7 @@ class AdminStoryController extends Controller
                 'status' => Story::STATUS_ACTIVE,
                 'starts_at' => $startsAt,
                 'activated_at' => $startsAt,
-                'expires_at' => $startsAt->copy()->addDay(),
+                'expires_at' => $startsAt->copy()->addHours((int) config('stories.ttl_hours', 24)),
             ]);
         }
 

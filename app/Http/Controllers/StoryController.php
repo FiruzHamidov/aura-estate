@@ -86,19 +86,23 @@ class StoryController extends Controller
             'viewed_at' => now(),
         ];
 
+        $view = null;
         if ($actor['viewer_user_id']) {
-            StoryView::query()->updateOrCreate(
+            $view = StoryView::query()->updateOrCreate(
                 ['story_id' => $story->id, 'viewer_user_id' => $actor['viewer_user_id']],
                 ['guest_token' => null, 'viewed_at' => now()]
             );
         } else {
-            StoryView::query()->updateOrCreate(
+            $view = StoryView::query()->updateOrCreate(
                 ['story_id' => $story->id, 'guest_token' => $actor['guest_token']],
                 ['viewer_user_id' => null, 'viewed_at' => now()]
             );
         }
 
-        Story::query()->whereKey($story->id)->increment('views_count');
+        // Keep views_count as a unique viewers counter.
+        if ($view?->wasRecentlyCreated) {
+            Story::query()->whereKey($story->id)->increment('views_count');
+        }
 
         return response()->json(['message' => 'View tracked', 'payload' => $payload]);
     }
@@ -377,6 +381,18 @@ class StoryController extends Controller
 
     private function activateStory(Story $story, bool $force = false): void
     {
+        $activeStories = Story::query()
+            ->where('user_id', $story->user_id)
+            ->where('status', Story::STATUS_ACTIVE)
+            ->when($force, fn (Builder $q) => $q->where('id', '!=', $story->id))
+            ->count();
+
+        abort_if(
+            $activeStories >= (int) config('stories.active_per_user_limit', 30),
+            422,
+            'You cannot have more active stories.'
+        );
+
         if ($story->type === Story::TYPE_REEL) {
             $activeReelStories = Story::query()
                 ->where('user_id', $story->user_id)
@@ -385,11 +401,15 @@ class StoryController extends Controller
                 ->when($force, fn (Builder $q) => $q->where('id', '!=', $story->id))
                 ->count();
 
-            abort_if($activeReelStories >= 10, 422, 'You cannot have more than 10 active reel stories.');
+            abort_if(
+                $activeReelStories >= (int) config('stories.active_reel_per_user_limit', 10),
+                422,
+                'You cannot have more active reel stories.'
+            );
         }
 
         $startsAt = $story->starts_at ?: now();
-        $expiresAt = $startsAt->copy()->addDay();
+        $expiresAt = $startsAt->copy()->addHours((int) config('stories.ttl_hours', 24));
 
         $story->update([
             'status' => Story::STATUS_ACTIVE,
