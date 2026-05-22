@@ -558,6 +558,10 @@ class PropertyReportController extends Controller
             return;
         }
 
+        if (! $request->filled('branch_id') && ! empty($authUser->branch_id)) {
+            $request->merge(['branch_id' => (string) $authUser->branch_id]);
+        }
+
         if ($request->filled('branch_id')) {
             foreach ($this->toArray($request->input('branch_id')) as $branchId) {
                 $this->branchScope->ensureSameBranchOrDeny((int) $branchId, $authUser);
@@ -659,8 +663,10 @@ class PropertyReportController extends Controller
             $clientsQ->whereIn(DB::raw($clientOwnerExpr), $this->toArray($request->input('agent_id')));
         }
 
-        $from = $request->input('date_from', $request->input('from'));
-        $to = $request->input('date_to', $request->input('to'));
+        // Keep client period aligned with main report period.
+        // Do not fallback to from/to here because conflicting values can zero-out client counts.
+        $from = $request->input('date_from');
+        $to = $request->input('date_to');
         if ($from) {
             $clientsQ->whereDate('created_at', '>=', $from);
         }

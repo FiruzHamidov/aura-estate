@@ -9,6 +9,7 @@ use App\Services\Bitrix24Client;
 use App\Services\Crm\AuditLogger;
 use App\Services\NotificationService;
 use App\Support\ClientAccess;
+use App\Support\RbacBranchScope;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
@@ -23,6 +24,7 @@ class BookingController extends Controller
         private readonly ClientAccess $clientAccess,
         private readonly AuditLogger $auditLogger,
         private readonly NotificationService $notifications,
+        private readonly RbacBranchScope $branchScope,
     ) {
     }
 
@@ -267,7 +269,7 @@ class BookingController extends Controller
             }
         }
 
-        if ($this->isPrivilegedRole($roleSlug) && $request->filled('branch_id')) {
+        if ($request->filled('branch_id')) {
             $branchIds = $this->toArray($request->input('branch_id'));
 
             if (!empty($branchIds)) {
@@ -291,6 +293,27 @@ class BookingController extends Controller
             }
 
             $query->whereIn($agentColumn, User::query()->where('branch_group_id', $authUser->branch_group_id)->select('id'));
+        }
+    }
+
+    private function resolveBranchScopeForReports(Request $request): void
+    {
+        $authUser = $this->authUser($request);
+
+        if (! $authUser || ! $this->isBranchScopedRole($this->roleSlug($authUser))) {
+            return;
+        }
+
+        if ($request->filled('branch_id')) {
+            foreach ($this->toArray($request->input('branch_id')) as $branchId) {
+                $this->branchScope->ensureSameBranchOrDeny((int) $branchId, $authUser);
+            }
+
+            return;
+        }
+
+        if (! empty($authUser->branch_id)) {
+            $request->merge(['branch_id' => (string) $authUser->branch_id]);
         }
     }
 
@@ -607,6 +630,7 @@ class BookingController extends Controller
     public function agentsReport(Request $request)
     {
         $this->ensureReportsAllowed($request);
+        $this->resolveBranchScopeForReports($request);
 
         try {
             $fromRaw = $request->input('from') ?? $request->input('date_from');

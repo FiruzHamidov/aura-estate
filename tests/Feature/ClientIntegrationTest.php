@@ -731,6 +731,67 @@ class ClientIntegrationTest extends TestCase
         $this->assertSame(0, (int) ($rowsById[$creator->id]['sold'] ?? 0));
     }
 
+    public function test_manager_efficiency_unique_clients_count_uses_date_from_date_to_even_if_from_to_conflict(): void
+    {
+        [$agent] = $this->seedClientContext(withProperty: false);
+
+        Property::create([
+            'title' => 'May property',
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 100000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+            'listing_type' => 'regular',
+            'moderation_status' => 'approved',
+            'created_at' => '2026-05-10 09:00:00',
+            'updated_at' => '2026-05-10 09:00:00',
+        ]);
+
+        Client::create([
+            'full_name' => 'May Client 1',
+            'phone' => '+992 90 555 3111',
+            'phone_normalized' => '992905553111',
+            'branch_id' => $agent->branch_id,
+            'created_by' => $agent->id,
+            'responsible_agent_id' => $agent->id,
+            'client_type_id' => 1,
+            'contact_kind' => Client::CONTACT_KIND_BUYER,
+            'status' => 'active',
+            'created_at' => '2026-05-12 09:00:00',
+            'updated_at' => '2026-05-12 09:00:00',
+        ]);
+
+        Client::create([
+            'full_name' => 'May Client 2',
+            'phone' => '+992 90 555 3222',
+            'phone_normalized' => '992905553222',
+            'branch_id' => $agent->branch_id,
+            'created_by' => $agent->id,
+            'responsible_agent_id' => $agent->id,
+            'client_type_id' => 1,
+            'contact_kind' => Client::CONTACT_KIND_BUYER,
+            'status' => 'active',
+            'created_at' => '2026-05-18 09:00:00',
+            'updated_at' => '2026-05-18 09:00:00',
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $response = $this->getJson(
+            '/api/reports/properties/manager-efficiency?agent_id='.$agent->id
+            .'&date_from=2026-05-01&date_to=2026-05-22'
+            .'&from=2026-05-22T05:49:34.000000Z&to=2026-05-01T05:49:34.000000Z'
+            .'&branch_id='.$agent->branch_id
+        );
+
+        $response->assertOk();
+        $response->assertJsonPath('0.agent_id', $agent->id);
+        $response->assertJsonPath('0.unique_clients_count', 2);
+    }
+
     public function test_agent_earnings_report_filters_by_agent_id_not_creator(): void
     {
         [$agent] = $this->seedClientContext(withProperty: false);
@@ -900,6 +961,89 @@ class ClientIntegrationTest extends TestCase
         $this->getJson('/api/bookings/agents-report?agent_id=' . $agent->id)->assertForbidden();
     }
 
+    public function test_agents_report_enforces_and_applies_branch_filter_for_rop_and_admin_roles(): void
+    {
+        $ctx = $this->seedReportBranchScopeContext();
+
+        Sanctum::actingAs($ctx['users']['rop']);
+
+        $valid = $this->getJson('/api/bookings/agents-report?branch_id=' . $ctx['branches']['a']->id);
+        $valid->assertOk();
+        $validRows = collect($valid->json());
+        $this->assertSame(1, $validRows->count());
+        $this->assertSame($ctx['users']['agentA']->id, (int) $validRows->first()['agent_id']);
+
+        $this->getJson('/api/bookings/agents-report?branch_id=' . $ctx['branches']['b']->id)
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+
+        $fallback = $this->getJson('/api/bookings/agents-report');
+        $fallback->assertOk();
+        $fallbackRows = collect($fallback->json());
+        $this->assertSame(1, $fallbackRows->count());
+        $this->assertSame($ctx['users']['agentA']->id, (int) $fallbackRows->first()['agent_id']);
+
+        Sanctum::actingAs($ctx['users']['admin']);
+        $admin = $this->getJson('/api/bookings/agents-report?branch_id=' . $ctx['branches']['b']->id);
+        $admin->assertOk();
+        $adminRows = collect($admin->json());
+        $this->assertSame(1, $adminRows->count());
+        $this->assertSame($ctx['users']['agentB']->id, (int) $adminRows->first()['agent_id']);
+
+        Sanctum::actingAs($ctx['users']['superadmin']);
+        $superadmin = $this->getJson('/api/bookings/agents-report?branch_id=' . $ctx['branches']['b']->id);
+        $superadmin->assertOk();
+        $superadminRows = collect($superadmin->json());
+        $this->assertSame(1, $superadminRows->count());
+        $this->assertSame($ctx['users']['agentB']->id, (int) $superadminRows->first()['agent_id']);
+    }
+
+    public function test_manager_efficiency_enforces_branch_filter_for_branch_director_and_rop_with_fallback(): void
+    {
+        $ctx = $this->seedReportBranchScopeContext();
+
+        Sanctum::actingAs($ctx['users']['director']);
+
+        $valid = $this->getJson('/api/reports/properties/manager-efficiency?date_from=2026-03-01&date_to=2026-03-31&branch_id=' . $ctx['branches']['a']->id);
+        $valid->assertOk();
+        $validRows = collect($valid->json());
+        $this->assertTrue($validRows->contains(fn (array $row) => (int) ($row['agent_id'] ?? 0) === $ctx['users']['agentA']->id));
+        $this->assertFalse($validRows->contains(fn (array $row) => (int) ($row['agent_id'] ?? 0) === $ctx['users']['agentB']->id));
+
+        $this->getJson('/api/reports/properties/manager-efficiency?date_from=2026-03-01&date_to=2026-03-31&branch_id=' . $ctx['branches']['b']->id)
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+
+        $directorFallback = $this->getJson('/api/reports/properties/manager-efficiency?date_from=2026-03-01&date_to=2026-03-31');
+        $directorFallback->assertOk();
+        $directorFallbackRows = collect($directorFallback->json());
+        $this->assertTrue($directorFallbackRows->contains(fn (array $row) => (int) ($row['agent_id'] ?? 0) === $ctx['users']['agentA']->id));
+        $this->assertFalse($directorFallbackRows->contains(fn (array $row) => (int) ($row['agent_id'] ?? 0) === $ctx['users']['agentB']->id));
+
+        Sanctum::actingAs($ctx['users']['rop']);
+        $this->getJson('/api/reports/properties/manager-efficiency?date_from=2026-03-01&date_to=2026-03-31&branch_id=' . $ctx['branches']['b']->id)
+            ->assertStatus(403)
+            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+
+        $fallback = $this->getJson('/api/reports/properties/manager-efficiency?date_from=2026-03-01&date_to=2026-03-31');
+        $fallback->assertOk();
+        $fallbackRows = collect($fallback->json());
+        $this->assertTrue($fallbackRows->contains(fn (array $row) => (int) ($row['agent_id'] ?? 0) === $ctx['users']['agentA']->id));
+        $this->assertFalse($fallbackRows->contains(fn (array $row) => (int) ($row['agent_id'] ?? 0) === $ctx['users']['agentB']->id));
+
+        Sanctum::actingAs($ctx['users']['admin']);
+        $admin = $this->getJson('/api/reports/properties/manager-efficiency?date_from=2026-03-01&date_to=2026-03-31&branch_id=' . $ctx['branches']['b']->id);
+        $admin->assertOk();
+        $adminRows = collect($admin->json());
+        $this->assertTrue($adminRows->contains(fn (array $row) => (int) ($row['agent_id'] ?? 0) === $ctx['users']['agentB']->id));
+
+        Sanctum::actingAs($ctx['users']['superadmin']);
+        $superadmin = $this->getJson('/api/reports/properties/manager-efficiency?date_from=2026-03-01&date_to=2026-03-31&branch_id=' . $ctx['branches']['b']->id);
+        $superadmin->assertOk();
+        $superadminRows = collect($superadmin->json());
+        $this->assertTrue($superadminRows->contains(fn (array $row) => (int) ($row['agent_id'] ?? 0) === $ctx['users']['agentB']->id));
+    }
+
     private function seedClientContext(bool $withProperty = true): array
     {
         $branch = Branch::create(['name' => 'Branch A']);
@@ -955,5 +1099,152 @@ class ClientIntegrationTest extends TestCase
         }
 
         return [$agent, $client, $property];
+    }
+
+    private function seedReportBranchScopeContext(): array
+    {
+        $roles = [
+            'agent' => Role::create(['name' => 'Agent', 'slug' => 'agent']),
+            'rop' => Role::create(['name' => 'ROP', 'slug' => 'rop']),
+            'branch_director' => Role::create(['name' => 'Branch Director', 'slug' => 'branch_director']),
+            'admin' => Role::create(['name' => 'Admin', 'slug' => 'admin']),
+            'superadmin' => Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']),
+        ];
+
+        DB::table('property_types')->insert([
+            'id' => 1,
+            'name' => 'Apartment',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('property_statuses')->insert([
+            'id' => 1,
+            'name' => 'New',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $rop = User::create([
+            'name' => 'ROP A',
+            'phone' => (string) ++$this->phoneCounter,
+            'password' => bcrypt('password'),
+            'role_id' => $roles['rop']->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+        $director = User::create([
+            'name' => 'Director A',
+            'phone' => (string) ++$this->phoneCounter,
+            'password' => bcrypt('password'),
+            'role_id' => $roles['branch_director']->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+        $admin = User::create([
+            'name' => 'Admin A',
+            'phone' => (string) ++$this->phoneCounter,
+            'password' => bcrypt('password'),
+            'role_id' => $roles['admin']->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+        $superadmin = User::create([
+            'name' => 'Superadmin A',
+            'phone' => (string) ++$this->phoneCounter,
+            'password' => bcrypt('password'),
+            'role_id' => $roles['superadmin']->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+
+        $agentA = User::create([
+            'name' => 'Agent A',
+            'phone' => (string) ++$this->phoneCounter,
+            'password' => bcrypt('password'),
+            'role_id' => $roles['agent']->id,
+            'branch_id' => $branchA->id,
+            'status' => 'active',
+        ]);
+        $agentB = User::create([
+            'name' => 'Agent B',
+            'phone' => (string) ++$this->phoneCounter,
+            'password' => bcrypt('password'),
+            'role_id' => $roles['agent']->id,
+            'branch_id' => $branchB->id,
+            'status' => 'active',
+        ]);
+
+        $propertyA = Property::create([
+            'title' => 'Branch A Property',
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 100000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'created_by' => $agentA->id,
+            'agent_id' => $agentA->id,
+            'listing_type' => 'regular',
+            'moderation_status' => 'approved',
+            'created_at' => '2026-03-10 10:00:00',
+            'updated_at' => '2026-03-10 10:00:00',
+        ]);
+        $propertyB = Property::create([
+            'title' => 'Branch B Property',
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 120000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'created_by' => $agentB->id,
+            'agent_id' => $agentB->id,
+            'listing_type' => 'regular',
+            'moderation_status' => 'approved',
+            'created_at' => '2026-03-11 10:00:00',
+            'updated_at' => '2026-03-11 10:00:00',
+        ]);
+
+        DB::table('bookings')->insert([
+            [
+                'property_id' => $propertyA->id,
+                'agent_id' => $agentA->id,
+                'client_id' => null,
+                'crm_client_id' => null,
+                'start_time' => '2026-03-12 10:00:00',
+                'end_time' => '2026-03-12 11:00:00',
+                'status' => 'confirmed',
+                'client_name' => 'Client A',
+                'client_phone' => '+992900000001',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'property_id' => $propertyB->id,
+                'agent_id' => $agentB->id,
+                'client_id' => null,
+                'crm_client_id' => null,
+                'start_time' => '2026-03-12 12:00:00',
+                'end_time' => '2026-03-12 13:00:00',
+                'status' => 'confirmed',
+                'client_name' => 'Client B',
+                'client_phone' => '+992900000002',
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+        ]);
+
+        return [
+            'branches' => ['a' => $branchA, 'b' => $branchB],
+            'users' => [
+                'rop' => $rop,
+                'director' => $director,
+                'admin' => $admin,
+                'superadmin' => $superadmin,
+                'agentA' => $agentA,
+                'agentB' => $agentB,
+            ],
+        ];
     }
 }
