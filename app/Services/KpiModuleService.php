@@ -1077,9 +1077,10 @@ class KpiModuleService
                 ) {
                     $this->overrideDailySalesMetricWithMonthlyCompletion($metrics, $user, $from);
                 }
-                $kpiValue = $this->kpiValueFromMetrics($metrics, $weightMap);
-                $kpiPercent = round($kpiValue * 100, 1);
-                $status = $this->statusForKpiPercent($kpiPercent);
+                $score = $this->kpiScoreFromMetrics($metrics, $weightMap);
+                $kpiValue = $score['kpi_value'];
+                $kpiPercent = $score['kpi_percent'];
+                $status = $this->statusForKpiPercent($kpiPercent, $score);
                 $locked = $this->isPeriodLockedForUser($periodType, $from, $user);
                 $rowSourceError = collect($metrics)->contains(fn (array $metric) => (bool) $metric['source_error']);
                 $globalSourceError = $globalSourceError || $rowSourceError;
@@ -1120,9 +1121,11 @@ class KpiModuleService
                     'sales' => (float) ($metrics['sales']['final_value'] ?? 0),
                     'kpi_value' => $kpiValue,
                     'kpi_percent' => $kpiPercent,
+                    'overall_progress_pct' => $kpiPercent,
                     'average_kpi_percent' => $kpiPercent,
                     'status' => $status,
                     'locked' => $locked,
+                    'kpi_trace' => $score['trace'],
                 ];
 
                 if ($withBreakdown) {
@@ -1199,6 +1202,7 @@ class KpiModuleService
         $daysInPeriod = max(1, $from->diffInDays($to) + 1);
         $globalSourceError = false;
         $debugPlanTrace = (bool) ($filters['debug_plan_trace'] ?? false);
+        $debugFormulaTrace = (bool) ($filters['debug_kpi_trace'] ?? false);
         $traceId = (string) (request()->attributes->get('trace_id') ?? '');
         $planTraceRows = [];
         $preloadedSalesByUserDate = $this->preloadSalesCreditsByUserDate($userIds->all(), $from, $to);
@@ -1236,9 +1240,10 @@ class KpiModuleService
             }
 
             $metrics = $this->buildMetricsForRows($rows, $autoByDate, $sourceErrors, $mapping, $targetMap, $periodType, $daysInPeriod, $metricPlanSourceMap);
-            $kpiValue = $this->kpiValueFromMetrics($metrics, $weightMap);
-            $kpiPercent = round($kpiValue * 100, 1);
-            $status = $this->statusForKpiPercent($kpiPercent);
+            $score = $this->kpiScoreFromMetrics($metrics, $weightMap);
+            $kpiValue = $score['kpi_value'];
+            $kpiPercent = $score['kpi_percent'];
+            $status = $this->statusForKpiPercent($kpiPercent, $score);
             $locked = $this->isPeriodLockedForUser($periodType, $from, $user);
             $rowSourceError = collect($metrics)->contains(fn (array $metric) => (bool) $metric['source_error']);
             $globalSourceError = $globalSourceError || $rowSourceError;
@@ -1309,6 +1314,7 @@ class KpiModuleService
                 'status' => $status,
                 'locked' => $locked,
                 'submitted_daily_report' => (bool) $submittedDailyReport,
+                'kpi_trace' => $score['trace'],
             ];
 
             if ($includeWeeklyStats && $dailyReportStats !== null) {
@@ -1346,6 +1352,22 @@ class KpiModuleService
                 'date_to' => $to->toDateString(),
                 'filters' => Arr::only($filters, ['role', 'branch_id', 'branch_group_id', 'assignee_id', 'agent_id', 'mop_id', 'page', 'per_page']),
                 'sample' => array_slice($planTraceRows, 0, 100),
+            ]);
+        }
+
+        if ($debugFormulaTrace || $traceId !== '') {
+            Log::info('kpi.v2.formula_trace', [
+                'trace_id' => $traceId !== '' ? $traceId : null,
+                'period_type' => $periodType,
+                'date_from' => $from->toDateString(),
+                'date_to' => $to->toDateString(),
+                'filters' => Arr::only($filters, ['role', 'branch_id', 'branch_group_id', 'assignee_id', 'agent_id', 'mop_id', 'page', 'per_page']),
+                'sample' => $data->map(fn (array $row) => [
+                    'employee_id' => (int) ($row['employee_id'] ?? 0),
+                    'kpi_percent' => (float) ($row['kpi_percent'] ?? 0),
+                    'status' => (string) ($row['status'] ?? ''),
+                    'kpi_trace' => (array) ($row['kpi_trace'] ?? []),
+                ])->take(100)->values()->all(),
             ]);
         }
 
@@ -1687,26 +1709,105 @@ class KpiModuleService
             ->all();
     }
 
-    private function kpiValueFromMetrics(array $metrics, array $weightMap): float
+    private function kpiScoreFromMetrics(array &$metrics, array $weightMap): array
     {
         $value = 0.0;
+        $capsEnabled = (bool) config('kpi.v2.formula.cap_metric_progress_at_100', true);
+        $gateConfig = (array) config('kpi.v2.formula.hard_gate', []);
+        $gateEnabled = (bool) ($gateConfig['enabled'] ?? true);
+        $gateMax = (float) ($gateConfig['max_kpi_percent'] ?? 79.9);
+        $metricGates = (array) ($gateConfig['metrics'] ?? []);
+        $doneMinMetricProgress = (float) config('kpi.v2.formula.done_min_metric_progress_pct', 80.0);
+        $traceMetrics = [];
+        $gateTriggered = false;
+        $gateReasons = [];
 
         foreach ($metrics as $key => $metric) {
             $target = (float) ($metric['target_value'] ?? 0);
             $final = (float) ($metric['final_value'] ?? 0);
+            $progressPct = (float) ($metric['progress_pct'] ?? 0);
+            $weight = (float) ($weightMap[$key] ?? 0);
+            $ratioRaw = $target > 0 ? ($final / $target) : 0.0;
+            $ratioUsed = $capsEnabled ? min(1.0, $ratioRaw) : $ratioRaw;
+            $contributionPct = round($ratioUsed * $weight * 100, 2);
+
+            $metrics[$key]['weight_used'] = $weight;
+            $metrics[$key]['contribution_pct'] = $contributionPct;
+            $metrics[$key]['progress_pct_capped'] = round($ratioUsed * 100, 2);
+
             if ($target <= 0) {
                 continue;
             }
 
-            $weight = (float) ($weightMap[$key] ?? 0);
-            $value += ($final / $target) * $weight;
+            if ($gateEnabled && isset($metricGates[$key])) {
+                $minPct = (float) $metricGates[$key];
+                if ($progressPct < $minPct) {
+                    $gateTriggered = true;
+                    $gateReasons[] = [
+                        'metric' => $key,
+                        'min_progress_pct' => $minPct,
+                        'actual_progress_pct' => round($progressPct, 2),
+                    ];
+                }
+            }
+
+            $traceMetrics[$key] = [
+                'target_value' => $this->normalizeNumber($target),
+                'final_value' => $this->normalizeNumber($final),
+                'progress_pct' => round($progressPct, 2),
+                'weight_used' => $weight,
+                'contribution_pct' => $contributionPct,
+            ];
+
+            $value += $ratioUsed * $weight;
         }
 
-        return round($value, 4);
+        $kpiValueRaw = round($value, 4);
+        $kpiPercentRaw = round($kpiValueRaw * 100, 1);
+        $kpiPercentFinal = $kpiPercentRaw;
+
+        if ($gateEnabled && $gateTriggered) {
+            $kpiPercentFinal = min($kpiPercentFinal, $gateMax);
+        }
+
+        return [
+            'kpi_value' => round($kpiPercentFinal / 100, 4),
+            'kpi_percent' => round($kpiPercentFinal, 1),
+            'raw_kpi_percent' => $kpiPercentRaw,
+            'gate_triggered' => $gateTriggered,
+            'done_min_metric_progress_pct' => $doneMinMetricProgress,
+            'trace' => [
+                'formula_version' => 'v2.1',
+                'cap_metric_progress_at_100' => $capsEnabled,
+                'hard_gate' => [
+                    'enabled' => $gateEnabled,
+                    'triggered' => $gateTriggered,
+                    'max_kpi_percent' => $gateMax,
+                    'reasons' => $gateReasons,
+                ],
+                'metrics' => $traceMetrics,
+                'raw_kpi_percent' => $kpiPercentRaw,
+                'final_kpi_percent' => round($kpiPercentFinal, 1),
+            ],
+        ];
     }
 
-    private function statusForKpiPercent(float $kpiPercent): string
+    private function statusForKpiPercent(float $kpiPercent, array $score = []): string
     {
+        if ((bool) ($score['gate_triggered'] ?? false) && $kpiPercent >= 100) {
+            return self::STATUS_CONTROL;
+        }
+
+        if ($kpiPercent >= 100) {
+            $doneMinMetricProgress = (float) ($score['done_min_metric_progress_pct'] ?? config('kpi.v2.formula.done_min_metric_progress_pct', 80.0));
+            $traceMetrics = (array) ($score['trace']['metrics'] ?? []);
+            foreach (['calls', 'ads'] as $criticalMetric) {
+                if ((float) ($traceMetrics[$criticalMetric]['progress_pct'] ?? 0.0) < $doneMinMetricProgress) {
+                    return self::STATUS_CONTROL;
+                }
+            }
+        }
+
         if ($kpiPercent >= 100) {
             return self::STATUS_DONE;
         }

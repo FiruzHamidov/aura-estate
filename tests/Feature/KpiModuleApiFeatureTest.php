@@ -1956,6 +1956,149 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertSame(0, (int) data_get($row, 'metrics.calls.final_value'));
     }
 
+    public function test_monthly_v2_formula_caps_metric_contribution_and_returns_breakdown_fields(): void
+    {
+        $this->createDailyKpiSystemTables();
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900002061', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900002062', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        foreach ([
+            ['metric_key' => 'objects', 'daily_plan' => 15, 'weight' => 0.2],
+            ['metric_key' => 'shows', 'daily_plan' => 10, 'weight' => 0.2],
+            ['metric_key' => 'ads', 'daily_plan' => 480, 'weight' => 0.2],
+            ['metric_key' => 'calls', 'daily_plan' => 720, 'weight' => 0.2],
+            ['metric_key' => 'sales', 'daily_plan' => 2, 'weight' => 0.2],
+        ] as $plan) {
+            KpiPlan::query()->create([
+                'role_slug' => 'agent',
+                'user_id' => $agent->id,
+                'branch_id' => $branch->id,
+                'branch_group_id' => $group->id,
+                'metric_key' => $plan['metric_key'],
+                'daily_plan' => $plan['daily_plan'],
+                'weight' => $plan['weight'],
+                'effective_from' => '2026-05-01',
+            ]);
+        }
+
+        DailyReport::create([
+            'user_id' => $agent->id,
+            'role_slug' => 'agent',
+            'report_date' => '2026-05-16',
+            'calls_count' => 45,
+            'ad_count' => 206,
+            'deals_count' => 1,
+            'submitted_at' => now(),
+        ]);
+
+        for ($i = 0; $i < 27; $i++) {
+            \DB::table('properties')->insert([
+                'created_by' => $agent->id,
+                'agent_id' => $agent->id,
+                'moderation_status' => 'new',
+                'created_at' => '2026-05-10 10:00:00',
+                'updated_at' => '2026-05-10 10:00:00',
+            ]);
+        }
+        for ($i = 0; $i < 10; $i++) {
+            \DB::table('bookings')->insert([
+                'agent_id' => $agent->id,
+                'start_time' => '2026-05-11 11:00:00',
+                'created_at' => '2026-05-11 11:00:00',
+                'updated_at' => '2026-05-11 11:00:00',
+            ]);
+        }
+
+        $response = $this->getJson('/api/kpi/monthly?year=2026&month=5&v=2&agent_id='.$agent->id)->assertOk();
+        $row = (array) collect((array) $response->json('data'))->firstWhere('employee_id', $agent->id);
+
+        $this->assertSame(720, (int) data_get($row, 'metrics.calls.target_value'));
+        $this->assertSame(45, (int) data_get($row, 'metrics.calls.final_value'));
+        $this->assertSame(480, (int) data_get($row, 'metrics.ads.target_value'));
+        $this->assertSame(206, (int) data_get($row, 'metrics.ads.final_value'));
+        $this->assertSame(0.2, (float) data_get($row, 'metrics.calls.weight_used'));
+        $this->assertSame(0.2, (float) data_get($row, 'metrics.ads.weight_used'));
+        $this->assertIsNumeric(data_get($row, 'metrics.calls.contribution_pct'));
+        $this->assertIsNumeric(data_get($row, 'metrics.ads.contribution_pct'));
+        $this->assertIsNumeric(data_get($row, 'overall_progress_pct'));
+        $this->assertLessThan(80.0, (float) data_get($row, 'kpi_percent'));
+        $this->assertContains((string) data_get($row, 'status'), ['risk', 'urgent', 'weak', 'control']);
+    }
+
+    public function test_monthly_v2_hard_gate_caps_kpi_and_prevents_done_status_on_critical_underperformance(): void
+    {
+        $this->createDailyKpiSystemTables();
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900002071', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900002072', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        Config::set('kpi.v2.formula.cap_metric_progress_at_100', false);
+        Config::set('kpi.v2.formula.hard_gate.enabled', true);
+        Config::set('kpi.v2.formula.hard_gate.max_kpi_percent', 79.9);
+        Config::set('kpi.v2.formula.hard_gate.metrics.calls', 60.0);
+        Config::set('kpi.v2.formula.hard_gate.metrics.ads', 60.0);
+
+        foreach ([
+            ['metric_key' => 'objects', 'daily_plan' => 1, 'weight' => 0.2],
+            ['metric_key' => 'shows', 'daily_plan' => 1, 'weight' => 0.2],
+            ['metric_key' => 'ads', 'daily_plan' => 100, 'weight' => 0.2],
+            ['metric_key' => 'calls', 'daily_plan' => 100, 'weight' => 0.2],
+            ['metric_key' => 'sales', 'daily_plan' => 1, 'weight' => 0.2],
+        ] as $plan) {
+            KpiPlan::query()->create([
+                'role_slug' => 'agent',
+                'user_id' => $agent->id,
+                'branch_id' => $branch->id,
+                'branch_group_id' => $group->id,
+                'metric_key' => $plan['metric_key'],
+                'daily_plan' => $plan['daily_plan'],
+                'weight' => $plan['weight'],
+                'effective_from' => '2026-05-01',
+            ]);
+        }
+
+        DailyReport::create([
+            'user_id' => $agent->id,
+            'role_slug' => 'agent',
+            'report_date' => '2026-05-16',
+            'calls_count' => 10,
+            'ad_count' => 10,
+            'deals_count' => 20,
+            'submitted_at' => now(),
+        ]);
+        for ($i = 0; $i < 20; $i++) {
+            \DB::table('properties')->insert([
+                'created_by' => $agent->id,
+                'agent_id' => $agent->id,
+                'moderation_status' => 'new',
+                'created_at' => '2026-05-08 10:00:00',
+                'updated_at' => '2026-05-08 10:00:00',
+            ]);
+            \DB::table('bookings')->insert([
+                'agent_id' => $agent->id,
+                'start_time' => '2026-05-08 11:00:00',
+                'created_at' => '2026-05-08 11:00:00',
+                'updated_at' => '2026-05-08 11:00:00',
+            ]);
+        }
+
+        $response = $this->getJson('/api/kpi/monthly?year=2026&month=5&v=2&agent_id='.$agent->id)->assertOk();
+        $row = (array) collect((array) $response->json('data'))->firstWhere('employee_id', $agent->id);
+
+        $this->assertLessThan(80.0, (float) data_get($row, 'kpi_percent'));
+        $this->assertNotSame('done', (string) data_get($row, 'status'));
+        $this->assertTrue((bool) data_get($row, 'kpi_trace.hard_gate.triggered'));
+    }
+
     private function createDailyKpiSystemTables(): void
     {
         if (! Schema::hasTable('bookings')) {

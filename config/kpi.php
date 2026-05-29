@@ -110,5 +110,18 @@ return [
             'calls' => 0.20,
             'sales' => 0.20,
         ],
+        'formula' => [
+            // KPI = SUM(min(progress, 100%) * weight) with optional hard gate.
+            'cap_metric_progress_at_100' => true,
+            'done_min_metric_progress_pct' => 80.0,
+            'hard_gate' => [
+                'enabled' => true,
+                'max_kpi_percent' => 79.9,
+                'metrics' => [
+                    'calls' => 60.0,
+                    'ads' => 60.0,
+                ],
+            ],
+        ],
     ],
 ];

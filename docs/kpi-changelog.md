@@ -67,3 +67,14 @@
 - Each metric now includes: `fact_value`, `manual_value`, `final_value`, `target_value`, `progress_pct`, `source`, `source_error`.
 - Added `meta.quality` with: `duplicate_check_passed`, `completeness_pct`, `source_error`.
 - Added `breakdown_by_day` for weekly/monthly `v2` response.
+
+## KPI monthly formula update (2026-05-29)
+- Formula for `kpi_percent` in `/api/kpi/monthly?v=2` is now explicit:
+- Metrics: `objects`, `shows`, `ads`, `calls`, `sales`.
+- Base score: `SUM(metric_progress * weight)` where `metric_progress = final_value / target_value`.
+- Per-metric cap is enabled: `metric_progress` is capped at `100%` before applying weight (`cap_metric_progress_at_100 = true`).
+- Hard gate is enabled for critical metrics: if `calls` or `ads` are below configured thresholds, final KPI is capped by `hard_gate.max_kpi_percent`.
+- Status mapping remains threshold-based (`done/control/weak/risk/urgent`), with additional guard: critical underperformance (`calls`/`ads`) cannot return `done`.
+- Added debug-friendly breakdown fields to each metric:
+- `target_value`, `final_value`, `progress_pct`, `weight_used`, `contribution_pct`.
+- Added row-level trace payload: `kpi_trace` with formula version, cap/gate info, per-metric contributions, raw/final KPI percent.
