@@ -11,6 +11,11 @@ use Illuminate\Support\Facades\Schema;
 
 class DailyReportService
 {
+    public function __construct(
+        private readonly SalesAttributionService $salesAttributionService
+    ) {
+    }
+
     public function statusForUser(User $user): array
     {
         $user->loadMissing('role');
@@ -289,7 +294,7 @@ class DailyReportService
         }
 
         $soldProperties = DB::table('properties')
-            ->select(['id', 'agent_id', 'sale_user_id', 'created_by'])
+            ->select(['id', 'moderation_status', 'agent_id', 'sale_user_id', 'created_by'])
             ->whereIn('moderation_status', ['sold', 'rented'])
             ->whereBetween('sold_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
             ->get();
@@ -298,95 +303,15 @@ class DailyReportService
             return 0.0;
         }
 
-        if (! Schema::hasTable('property_agent_sales')) {
-            return (float) $soldProperties->filter(function ($property) use ($user) {
-                $saleUserId = (int) ($property->sale_user_id ?? 0);
-                if ($saleUserId > 0) {
-                    return $saleUserId === (int) $user->id;
-                }
-
-                $agentId = (int) ($property->agent_id ?? 0);
-                if ($agentId > 0) {
-                    return $agentId === (int) $user->id;
-                }
-
-                return (int) ($property->created_by ?? 0) === (int) $user->id;
-            })->count();
-        }
-
-        $propertyIds = $soldProperties->pluck('id')->all();
-        $saleAgentsRows = DB::table('property_agent_sales')
-            ->select(['property_id', 'agent_id'])
-            ->whereIn('property_id', $propertyIds)
-            ->get()
-            ->groupBy('property_id');
+        $creditsByProperty = $this->salesAttributionService->creditsByProperty($soldProperties, ['sold', 'rented']);
 
         $credit = 0.0;
-
         foreach ($soldProperties as $property) {
-            $rawParticipants = collect($saleAgentsRows->get($property->id, []))->pluck('agent_id')->values();
-            $participants = $rawParticipants->filter(fn ($id) => !is_null($id))->unique()->values();
-
-            if ($rawParticipants->isNotEmpty()) {
-                if ($rawParticipants->count() !== $participants->count()) {
-                    $this->reportSalesQualityIssue('SALES_AGENT_DUPLICATES', $property->id, [
-                        'metric_key' => 'sales',
-                        'source' => 'property_agent_sales',
-                        'participants_raw' => $rawParticipants->all(),
-                    ]);
-                    continue;
-                }
-
-                if ($participants->count() > 3) {
-                    $this->reportSalesQualityIssue('SALES_AGENT_LIMIT_EXCEEDED', $property->id, [
-                        'metric_key' => 'sales',
-                        'source' => 'property_agent_sales',
-                        'participants_count' => $participants->count(),
-                    ]);
-                    continue;
-                }
-            }
-
-            if ($participants->isNotEmpty()) {
-                if ($participants->contains($user->id)) {
-                    $credit += 1 / max(1, $participants->count());
-                }
-
-                continue;
-            }
-
-            // Primary source is sale_user_id; fallback for legacy rows.
-            $saleUserId = (int) ($property->sale_user_id ?? 0);
-            if ($saleUserId > 0) {
-                if ($saleUserId === (int) $user->id) {
-                    $credit += 1.0;
-                }
-                continue;
-            }
-
-            $agentId = (int) ($property->agent_id ?? 0);
-            if ($agentId > 0) {
-                if ($agentId === (int) $user->id) {
-                    $credit += 1.0;
-                }
-                continue;
-            }
-
-            $creatorId = (int) ($property->created_by ?? 0);
-            if ($creatorId > 0) {
-                if ($creatorId === (int) $user->id) {
-                    $credit += 1.0;
-                }
-                continue;
-            }
-
-            $this->reportSalesQualityIssue('SALES_WITHOUT_AGENTS', $property->id, [
-                'metric_key' => 'sales',
-                'source' => 'properties.sale_user_id,agent_id,created_by',
-            ]);
+            $propertyId = (int) ($property->id ?? 0);
+            $credit += (float) ($creditsByProperty[$propertyId][$user->id] ?? 0.0);
         }
 
-        return round($credit, 4);
+        return round((float) $credit, 4);
     }
 
     private function utcDayBounds(string $reportDate): array

@@ -185,6 +185,7 @@ class ClientIntegrationTest extends TestCase
             $table->text('rejection_comment')->nullable();
             $table->text('status_comment')->nullable();
             $table->timestamp('sold_at')->nullable();
+            $table->unsignedBigInteger('sale_user_id')->nullable();
             $table->decimal('actual_sale_price', 15, 2)->nullable();
             $table->string('actual_sale_currency', 3)->nullable();
             $table->decimal('company_commission_amount', 15, 2)->nullable();
@@ -727,8 +728,140 @@ class ClientIntegrationTest extends TestCase
 
         $rowsById = collect($response->json())->keyBy('agent_id');
 
-        $this->assertSame(1, (int) ($rowsById[$seller->id]['sold'] ?? 0));
-        $this->assertSame(0, (int) ($rowsById[$creator->id]['sold'] ?? 0));
+        $this->assertSame(1.0, (float) ($rowsById[$seller->id]['sold'] ?? 0));
+        $this->assertSame(0.0, (float) ($rowsById[$creator->id]['sold'] ?? 0));
+    }
+
+    public function test_manager_efficiency_splits_credit_across_all_sale_participants_including_partner(): void
+    {
+        [$seller] = $this->seedClientContext(withProperty: false);
+
+        $partner = User::create([
+            'name' => 'Partner Agent',
+            'phone' => (string) ++$this->phoneCounter,
+            'password' => bcrypt('password'),
+            'role_id' => $seller->role_id,
+            'branch_id' => $seller->branch_id,
+            'status' => 'active',
+        ]);
+
+        $property = Property::create([
+            'title' => 'Partner participates in shared sale credit',
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 180000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'created_by' => $seller->id,
+            'agent_id' => null,
+            'sale_user_id' => $seller->id,
+            'listing_type' => 'regular',
+            'moderation_status' => 'sold',
+            'created_at' => '2026-03-01 09:00:00',
+            'updated_at' => '2026-03-20 09:00:00',
+            'sold_at' => '2026-03-20 09:00:00',
+        ]);
+
+        DB::table('property_agent_sales')->insert([
+            [
+                'property_id' => $property->id,
+                'agent_id' => $seller->id,
+                'role' => 'main',
+                'created_at' => '2026-03-20 09:05:00',
+                'updated_at' => '2026-03-20 09:05:00',
+            ],
+            [
+                'property_id' => $property->id,
+                'agent_id' => $partner->id,
+                'role' => 'partner',
+                'created_at' => '2026-03-20 09:05:00',
+                'updated_at' => '2026-03-20 09:05:00',
+            ],
+        ]);
+
+        Sanctum::actingAs($seller);
+
+        $response = $this->getJson('/api/reports/properties/manager-efficiency?date_from=2026-03-01&date_to=2026-03-31&branch_id='.$seller->branch_id);
+        $response->assertOk();
+
+        $rowsById = collect($response->json())->keyBy('agent_id');
+
+        $this->assertSame(0.5, (float) ($rowsById[$seller->id]['sold'] ?? 0));
+        $this->assertSame(0.5, (float) ($rowsById[$partner->id]['sold'] ?? 0));
+    }
+
+    public function test_manager_efficiency_splits_rented_credit_across_three_participants(): void
+    {
+        [$seller] = $this->seedClientContext(withProperty: false);
+
+        $assistantA = User::create([
+            'name' => 'Assistant A',
+            'phone' => (string) ++$this->phoneCounter,
+            'password' => bcrypt('password'),
+            'role_id' => $seller->role_id,
+            'branch_id' => $seller->branch_id,
+            'status' => 'active',
+        ]);
+
+        $assistantB = User::create([
+            'name' => 'Assistant B',
+            'phone' => (string) ++$this->phoneCounter,
+            'password' => bcrypt('password'),
+            'role_id' => $seller->role_id,
+            'branch_id' => $seller->branch_id,
+            'status' => 'active',
+        ]);
+
+        $property = Property::create([
+            'title' => 'Rented shared deal',
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 120000,
+            'currency' => 'USD',
+            'offer_type' => 'rent',
+            'created_by' => $seller->id,
+            'agent_id' => null,
+            'sale_user_id' => $seller->id,
+            'listing_type' => 'regular',
+            'moderation_status' => 'rented',
+            'created_at' => '2026-03-01 09:00:00',
+            'updated_at' => '2026-03-20 09:00:00',
+            'sold_at' => '2026-03-20 09:00:00',
+        ]);
+
+        DB::table('property_agent_sales')->insert([
+            [
+                'property_id' => $property->id,
+                'agent_id' => $seller->id,
+                'role' => 'main',
+                'created_at' => '2026-03-20 09:05:00',
+                'updated_at' => '2026-03-20 09:05:00',
+            ],
+            [
+                'property_id' => $property->id,
+                'agent_id' => $assistantA->id,
+                'role' => 'assistant',
+                'created_at' => '2026-03-20 09:05:00',
+                'updated_at' => '2026-03-20 09:05:00',
+            ],
+            [
+                'property_id' => $property->id,
+                'agent_id' => $assistantB->id,
+                'role' => 'partner',
+                'created_at' => '2026-03-20 09:05:00',
+                'updated_at' => '2026-03-20 09:05:00',
+            ],
+        ]);
+
+        Sanctum::actingAs($seller);
+
+        $response = $this->getJson('/api/reports/properties/manager-efficiency?date_from=2026-03-01&date_to=2026-03-31&branch_id='.$seller->branch_id);
+        $response->assertOk();
+
+        $rowsById = collect($response->json())->keyBy('agent_id');
+        $this->assertEqualsWithDelta(0.3333, (float) ($rowsById[$seller->id]['rented'] ?? 0), 0.0001);
+        $this->assertEqualsWithDelta(0.3333, (float) ($rowsById[$assistantA->id]['rented'] ?? 0), 0.0001);
+        $this->assertEqualsWithDelta(0.3333, (float) ($rowsById[$assistantB->id]['rented'] ?? 0), 0.0001);
     }
 
     public function test_manager_efficiency_unique_clients_count_uses_date_from_date_to_even_if_from_to_conflict(): void
@@ -850,6 +983,65 @@ class ClientIntegrationTest extends TestCase
         $response->assertJsonPath('sold_count', 1);
         $response->assertJsonPath('rented_count', 0);
         $response->assertJsonPath('sold_by_owner_count', 0);
+    }
+
+    public function test_agent_earnings_report_splits_shared_sale_credit_and_amount_equally(): void
+    {
+        [$seller] = $this->seedClientContext(withProperty: false);
+
+        $partner = User::create([
+            'name' => 'Partner Shared',
+            'phone' => (string) ++$this->phoneCounter,
+            'password' => bcrypt('password'),
+            'role_id' => $seller->role_id,
+            'branch_id' => $seller->branch_id,
+            'status' => 'active',
+        ]);
+
+        $property = Property::create([
+            'title' => 'Shared earnings deal',
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 200000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'created_by' => $seller->id,
+            'agent_id' => null,
+            'sale_user_id' => $seller->id,
+            'listing_type' => 'regular',
+            'moderation_status' => 'sold',
+            'created_at' => '2026-02-20 09:00:00',
+            'updated_at' => '2026-03-10 09:00:00',
+            'sold_at' => '2026-03-10 09:00:00',
+        ]);
+
+        DB::table('property_agent_sales')->insert([
+            [
+                'property_id' => $property->id,
+                'agent_id' => $seller->id,
+                'role' => 'main',
+                'created_at' => '2026-03-10 09:05:00',
+                'updated_at' => '2026-03-10 09:05:00',
+            ],
+            [
+                'property_id' => $property->id,
+                'agent_id' => $partner->id,
+                'role' => 'partner',
+                'created_at' => '2026-03-10 09:05:00',
+                'updated_at' => '2026-03-10 09:05:00',
+            ],
+        ]);
+
+        Sanctum::actingAs($seller);
+
+        $response = $this->getJson('/api/reports/agent/earnings?agent_id='.$seller->id.'&date_from=2026-03-01&date_to=2026-03-31&branch_id='.$seller->branch_id);
+        $response->assertOk();
+
+        $response->assertJsonPath('sum_price', 100000);
+        $response->assertJsonPath('closed_count', 0.5);
+        $response->assertJsonPath('deals_count', 0.5);
+        $response->assertJsonPath('sold_count', 0.5);
+        $response->assertJsonPath('rented_count', 0);
     }
 
     public function test_agent_properties_report_returns_contracts_object_and_period_aware_statuses(): void

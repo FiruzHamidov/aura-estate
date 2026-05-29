@@ -38,7 +38,8 @@ class KpiModuleService
     public function __construct(
         private readonly DailyReportService $dailyReportService,
         private readonly AuditLogger $auditLogger,
-        private readonly KpiPlanScopePolicy $kpiPlanScopePolicy
+        private readonly KpiPlanScopePolicy $kpiPlanScopePolicy,
+        private readonly SalesAttributionService $salesAttributionService
     )
     {
     }
@@ -1409,7 +1410,7 @@ class KpiModuleService
         }
 
         $soldProperties = DB::table('properties')
-            ->select(['id', 'sold_at', 'sale_user_id', 'agent_id', 'created_by'])
+            ->select(['id', 'sold_at', 'moderation_status', 'sale_user_id', 'agent_id', 'created_by'])
             ->whereIn('moderation_status', ['sold', 'rented'])
             ->whereBetween('sold_at', [
                 $from->copy()->startOfDay()->setTimezone('UTC')->toDateTimeString(),
@@ -1423,18 +1424,7 @@ class KpiModuleService
 
         $targetUsers = array_fill_keys($userIds, true);
         $result = [];
-        $propertyIds = $soldProperties->pluck('id')->all();
-        $participantsByProperty = collect();
-
-        if (Schema::hasTable('property_agent_sales')) {
-            $participantsByProperty = DB::table('property_agent_sales')
-                ->select(['property_id', 'agent_id'])
-                ->whereIn('property_id', $propertyIds)
-                ->whereNotNull('agent_id')
-                ->get()
-                ->groupBy('property_id')
-                ->map(fn (Collection $rows) => $rows->pluck('agent_id')->map(fn ($id) => (int) $id)->unique()->values()->all());
-        }
+        $creditsByProperty = $this->salesAttributionService->creditsByProperty($soldProperties, ['sold', 'rented']);
 
         foreach ($soldProperties as $property) {
             $soldAt = $property->sold_at ? Carbon::parse((string) $property->sold_at, 'UTC')->setTimezone(self::TZ) : null;
@@ -1442,34 +1432,13 @@ class KpiModuleService
                 continue;
             }
             $dayKey = $soldAt->toDateString();
-
-            $participants = $participantsByProperty->get($property->id, []);
-            if (! empty($participants)) {
-                $denominator = max(1, count($participants));
-                foreach ($participants as $agentId) {
-                    if (! isset($targetUsers[$agentId])) {
-                        continue;
-                    }
-                    $result[$agentId][$dayKey] = round((float) ($result[$agentId][$dayKey] ?? 0.0) + (1 / $denominator), 4);
+            $propertyId = (int) ($property->id ?? 0);
+            $credits = $creditsByProperty[$propertyId] ?? [];
+            foreach ($credits as $agentId => $credit) {
+                if (! isset($targetUsers[(int) $agentId])) {
+                    continue;
                 }
-                continue;
-            }
-
-            $saleUserId = (int) ($property->sale_user_id ?? 0);
-            if ($saleUserId > 0 && isset($targetUsers[$saleUserId])) {
-                $result[$saleUserId][$dayKey] = round((float) ($result[$saleUserId][$dayKey] ?? 0.0) + 1.0, 4);
-                continue;
-            }
-
-            $agentId = (int) ($property->agent_id ?? 0);
-            if ($agentId > 0 && isset($targetUsers[$agentId])) {
-                $result[$agentId][$dayKey] = round((float) ($result[$agentId][$dayKey] ?? 0.0) + 1.0, 4);
-                continue;
-            }
-
-            $creatorId = (int) ($property->created_by ?? 0);
-            if ($creatorId > 0 && isset($targetUsers[$creatorId])) {
-                $result[$creatorId][$dayKey] = round((float) ($result[$creatorId][$dayKey] ?? 0.0) + 1.0, 4);
+                $result[(int) $agentId][$dayKey] = round((float) ($result[(int) $agentId][$dayKey] ?? 0.0) + (float) $credit, 4);
             }
         }
 

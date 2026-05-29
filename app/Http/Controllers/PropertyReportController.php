@@ -6,6 +6,7 @@ use App\Models\Booking;
 use App\Models\BranchGroup;
 use App\Models\Property;
 use App\Models\User;
+use App\Services\SalesAttributionService;
 use App\Support\RbacBranchScope;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -14,7 +15,10 @@ use Illuminate\Support\Facades\Schema;
 
 class PropertyReportController extends Controller
 {
-    public function __construct(private readonly RbacBranchScope $branchScope)
+    public function __construct(
+        private readonly RbacBranchScope $branchScope,
+        private readonly SalesAttributionService $salesAttributionService
+    )
     {
     }
 
@@ -211,7 +215,7 @@ class PropertyReportController extends Controller
     {
         $this->ensureReportsAllowed($request);
 
-        $soldStatuses = ['sold', 'rented', 'sold_by_owner'];
+        $soldStatuses = ['sold', 'rented'];
         $salesUserExpr = 'COALESCE(sale_user_id, agent_id, created_by)';
 
         $addedQ = Property::query()
@@ -981,68 +985,41 @@ class PropertyReportController extends Controller
         $soldBase = Property::query()->whereIn('moderation_status', $soldStatuses);
         [$soldQ] = $this->applyCommonFilters(new Request($soldRequest), $soldBase);
 
-        $saleAgentColumn = $this->resolveSaleAgentColumn();
-        $soldSelect = ['id', 'moderation_status', 'agent_id'];
-        if ($saleAgentColumn) {
-            $soldSelect[] = $saleAgentColumn;
+        $soldSelect = ['id', 'moderation_status', 'agent_id', 'created_by'];
+        if (Schema::hasColumn('properties', 'sale_user_id')) {
+            $soldSelect[] = 'sale_user_id';
         }
 
         $soldProperties = (clone $soldQ)
             ->select($soldSelect)
             ->get();
 
-        $participantsByProperty = collect();
-        if (Schema::hasTable('property_agent_sales') && $soldProperties->isNotEmpty()) {
-            $participantsByProperty = DB::table('property_agent_sales')
-                ->select(['property_id', 'agent_id'])
-                ->whereIn('property_id', $soldProperties->pluck('id')->all())
-                ->whereNotNull('agent_id')
-                ->get()
-                ->groupBy('property_id')
-                ->map(fn ($rows) => collect($rows)->pluck('agent_id')->map(fn ($id) => (int) $id)->unique()->values()->all());
-        }
+        $creditsByProperty = $this->salesAttributionService->creditsByProperty($soldProperties, ['sold', 'rented']);
 
         $soldCounters = [];
         foreach ($soldProperties as $property) {
-            $participants = collect($participantsByProperty->get($property->id, []))
-                ->filter(fn ($id) => (int) $id > 0)
-                ->unique()
-                ->values()
-                ->all();
+            $propertyId = (int) ($property->id ?? 0);
+            $creditsForProperty = $creditsByProperty[$propertyId] ?? [];
 
-            if (empty($participants)) {
-                $fallbackAgentId = $saleAgentColumn
-                    ? (int) ($property->{$saleAgentColumn} ?? 0)
-                    : 0;
-
-                if ($fallbackAgentId <= 0) {
-                    $fallbackAgentId = (int) ($property->agent_id ?? 0);
-                }
-
-                if ($fallbackAgentId > 0) {
-                    $participants = [$fallbackAgentId];
-                }
-            }
-
-            foreach ($participants as $participantId) {
+            foreach ($creditsForProperty as $participantId => $creditPart) {
                 if (! isset($allowedUserMap[(int) $participantId])) {
                     continue;
                 }
 
                 if (!isset($soldCounters[$participantId])) {
                     $soldCounters[$participantId] = [
-                        'sold' => 0,
-                        'rented' => 0,
-                        'sold_by_owner' => 0,
+                        'sold' => 0.0,
+                        'rented' => 0.0,
+                        'sold_by_owner' => 0.0,
                     ];
                 }
 
                 if ($property->moderation_status === 'sold') {
-                    $soldCounters[$participantId]['sold']++;
+                    $soldCounters[$participantId]['sold'] = round($soldCounters[$participantId]['sold'] + (float) $creditPart, 4);
                 } elseif ($property->moderation_status === 'rented') {
-                    $soldCounters[$participantId]['rented']++;
+                    $soldCounters[$participantId]['rented'] = round($soldCounters[$participantId]['rented'] + (float) $creditPart, 4);
                 } elseif ($property->moderation_status === 'sold_by_owner') {
-                    $soldCounters[$participantId]['sold_by_owner']++;
+                    $soldCounters[$participantId]['sold_by_owner'] = round($soldCounters[$participantId]['sold_by_owner'] + (float) $creditPart, 4);
                 }
             }
         }
@@ -1069,9 +1046,9 @@ class PropertyReportController extends Controller
             $total = (int)($baseRow->total ?? 0);
             $approved = (int)($baseRow->approved ?? 0);
 
-            $sold = (int)($soldRow->sold ?? 0);
-            $rented = (int)($soldRow->rented ?? 0);
-            $soldByOwner = (int)($soldRow->sold_by_owner ?? 0);
+            $sold = round((float)($soldRow->sold ?? 0), 4);
+            $rented = round((float)($soldRow->rented ?? 0), 4);
+            $soldByOwner = round((float)($soldRow->sold_by_owner ?? 0), 4);
 
             $closed = $sold + $rented + $soldByOwner;
 
@@ -1260,45 +1237,81 @@ class PropertyReportController extends Controller
         $limit = (int)$request->input('limit', 10);
 
         [$expr, $alias] = $this->priceExpr($request);
-        $saleAgentColumn = $this->resolveSaleAgentColumn();
-        $salesUserExpr = $saleAgentColumn
-            ? 'COALESCE('.$saleAgentColumn.', agent_id, created_by)'
-            : 'COALESCE(agent_id, created_by)';
 
-        $base = Property::query();
-        [$q] = $this->applyCommonFilters($request, $base, 'sale_user_id');
+        $base = Property::query()->whereIn('moderation_status', ['sold', 'rented']);
+        $soldRequest = $request->except(['date_from', 'date_to']);
+        $soldRequest['sold_at_from'] = $request->input('date_from');
+        $soldRequest['sold_at_to'] = $request->input('date_to');
+        [$q] = $this->applyCommonFilters(new Request($soldRequest), $base, 'sale_user_id');
 
-        $rows = (clone $q)
-            ->select(
-                DB::raw($salesUserExpr.' as sales_user_id'),
-                DB::raw("SUM(CASE WHEN moderation_status = 'sold' THEN 1 ELSE 0 END) as sold_count"),
-                DB::raw("SUM(CASE WHEN moderation_status = 'rented' THEN 1 ELSE 0 END) as rented_count"),
-                DB::raw("SUM(CASE WHEN moderation_status = 'sold_by_owner' THEN 1 ELSE 0 END) as sold_by_owner_count"),
-                DB::raw("SUM(CASE WHEN moderation_status IN ('sold','rented') THEN 1 ELSE 0 END) as closed"),
-                DB::raw('COUNT(*) as total'),
-                DB::raw("$expr as $alias")
-            )
-            ->whereRaw($salesUserExpr.' IS NOT NULL')
-            ->groupBy(DB::raw($salesUserExpr))
-            // Сортировка: сначала по sold_count, затем rented_count, затем sold_by_owner_count, затем total
-            ->orderByDesc('sold_count')
-            ->orderByDesc('total')
-            ->limit($limit)
+        $soldSelect = ['id', 'moderation_status', 'agent_id', 'created_by', 'price'];
+        if (Schema::hasColumn('properties', 'sale_user_id')) {
+            $soldSelect[] = 'sale_user_id';
+        }
+
+        $properties = (clone $q)
+            ->select($soldSelect)
             ->get();
 
-        // имена агентов
+        $creditsByProperty = $this->salesAttributionService->creditsByProperty($properties, ['sold', 'rented']);
+
+        $rows = [];
+        foreach ($properties as $property) {
+            $propertyId = (int) ($property->id ?? 0);
+            $credits = $creditsByProperty[$propertyId] ?? [];
+            foreach ($credits as $agentId => $credit) {
+                if (! isset($rows[$agentId])) {
+                    $rows[$agentId] = [
+                        'sales_user_id' => (int) $agentId,
+                        'sold_count' => 0.0,
+                        'rented_count' => 0.0,
+                        'sold_by_owner_count' => 0.0,
+                        'closed' => 0.0,
+                        'total' => 0.0,
+                        $alias => 0.0,
+                    ];
+                }
+
+                $rows[$agentId]['total'] = round($rows[$agentId]['total'] + (float) $credit, 4);
+                $rows[$agentId]['closed'] = round($rows[$agentId]['closed'] + (float) $credit, 4);
+                $rows[$agentId][$alias] = round($rows[$agentId][$alias] + ((float) ($property->price ?? 0) * (float) $credit), 4);
+
+                if ($property->moderation_status === 'sold') {
+                    $rows[$agentId]['sold_count'] = round($rows[$agentId]['sold_count'] + (float) $credit, 4);
+                } elseif ($property->moderation_status === 'rented') {
+                    $rows[$agentId]['rented_count'] = round($rows[$agentId]['rented_count'] + (float) $credit, 4);
+                }
+            }
+        }
+
+        $rows = collect($rows)
+            ->sort(function (array $a, array $b) {
+                if ($b['sold_count'] !== $a['sold_count']) return $b['sold_count'] <=> $a['sold_count'];
+                if ($b['rented_count'] !== $a['rented_count']) return $b['rented_count'] <=> $a['rented_count'];
+                return $b['total'] <=> $a['total'];
+            })
+            ->take($limit)
+            ->values();
+
         $ids = $rows->pluck('sales_user_id')->filter()->unique();
         $users = User::whereIn('id', $ids)->get(['id', 'name'])->keyBy('id');
 
-        $rows->transform(function ($r) use ($users) {
-            $r->agent_name = $users[$r->sales_user_id]->name ?? '—';
-            $r->agent_id = $users[$r->sales_user_id]->id ?? '—';
-            $r->sum_price = isset($r->sum_price) ? round((float)$r->sum_price, 2) : null;
-            $r->avg_price = isset($r->avg_price) ? round((float)$r->avg_price, 2) : null;
-            return $r;
+        $result = $rows->map(function (array $row) use ($users, $alias) {
+            $agentId = (int) $row['sales_user_id'];
+            return (object) [
+                'sales_user_id' => $agentId,
+                'agent_name' => $users[$agentId]->name ?? '—',
+                'agent_id' => $users[$agentId]->id ?? '—',
+                'sold_count' => round((float) $row['sold_count'], 4),
+                'rented_count' => round((float) $row['rented_count'], 4),
+                'sold_by_owner_count' => round((float) $row['sold_by_owner_count'], 4),
+                'closed' => round((float) $row['closed'], 4),
+                'total' => round((float) $row['total'], 4),
+                $alias => round((float) $row[$alias], 2),
+            ];
         });
 
-        return response()->json($rows);
+        return response()->json($result->values());
     }
 
     // --- 10) Воронка конверсии
@@ -1864,17 +1877,39 @@ class PropertyReportController extends Controller
         // Sales attribution is based on sale_user_id (legacy fallback is handled in KPI services).
         [$q] = $this->applyCommonFilters(new Request($soldRequest), $base, 'sale_user_id');
 
-        $rows = (clone $q)
-            ->select([
-                DB::raw('SUM(COALESCE(price, 0)) as sum_price'),
-                DB::raw('COUNT(*) as closed_count'),
-                DB::raw("SUM(CASE WHEN moderation_status = 'sold' THEN 1 ELSE 0 END) as sold_count"),
-                DB::raw("SUM(CASE WHEN moderation_status = 'rented' THEN 1 ELSE 0 END) as rented_count"),
-                DB::raw("SUM(CASE WHEN moderation_status = 'sold_by_owner' THEN 1 ELSE 0 END) as sold_by_owner_count"),
-            ])
-            ->first();
+        $soldSelect = ['id', 'moderation_status', 'agent_id', 'created_by', 'price'];
+        if (Schema::hasColumn('properties', 'sale_user_id')) {
+            $soldSelect[] = 'sale_user_id';
+        }
 
-        $sumPrice = (float)($rows->sum_price ?? 0);
+        $properties = (clone $q)->select($soldSelect)->get();
+        $creditsByProperty = $this->salesAttributionService->creditsByProperty($properties, ['sold', 'rented']);
+
+        $agentIdFilter = (int) ($request->input('agent_id') ?? 0);
+        $sumPrice = 0.0;
+        $soldCount = 0.0;
+        $rentedCount = 0.0;
+        $closedCount = 0.0;
+
+        foreach ($properties as $property) {
+            $propertyId = (int) ($property->id ?? 0);
+            $credit = $agentIdFilter > 0
+                ? (float) (($creditsByProperty[$propertyId][$agentIdFilter] ?? 0.0))
+                : (float) array_sum($creditsByProperty[$propertyId] ?? []);
+            if ($credit <= 0) {
+                continue;
+            }
+
+            $sumPrice = round($sumPrice + ((float) ($property->price ?? 0) * $credit), 4);
+            $closedCount = round($closedCount + $credit, 4);
+
+            if ($property->moderation_status === 'sold') {
+                $soldCount = round($soldCount + $credit, 4);
+            } elseif ($property->moderation_status === 'rented') {
+                $rentedCount = round($rentedCount + $credit, 4);
+            }
+        }
+
         $commission = round($sumPrice * $commissionPct / 100, 2);
 
         return response()->json([
@@ -1882,11 +1917,11 @@ class PropertyReportController extends Controller
             'total_amount' => round($sumPrice, 2),
             'commission_pct' => $commissionPct,
             'earnings' => $commission,
-            'closed_count' => (int)($rows->closed_count ?? 0),
-            'deals_count' => (int)($rows->closed_count ?? 0),
-            'sold_count' => (int)($rows->sold_count ?? 0),
-            'rented_count' => (int)($rows->rented_count ?? 0),
-            'sold_by_owner_count' => (int)($rows->sold_by_owner_count ?? 0),
+            'closed_count' => round($closedCount, 4),
+            'deals_count' => round($closedCount, 4),
+            'sold_count' => round($soldCount, 4),
+            'rented_count' => round($rentedCount, 4),
+            'sold_by_owner_count' => 0.0,
         ]);
     }
 
