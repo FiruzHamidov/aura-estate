@@ -989,6 +989,9 @@ class PropertyReportController extends Controller
             ->groupBy($groupBy)
             ->get()
             ->keyBy($groupBy);
+        // Normalize to base Collection so `only()` filters by collection keys (group ids),
+        // not by Eloquent model primary-key semantics.
+        $baseData = collect($baseData->all());
 
         // --- 2) Закрытые статусы (sold_at)
         $soldRequest = $request->except(['date_from', 'date_to']);
