@@ -1056,7 +1056,7 @@ class PropertyReportController extends Controller
         $userIds = $allKeys->filter()->values();
         $users = User::whereIn('id', $userIds)->get(['id','name','email'])->keyBy('id');
 
-        $result = $allKeys->map(function ($key) use ($baseData, $soldData, $users, $groupBy, $alias) {
+        $result = $allKeys->map(function ($key) use ($baseData, $soldData, $users, $groupBy, $alias, $uniqueClientsMap) {
             $baseRow = $baseData[$key] ?? null;
             $soldRow = $soldData[$key] ?? null;
 
