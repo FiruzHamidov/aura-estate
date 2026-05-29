@@ -516,15 +516,57 @@ class PropertyReportController extends Controller
             }
         }
 
-        // Фильтр по агенту: фронт передает agent_id, но фактически сравниваем с created_by
+        // Фильтр по агенту:
+        // - для закрытых сделок атрибуция идет по продавцу (sale_user_id -> agent_id -> created_by)
+        // - для остальных случаев сравниваем по целевой creator-колонке
         if ($request->filled('agent_id')) {
             $agentIds = $this->toArray($request->input('agent_id'));
             if (!empty($agentIds)) {
-                $query->whereIn($creatorColumn, $agentIds);
+                $closedStatuses = ['sold', 'rented', 'sold_by_owner'];
+                $statusVals = $this->toArray($request->input('moderation_status'));
+                $isClosedScope = !empty(array_intersect($statusVals, $closedStatuses));
+                $isSalesColumn = in_array($creatorColumn, ['sale_user_id', 'sale_agent_id'], true);
+
+                if ($isClosedScope || $isSalesColumn) {
+                    $saleAgentColumn = $this->resolveSaleAgentColumn();
+                    if ($saleAgentColumn) {
+                        $query->where(function ($salesFilter) use ($agentIds, $saleAgentColumn) {
+                            $salesFilter->whereIn($saleAgentColumn, $agentIds)
+                                ->orWhere(function ($legacyByAgent) use ($agentIds, $saleAgentColumn) {
+                                    $legacyByAgent->whereNull($saleAgentColumn)
+                                        ->whereIn('agent_id', $agentIds);
+                                })
+                                ->orWhere(function ($legacyByCreator) use ($agentIds, $saleAgentColumn) {
+                                    $legacyByCreator->whereNull($saleAgentColumn)
+                                        ->where(function ($missingAgent) {
+                                            $missingAgent->whereNull('agent_id')->orWhere('agent_id', 0);
+                                        })
+                                        ->whereIn('created_by', $agentIds);
+                                });
+                        });
+                    } else {
+                        $query->where(function ($legacySalesFilter) use ($agentIds) {
+                            $legacySalesFilter->whereIn('agent_id', $agentIds)
+                                ->orWhere(function ($legacyByCreator) use ($agentIds) {
+                                    $legacyByCreator
+                                        ->where(function ($missingAgent) {
+                                            $missingAgent->whereNull('agent_id')->orWhere('agent_id', 0);
+                                        })
+                                        ->whereIn('created_by', $agentIds);
+                                });
+                        });
+                    }
+                } else {
+                    $query->whereIn($creatorColumn, $agentIds);
+                }
             }
         }
 
-        $this->applyBranchAccessFilter($request, $query, $creatorColumn);
+        $scopeColumn = in_array($creatorColumn, ['sale_user_id', 'sale_agent_id'], true)
+            ? 'created_by'
+            : $creatorColumn;
+
+        $this->applyBranchAccessFilter($request, $query, $scopeColumn);
 
         // Диапазоны
         foreach ([
@@ -903,6 +945,17 @@ class PropertyReportController extends Controller
         $soldStatuses = ['sold', 'rented', 'sold_by_owner'];
         $uniqueClientsMap = $this->buildManagerUniqueClientsMap($request, $groupBy, $soldStatuses);
 
+        $scopedUsersQuery = User::query()->select('id');
+        $this->applyBranchAccessByUserColumn($request, $scopedUsersQuery, 'id');
+        if ($request->filled('agent_id')) {
+            $scopedUsersQuery->whereIn('id', array_map('intval', $this->toArray($request->input('agent_id'))));
+        }
+        $allowedUserIds = $scopedUsersQuery
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
+        $allowedUserMap = array_fill_keys($allowedUserIds, true);
+
         // --- 1) Основной запрос (created_at)
         $base = Property::query();
         [$q] = $this->applyCommonFilters($request, $base);
@@ -972,6 +1025,10 @@ class PropertyReportController extends Controller
             }
 
             foreach ($participants as $participantId) {
+                if (! isset($allowedUserMap[(int) $participantId])) {
+                    continue;
+                }
+
                 if (!isset($soldCounters[$participantId])) {
                     $soldCounters[$participantId] = [
                         'sold' => 0,
@@ -995,6 +1052,9 @@ class PropertyReportController extends Controller
                 return (object) array_merge(['agent_id' => $agentId], $counters);
             })
             ->keyBy('agent_id');
+
+        $baseData = $baseData->only($allowedUserIds);
+        $soldData = $soldData->only($allowedUserIds);
 
         // --- 3) Объединяем в PHP
         $allKeys = $baseData->keys()->merge($soldData->keys())->unique();
@@ -1198,17 +1258,19 @@ class PropertyReportController extends Controller
     public function agentsLeaderboard(Request $request)
     {
         $limit = (int)$request->input('limit', 10);
-        $groupBy = $request->input('group_by', 'created_by'); // 'agent_id' | 'created_by'
-        if (!in_array($groupBy, ['agent_id', 'created_by'], true)) $groupBy = 'created_by';
 
         [$expr, $alias] = $this->priceExpr($request);
+        $saleAgentColumn = $this->resolveSaleAgentColumn();
+        $salesUserExpr = $saleAgentColumn
+            ? 'COALESCE('.$saleAgentColumn.', agent_id, created_by)'
+            : 'COALESCE(agent_id, created_by)';
 
         $base = Property::query();
-        [$q] = $this->applyCommonFilters($request, $base);
+        [$q] = $this->applyCommonFilters($request, $base, 'sale_user_id');
 
         $rows = (clone $q)
             ->select(
-                $groupBy,
+                DB::raw($salesUserExpr.' as sales_user_id'),
                 DB::raw("SUM(CASE WHEN moderation_status = 'sold' THEN 1 ELSE 0 END) as sold_count"),
                 DB::raw("SUM(CASE WHEN moderation_status = 'rented' THEN 1 ELSE 0 END) as rented_count"),
                 DB::raw("SUM(CASE WHEN moderation_status = 'sold_by_owner' THEN 1 ELSE 0 END) as sold_by_owner_count"),
@@ -1216,7 +1278,8 @@ class PropertyReportController extends Controller
                 DB::raw('COUNT(*) as total'),
                 DB::raw("$expr as $alias")
             )
-            ->groupBy($groupBy)
+            ->whereRaw($salesUserExpr.' IS NOT NULL')
+            ->groupBy(DB::raw($salesUserExpr))
             // Сортировка: сначала по sold_count, затем rented_count, затем sold_by_owner_count, затем total
             ->orderByDesc('sold_count')
             ->orderByDesc('total')
@@ -1224,12 +1287,12 @@ class PropertyReportController extends Controller
             ->get();
 
         // имена агентов
-        $ids = $rows->pluck($groupBy)->filter()->unique();
+        $ids = $rows->pluck('sales_user_id')->filter()->unique();
         $users = User::whereIn('id', $ids)->get(['id', 'name'])->keyBy('id');
 
-        $rows->transform(function ($r) use ($users, $groupBy) {
-            $r->agent_name = $users[$r->$groupBy]->name ?? '—';
-            $r->agent_id = $users[$r->$groupBy]->id ?? '—';
+        $rows->transform(function ($r) use ($users) {
+            $r->agent_name = $users[$r->sales_user_id]->name ?? '—';
+            $r->agent_id = $users[$r->sales_user_id]->id ?? '—';
             $r->sum_price = isset($r->sum_price) ? round((float)$r->sum_price, 2) : null;
             $r->avg_price = isset($r->avg_price) ? round((float)$r->avg_price, 2) : null;
             return $r;
@@ -1443,6 +1506,9 @@ class PropertyReportController extends Controller
             if (Schema::hasColumn('properties', 'branch_group_id')) {
                 $propertySelect[] = 'branch_group_id';
             }
+            if (Schema::hasColumn('properties', 'sale_user_id')) {
+                $propertySelect[] = 'sale_user_id';
+            }
 
             $propsQ = Property::query()
                 ->select($propertySelect)
@@ -1453,10 +1519,16 @@ class PropertyReportController extends Controller
             $propsQ = $this->applyPropertyAgentReportFilters($request, $propsQ);
             $propsQ = $this->applyAgentPropertiesPeriodFilter($request, $propsQ, $soldStatuses);
 
-            // If single-agent mode: restrict properties to that agent (agent_id OR created_by)
+            // If single-agent mode: restrict properties to that agent (sale_user_id OR agent_id OR created_by)
             if ($agentId !== null) {
                 $propsQ->where(function ($q) use ($agentId) {
-                    $q->where('agent_id', $agentId)->orWhere('created_by', $agentId);
+                    if (Schema::hasColumn('properties', 'sale_user_id')) {
+                        $q->where('sale_user_id', $agentId)->orWhere('agent_id', $agentId)->orWhere('created_by', $agentId);
+                        return;
+                    }
+
+                    $q->where('agent_id', $agentId)
+                        ->orWhere('created_by', $agentId);
                 });
 
                 $properties = $propsQ->get();
@@ -1539,8 +1611,16 @@ class PropertyReportController extends Controller
                 return response()->json([]);
             }
 
-            // group properties by agent key (prefer agent_id, fallback to created_by)
+            // group properties by agent key (for closed deals prefer sale_user_id)
             $grouped = $properties->groupBy(function ($p) {
+                if (
+                    Schema::hasColumn('properties', 'sale_user_id')
+                    && in_array($p->moderation_status, ['sold', 'rented', 'sold_by_owner'], true)
+                    && !empty($p->sale_user_id)
+                ) {
+                    return $p->sale_user_id;
+                }
+
                 return $p->agent_id ?: $p->created_by;
             });
 
