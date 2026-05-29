@@ -30,23 +30,11 @@ class SalesAttributionService
             return [];
         }
 
-        $participantsByProperty = $this->participantsByProperty($propertyIds);
         $creditsByProperty = [];
 
         foreach ($properties as $property) {
             $propertyId = (int) ($property->id ?? 0);
             if ($propertyId <= 0) {
-                continue;
-            }
-
-            $status = (string) ($property->moderation_status ?? '');
-            $participants = $participantsByProperty[$propertyId] ?? [];
-
-            if (in_array($status, $splitStatuses, true) && $participants !== []) {
-                $denominator = max(1, count($participants));
-                foreach ($participants as $participantId) {
-                    $creditsByProperty[$propertyId][$participantId] = round(1 / $denominator, 4);
-                }
                 continue;
             }
 
@@ -90,6 +78,11 @@ class SalesAttributionService
 
     public function primarySellerId(object $property): int
     {
+        $saleAgentId = (int) ($property->sale_agent_id ?? 0);
+        if ($saleAgentId > 0) {
+            return $saleAgentId;
+        }
+
         $saleUserId = (int) ($property->sale_user_id ?? 0);
         if ($saleUserId > 0) {
             return $saleUserId;
@@ -103,4 +96,3 @@ class SalesAttributionService
         return (int) ($property->created_by ?? 0);
     }
 }
-

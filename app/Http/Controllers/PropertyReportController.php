@@ -1043,7 +1043,7 @@ class PropertyReportController extends Controller
             $baseRow = $baseData[$key] ?? null;
             $soldRow = $soldData[$key] ?? null;
 
-            $total = (int)($baseRow->total ?? 0);
+            $total = (float)($baseRow->total ?? 0);
             $approved = (int)($baseRow->approved ?? 0);
 
             $sold = round((float)($soldRow->sold ?? 0), 4);
@@ -1051,13 +1051,18 @@ class PropertyReportController extends Controller
             $soldByOwner = round((float)($soldRow->sold_by_owner ?? 0), 4);
 
             $closed = $sold + $rented + $soldByOwner;
+            // If there is no "open statuses" base in period but there are closed deals,
+            // keep total meaningful for conversion instead of returning forced zero.
+            if ($total <= 0.0 && $closed > 0.0) {
+                $total = $closed;
+            }
 
             return [
                 'id' => $key,
                 'name' => $users[$key]->name ?? '—',
                 'agent_id' => $users[$key]->id ?? '—',
                 'email' => $users[$key]->email ?? null,
-                'total' => $total,
+                'total' => round($total, 4),
                 'approved' => $approved,
                 'sold' => $sold,
                 'rented' => $rented,
