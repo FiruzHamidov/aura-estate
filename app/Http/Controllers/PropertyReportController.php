@@ -963,7 +963,16 @@ class PropertyReportController extends Controller
 
         // --- 1) Основной запрос (aligned period: open by created_at, closed by sold_at)
         $base = Property::query();
-        $periodRequestData = $request->all();
+        $periodRequestData = $request->except([
+            'date_from',
+            'date_to',
+            'sold_at_from',
+            'sold_at_to',
+            'date_field',
+        ]);
+        // Date window for manager efficiency is applied by applyAgentPropertiesPeriodFilter:
+        // open statuses by created_at, closed statuses by sold_at.
+        // Avoid pre-filtering by created_at in applyCommonFilters to keep totals aligned.
         $periodRequestData['from'] = $request->input('date_from');
         $periodRequestData['to'] = $request->input('date_to');
         [$q] = $this->applyCommonFilters(new Request($periodRequestData), $base);
