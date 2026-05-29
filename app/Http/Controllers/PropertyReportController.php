@@ -709,15 +709,16 @@ class PropertyReportController extends Controller
             $clientsQ->whereIn(DB::raw($clientOwnerExpr), $this->toArray($request->input('agent_id')));
         }
 
-        // Keep client period aligned with main report period.
-        // Do not fallback to from/to here because conflicting values can zero-out client counts.
+        // Clients metric is counted from the clients table by clients.created_at.
+        // Do not use CONVERT_TZ here: on some servers timezone tables are not loaded.
         $from = $request->input('date_from');
         $to = $request->input('date_to');
         if ($from) {
-            $clientsQ->whereDate('created_at', '>=', $from);
+            $clientsQ->where('created_at', '>=', $from.' 00:00:00');
         }
         if ($to) {
-            $clientsQ->whereDate('created_at', '<=', $to);
+            $toExclusive = Carbon::parse($to)->addDay()->toDateString().' 00:00:00';
+            $clientsQ->where('created_at', '<', $toExclusive);
         }
 
         return $clientsQ
@@ -960,12 +961,15 @@ class PropertyReportController extends Controller
             ->all();
         $allowedUserMap = array_fill_keys($allowedUserIds, true);
 
-        // --- 1) Основной запрос (created_at)
+        // --- 1) Основной запрос (aligned period: open by created_at, closed by sold_at)
         $base = Property::query();
-        [$q] = $this->applyCommonFilters($request, $base);
+        $periodRequestData = $request->all();
+        $periodRequestData['from'] = $request->input('date_from');
+        $periodRequestData['to'] = $request->input('date_to');
+        [$q] = $this->applyCommonFilters(new Request($periodRequestData), $base);
+        $q = $this->applyAgentPropertiesPeriodFilter(new Request($periodRequestData), $q, $soldStatuses);
 
         $baseData = (clone $q)
-            ->whereNotIn('moderation_status', $soldStatuses)
             ->select([
                 $groupBy,
                 DB::raw('COUNT(*) as total'),
@@ -1034,7 +1038,11 @@ class PropertyReportController extends Controller
         $soldData = $soldData->only($allowedUserIds);
 
         // --- 3) Объединяем в PHP
-        $allKeys = $baseData->keys()->merge($soldData->keys())->unique();
+        $clientKeys = collect(array_keys($uniqueClientsMap))
+            ->map(fn ($id) => (int) $id)
+            ->filter(fn (int $id) => isset($allowedUserMap[$id]));
+
+        $allKeys = $baseData->keys()->merge($soldData->keys())->merge($clientKeys)->unique();
 
         $userIds = $allKeys->filter()->values();
         $users = User::whereIn('id', $userIds)->get(['id','name','email'])->keyBy('id');
@@ -1051,11 +1059,6 @@ class PropertyReportController extends Controller
             $soldByOwner = round((float)($soldRow->sold_by_owner ?? 0), 4);
 
             $closed = $sold + $rented + $soldByOwner;
-            // If there is no "open statuses" base in period but there are closed deals,
-            // keep total meaningful for conversion instead of returning forced zero.
-            if ($total <= 0.0 && $closed > 0.0) {
-                $total = $closed;
-            }
 
             return [
                 'id' => $key,
