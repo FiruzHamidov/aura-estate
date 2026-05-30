@@ -1491,6 +1491,27 @@ class KpiModuleService
                 $factValue += (float) ($autoByDate[$dateKey][$column] ?? 0);
             }
 
+            // Sales KPI is system-only: always use computed sales credits from properties.
+            if ($metricKey === 'sales') {
+                $finalValue = $factValue;
+                $manualResult = 0.0;
+                $source = 'system';
+                $progress = $target > 0 ? round(($finalValue / $target) * 100, 2) : 0.0;
+
+                $metrics[$metricKey] = [
+                    'fact_value' => $this->normalizeNumber($factValue),
+                    'manual_value' => 0,
+                    'final_value' => $this->normalizeNumber($finalValue),
+                    'target_value' => $this->normalizeNumber($target),
+                    'progress_pct' => $progress,
+                    'source' => $source,
+                    'source_error' => $sourceError,
+                    'plan_source' => (string) ($metricPlanSourceMap[$metricKey] ?? 'system'),
+                ];
+
+                continue;
+            }
+
             if ($sourceType === 'system') {
                 $finalValue = $factValue;
                 $manualResult = 0.0;
