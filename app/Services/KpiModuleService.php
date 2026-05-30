@@ -1416,7 +1416,7 @@ class KpiModuleService
 
         $soldProperties = DB::table('properties')
             ->select($select)
-            ->whereIn('moderation_status', ['sold', 'rented', 'sold_by_owner'])
+            ->whereIn('moderation_status', ['sold'])
             ->whereBetween('sold_at', [
                 $from->copy()->startOfDay()->setTimezone('UTC')->toDateTimeString(),
                 $to->copy()->endOfDay()->setTimezone('UTC')->toDateTimeString(),
