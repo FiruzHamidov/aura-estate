@@ -1409,9 +1409,14 @@ class KpiModuleService
             return [];
         }
 
+        $select = ['id', 'sold_at', 'moderation_status', 'sale_user_id', 'agent_id', 'created_by'];
+        if (Schema::hasColumn('properties', 'sale_agent_id')) {
+            $select[] = 'sale_agent_id';
+        }
+
         $soldProperties = DB::table('properties')
-            ->select(['id', 'sold_at', 'moderation_status', 'sale_user_id', 'agent_id', 'created_by'])
-            ->whereIn('moderation_status', ['sold', 'rented'])
+            ->select($select)
+            ->whereIn('moderation_status', ['sold', 'rented', 'sold_by_owner'])
             ->whereBetween('sold_at', [
                 $from->copy()->startOfDay()->setTimezone('UTC')->toDateTimeString(),
                 $to->copy()->endOfDay()->setTimezone('UTC')->toDateTimeString(),

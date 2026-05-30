@@ -256,6 +256,8 @@ class DailyReportService
             return 0;
         }
 
+        $closedStatuses = ['sold', 'rented', 'sold_by_owner'];
+
         return (int) DB::table('properties')
             ->where(function ($query) use ($user) {
                 $hasCreatedBy = Schema::hasColumn('properties', 'created_by');
@@ -281,7 +283,19 @@ class DailyReportService
                     });
                 }
             })
-            ->whereBetween('created_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
+            // Keep objects KPI consistent with manager-efficiency period semantics:
+            // open statuses are counted by created_at, closed statuses by sold_at.
+            ->where(function ($periodQ) use ($startUtc, $endUtc, $closedStatuses) {
+                $periodQ
+                    ->where(function ($openQ) use ($startUtc, $endUtc, $closedStatuses) {
+                        $openQ->whereNotIn('moderation_status', $closedStatuses)
+                            ->whereBetween('created_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()]);
+                    })
+                    ->orWhere(function ($closedQ) use ($startUtc, $endUtc, $closedStatuses) {
+                        $closedQ->whereIn('moderation_status', $closedStatuses)
+                            ->whereBetween('sold_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()]);
+                    });
+            })
             ->count();
     }
 
@@ -295,7 +309,7 @@ class DailyReportService
 
         $soldProperties = DB::table('properties')
             ->select(['id', 'moderation_status', 'agent_id', 'sale_user_id', 'created_by'])
-            ->whereIn('moderation_status', ['sold', 'rented'])
+            ->whereIn('moderation_status', ['sold', 'rented', 'sold_by_owner'])
             ->whereBetween('sold_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
             ->get();
 
