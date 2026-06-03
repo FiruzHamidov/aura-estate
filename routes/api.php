@@ -62,6 +62,7 @@ use App\Http\Controllers\TelegramAuthController;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\StoryController;
 use App\Http\Controllers\AdminStoryController;
+use App\Http\Controllers\ApiRequestLogController;
 use App\Http\Controllers\KpiPeriodLockController;
 use App\Http\Controllers\MyReminderController;
 use App\Http\Controllers\MotivationController;
@@ -235,6 +236,8 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::get('/notifications/unread-count', [NotificationController::class, 'unreadCount']);
     Route::patch('/notifications/read-all', [NotificationController::class, 'markAllRead']);
     Route::patch('/notifications/{notification}/read', [NotificationController::class, 'markRead']);
+    Route::get('/audit/api-requests', [ApiRequestLogController::class, 'index']);
+    Route::get('/audit/api-requests/{apiRequestLog}', [ApiRequestLogController::class, 'show'])->whereNumber('apiRequestLog');
     Route::get('/my/stories', [StoryController::class, 'myStories']);
     Route::post('/stories', [StoryController::class, 'store'])->middleware('throttle:30,60');
     Route::post('/stories/from-property/{property}', [StoryController::class, 'storeFromProperty'])->middleware('throttle:30,60');

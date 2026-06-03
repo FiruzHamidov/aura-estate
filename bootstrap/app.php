@@ -7,6 +7,7 @@ use App\Http\Middleware\EnsureTraceId;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\EnsureUserIsNotClient;
 use App\Http\Middleware\EnforceRopBranchScope;
+use App\Http\Middleware\LogApiRequest;
 use Illuminate\Auth\AuthenticationException;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Application;
@@ -29,6 +30,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->group('api', [
             HandleCors::class,
             EnsureTraceId::class,
+            LogApiRequest::class,
             DetectClientLocale::class,
             SubstituteBindings::class,
         ]);
@@ -90,5 +92,6 @@ return Application::configure(basePath: dirname(__DIR__))
         $schedule->command('b24:sync:properties')->everyTenMinutes();
         $schedule->command('notifications:dispatch-reminders')->everyFiveMinutes();
         $schedule->command('stories:expire')->everyFiveMinutes();
+        $schedule->command('audit:prune-api-request-logs')->dailyAt('03:30');
     })
     ->create();
