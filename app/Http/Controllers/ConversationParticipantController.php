@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\Concerns\SerializesConversationPayloads;
 use App\Models\Conversation;
 use App\Models\ConversationParticipant;
 use App\Models\User;
@@ -13,6 +14,8 @@ use Illuminate\Validation\Rule;
 
 class ConversationParticipantController extends Controller
 {
+    use SerializesConversationPayloads;
+
     public function __construct(
         private readonly MessageAccessService $access,
         private readonly ConversationService $conversations
@@ -38,17 +41,9 @@ class ConversationParticipantController extends Controller
         $conversation->load('participants.user.role');
 
         return response()->json(
-            $conversation->participants->map(fn ($participant) => [
-                'user_id' => $participant->user_id,
-                'role' => $participant->role,
-                'joined_at' => $participant->joined_at?->toIso8601String(),
-                'user' => $participant->user ? [
-                    'id' => $participant->user->id,
-                    'name' => $participant->user->name,
-                    'phone' => $participant->user->phone,
-                    'role_slug' => $participant->user->role?->slug,
-                ] : null,
-            ])->values()
+            $conversation->participants
+                ->map(fn (ConversationParticipant $participant) => $this->serializeParticipant($participant))
+                ->values()
         );
     }
 
@@ -68,12 +63,16 @@ class ConversationParticipantController extends Controller
             $conversation,
             $target,
             $validated['role'] ?? ConversationParticipant::ROLE_MEMBER
-        );
+        )->load('user.role');
 
         return response()->json([
+            'id' => $participant->id,
             'user_id' => $participant->user_id,
             'role' => $participant->role,
             'joined_at' => $participant->joined_at?->toIso8601String(),
+            'last_read_message_id' => $participant->last_read_message_id,
+            'last_read_at' => $participant->last_read_at?->toIso8601String(),
+            'user' => $participant->user ? $this->serializeChatUser($participant->user) : null,
         ], 201);
     }
 

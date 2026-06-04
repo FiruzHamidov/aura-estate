@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\Concerns\SerializesConversationPayloads;
 use App\Models\Conversation;
 use App\Models\ConversationMessage;
 use App\Models\User;
@@ -14,6 +15,8 @@ use Illuminate\Support\Facades\Log;
 
 class ConversationMessageController extends Controller
 {
+    use SerializesConversationPayloads;
+
     public function __construct(
         private readonly MessageAccessService $access,
         private readonly ConversationService $conversations,
@@ -32,24 +35,6 @@ class ConversationMessageController extends Controller
         return $user;
     }
 
-    private function serializeMessage(ConversationMessage $message): array
-    {
-        return [
-            'id' => $message->id,
-            'conversation_id' => $message->conversation_id,
-            'author_id' => $message->author_id,
-            'type' => $message->type,
-            'body' => $message->body,
-            'meta' => $message->meta,
-            'created_at' => $message->created_at?->toIso8601String(),
-            'author' => $message->author ? [
-                'id' => $message->author->id,
-                'name' => $message->author->name,
-                'role_slug' => $message->author->role?->slug,
-            ] : null,
-        ];
-    }
-
     public function index(Request $request, Conversation $conversation)
     {
         $authUser = $this->authUser();
@@ -63,7 +48,7 @@ class ConversationMessageController extends Controller
             ->with('author.role')
             ->orderByDesc('id')
             ->paginate((int) ($validated['per_page'] ?? 50))
-            ->through(fn (ConversationMessage $message) => $this->serializeMessage($message));
+            ->through(fn (ConversationMessage $message) => $this->serializeMessage($message, $authUser, $conversation));
 
         $this->conversations->markConversationRead($conversation, $authUser);
 
@@ -94,6 +79,6 @@ class ConversationMessageController extends Controller
 
         $this->notifications->handleConversationMessageCreated($message);
 
-        return response()->json($this->serializeMessage($message), 201);
+        return response()->json($this->serializeMessage($message, $authUser, $conversation), 201);
     }
 }

@@ -202,6 +202,58 @@ class MessagingFeatureTest extends TestCase
         $this->getJson('/api/conversations/'.$conversationId)->assertForbidden();
     }
 
+    public function test_chat_endpoints_include_ios_header_and_message_state_fields(): void
+    {
+        $agent = $this->createUser('agent', 'Ситора Рахмонова', '991000024');
+        $client = $this->createUser('client', 'Current User', '991000025');
+
+        Sanctum::actingAs($agent);
+
+        $create = $this->postJson('/api/conversations/direct', [
+            'target_user_id' => $client->id,
+        ]);
+
+        $conversationId = $create->json('id');
+
+        $show = $this->getJson('/api/conversations/'.$conversationId);
+
+        $show->assertOk()
+            ->assertJsonPath('name', 'Current User')
+            ->assertJsonPath('type', Conversation::TYPE_DIRECT)
+            ->assertJsonPath('unread_count', 0)
+            ->assertJsonPath('participants.0.user.is_online', false)
+            ->assertJsonPath('participants.0.user.status', 'offline')
+            ->assertJsonPath('participants.0.user.last_seen_at', null);
+
+        $message = $this->postJson('/api/conversations/'.$conversationId.'/messages', [
+            'body' => 'Салом) Ман мехостам хона харам чи маслихат медихед',
+        ]);
+
+        $message->assertCreated()
+            ->assertJsonPath('role', 'me')
+            ->assertJsonPath('sender.id', $agent->id)
+            ->assertJsonPath('sender.name', 'Ситора Рахмонова')
+            ->assertJsonPath('sender.photo', null)
+            ->assertJsonPath('delivery_status', 'sent');
+
+        Sanctum::actingAs($client);
+
+        $messages = $this->getJson('/api/conversations/'.$conversationId.'/messages?per_page=50');
+
+        $messages->assertOk()
+            ->assertJsonPath('data.0.role', 'agent')
+            ->assertJsonPath('data.0.sender.id', $agent->id)
+            ->assertJsonPath('data.0.delivery_status', 'delivered');
+
+        $participants = $this->getJson('/api/conversations/'.$conversationId.'/participants');
+
+        $participants->assertOk()
+            ->assertJsonPath('0.id', 1)
+            ->assertJsonPath('0.user.name', 'Ситора Рахмонова')
+            ->assertJsonPath('0.user.photo', null)
+            ->assertJsonPath('0.user.is_online', false);
+    }
+
     public function test_support_conversation_can_be_created_from_client_flow_and_manager_operator_can_reply(): void
     {
         $client = $this->createUser('client', 'Client', '991000031');

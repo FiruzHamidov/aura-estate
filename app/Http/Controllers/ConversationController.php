@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\Concerns\SerializesConversationPayloads;
 use App\Models\Conversation;
 use App\Models\User;
 use App\Services\Messaging\ConversationService;
@@ -12,6 +13,8 @@ use Illuminate\Validation\Rule;
 
 class ConversationController extends Controller
 {
+    use SerializesConversationPayloads;
+
     public function __construct(
         private readonly MessageAccessService $access,
         private readonly ConversationService $conversations
@@ -41,46 +44,6 @@ class ConversationController extends Controller
             ]);
     }
 
-    private function serializeConversation(Conversation $conversation): array
-    {
-        return [
-            'id' => $conversation->id,
-            'type' => $conversation->type,
-            'name' => $conversation->name,
-            'created_by' => $conversation->created_by,
-            'created_at' => $conversation->created_at?->toIso8601String(),
-            'updated_at' => $conversation->updated_at?->toIso8601String(),
-            'meta' => $conversation->meta,
-            'latest_message' => $conversation->latestMessage ? [
-                'id' => $conversation->latestMessage->id,
-                'author_id' => $conversation->latestMessage->author_id,
-                'type' => $conversation->latestMessage->type,
-                'body' => $conversation->latestMessage->body,
-                'created_at' => $conversation->latestMessage->created_at?->toIso8601String(),
-            ] : null,
-            'participants' => $conversation->participants->map(fn ($participant) => [
-                'user_id' => $participant->user_id,
-                'role' => $participant->role,
-                'joined_at' => $participant->joined_at?->toIso8601String(),
-                'last_read_message_id' => $participant->last_read_message_id,
-                'last_read_at' => $participant->last_read_at?->toIso8601String(),
-                'user' => $participant->user ? [
-                    'id' => $participant->user->id,
-                    'name' => $participant->user->name,
-                    'phone' => $participant->user->phone,
-                    'role_slug' => $participant->user->role?->slug,
-                ] : null,
-            ])->values()->all(),
-            'support_thread' => $conversation->supportThread ? [
-                'id' => $conversation->supportThread->id,
-                'status' => $conversation->supportThread->status,
-                'requester_user_id' => $conversation->supportThread->requester_user_id,
-                'chat_session_id' => $conversation->supportThread->chat_session_id,
-                'summary' => $conversation->supportThread->summary,
-            ] : null,
-        ];
-    }
-
     public function index(Request $request)
     {
         $authUser = $this->authUser();
@@ -99,7 +62,7 @@ class ConversationController extends Controller
         $conversations = $query
             ->orderByDesc('updated_at')
             ->paginate((int) ($validated['per_page'] ?? 20))
-            ->through(fn (Conversation $conversation) => $this->serializeConversation($conversation));
+            ->through(fn (Conversation $conversation) => $this->serializeConversation($conversation, $authUser));
 
         return response()->json($conversations);
     }
@@ -124,7 +87,7 @@ class ConversationController extends Controller
             $validated['meta'] ?? null
         );
 
-        return response()->json($this->serializeConversation($conversation), 201);
+        return response()->json($this->serializeConversation($conversation, $authUser), 201);
     }
 
     public function show(Conversation $conversation)
@@ -141,7 +104,7 @@ class ConversationController extends Controller
 
         $this->conversations->markConversationRead($conversation, $authUser);
 
-        return response()->json($this->serializeConversation($conversation));
+        return response()->json($this->serializeConversation($conversation, $authUser));
     }
 
     public function storeDirect(Request $request)
@@ -156,6 +119,6 @@ class ConversationController extends Controller
 
         $conversation = $this->conversations->createOrGetDirectConversation($authUser, $target);
 
-        return response()->json($this->serializeConversation($conversation));
+        return response()->json($this->serializeConversation($conversation, $authUser));
     }
 }
