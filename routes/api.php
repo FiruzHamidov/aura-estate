@@ -83,6 +83,7 @@ Route::post('/lead-requests', [LeadRequestController::class, 'store'])->middlewa
 
 Route::get('/properties', [PropertyController::class, 'index']);
 Route::get('/properties/map', [PropertyController::class, 'map']);
+Route::get('/properties/search', [PropertyController::class, 'search']);
 Route::get('/properties/{property}', [PropertyController::class, 'show']);
 Route::get('/properties/{property}/similar', [PropertyController::class, 'similar']);
 Route::post('/properties/{property}/view', [PropertyController::class, 'trackView'])->middleware('throttle:30,1');

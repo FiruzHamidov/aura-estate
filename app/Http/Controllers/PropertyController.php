@@ -507,10 +507,10 @@ class PropertyController extends Controller
     }
 
     // ==== Общая база для index/map: роли, связи, базовые статусы ====
-    private function baseQuery(Request $request): Builder
+    private function baseQuery(Request $request, ?array $relations = null): Builder
     {
-        $user = auth()->user();
-        $query = Property::query()->with($this->propertyListRelations());
+        $user = $this->propertyShowAuthUser($request);
+        $query = Property::query()->with($relations ?? $this->propertyListRelations());
 
         $hasStatusFilter = $request->filled('moderation_status');
 
@@ -540,6 +540,229 @@ class PropertyController extends Controller
         }
 
         return $query;
+    }
+
+    public function search(Request $request)
+    {
+        $validated = $request->validate([
+            'q' => ['sometimes', 'nullable', 'string'],
+            'page' => ['sometimes', 'integer', 'min:1'],
+            'per_page' => ['sometimes', 'integer', 'min:1', 'max:50'],
+            'deal_type' => ['sometimes', 'nullable', Rule::in(['sale', 'rent'])],
+            'property_type_id' => ['sometimes', 'nullable', 'integer'],
+            'status_id' => ['sometimes', 'nullable', 'integer'],
+            'location_id' => ['sometimes', 'nullable', 'integer'],
+            'district' => ['sometimes', 'nullable', 'string'],
+            'price_from' => ['sometimes', 'nullable', 'numeric'],
+            'price_to' => ['sometimes', 'nullable', 'numeric'],
+            'rooms_from' => ['sometimes', 'nullable', 'integer'],
+            'rooms_to' => ['sometimes', 'nullable', 'integer'],
+            'area_from' => ['sometimes', 'nullable', 'numeric'],
+            'area_to' => ['sometimes', 'nullable', 'numeric'],
+            'sort' => ['sometimes', 'nullable', Rule::in(['relevance', 'newest', 'price_asc', 'price_desc'])],
+        ]);
+
+        $q = trim((string) ($validated['q'] ?? ''));
+
+        if ($q !== '' && mb_strlen($q, 'UTF-8') < 2 && !ctype_digit($q)) {
+            return response()->json([
+                'message' => 'Минимум 2 символа для поиска',
+            ], 422);
+        }
+
+        $authUser = $this->propertyShowAuthUser($request);
+        $canSearchCrmFields = $this->canSearchPropertyCrmFields($authUser);
+        $sort = $validated['sort'] ?? 'relevance';
+        $perPage = min((int) ($validated['per_page'] ?? 20), 50);
+
+        $query = $this->baseQuery($request, [
+            'type',
+            'status',
+            'location',
+            'photos',
+            'creator',
+            'developer',
+        ])->where('moderation_status', '!=', 'deleted');
+
+        $this->applyPropertySearchFilters($query, $validated);
+
+        if ($q !== '') {
+            $this->applyPropertySearchText($query, $q, $canSearchCrmFields);
+        }
+
+        $query->select('properties.*');
+        $this->applyPropertySearchSort($query, $sort, $q, $canSearchCrmFields);
+
+        $paginator = $query->paginate($perPage);
+
+        return response()->json([
+            'data' => $paginator->getCollection()
+                ->map(fn (Property $property) => $this->serializePropertySearchResult($property))
+                ->values(),
+            'current_page' => $paginator->currentPage(),
+            'last_page' => $paginator->lastPage(),
+            'per_page' => $paginator->perPage(),
+            'total' => $paginator->total(),
+        ]);
+    }
+
+    private function canSearchPropertyCrmFields(?User $user): bool
+    {
+        return $user !== null && !$user->hasRole('client');
+    }
+
+    private function applyPropertySearchFilters(Builder $query, array $filters): void
+    {
+        $map = [
+            'deal_type' => 'offer_type',
+            'property_type_id' => 'type_id',
+            'status_id' => 'status_id',
+            'location_id' => 'location_id',
+            'district' => 'district',
+        ];
+
+        foreach ($map as $param => $column) {
+            if (array_key_exists($param, $filters) && $filters[$param] !== null && $filters[$param] !== '') {
+                $query->where($column, $filters[$param]);
+            }
+        }
+
+        foreach ([
+            'price_from' => ['price', '>='],
+            'price_to' => ['price', '<='],
+            'rooms_from' => ['rooms', '>='],
+            'rooms_to' => ['rooms', '<='],
+            'area_from' => ['total_area', '>='],
+            'area_to' => ['total_area', '<='],
+        ] as $param => [$column, $operator]) {
+            if (array_key_exists($param, $filters) && $filters[$param] !== null && $filters[$param] !== '') {
+                $query->where($column, $operator, $filters[$param]);
+            }
+        }
+    }
+
+    private function applyPropertySearchText(Builder $query, string $term, bool $includeCrmFields): void
+    {
+        $like = '%' . $this->escapeLikeTerm(mb_strtolower($term, 'UTF-8')) . '%';
+        $isNumericId = ctype_digit($term);
+
+        $query->where(function (Builder $searchQuery) use ($term, $like, $isNumericId, $includeCrmFields) {
+            if ($isNumericId) {
+                $searchQuery->orWhere('properties.id', (int) $term);
+            }
+
+            foreach (['title', 'description', 'address', 'district', 'landmark'] as $column) {
+                $searchQuery->orWhereRaw("LOWER(properties.{$column}) LIKE ? ESCAPE '\\'", [$like]);
+            }
+
+            if ($includeCrmFields) {
+                $searchQuery
+                    ->orWhereRaw("LOWER(properties.owner_name) LIKE ? ESCAPE '\\'", [$like])
+                    ->orWhereRaw("LOWER(properties.owner_phone) LIKE ? ESCAPE '\\'", [$like]);
+            }
+
+            $searchQuery
+                ->orWhereHas('developer', fn (Builder $developerQuery) => $developerQuery
+                    ->whereRaw("LOWER(name) LIKE ? ESCAPE '\\'", [$like]))
+                ->orWhereHas('location', fn (Builder $locationQuery) => $locationQuery
+                    ->whereRaw("LOWER(city) LIKE ? ESCAPE '\\'", [$like]))
+                ->orWhereHas('type', fn (Builder $typeQuery) => $typeQuery
+                    ->whereRaw("LOWER(name) LIKE ? ESCAPE '\\'", [$like])
+                    ->orWhereRaw("LOWER(slug) LIKE ? ESCAPE '\\'", [$like]))
+                ->orWhereHas('status', fn (Builder $statusQuery) => $statusQuery
+                    ->whereRaw("LOWER(name) LIKE ? ESCAPE '\\'", [$like])
+                    ->orWhereRaw("LOWER(slug) LIKE ? ESCAPE '\\'", [$like]));
+        });
+    }
+
+    private function applyPropertySearchSort(Builder $query, string $sort, string $term, bool $includeCrmFields): void
+    {
+        if ($sort === 'newest' || ($sort === 'relevance' && $term === '')) {
+            $query->orderByDesc('properties.created_at')->orderByDesc('properties.id');
+            return;
+        }
+
+        if ($sort === 'price_asc') {
+            $query->orderBy('properties.price')->orderByDesc('properties.created_at');
+            return;
+        }
+
+        if ($sort === 'price_desc') {
+            $query->orderByDesc('properties.price')->orderByDesc('properties.created_at');
+            return;
+        }
+
+        $lowerTerm = mb_strtolower($term, 'UTF-8');
+        $like = '%' . $this->escapeLikeTerm($lowerTerm) . '%';
+        $bindings = [
+            ctype_digit($term) ? (int) $term : 0,
+            $lowerTerm,
+            $like,
+            $like,
+            $like,
+            $like,
+        ];
+
+        $crmSql = '';
+        if ($includeCrmFields) {
+            $crmSql = "
+                WHEN LOWER(properties.owner_name) LIKE ? ESCAPE '\\' THEN 240
+                WHEN LOWER(properties.owner_phone) LIKE ? ESCAPE '\\' THEN 240
+            ";
+            $bindings[] = $like;
+            $bindings[] = $like;
+        }
+
+        $query
+            ->orderByRaw("
+                CASE
+                    WHEN properties.id = ? THEN 1000
+                    WHEN LOWER(properties.title) = ? THEN 800
+                    WHEN LOWER(properties.title) LIKE ? ESCAPE '\\' THEN 700
+                    WHEN LOWER(properties.address) LIKE ? ESCAPE '\\' THEN 600
+                    WHEN LOWER(properties.district) LIKE ? ESCAPE '\\' THEN 550
+                    WHEN LOWER(properties.description) LIKE ? ESCAPE '\\' THEN 350
+                    {$crmSql}
+                    ELSE 100
+                END DESC
+            ", $bindings)
+            ->orderByDesc('properties.created_at')
+            ->orderByDesc('properties.id');
+    }
+
+    private function escapeLikeTerm(string $term): string
+    {
+        return str_replace(['\\', '%', '_'], ['\\\\', '\%', '\_'], $term);
+    }
+
+    private function serializePropertySearchResult(Property $property): array
+    {
+        return [
+            'id' => (int) $property->id,
+            'title' => $property->title,
+            'price' => $this->normalizeRawNumber($property->price),
+            'currency' => $property->currency,
+            'address' => $property->address,
+            'district' => $property->district,
+            'location' => $property->location ? [
+                'id' => (int) $property->location->id,
+                'name' => $property->location->name,
+            ] : null,
+            'type' => $property->type?->slug ?? $property->type?->name,
+            'status' => $property->status?->slug ?? $property->status?->name,
+            'photos' => $property->photos
+                ->map(fn ($photo) => [
+                    'id' => (int) $photo->id,
+                    'url' => $photo->file_path ? asset('storage/' . ltrim($photo->file_path, '/')) : null,
+                ])
+                ->values(),
+            'creator' => $property->creator ? [
+                'id' => (int) $property->creator->id,
+                'name' => $property->creator->name,
+                'phone' => $property->creator->phone,
+            ] : null,
+            'created_at' => $property->created_at?->toJSON(),
+        ];
     }
 
     // ==== Карта: bbox + zoom + кластеризация/точки ====
