@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\Role;
+use App\Models\SmsVerificationCode;
 use App\Models\User;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Hash;
@@ -46,6 +47,16 @@ class AuthRegistrationTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('sms_verification_codes', function (Blueprint $table) {
+            $table->id();
+            $table->string('phone');
+            $table->string('purpose')->default('login');
+            $table->string('code');
+            $table->timestamp('expires_at');
+            $table->timestamps();
+            $table->unique(['phone', 'purpose']);
+        });
+
         Schema::create('personal_access_tokens', function (Blueprint $table) {
             $table->id();
             $table->morphs('tokenable');
@@ -81,5 +92,43 @@ class AuthRegistrationTest extends TestCase
         $this->assertNotNull($user);
         $this->assertTrue(Hash::check('password123', (string) $user->password));
         $this->assertSame($clientRole->id, $user->role_id);
+    }
+
+    public function test_app_review_account_can_sign_in_with_fixed_sms_code(): void
+    {
+        config()->set('auth.app_review.phone', '938080888');
+        config()->set('auth.app_review.otp', '000000');
+
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'App Review',
+            'phone' => '938080888',
+            'password' => bcrypt('password'),
+            'role_id' => $role->id,
+            'status' => 'active',
+            'auth_method' => 'sms',
+        ]);
+
+        $this->postJson('/api/sms/request', [
+            'phone' => '938080888',
+        ])->assertOk();
+
+        $this->assertDatabaseHas('sms_verification_codes', [
+            'phone' => '938080888',
+            'purpose' => SmsVerificationCode::PURPOSE_LOGIN,
+            'code' => '000000',
+        ]);
+
+        $response = $this->postJson('/api/sms/verify', [
+            'phone' => '938080888',
+            'code' => '000000',
+            'device_name' => 'iPad Air 11-inch (M3)',
+            'platform' => 'ios',
+            'app_version' => '1.0',
+        ]);
+
+        $response->assertOk();
+        $response->assertJsonPath('user.id', $user->id);
+        $this->assertNotEmpty($response->json('token'));
     }
 }

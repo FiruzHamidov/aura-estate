@@ -116,4 +116,9 @@ return [
 
     'password_timeout' => env('AUTH_PASSWORD_TIMEOUT', 10800),
 
+    'app_review' => [
+        'phone' => env('AURA_APP_REVIEW_PHONE', '938080888'),
+        'otp' => env('AURA_APP_REVIEW_OTP', '000000'),
+    ],
+
 ];
