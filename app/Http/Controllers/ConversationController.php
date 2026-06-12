@@ -72,13 +72,25 @@ class ConversationController extends Controller
         $authUser = $this->authUser();
 
         $validated = $request->validate([
-            'name' => 'required|string|max:255',
+            'name' => 'nullable|string|max:255',
             'participant_ids' => 'required|array|min:1',
             'participant_ids.*' => 'integer|distinct|exists:users,id',
             'meta' => 'nullable|array',
         ]);
 
         $participants = User::query()->whereIn('id', $validated['participant_ids'])->get()->all();
+
+        if (! $this->access->isInternalUser($authUser)) {
+            abort_unless(count($participants) === 1, 422, 'Direct conversations require exactly one participant.');
+
+            $conversation = $this->conversations->createOrGetDirectConversation($authUser, $participants[0]);
+
+            return response()->json($this->serializeConversation($conversation, $authUser));
+        }
+
+        $request->validate([
+            'name' => 'required|string|max:255',
+        ]);
 
         $conversation = $this->conversations->createGroupConversation(
             $authUser,

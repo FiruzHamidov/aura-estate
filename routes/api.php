@@ -120,6 +120,10 @@ Route::post('/reviews/request-code', [ReviewController::class, 'requestCode'])->
 Route::get('/agents/{agent}/reviews', [ReviewController::class, 'index'])->whereNumber('agent');
 Route::post('/agents/{agent}/reviews', [ReviewController::class, 'store'])->middleware('throttle:10,1')->whereNumber('agent');
 
+Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
+    Route::get('/mobile/clients/filters', [ClientController::class, 'mobileFilters']);
+});
+
 // --- Новостройки (public index/show + ВЛОЖЕННЫЕ index/show) ---
 Route::scopeBindings()->group(function () {
     Route::apiResource('developers', DeveloperController::class)->only(['index', 'show']);

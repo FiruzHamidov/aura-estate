@@ -3,7 +3,14 @@
 namespace App\Http\Controllers;
 
 use App\Models\Client;
+use App\Models\Branch;
+use App\Models\BranchGroup;
+use App\Models\ClientNeedType;
 use App\Models\ClientNeedStatus;
+use App\Models\ClientSource;
+use App\Models\ClientType;
+use App\Models\PropertyType;
+use App\Models\RepairType;
 use App\Models\User;
 use App\Services\Crm\AuditLogger;
 use App\Services\Crm\ClientAttachService;
@@ -44,6 +51,27 @@ class ClientController extends Controller
     private function isPrivilegedRole(User $user): bool
     {
         return $this->clientAccess->isPrivilegedRole($this->clientAccess->roleSlug($user));
+    }
+
+    private function catalog(string $modelClass, string $table, array $orderColumns = ['sort_order', 'id'], bool $activeOnly = false): array
+    {
+        if (! Schema::hasTable($table)) {
+            return [];
+        }
+
+        $query = $modelClass::query();
+
+        if ($activeOnly && Schema::hasColumn($table, 'is_active')) {
+            $query->where('is_active', true);
+        }
+
+        foreach ($orderColumns as $column) {
+            if (Schema::hasColumn($table, $column)) {
+                $query->orderBy($column);
+            }
+        }
+
+        return $query->get()->values()->all();
     }
 
     private function normalizeInput(array $data): array
@@ -554,6 +582,55 @@ class ClientController extends Controller
                 ->paginate((int) ($validated['per_page'] ?? 15))
                 ->withQueryString()
         );
+    }
+
+    public function mobileFilters()
+    {
+        $authUser = $this->authUser();
+
+        $agents = [];
+        if (Schema::hasTable('users')) {
+            $agentColumns = ['id', 'name', 'phone', 'role_id'];
+            if (Schema::hasColumn('users', 'branch_id')) {
+                $agentColumns[] = 'branch_id';
+            }
+            if (Schema::hasColumn('users', 'branch_group_id')) {
+                $agentColumns[] = 'branch_group_id';
+            }
+
+            $agentsQuery = User::query()
+                ->with('role')
+                ->when(Schema::hasColumn('users', 'status'), fn ($query) => $query->where('status', User::STATUS_ACTIVE))
+                ->whereHas('role', fn ($query) => $query->whereIn('slug', ['agent', 'mop', 'rop', 'manager']))
+                ->orderBy('name');
+
+            if (! $this->isPrivilegedRole($authUser) && Schema::hasColumn('users', 'branch_id') && ! empty($authUser->branch_id)) {
+                $agentsQuery->where('branch_id', $authUser->branch_id);
+            }
+
+            $agents = $agentsQuery->get($agentColumns)->values()->all();
+        }
+
+        return response()->json([
+            'contact_kinds' => [
+                ['value' => Client::CONTACT_KIND_BUYER, 'label' => 'Покупатель'],
+                ['value' => Client::CONTACT_KIND_SELLER, 'label' => 'Продавец'],
+                ['value' => Client::CONTACT_KIND_BOTH, 'label' => 'Покупатель и продавец'],
+            ],
+            'statuses' => [
+                ['value' => 'active', 'label' => 'Активные'],
+                ['value' => 'inactive', 'label' => 'Неактивные'],
+            ],
+            'client_types' => $this->catalog(ClientType::class, 'client_types', ['sort_order', 'id'], true),
+            'client_sources' => $this->catalog(ClientSource::class, 'client_sources', ['sort_order', 'id'], true),
+            'need_types' => $this->catalog(ClientNeedType::class, 'client_need_types', ['sort_order', 'id'], true),
+            'need_statuses' => $this->catalog(ClientNeedStatus::class, 'client_need_statuses', ['sort_order', 'id'], true),
+            'repair_types' => $this->catalog(RepairType::class, 'repair_types', ['id']),
+            'property_types' => $this->catalog(PropertyType::class, 'property_types', ['id']),
+            'branches' => $this->catalog(Branch::class, 'branches', ['id']),
+            'branch_groups' => $this->catalog(BranchGroup::class, 'branch_groups', ['id']),
+            'responsible_agents' => $agents,
+        ]);
     }
 
     public function store(Request $request)

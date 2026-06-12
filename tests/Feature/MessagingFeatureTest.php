@@ -156,7 +156,7 @@ class MessagingFeatureTest extends TestCase
         $denied->assertForbidden();
     }
 
-    public function test_client_cannot_create_arbitrary_group_while_internal_user_can(): void
+    public function test_non_internal_user_posting_conversation_with_one_participant_creates_direct_chat(): void
     {
         $client = $this->createUser('client', 'Client', '991000011');
         $agent = $this->createUser('agent', 'Agent', '991000012');
@@ -169,7 +169,8 @@ class MessagingFeatureTest extends TestCase
             'participant_ids' => [$agent->id],
         ]);
 
-        $clientAttempt->assertForbidden();
+        $clientAttempt->assertOk();
+        $clientAttempt->assertJsonPath('type', Conversation::TYPE_DIRECT);
 
         Sanctum::actingAs($operator);
 

@@ -8,6 +8,7 @@ use App\Models\User;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Schema;
+use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
 class AuthRegistrationTest extends TestCase
@@ -130,5 +131,37 @@ class AuthRegistrationTest extends TestCase
         $response->assertOk();
         $response->assertJsonPath('user.id', $user->id);
         $this->assertNotEmpty($response->json('token'));
+    }
+
+    public function test_mobile_client_filters_route_is_available_for_authenticated_users(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Mobile Agent',
+            'phone' => '992900002222',
+            'password' => bcrypt('password'),
+            'role_id' => $role->id,
+            'status' => 'active',
+            'auth_method' => 'sms',
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $response = $this->getJson('/api/mobile/clients/filters');
+
+        $response->assertOk();
+        $response->assertJsonStructure([
+            'contact_kinds',
+            'statuses',
+            'client_types',
+            'client_sources',
+            'need_types',
+            'need_statuses',
+            'repair_types',
+            'property_types',
+            'branches',
+            'branch_groups',
+            'responsible_agents',
+        ]);
     }
 }
