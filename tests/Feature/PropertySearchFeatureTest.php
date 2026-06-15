@@ -224,6 +224,32 @@ class PropertySearchFeatureTest extends TestCase
         $response->assertJsonPath('data.0.creator.phone', '992900000001');
     }
 
+    public function test_search_handles_cyrillic_room_query_with_bearer_token(): void
+    {
+        $match = $this->createProperty([
+            'title' => '2 комнатная квартира',
+            'description' => 'Светлая квартира в центре',
+            'rooms' => 2,
+        ]);
+
+        $this->createProperty([
+            'title' => '3 комнатная квартира',
+            'rooms' => 3,
+        ]);
+
+        $token = $this->agent->createToken('api-token', ['*'], now()->addHours(24))->plainTextToken;
+
+        $this->withToken($token)
+            ->getJson('/api/properties/search?' . http_build_query([
+                'page' => 1,
+                'per_page' => 20,
+                'sort' => 'relevance',
+                'q' => '2 комнат',
+            ]))
+            ->assertOk()
+            ->assertJsonPath('data.0.id', $match->id);
+    }
+
     public function test_owner_name_search_requires_bearer_token(): void
     {
         $property = $this->createProperty([

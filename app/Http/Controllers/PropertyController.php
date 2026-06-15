@@ -10,9 +10,11 @@ use App\Services\Crm\Matching\ClientPropertyMatcher;
 use App\Models\User;
 use App\Support\ClientAccess;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 use Intervention\Image\Drivers\Gd\Driver;
@@ -593,7 +595,32 @@ class PropertyController extends Controller
         $query->select('properties.*');
         $this->applyPropertySearchSort($query, $sort, $q, $canSearchCrmFields);
 
-        $paginator = $query->paginate($perPage);
+        try {
+            $paginator = $query->paginate($perPage);
+        } catch (QueryException $e) {
+            Log::warning('Property search relevance query failed, retrying with safe fallback.', [
+                'query' => $q,
+                'sort' => $sort,
+                'error' => $e->getMessage(),
+            ]);
+
+            $query = $this->baseQuery($request, [
+                'type',
+                'status',
+                'location',
+                'photos',
+                'creator',
+                'developer',
+            ])->where('moderation_status', '!=', 'deleted');
+
+            $this->applyPropertySearchFilters($query, $validated);
+            $this->applyPropertySearchSafeFallback($query, $q);
+            $query->select('properties.*')
+                ->orderByDesc('properties.created_at')
+                ->orderByDesc('properties.id');
+
+            $paginator = $query->paginate($perPage);
+        }
 
         return response()->json([
             'data' => $paginator->getCollection()
@@ -645,20 +672,25 @@ class PropertyController extends Controller
     {
         $like = '%' . $this->escapeLikeTerm(mb_strtolower($term, 'UTF-8')) . '%';
         $isNumericId = ctype_digit($term);
+        $roomCount = $this->extractRoomSearchHint($term);
 
-        $query->where(function (Builder $searchQuery) use ($term, $like, $isNumericId, $includeCrmFields) {
+        $query->where(function (Builder $searchQuery) use ($term, $like, $isNumericId, $includeCrmFields, $roomCount) {
             if ($isNumericId) {
                 $searchQuery->orWhere('properties.id', (int) $term);
             }
 
-            foreach (['title', 'description', 'address', 'district', 'landmark'] as $column) {
+            if ($roomCount !== null && Schema::hasColumn('properties', 'rooms')) {
+                $searchQuery->orWhere('properties.rooms', $roomCount);
+            }
+
+            foreach ($this->propertySearchTextColumns() as $column) {
                 $searchQuery->orWhereRaw("LOWER(properties.{$column}) LIKE ? ESCAPE '\\'", [$like]);
             }
 
             if ($includeCrmFields) {
-                $searchQuery
-                    ->orWhereRaw("LOWER(properties.owner_name) LIKE ? ESCAPE '\\'", [$like])
-                    ->orWhereRaw("LOWER(properties.owner_phone) LIKE ? ESCAPE '\\'", [$like]);
+                foreach ($this->propertySearchCrmColumns() as $column) {
+                    $searchQuery->orWhereRaw("LOWER(properties.{$column}) LIKE ? ESCAPE '\\'", [$like]);
+                }
             }
 
             $searchQuery
@@ -694,40 +726,98 @@ class PropertyController extends Controller
 
         $lowerTerm = mb_strtolower($term, 'UTF-8');
         $like = '%' . $this->escapeLikeTerm($lowerTerm) . '%';
-        $bindings = [
-            ctype_digit($term) ? (int) $term : 0,
-            $lowerTerm,
-            $like,
-            $like,
-            $like,
-            $like,
-        ];
+        $cases = ['WHEN properties.id = ? THEN 1000'];
+        $bindings = [ctype_digit($term) ? (int) $term : 0];
 
-        $crmSql = '';
-        if ($includeCrmFields) {
-            $crmSql = "
-                WHEN LOWER(properties.owner_name) LIKE ? ESCAPE '\\' THEN 240
-                WHEN LOWER(properties.owner_phone) LIKE ? ESCAPE '\\' THEN 240
-            ";
-            $bindings[] = $like;
+        if (Schema::hasColumn('properties', 'title')) {
+            $cases[] = 'WHEN LOWER(properties.title) = ? THEN 800';
+            $bindings[] = $lowerTerm;
+            $cases[] = "WHEN LOWER(properties.title) LIKE ? ESCAPE '\\' THEN 700";
             $bindings[] = $like;
         }
+
+        foreach ([
+            'address' => 600,
+            'district' => 550,
+            'description' => 350,
+        ] as $column => $score) {
+            if (Schema::hasColumn('properties', $column)) {
+                $cases[] = "WHEN LOWER(properties.{$column}) LIKE ? ESCAPE '\\' THEN {$score}";
+                $bindings[] = $like;
+            }
+        }
+
+        if ($includeCrmFields) {
+            foreach ($this->propertySearchCrmColumns() as $column) {
+                $cases[] = "WHEN LOWER(properties.{$column}) LIKE ? ESCAPE '\\' THEN 240";
+                $bindings[] = $like;
+            }
+        }
+
+        $caseSql = implode("\n", $cases);
 
         $query
             ->orderByRaw("
                 CASE
-                    WHEN properties.id = ? THEN 1000
-                    WHEN LOWER(properties.title) = ? THEN 800
-                    WHEN LOWER(properties.title) LIKE ? ESCAPE '\\' THEN 700
-                    WHEN LOWER(properties.address) LIKE ? ESCAPE '\\' THEN 600
-                    WHEN LOWER(properties.district) LIKE ? ESCAPE '\\' THEN 550
-                    WHEN LOWER(properties.description) LIKE ? ESCAPE '\\' THEN 350
-                    {$crmSql}
+                    {$caseSql}
                     ELSE 100
                 END DESC
             ", $bindings)
             ->orderByDesc('properties.created_at')
             ->orderByDesc('properties.id');
+    }
+
+    private function applyPropertySearchSafeFallback(Builder $query, string $term): void
+    {
+        $term = trim($term);
+
+        if ($term === '') {
+            return;
+        }
+
+        $roomCount = $this->extractRoomSearchHint($term);
+        $isNumericId = ctype_digit($term);
+
+        if (! $isNumericId && $roomCount === null) {
+            return;
+        }
+
+        $query->where(function (Builder $fallbackQuery) use ($term, $roomCount, $isNumericId) {
+            if ($isNumericId) {
+                $fallbackQuery->orWhere('properties.id', (int) $term);
+            }
+
+            if ($roomCount !== null && Schema::hasColumn('properties', 'rooms')) {
+                $fallbackQuery->orWhere('properties.rooms', $roomCount);
+            }
+        });
+    }
+
+    private function propertySearchTextColumns(): array
+    {
+        return array_values(array_filter(
+            ['title', 'description', 'address', 'district', 'landmark'],
+            static fn (string $column): bool => Schema::hasColumn('properties', $column)
+        ));
+    }
+
+    private function propertySearchCrmColumns(): array
+    {
+        return array_values(array_filter(
+            ['owner_name', 'owner_phone'],
+            static fn (string $column): bool => Schema::hasColumn('properties', $column)
+        ));
+    }
+
+    private function extractRoomSearchHint(string $term): ?int
+    {
+        $normalized = mb_strtolower(trim($term), 'UTF-8');
+
+        if (preg_match('/\b([1-9])\s*[- ]?\s*(комн|комнат|room|rooms|кк|к)\b/u', $normalized, $matches) !== 1) {
+            return null;
+        }
+
+        return (int) $matches[1];
     }
 
     private function escapeLikeTerm(string $term): string
