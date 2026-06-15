@@ -25,7 +25,7 @@ class TelegramAuthService
         }
 
         if ($user->status !== User::STATUS_ACTIVE) {
-            throw new RuntimeException('Пользователь деактивирован');
+            throw new RuntimeException($user->isDeletedAccount() ? 'Account has been deleted' : 'Пользователь деактивирован');
         }
 
         $this->syncTelegramProfile($user, $data);
@@ -56,7 +56,7 @@ class TelegramAuthService
         }
 
         if ($user->status !== User::STATUS_ACTIVE) {
-            throw new RuntimeException('Пользователь деактивирован');
+            throw new RuntimeException($user->isDeletedAccount() ? 'Account has been deleted' : 'Пользователь деактивирован');
         }
 
         $this->syncTelegramProfile($user, $data);

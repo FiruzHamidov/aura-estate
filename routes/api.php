@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\AccountDeletionController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\B24AuthController;
 use App\Http\Controllers\BookingController;
@@ -123,6 +124,8 @@ Route::post('/agents/{agent}/reviews', [ReviewController::class, 'store'])->midd
 Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::get('/mobile/clients/filters', [ClientController::class, 'mobileFilters']);
 });
+
+Route::middleware('auth:sanctum')->post('/user/account-deletion', [AccountDeletionController::class, 'destroy']);
 
 // --- Новостройки (public index/show + ВЛОЖЕННЫЕ index/show) ---
 Route::scopeBindings()->group(function () {

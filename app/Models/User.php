@@ -21,7 +21,8 @@ class User extends Authenticatable
 
     protected $fillable = [
         'name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'password', 'photo', 'description', 'birthday',
-        'telegram_id', 'telegram_username', 'telegram_photo_url', 'telegram_chat_id', 'telegram_linked_at'
+        'telegram_id', 'telegram_username', 'telegram_photo_url', 'telegram_chat_id', 'telegram_linked_at',
+        'deleted_at', 'deletion_requested_at', 'deletion_reason', 'deleted_by_user_id', 'deletion_phone_hash',
     ];
 
     protected $hidden = [
@@ -32,6 +33,8 @@ class User extends Authenticatable
     protected $casts = [
         'birthday' => 'date',
         'telegram_linked_at' => 'datetime',
+        'deleted_at' => 'datetime',
+        'deletion_requested_at' => 'datetime',
     ];
 
     public function getStatusAttribute($value): string
@@ -39,6 +42,16 @@ class User extends Authenticatable
         return in_array($value, [self::STATUS_ACTIVE, self::STATUS_INACTIVE], true)
             ? $value
             : self::STATUS_ACTIVE;
+    }
+
+    public static function accountDeletionPhoneHash(string $phone): string
+    {
+        return hash('sha256', trim($phone));
+    }
+
+    public function isDeletedAccount(): bool
+    {
+        return $this->deleted_at !== null || $this->deletion_requested_at !== null;
     }
 
 

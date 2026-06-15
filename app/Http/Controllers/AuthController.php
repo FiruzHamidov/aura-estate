@@ -11,6 +11,7 @@ use App\Services\TelegramBotService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Schema;
 use RuntimeException;
 
 class AuthController extends Controller
@@ -22,6 +23,10 @@ class AuthController extends Controller
 
     private function createClientUserFromPhone(string $phone): ?User
     {
+        if ($this->deletedAccountForPhone($phone)) {
+            return null;
+        }
+
         $clientRole = $this->resolveClientRole();
 
         if (! $clientRole) {
@@ -55,6 +60,10 @@ class AuthController extends Controller
 
         if (! $clientRole) {
             return response()->json(['message' => 'Роль клиента не настроена в системе'], 500);
+        }
+
+        if ($this->deletedAccountForPhone($validated['phone'])) {
+            return response()->json(['message' => 'Account has been deleted'], 403);
         }
 
         $user = User::query()->create([
@@ -98,7 +107,37 @@ class AuthController extends Controller
             $user->tokens()->delete();
         }
 
-        return response()->json(['message' => 'Пользователь деактивирован'], 403);
+        return response()->json([
+            'message' => $user->isDeletedAccount() ? 'Account has been deleted' : 'Пользователь деактивирован',
+        ], 403);
+    }
+
+    private function findUserForPhoneLogin(string $phone): ?User
+    {
+        $user = User::query()
+            ->where('phone', $phone)
+            ->with('role')
+            ->first();
+
+        if ($user || ! Schema::hasColumn('users', 'deletion_phone_hash')) {
+            return $user;
+        }
+
+        return User::query()
+            ->where('deletion_phone_hash', User::accountDeletionPhoneHash($phone))
+            ->with('role')
+            ->first();
+    }
+
+    private function deletedAccountForPhone(string $phone): ?User
+    {
+        if (! Schema::hasColumn('users', 'deletion_phone_hash')) {
+            return null;
+        }
+
+        return User::query()
+            ->where('deletion_phone_hash', User::accountDeletionPhoneHash($phone))
+            ->first();
     }
 
     private function issueApiToken(User $user, string $tokenName = 'api-token'): string
@@ -129,7 +168,7 @@ class AuthController extends Controller
             'phone' => 'required|string',
         ]);
 
-        $user = User::where('phone', $request->phone)->first();
+        $user = $this->findUserForPhoneLogin($request->phone);
 
         if (!$user) {
             return response()->json(['message' => 'Пользователь не найден'], 404);
@@ -152,7 +191,7 @@ class AuthController extends Controller
             'phone' => 'required|string'
         ]);
 
-        $user = User::where('phone', $request->phone)->first();
+        $user = $this->findUserForPhoneLogin($request->phone);
 
         if ($user && ($inactiveResponse = $this->ensureUserIsActive($user))) {
             return $inactiveResponse;
@@ -176,7 +215,7 @@ class AuthController extends Controller
             'channel' => 'required|string|in:sms,telegram',
         ]);
 
-        $user = User::where('phone', $validated['phone'])->first();
+        $user = $this->findUserForPhoneLogin($validated['phone']);
 
         if (! $user) {
             return response()->json(['message' => 'Пользователь не найден'], 404);
@@ -226,7 +265,7 @@ class AuthController extends Controller
             'new_password' => 'required|string|min:6|confirmed',
         ]);
 
-        $user = User::where('phone', $validated['phone'])->first();
+        $user = $this->findUserForPhoneLogin($validated['phone']);
 
         if (! $user) {
             return response()->json(['message' => 'Пользователь не найден'], 404);
@@ -268,7 +307,7 @@ class AuthController extends Controller
         ]);
 
         if ($smsAuthService->verifyCode($request->phone, $request->code)) {
-            $user = User::where('phone', $request->phone)->with('role')->first();
+            $user = $this->findUserForPhoneLogin($request->phone);
 
             if (! $user) {
                 $user = $this->createClientUserFromPhone($request->phone);
@@ -304,7 +343,7 @@ class AuthController extends Controller
             'app_version' => 'nullable|string|max:50',
         ]);
 
-        $user = User::where('phone', $request->phone)->with('role')->first();
+        $user = $this->findUserForPhoneLogin($request->phone);
 
         if (!$user) {
             return response()->json(['message' => 'Пользователь не найден'], 404);

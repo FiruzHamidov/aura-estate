@@ -18,7 +18,9 @@ class EnsureUserIsActive
             }
 
             return response()->json([
-                'message' => 'Аккаунт деактивирован. Доступ запрещён.',
+                'message' => method_exists($user, 'isDeletedAccount') && $user->isDeletedAccount()
+                    ? 'Account has been deleted'
+                    : 'Аккаунт деактивирован. Доступ запрещён.',
             ], 403);
         }
 
