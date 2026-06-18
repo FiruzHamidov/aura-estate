@@ -47,6 +47,9 @@ class Property extends Model
         'longitude',
         'created_by',
         'agent_id',
+        'external_agent_id',
+        'external_property_request_id',
+        'source_type',
         'branch_id',
         'branch_group_id',
         'district',
@@ -141,6 +144,16 @@ class Property extends Model
     public function agent()
     {
         return $this->belongsTo(User::class, 'agent_id');
+    }
+
+    public function externalAgent()
+    {
+        return $this->belongsTo(User::class, 'external_agent_id');
+    }
+
+    public function externalPropertyRequest()
+    {
+        return $this->belongsTo(ExternalPropertyRequest::class, 'external_property_request_id');
     }
 
     public function ownerClient()

@@ -13,7 +13,7 @@ class EnsureUserIsNotClient
         $user = $request->user();
         $user?->loadMissing('role');
 
-        if ($user?->role?->slug === 'client') {
+        if (in_array($user?->role?->slug, ['client', 'external_agent'], true)) {
             return response()->json([
                 'message' => 'Forbidden',
             ], 403);

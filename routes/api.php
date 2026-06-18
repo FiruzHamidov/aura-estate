@@ -30,6 +30,7 @@ use App\Http\Controllers\DailyReportController;
 use App\Http\Controllers\DeveloperController;
 use App\Http\Controllers\DeveloperUnitController;
 use App\Http\Controllers\DeveloperUnitPhotoController;
+use App\Http\Controllers\ExternalPropertyRequestController;
 use App\Http\Controllers\FavoriteController;
 use App\Http\Controllers\FeatureController;
 use App\Http\Controllers\HeatingTypeController;
@@ -123,6 +124,32 @@ Route::post('/agents/{agent}/reviews', [ReviewController::class, 'store'])->midd
 
 Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::get('/mobile/clients/filters', [ClientController::class, 'mobileFilters']);
+
+    Route::prefix('external/property-requests')->group(function () {
+        Route::get('/', [ExternalPropertyRequestController::class, 'myIndex']);
+        Route::post('/', [ExternalPropertyRequestController::class, 'myStore'])->middleware('throttle:30,60');
+        Route::get('/stats', [ExternalPropertyRequestController::class, 'myStats']);
+        Route::get('/{externalPropertyRequest}', [ExternalPropertyRequestController::class, 'myShow'])->whereNumber('externalPropertyRequest');
+        Route::patch('/{externalPropertyRequest}', [ExternalPropertyRequestController::class, 'myUpdate'])->whereNumber('externalPropertyRequest');
+        Route::post('/{externalPropertyRequest}/submit', [ExternalPropertyRequestController::class, 'mySubmit'])->whereNumber('externalPropertyRequest');
+        Route::post('/{externalPropertyRequest}/photos', [ExternalPropertyRequestController::class, 'myStorePhoto'])
+            ->middleware('throttle:60,60')
+            ->whereNumber('externalPropertyRequest');
+        Route::delete('/{externalPropertyRequest}/photos/{photo}', [ExternalPropertyRequestController::class, 'myDestroyPhoto'])
+            ->whereNumber('externalPropertyRequest')
+            ->whereNumber('photo');
+    });
+
+    Route::prefix('external-agent-requests')->group(function () {
+        Route::get('/', [ExternalPropertyRequestController::class, 'internalIndex']);
+        Route::get('/stats', [ExternalPropertyRequestController::class, 'internalStats']);
+        Route::get('/leaderboard', [ExternalPropertyRequestController::class, 'internalLeaderboard']);
+        Route::get('/{externalPropertyRequest}', [ExternalPropertyRequestController::class, 'internalShow'])->whereNumber('externalPropertyRequest');
+        Route::patch('/{externalPropertyRequest}/assign', [ExternalPropertyRequestController::class, 'assign'])->whereNumber('externalPropertyRequest');
+        Route::patch('/{externalPropertyRequest}/status', [ExternalPropertyRequestController::class, 'changeStatus'])->whereNumber('externalPropertyRequest');
+        Route::get('/{externalPropertyRequest}/prefill', [ExternalPropertyRequestController::class, 'prefill'])->whereNumber('externalPropertyRequest');
+        Route::post('/{externalPropertyRequest}/convert', [ExternalPropertyRequestController::class, 'convert'])->whereNumber('externalPropertyRequest');
+    });
 });
 
 Route::middleware('auth:sanctum')->post('/user/account-deletion', [AccountDeletionController::class, 'destroy']);

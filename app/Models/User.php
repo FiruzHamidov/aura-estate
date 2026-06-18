@@ -129,6 +129,21 @@ class User extends Authenticatable
             ]);
     }
 
+    public function externalPropertyRequests(): HasMany
+    {
+        return $this->hasMany(ExternalPropertyRequest::class, 'external_agent_id');
+    }
+
+    public function assignedExternalPropertyRequests(): HasMany
+    {
+        return $this->hasMany(ExternalPropertyRequest::class, 'assigned_agent_id');
+    }
+
+    public function externalSourcedProperties(): HasMany
+    {
+        return $this->hasMany(Property::class, 'external_agent_id');
+    }
+
     public function reviewsReceived(): MorphMany
     {
         return $this->morphMany(Review::class, 'reviewable');

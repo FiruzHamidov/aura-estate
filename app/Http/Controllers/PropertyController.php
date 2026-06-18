@@ -183,6 +183,7 @@ class PropertyController extends Controller
     private function serializePropertyShow(Property $property, bool $includeAuthContacts): array
     {
         if ($includeAuthContacts) {
+            $property->loadMissing(['externalAgent', 'externalPropertyRequest']);
             $property->makeVisible([
                 'owner_client_id',
                 'owner_name',
@@ -211,6 +212,15 @@ class PropertyController extends Controller
         if ($includeAuthContacts) {
             $payload['ownerClient'] = $payload['owner_client'] ?? null;
             $payload['buyerClient'] = $payload['buyer_client'] ?? null;
+            $payload['external_source'] = $property->external_agent_id ? [
+                'source_type' => $property->source_type,
+                'external_agent_id' => $property->external_agent_id,
+                'external_agent_name' => $property->externalAgent?->name,
+                'external_property_request_id' => $property->external_property_request_id,
+                'external_property_request_status' => $property->externalPropertyRequest?->status,
+                'external_property_request_display_status' => $property->externalPropertyRequest?->display_status,
+                'submitted_at' => $property->externalPropertyRequest?->submitted_at?->toJSON(),
+            ] : null;
         }
 
         return $payload;
@@ -1077,6 +1087,27 @@ class PropertyController extends Controller
 
             if (!empty($branchGroupIds)) {
                 $this->applyBranchGroupFilter($query, $branchGroupIds);
+            }
+        }
+
+        if ($request->filled('source_type') && Schema::hasColumn('properties', 'source_type')) {
+            $sourceTypes = array_values(array_intersect(
+                $toArray($request->input('source_type')),
+                ['external_agent']
+            ));
+
+            if (!empty($sourceTypes)) {
+                $query->whereIn('source_type', $sourceTypes);
+            }
+        }
+
+        if ($request->filled('external_agent_id') && Schema::hasColumn('properties', 'external_agent_id')) {
+            $externalAgentIds = array_values(array_filter(
+                array_map('intval', $toArray($request->input('external_agent_id')))
+            ));
+
+            if (!empty($externalAgentIds)) {
+                $query->whereIn('external_agent_id', $externalAgentIds);
             }
         }
 
