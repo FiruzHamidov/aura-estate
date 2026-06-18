@@ -59,17 +59,21 @@ return new class extends Migration
 
         Schema::create('external_property_request_photos', function (Blueprint $table) {
             $table->id();
-            $table->foreignId('external_property_request_id')->constrained('external_property_requests')->cascadeOnDelete();
+            $table->foreignId('external_property_request_id');
             $table->string('file_path');
             $table->unsignedInteger('position')->default(0);
             $table->timestamps();
 
-            $table->index(['external_property_request_id', 'position']);
+            $table->foreign('external_property_request_id', 'epr_photos_request_fk')
+                ->references('id')
+                ->on('external_property_requests')
+                ->cascadeOnDelete();
+            $table->index(['external_property_request_id', 'position'], 'epr_photos_request_position_idx');
         });
 
         Schema::create('external_property_request_logs', function (Blueprint $table) {
             $table->id();
-            $table->foreignId('external_property_request_id')->constrained('external_property_requests')->cascadeOnDelete();
+            $table->foreignId('external_property_request_id');
             $table->foreignId('actor_id')->nullable()->constrained('users')->nullOnDelete();
             $table->string('action', 80);
             $table->string('from_status', 40)->nullable();
@@ -78,6 +82,10 @@ return new class extends Migration
             $table->json('payload')->nullable();
             $table->timestamp('created_at')->useCurrent();
 
+            $table->foreign('external_property_request_id', 'epr_logs_request_fk')
+                ->references('id')
+                ->on('external_property_requests')
+                ->cascadeOnDelete();
             $table->index(['external_property_request_id', 'created_at'], 'external_request_logs_request_created_idx');
         });
     }
