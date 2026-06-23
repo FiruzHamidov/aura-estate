@@ -9,6 +9,7 @@ use App\Models\Deal;
 use App\Models\DealPipeline;
 use App\Models\DealStage;
 use App\Models\Lead;
+use App\Models\Property;
 use App\Models\Role;
 use App\Models\Setting;
 use App\Models\User;
@@ -93,6 +94,15 @@ class DealBoardFeatureTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('client_collaborators', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('client_id');
+            $table->unsignedBigInteger('user_id');
+            $table->string('role', 32)->default(Client::COLLABORATOR_ROLE_VIEWER);
+            $table->unsignedBigInteger('granted_by')->nullable();
+            $table->timestamps();
+        });
+
         Schema::create('leads', function (Blueprint $table) {
             $table->id();
             $table->string('full_name')->nullable();
@@ -129,6 +139,16 @@ class DealBoardFeatureTest extends TestCase
             $table->unsignedBigInteger('agent_id')->nullable();
             $table->unsignedBigInteger('owner_client_id')->nullable();
             $table->unsignedBigInteger('buyer_client_id')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('property_logs', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('property_id');
+            $table->unsignedBigInteger('user_id')->nullable();
+            $table->string('action');
+            $table->json('changes')->nullable();
+            $table->text('comment')->nullable();
             $table->timestamps();
         });
 
@@ -367,6 +387,61 @@ class DealBoardFeatureTest extends TestCase
             ->assertOk()
             ->assertJsonFragment(['id' => $foreignSameBranchDeal->id])
             ->assertJsonMissing(['title' => $foreignBranchDeal->title]);
+    }
+
+    public function test_agent_cannot_create_deal_for_another_agents_property(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $agentA = $this->createUser($agentRole, $branchA, 'Agent A');
+        $agentB = $this->createUser($agentRole, $branchA, 'Agent B');
+        $agentC = $this->createUser($agentRole, $branchB, 'Agent C');
+
+        [$pipelineA, $newStageA] = $this->createPipelineWithStages($branchA);
+
+        $ownProperty = Property::create([
+            'title' => 'Own Property',
+            'created_by' => $agentA->id,
+            'agent_id' => $agentA->id,
+        ]);
+        $sameBranchForeignProperty = Property::create([
+            'title' => 'Same Branch Foreign Property',
+            'created_by' => $agentB->id,
+            'agent_id' => $agentB->id,
+        ]);
+        $otherBranchForeignProperty = Property::create([
+            'title' => 'Other Branch Foreign Property',
+            'created_by' => $agentC->id,
+            'agent_id' => $agentC->id,
+        ]);
+
+        Sanctum::actingAs($agentA);
+
+        $this->postJson('/api/deals', [
+            'title' => 'Own Property Deal',
+            'pipeline_id' => $pipelineA->id,
+            'stage_id' => $newStageA->id,
+            'primary_property_id' => $ownProperty->id,
+        ])->assertCreated()
+            ->assertJsonPath('primary_property_id', $ownProperty->id);
+
+        $this->postJson('/api/deals', [
+            'title' => 'Same Branch Foreign Property Deal',
+            'pipeline_id' => $pipelineA->id,
+            'stage_id' => $newStageA->id,
+            'primary_property_id' => $sameBranchForeignProperty->id,
+        ])->assertForbidden();
+
+        $this->postJson('/api/deals', [
+            'title' => 'Other Branch Foreign Property Deal',
+            'pipeline_id' => $pipelineA->id,
+            'stage_id' => $newStageA->id,
+            'primary_property_id' => $otherBranchForeignProperty->id,
+        ])->assertForbidden();
+
+        $this->assertSame(1, Deal::query()->count());
     }
 
     public function test_hr_sees_only_hr_pipeline_and_can_work_with_hr_cards(): void

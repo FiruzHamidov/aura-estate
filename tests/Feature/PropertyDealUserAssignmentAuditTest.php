@@ -342,6 +342,84 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
         $this->assertTrue(true);
     }
 
+    public function test_agent_cannot_deposit_or_sell_another_agents_property(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $agentA = $this->makeUser($agentRole, $branchA->id, 'agent-a');
+        $agentB = $this->makeUser($agentRole, $branchA->id, 'agent-b');
+        $agentC = $this->makeUser($agentRole, $branchB->id, 'agent-c');
+
+        $type = PropertyType::create(['name' => 'Apartment']);
+        $status = PropertyStatus::create(['name' => 'New']);
+
+        Property::unsetEventDispatcher();
+
+        $sameBranchProperty = $this->makeProperty($agentB, $type, $status);
+        $otherBranchProperty = $this->makeProperty($agentC, $type, $status);
+
+        Sanctum::actingAs($agentA);
+
+        foreach ([$sameBranchProperty, $otherBranchProperty] as $property) {
+            $this->postJson("/api/properties/{$property->id}/deal", $this->depositPayload())
+                ->assertForbidden();
+
+            $this->assertSame('approved', $property->fresh()->moderation_status);
+            $this->assertNull($property->fresh()->deposit_user_id);
+
+            $this->postJson("/api/properties/{$property->id}/deal", $this->salePayload())
+                ->assertForbidden();
+
+            $this->assertSame('approved', $property->fresh()->moderation_status);
+            $this->assertNull($property->fresh()->sale_user_id);
+            $this->assertNull($property->fresh()->sold_at);
+        }
+    }
+
+    public function test_agent_cannot_assign_deposit_or_sale_to_another_user(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $agentA = $this->makeUser($agentRole, $branchA->id, 'agent-a');
+        $agentB = $this->makeUser($agentRole, $branchA->id, 'agent-b');
+        $agentC = $this->makeUser($agentRole, $branchB->id, 'agent-c');
+
+        $type = PropertyType::create(['name' => 'Apartment']);
+        $status = PropertyStatus::create(['name' => 'New']);
+
+        Property::unsetEventDispatcher();
+
+        $property = $this->makeProperty($agentA, $type, $status);
+
+        Sanctum::actingAs($agentA);
+
+        $this->postJson("/api/properties/{$property->id}/deal", $this->depositPayload([
+            'deposit_user_id' => $agentB->id,
+        ]))->assertForbidden();
+
+        $this->postJson("/api/properties/{$property->id}/deal", $this->salePayload([
+            'sale_user_id' => $agentC->id,
+        ]))->assertForbidden();
+
+        $this->postJson("/api/properties/{$property->id}/deal", $this->salePayload([
+            'agents' => [
+                ['agent_id' => $agentB->id, 'role' => 'partner'],
+            ],
+        ]))->assertForbidden();
+
+        $property->refresh();
+        $this->assertSame('approved', $property->moderation_status);
+        $this->assertNull($property->deposit_user_id);
+        $this->assertNull($property->sale_user_id);
+        $this->assertNull($property->sold_at);
+    }
+
     private function runCase(string $key, string $method, string $url, array $body, int $propertyId): array
     {
         $response = $this->{$method}($url, $body);
@@ -380,5 +458,47 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
             'status' => 'active',
             'auth_method' => 'password',
         ]);
+    }
+
+    private function makeProperty(User $agent, PropertyType $type, PropertyStatus $status): Property
+    {
+        return Property::create([
+            'title' => 'Scoped Property '.$agent->id,
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 100000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'moderation_status' => 'approved',
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+        ]);
+    }
+
+    private function depositPayload(array $overrides = []): array
+    {
+        return array_merge([
+            'moderation_status' => 'deposit',
+            'buyer_full_name' => 'Buyer One',
+            'buyer_phone' => '900000111',
+            'deposit_amount' => 1000,
+            'deposit_currency' => 'USD',
+            'deposit_received_at' => '2026-05-01',
+            'planned_contract_signed_at' => '2026-05-15',
+            'company_expected_income' => 200,
+            'company_expected_income_currency' => 'USD',
+            'money_holder' => 'company',
+        ], $overrides);
+    }
+
+    private function salePayload(array $overrides = []): array
+    {
+        return array_merge([
+            'moderation_status' => 'sold',
+            'actual_sale_price' => 120000,
+            'actual_sale_currency' => 'USD',
+            'company_commission_amount' => 3000,
+            'company_commission_currency' => 'USD',
+        ], $overrides);
     }
 }

@@ -215,15 +215,104 @@ class DealController extends Controller
         return $lead;
     }
 
-    private function resolveProperty(?int $propertyId): ?Property
+    private function resolveVisibleProperty(User $authUser, ?int $propertyId): ?Property
     {
         if (! $propertyId) {
             return null;
         }
 
-        return Property::query()
+        $property = Property::query()
             ->with(['ownerClient.type', 'logs.user'])
             ->findOrFail($propertyId);
+
+        $this->ensurePropertyUsable($authUser, $property);
+
+        return $property;
+    }
+
+    private function ensurePropertyUsable(User $authUser, Property $property): void
+    {
+        $roleSlug = $this->dealAccess->roleSlug($authUser);
+
+        if ($this->dealAccess->isPrivilegedRole($roleSlug)) {
+            return;
+        }
+
+        if (in_array($roleSlug, ['agent', 'intern'], true)) {
+            abort_unless(
+                (int) $property->created_by === (int) $authUser->id
+                    || (int) $property->agent_id === (int) $authUser->id,
+                403,
+                'Property is outside your scope.'
+            );
+
+            return;
+        }
+
+        if ($roleSlug === 'mop') {
+            abort_unless(
+                ! empty($authUser->branch_group_id)
+                    && $this->resolvePropertyBranchGroupId($property) === (int) $authUser->branch_group_id,
+                403,
+                'Property is outside your branch group.'
+            );
+
+            return;
+        }
+
+        if (in_array($roleSlug, ['branch_director', 'rop', 'manager', 'operator'], true)) {
+            abort_unless(
+                ! empty($authUser->branch_id)
+                    && $this->resolvePropertyBranchId($property) === (int) $authUser->branch_id,
+                403,
+                'Property is outside your branch.'
+            );
+
+            return;
+        }
+
+        abort(403, 'Property is outside your scope.');
+    }
+
+    private function resolvePropertyBranchId(Property $property): ?int
+    {
+        if (Schema::hasColumn('properties', 'branch_id')) {
+            $branchId = $property->getAttributes()['branch_id'] ?? null;
+
+            if ($branchId !== null && $branchId !== '') {
+                return (int) $branchId;
+            }
+        }
+
+        $property->loadMissing(['agent', 'creator']);
+
+        return $this->normalizeScopeId($property->agent?->branch_id)
+            ?? $this->normalizeScopeId($property->creator?->branch_id);
+    }
+
+    private function resolvePropertyBranchGroupId(Property $property): ?int
+    {
+        if (Schema::hasColumn('properties', 'branch_group_id')) {
+            $branchGroupId = $property->getAttributes()['branch_group_id'] ?? null;
+
+            if ($branchGroupId !== null && $branchGroupId !== '') {
+                return (int) $branchGroupId;
+            }
+        }
+
+        $property->loadMissing(['agent', 'creator']);
+
+        return $this->normalizeScopeId($property->agent?->branch_group_id)
+            ?? $this->normalizeScopeId($property->creator?->branch_group_id);
+    }
+
+    private function normalizeScopeId(mixed $value): ?int
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        return (int) $value;
     }
 
     private function normalizeInput(array $data, ?Client $client, ?Lead $lead, ?Property $property): array
@@ -550,7 +639,7 @@ class DealController extends Controller
         $data = $this->validatePayload($request);
         $client = $this->resolveVisibleClient($authUser, $data['client_id'] ?? null);
         $lead = $this->resolveVisibleLead($authUser, $data['lead_id'] ?? null);
-        $property = $this->resolveProperty($data['primary_property_id'] ?? null);
+        $property = $this->resolveVisibleProperty($authUser, $data['primary_property_id'] ?? null);
         $data = $this->normalizeInput($data, $client, $lead, $property);
         if ($lead) {
             $data = $this->inheritLeadFields($data, $lead);
@@ -644,7 +733,7 @@ class DealController extends Controller
         $data = $this->validatePayload($request, $deal);
         $client = $this->resolveVisibleClient($authUser, $data['client_id'] ?? $deal->client_id);
         $lead = $this->resolveVisibleLead($authUser, $data['lead_id'] ?? $deal->lead_id);
-        $property = $this->resolveProperty($data['primary_property_id'] ?? $deal->primary_property_id);
+        $property = $this->resolveVisibleProperty($authUser, $data['primary_property_id'] ?? $deal->primary_property_id);
         $data = $this->normalizeInput($data, $client, $lead, $property);
         $data = $this->dealAccess->normalizeMutationData($data, $authUser);
         $data['updated_by'] = $authUser->id;

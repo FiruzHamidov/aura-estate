@@ -318,6 +318,7 @@ class UserAccessTest extends TestCase
         $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
         $directorRole = Role::create(['name' => 'Director', 'slug' => 'branch_director']);
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $externalAgentRole = Role::create(['name' => 'External Agent', 'slug' => 'external_agent']);
 
         $rop = User::create([
             'name' => 'ROP A',
@@ -345,6 +346,17 @@ class UserAccessTest extends TestCase
         ]);
 
         $response->assertCreated();
+        $response->assertJsonPath('branch_id', $branchA->id);
+
+        $response = $this->postJson('/api/user', [
+            'name' => 'External Agent A',
+            'phone' => '900000123',
+            'role_id' => $externalAgentRole->id,
+            'branch_id' => $branchB->id,
+        ]);
+
+        $response->assertCreated();
+        $response->assertJsonPath('role.slug', 'external_agent');
         $response->assertJsonPath('branch_id', $branchA->id);
     }
 
@@ -668,6 +680,7 @@ class UserAccessTest extends TestCase
 
         $hrRole = Role::create(['name' => 'HR', 'slug' => 'hr']);
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $externalAgentRole = Role::create(['name' => 'External Agent', 'slug' => 'external_agent']);
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
         $superadminRole = Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']);
 
@@ -705,6 +718,15 @@ class UserAccessTest extends TestCase
             'role_id' => $agentRole->id,
             'branch_id' => $branchB->id,
         ])->assertCreated()
+            ->assertJsonPath('branch_id', $branchB->id);
+
+        $this->postJson('/api/user', [
+            'name' => 'HR Created External Agent',
+            'phone' => '900000159',
+            'role_id' => $externalAgentRole->id,
+            'branch_id' => $branchB->id,
+        ])->assertCreated()
+            ->assertJsonPath('role.slug', 'external_agent')
             ->assertJsonPath('branch_id', $branchB->id);
 
         $this->postJson('/api/user', [

@@ -51,7 +51,7 @@ class UserController extends Controller
 
     private function isBranchScopedRole(?string $roleSlug): bool
     {
-        return in_array($roleSlug, ['branch_director', 'rop', 'mop', 'agent', 'manager', 'operator', 'intern'], true);
+        return in_array($roleSlug, ['branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern'], true);
     }
 
     private function isBranchGroupScopedRole(?string $roleSlug): bool
@@ -212,10 +212,10 @@ class UserController extends Controller
     {
         return match ($this->roleSlug($authUser)) {
             'superadmin', 'admin' => null,
-            'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'manager', 'operator', 'intern', 'client'],
-            'hr' => ['hr', 'marketing', 'branch_director', 'rop', 'mop', 'agent', 'manager', 'operator', 'intern', 'client', 'reels_manager'],
-            'rop' => ['mop', 'agent', 'manager', 'operator', 'intern', 'client'],
-            'branch_director' => ['mop', 'agent', 'manager', 'operator', 'intern', 'client'],
+            'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
+            'hr' => ['hr', 'marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client', 'reels_manager'],
+            'rop' => ['mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
+            'branch_director' => ['mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
             default => [],
         };
     }
