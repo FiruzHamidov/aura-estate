@@ -57,7 +57,7 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->string('title')->nullable();
             $table->text('description')->nullable();
             $table->unsignedBigInteger('type_id');
-            $table->unsignedBigInteger('status_id');
+            $table->unsignedBigInteger('status_id')->nullable();
             $table->unsignedBigInteger('location_id')->nullable();
             $table->unsignedBigInteger('repair_type_id')->nullable();
             $table->decimal('price', 15, 2);
@@ -171,6 +171,40 @@ class PropertyConstructionFieldsTest extends TestCase
         $response->assertOk();
         $response->assertJsonPath('construction_status', 'commissioned');
         $response->assertJsonPath('renovation_permission_status', 'allowed');
+    }
+
+    public function test_property_store_accepts_missing_status_id(): void
+    {
+        $agentRole = Role::create([
+            'name' => 'Agent',
+            'slug' => 'agent',
+        ]);
+
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000002',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+
+        Sanctum::actingAs($user);
+
+        $response = $this->postJson('/api/properties', [
+            'type_id' => $type->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ]);
+
+        $response->assertOk();
+        $response->assertJsonPath('status_id', null);
+        $this->assertDatabaseHas('properties', [
+            'id' => $response->json('id'),
+            'status_id' => null,
+        ]);
     }
 
     public function test_property_store_does_not_flag_duplicate_by_phone_only(): void
