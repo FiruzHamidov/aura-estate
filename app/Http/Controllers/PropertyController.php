@@ -1885,7 +1885,7 @@ class PropertyController extends Controller
             'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,deposit,sold,rented,sold_by_owner,denied',
             'contract_type_id' => 'nullable|exists:contract_types,id',
             'type_id' => 'required|exists:property_types,id',
-            'status_id' => 'required|exists:property_statuses,id',
+            'status_id' => 'nullable|exists:property_statuses,id',
             'location_id' => 'nullable|exists:locations,id',
             'repair_type_id' => 'nullable|exists:repair_types,id',
             'price' => 'required|numeric',
