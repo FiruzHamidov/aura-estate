@@ -81,7 +81,15 @@ return Application::configure(basePath: dirname(__DIR__))
             }
 
             return response()->json([
-                'code' => $status === 500 ? 'INTERNAL_ERROR' : 'REQUEST_FAILED',
+                'code' => match ($status) {
+                    401 => 'UNAUTHENTICATED',
+                    403 => 'FORBIDDEN',
+                    404 => 'NOT_FOUND',
+                    409 => 'CONFLICT',
+                    422 => 'VALIDATION_ERROR',
+                    500 => 'INTERNAL_ERROR',
+                    default => 'REQUEST_FAILED',
+                },
                 'message' => $status === 500 ? 'Server Error.' : ($e->getMessage() ?: 'Request failed.'),
                 'details' => (object) [],
                 'trace_id' => $request->attributes->get('trace_id'),

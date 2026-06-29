@@ -180,49 +180,39 @@ class PropertyController extends Controller
         return $user;
     }
 
-    private function canAssignDealUser(User $actor, User $target): bool
+    private function canAssignDealUser(User $actor): bool
     {
-        if ($actor->hasRole('admin') || $actor->hasRole('superadmin')) {
-            return true;
-        }
-
-        if ($actor->hasRole('agent') || $actor->hasRole('intern')) {
-            return (int) $target->id === (int) $actor->id;
-        }
-
-        if ($actor->hasRole('mop')) {
-            return !empty($actor->branch_group_id)
-                && !empty($target->branch_group_id)
-                && (int) $target->branch_group_id === (int) $actor->branch_group_id;
-        }
-
-        if ($actor->hasRole('rop') || $actor->hasRole('branch_director') || $actor->hasRole('manager') || $actor->hasRole('operator')) {
-            return !empty($actor->branch_id)
-                && !empty($target->branch_id)
-                && (int) $target->branch_id === (int) $actor->branch_id;
-        }
-
-        return false;
+        return $actor->hasRole('admin')
+            || $actor->hasRole('superadmin')
+            || $actor->hasRole('agent')
+            || $actor->hasRole('intern')
+            || $actor->hasRole('mop')
+            || $actor->hasRole('rop')
+            || $actor->hasRole('branch_director')
+            || $actor->hasRole('manager')
+            || $actor->hasRole('operator');
     }
 
-    private function ensureDealAssignmentUsersInScope(User $actor, array $data): void
+    private function ensureDealAssignmentUsersInScope(User $actor, array $data, ?Property $property = null): void
     {
         $fields = [
-            'deposit_user_id' => 'deposit_user_id',
-            'sale_user_id' => 'sale_user_id',
+            'deposit_user_id' => 'Недостаточно прав, чтобы указать сотрудника как принявшего депозит.',
+            'sale_user_id' => 'Недостаточно прав, чтобы указать продавца сделки.',
         ];
 
-        foreach ($fields as $field => $label) {
+        foreach ($fields as $field => $message) {
             if (empty($data[$field])) {
                 continue;
             }
 
-            $target = User::query()->with('role')->findOrFail($data[$field]);
+            if ($property && (int) $property->{$field} === (int) $data[$field]) {
+                continue;
+            }
 
             abort_unless(
-                $this->canAssignDealUser($actor, $target),
+                $this->canAssignDealUser($actor),
                 403,
-                "{$label} is outside your scope."
+                $message
             );
         }
 
@@ -231,12 +221,10 @@ class PropertyController extends Controller
                 continue;
             }
 
-            $target = User::query()->with('role')->findOrFail($agent['agent_id']);
-
             abort_unless(
-                $this->canAssignDealUser($actor, $target),
+                $this->canAssignDealUser($actor),
                 403,
-                "agents.{$index}.agent_id is outside your scope."
+                "Недостаточно прав, чтобы добавить соисполнителя #".($index + 1)."."
             );
         }
     }
@@ -1783,7 +1771,7 @@ class PropertyController extends Controller
         Property $property
     ) {
         $user = $this->authorizePropertyMutation($property);
-        $this->ensureDealAssignmentUsersInScope($user, $request->validated());
+        $this->ensureDealAssignmentUsersInScope($user, $request->validated(), $property);
         $isDepositStatus = $request->moderation_status === 'deposit';
         $isSaleStatus = in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true);
 
@@ -2404,7 +2392,7 @@ class PropertyController extends Controller
         Property                $property
     ) {
         $user = $this->authorizePropertyMutation($property);
-        $this->ensureDealAssignmentUsersInScope($user, $request->validated());
+        $this->ensureDealAssignmentUsersInScope($user, $request->validated(), $property);
         $isDepositStatus = $request->moderation_status === 'deposit';
         $isSaleStatus = in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true);
 

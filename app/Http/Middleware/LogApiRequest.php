@@ -210,7 +210,7 @@ class LogApiRequest
         }
 
         if ($e) {
-            return $statusCode === 500 ? 'INTERNAL_ERROR' : 'REQUEST_FAILED';
+            return $this->defaultErrorCode($statusCode);
         }
 
         if (! $statusCode || $statusCode < 400) {
@@ -221,7 +221,20 @@ class LogApiRequest
 
         return isset($payload['code']) && is_string($payload['code'])
             ? $this->truncate($payload['code'])
-            : ($statusCode === 500 ? 'INTERNAL_ERROR' : 'REQUEST_FAILED');
+            : $this->defaultErrorCode($statusCode);
+    }
+
+    private function defaultErrorCode(?int $statusCode): string
+    {
+        return match ($statusCode) {
+            401 => 'UNAUTHENTICATED',
+            403 => 'FORBIDDEN',
+            404 => 'NOT_FOUND',
+            409 => 'CONFLICT',
+            422 => 'VALIDATION_ERROR',
+            500 => 'INTERNAL_ERROR',
+            default => 'REQUEST_FAILED',
+        };
     }
 
     private function errorMessage(?Throwable $e, ?int $statusCode, ?Response $response = null): ?string
