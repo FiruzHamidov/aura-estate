@@ -420,7 +420,7 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
         $this->assertTrue($property->saleAgents()->where('users.id', $agentB->id)->exists());
     }
 
-    public function test_agent_can_assign_deposit_sale_and_shared_agent_to_other_branch_user(): void
+    public function test_agent_cannot_assign_deposit_sale_or_shared_agent_to_other_branch_user(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
         $branchB = Branch::create(['name' => 'Branch B']);
@@ -441,25 +441,31 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
 
         $this->postJson("/api/properties/{$property->id}/deal", $this->depositPayload([
             'deposit_user_id' => $agentB->id,
-        ]))->assertOk();
+        ]))->assertForbidden();
+
+        $property->refresh();
+        $this->assertSame('approved', $property->moderation_status);
+        $this->assertNull($property->deposit_user_id);
 
         $this->postJson("/api/properties/{$property->id}/deal", $this->salePayload([
             'sale_user_id' => $agentB->id,
-        ]))->assertOk();
+        ]))->assertForbidden();
+
+        $property->refresh();
+        $this->assertSame('approved', $property->moderation_status);
+        $this->assertNull($property->sale_user_id);
+        $this->assertNull($property->sold_at);
 
         $this->postJson("/api/properties/{$property->id}/deal", $this->salePayload([
-            'sale_user_id' => $agentB->id,
+            'sale_user_id' => $agentA->id,
             'agents' => [
                 ['agent_id' => $agentB->id, 'role' => 'partner'],
             ],
-        ]))->assertOk();
+        ]))->assertForbidden();
 
         $property->refresh();
-        $this->assertSame('sold', $property->moderation_status);
-        $this->assertSame($agentB->id, $property->deposit_user_id);
-        $this->assertSame($agentB->id, $property->sale_user_id);
-        $this->assertNotNull($property->sold_at);
-        $this->assertTrue($property->saleAgents()->where('users.id', $agentB->id)->exists());
+        $this->assertSame('approved', $property->moderation_status);
+        $this->assertFalse($property->saleAgents()->where('users.id', $agentB->id)->exists());
     }
 
     public function test_agent_can_save_sale_with_existing_deposit_user_id(): void

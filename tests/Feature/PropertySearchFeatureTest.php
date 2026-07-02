@@ -105,6 +105,7 @@ class PropertySearchFeatureTest extends TestCase
             $table->string('owner_phone')->nullable();
             $table->string('owner_name')->nullable();
             $table->unsignedBigInteger('developer_id')->nullable();
+            $table->timestamp('sold_at')->nullable();
             $table->timestamps();
         });
 
@@ -268,6 +269,89 @@ class PropertySearchFeatureTest extends TestCase
             ->assertOk()
             ->assertJsonPath('total', 1)
             ->assertJsonPath('data.0.id', $property->id);
+    }
+
+    public function test_public_search_price_sort_returns_only_open_active_properties(): void
+    {
+        $closedStatus = PropertyStatus::create(['name' => 'Sold', 'slug' => 'sold']);
+
+        $active = $this->createProperty([
+            'title' => 'Open listing',
+            'price' => 90000,
+        ]);
+
+        $soldModeration = $this->createProperty([
+            'title' => 'Sold listing',
+            'price' => 10000,
+            'moderation_status' => 'sold',
+        ]);
+
+        $soldStatus = $this->createProperty([
+            'title' => 'Status sold listing',
+            'price' => 20000,
+            'status_id' => $closedStatus->id,
+        ]);
+
+        $completedDeal = $this->createProperty([
+            'title' => 'Completed deal listing',
+            'price' => 30000,
+            'sold_at' => now(),
+        ]);
+
+        $response = $this->getJson('/api/properties/search?page=1&per_page=20&sort=price_asc');
+
+        $response->assertOk();
+
+        $ids = collect($response->json('data'))->pluck('id')->all();
+
+        $this->assertContains($active->id, $ids);
+        $this->assertNotContains($soldModeration->id, $ids);
+        $this->assertNotContains($soldStatus->id, $ids);
+        $this->assertNotContains($completedDeal->id, $ids);
+    }
+
+    public function test_similar_returns_only_open_active_properties(): void
+    {
+        $closedStatus = PropertyStatus::create(['name' => 'Rented', 'slug' => 'rented']);
+
+        $source = $this->createProperty([
+            'title' => 'Source listing',
+            'price' => 100000,
+        ]);
+
+        $activeSimilar = $this->createProperty([
+            'title' => 'Active similar listing',
+            'price' => 95000,
+        ]);
+
+        $soldModeration = $this->createProperty([
+            'title' => 'Sold similar listing',
+            'price' => 96000,
+            'moderation_status' => 'sold',
+        ]);
+
+        $rentedStatus = $this->createProperty([
+            'title' => 'Rented status similar listing',
+            'price' => 97000,
+            'status_id' => $closedStatus->id,
+        ]);
+
+        $closedDeal = $this->createProperty([
+            'title' => 'Closed deal similar listing',
+            'price' => 98000,
+            'sold_at' => now(),
+        ]);
+
+        $response = $this->getJson("/api/properties/{$source->id}/similar");
+
+        $response->assertOk();
+
+        $ids = collect($response->json())->pluck('id')->all();
+
+        $this->assertContains($activeSimilar->id, $ids);
+        $this->assertNotContains($soldModeration->id, $ids);
+        $this->assertNotContains($rentedStatus->id, $ids);
+        $this->assertNotContains($closedDeal->id, $ids);
     }
 
     private function createProperty(array $attributes = []): Property

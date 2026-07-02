@@ -3,12 +3,39 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\Schema;
 
 class Property extends Model
 {
     use HasFactory;
+
+    public const PUBLIC_MODERATION_STATUS = 'approved';
+
+    public const CLOSED_MODERATION_STATUSES = [
+        'closed',
+        'sold',
+        'rented',
+        'archived',
+        'inactive',
+        'completed',
+        'deleted',
+        'rejected',
+        'denied',
+        'draft',
+        'sold_by_owner',
+    ];
+
+    public const CLOSED_STATUS_SLUGS = [
+        'closed',
+        'sold',
+        'rented',
+        'archived',
+        'inactive',
+        'completed',
+        'sold_by_owner',
+    ];
 
     protected $appends = [
         'branch_group_id',
@@ -244,6 +271,25 @@ class Property extends Model
     {
         return $query->whereNotNull('sold_at')
             ->whereIn('moderation_status', ['sold', 'rented', 'sold_by_owner']);
+    }
+
+    public function scopePublicSearchable(Builder $query): Builder
+    {
+        $query
+            ->where('properties.moderation_status', self::PUBLIC_MODERATION_STATUS)
+            ->whereNotIn('properties.moderation_status', self::CLOSED_MODERATION_STATUSES);
+
+        if (Schema::hasColumn('properties', 'sold_at')) {
+            $query->whereNull('properties.sold_at');
+        }
+
+        if (Schema::hasTable('property_statuses')) {
+            $query->whereDoesntHave('status', function (Builder $statusQuery) {
+                $statusQuery->whereIn('slug', self::CLOSED_STATUS_SLUGS);
+            });
+        }
+
+        return $query;
     }
 
     public function isDealClosed(): bool
