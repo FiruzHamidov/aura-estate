@@ -193,6 +193,35 @@ class PropertyController extends Controller
             || $actor->hasRole('operator');
     }
 
+    private function canAssignSpecificDealUser(User $actor, User $assignee): bool
+    {
+        if ((int) $actor->id === (int) $assignee->id) {
+            return true;
+        }
+
+        if ($actor->hasRole('admin') || $actor->hasRole('superadmin')) {
+            return true;
+        }
+
+        if ($actor->hasRole('mop')) {
+            return !empty($actor->branch_group_id)
+                && !empty($assignee->branch_group_id)
+                && (int) $actor->branch_group_id === (int) $assignee->branch_group_id;
+        }
+
+        return !empty($actor->branch_id)
+            && !empty($assignee->branch_id)
+            && (int) $actor->branch_id === (int) $assignee->branch_id;
+    }
+
+    private function ensureDealAssigneeInScope(User $actor, int $assigneeId, string $message): void
+    {
+        $assignee = User::query()->find($assigneeId);
+
+        abort_unless($assignee, 422, 'Указанный сотрудник не найден.');
+        abort_unless($this->canAssignSpecificDealUser($actor, $assignee), 403, $message);
+    }
+
     private function ensureDealAssignmentUsersInScope(User $actor, array $data, ?Property $property = null): void
     {
         $fields = [
@@ -214,6 +243,8 @@ class PropertyController extends Controller
                 403,
                 $message
             );
+
+            $this->ensureDealAssigneeInScope($actor, (int) $data[$field], $message);
         }
 
         foreach (($data['agents'] ?? []) as $index => $agent) {
@@ -224,6 +255,12 @@ class PropertyController extends Controller
             abort_unless(
                 $this->canAssignDealUser($actor),
                 403,
+                "Недостаточно прав, чтобы добавить соисполнителя #".($index + 1)."."
+            );
+
+            $this->ensureDealAssigneeInScope(
+                $actor,
+                (int) $agent['agent_id'],
                 "Недостаточно прав, чтобы добавить соисполнителя #".($index + 1)."."
             );
         }
@@ -643,7 +680,7 @@ class PropertyController extends Controller
             'photos',
             'creator',
             'developer',
-        ])->where('moderation_status', '!=', 'deleted');
+        ])->publicSearchable();
 
         $this->applyPropertySearchFilters($query, $validated);
 
@@ -670,7 +707,7 @@ class PropertyController extends Controller
                 'photos',
                 'creator',
                 'developer',
-            ])->where('moderation_status', '!=', 'deleted');
+            ])->publicSearchable();
 
             $this->applyPropertySearchFilters($query, $validated);
             $this->applyPropertySearchSafeFallback($query, $q);
@@ -1572,7 +1609,7 @@ class PropertyController extends Controller
 
         $this->storePhotosFromRequest($request, $property);
 
-        return response()->json($property->load(['photos', 'ownerClient.type', 'buyerClient.type']));
+        return response()->json($property->load(['photos', 'contractType', 'ownerClient.type', 'buyerClient.type']));
     }
 
     /**
@@ -1614,7 +1651,7 @@ class PropertyController extends Controller
             $this->applyOrder($property, $request->photo_order);
         }
 
-        return response()->json($property->load(['photos', 'ownerClient.type', 'buyerClient.type']));
+        return response()->json($property->load(['photos', 'contractType', 'ownerClient.type', 'buyerClient.type']));
     }
 
     private function storePhotosFromRequest(Request $request, Property $property, bool $append = false): void
@@ -2301,7 +2338,7 @@ class PropertyController extends Controller
         $radiusKm = (float) $request->input('radius_km', 5); // 5 km by default
         $useRadius = $request->boolean('use_radius', true);
 
-        $query = Property::query();
+        $query = Property::query()->publicSearchable();
 
         // всегда исключаем текущий объект
         $query->where('id', '!=', $property->id);
@@ -2363,7 +2400,7 @@ class PropertyController extends Controller
 
         // Добавим дополнительные нестрогие критерии (например, same repair type) как опция
         if ($property->repair_type_id) {
-            $query->orWhere('repair_type_id', $property->repair_type_id);
+            $query->where('repair_type_id', $property->repair_type_id);
         }
 
         // eager load

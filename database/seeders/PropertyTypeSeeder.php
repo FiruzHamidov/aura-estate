@@ -9,29 +9,19 @@ class PropertyTypeSeeder extends Seeder
 {
     public function run(): void
     {
-        PropertyType::create([
-            'name' => 'Квартира',
-            'slug' => 'apartment',
-        ]);
-
-        PropertyType::create([
-            'name' => 'Дом',
-            'slug' => 'house',
-        ]);
-
-        PropertyType::create([
-            'name' => 'Дача',
-            'slug' => 'cottage',
-        ]);
-
-        PropertyType::create([
-            'name' => 'Комната',
-            'slug' => 'room',
-        ]);
-
-        PropertyType::create([
-            'name' => 'Коммерческая недвижимость',
-            'slug' => 'commercial',
-        ]);
+        foreach ([
+            ['name' => 'Квартира', 'slug' => 'apartment'],
+            ['name' => 'Дом', 'slug' => 'house'],
+            ['name' => 'Дача', 'slug' => 'cottage'],
+            ['name' => 'Комната', 'slug' => 'room'],
+            ['name' => 'Коммерческая недвижимость', 'slug' => 'commercial'],
+            ['name' => 'Промбаза', 'slug' => 'industrial_base'],
+            ['name' => 'Завод', 'slug' => 'factory'],
+        ] as $type) {
+            PropertyType::query()->updateOrCreate(
+                ['slug' => $type['slug']],
+                ['name' => $type['name']]
+            );
+        }
     }
 }

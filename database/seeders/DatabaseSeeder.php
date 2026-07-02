@@ -24,6 +24,7 @@ class DatabaseSeeder extends Seeder
             ParkingTypeSeeder::class,
             HeatingTypeSeeder::class,
             RepairTypeSeeder::class,
+            ContractTypesSeeder::class,
             PropertySeeder::class,
             ConstructionStageSeeder::class,
             MaterialSeeder::class,

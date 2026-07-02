@@ -1,13 +1,11 @@
 <?php
 
-namespace Database\Seeders;
-
-use Illuminate\Database\Seeder;
+use Illuminate\Database\Migrations\Migration;
 use Illuminate\Support\Facades\DB;
 
-class ContractTypesSeeder extends Seeder
+return new class extends Migration
 {
-    public function run()
+    public function up(): void
     {
         $now = now();
 
@@ -25,4 +23,16 @@ class ContractTypesSeeder extends Seeder
             );
         }
     }
-}
+
+    public function down(): void
+    {
+        DB::table('contract_types')
+            ->whereIn('slug', ['technical_passport', 'contract'])
+            ->whereNotIn('id', function ($query) {
+                $query->select('contract_type_id')
+                    ->from('properties')
+                    ->whereNotNull('contract_type_id');
+            })
+            ->delete();
+    }
+};
