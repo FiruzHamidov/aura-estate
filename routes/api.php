@@ -313,6 +313,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         Route::get('/properties/{property}/logs', [PropertyController::class, 'logs']);
         Route::get('/properties/{property}/matching-clients', [PropertyController::class, 'matchingClients']);
         Route::put('/properties/{property}', [PropertyController::class, 'update']);
+        Route::patch('/properties/{property}/co-owner', [PropertyController::class, 'updateCoOwner']);
         Route::delete('/properties/{property}', [PropertyController::class, 'destroy']);
         Route::patch('/properties/{property}/moderation-listing', [PropertyController::class, 'updateModerationAndListingType']);
         Route::post('properties/{property}/photos', [PropertyPhotoController::class, 'store']);

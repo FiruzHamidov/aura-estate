@@ -39,7 +39,7 @@ class PropertyController extends Controller
 
     private function propertyDetailRelations(): array
     {
-        return [
+        $relations = [
             'type',
             'status',
             'location',
@@ -56,6 +56,17 @@ class PropertyController extends Controller
             'depositUser',
             'saleUser',
         ];
+
+        if ($this->supportsPropertyCoOwner()) {
+            $relations[] = 'coOwner.role';
+        }
+
+        return $relations;
+    }
+
+    private function supportsPropertyCoOwner(): bool
+    {
+        return Schema::hasColumn('properties', 'co_owner_user_id');
     }
 
     private function propertyShowAuthUser(Request $request): ?User
@@ -131,6 +142,14 @@ class PropertyController extends Controller
         }
 
         if ($property->created_by === $user->id || $property->agent_id === $user->id) {
+            return true;
+        }
+
+        if (
+            $this->supportsPropertyCoOwner()
+            && !empty($property->co_owner_user_id)
+            && (int) $property->co_owner_user_id === (int) $user->id
+        ) {
             return true;
         }
 
@@ -220,6 +239,24 @@ class PropertyController extends Controller
 
         abort_unless($assignee, 422, 'Указанный сотрудник не найден.');
         abort_unless($this->canAssignSpecificDealUser($actor, $assignee), 403, $message);
+    }
+
+    private function ensureValidCoOwner(?int $coOwnerUserId, ?int $ownerUserId): void
+    {
+        if (!$coOwnerUserId) {
+            return;
+        }
+
+        abort_if(
+            $ownerUserId && (int) $coOwnerUserId === (int) $ownerUserId,
+            422,
+            'Соучастник не может быть владельцем объявления.'
+        );
+
+        $coOwner = User::query()->find($coOwnerUserId);
+
+        abort_unless($coOwner, 422, 'Соучастник не найден.');
+        abort_unless($coOwner->status === User::STATUS_ACTIVE, 422, 'Соучастник должен быть активным пользователем.');
     }
 
     private function ensureDealAssignmentUsersInScope(User $actor, array $data, ?Property $property = null): void
@@ -566,6 +603,10 @@ class PropertyController extends Controller
             $relations[] = 'contractType';
         }
 
+        if ($this->supportsPropertyCoOwner()) {
+            $relations[] = 'coOwner.role';
+        }
+
         return $relations;
     }
 
@@ -581,7 +622,13 @@ class PropertyController extends Controller
         } elseif (!$user) {
             $query->where('moderation_status', 'approved');
         } elseif ($this->hasOwnPropertyScope($user)) {
-            $query->where('created_by', $user->id);
+            $query->where(function (Builder $ownerQuery) use ($user) {
+                $ownerQuery->where('created_by', $user->id);
+
+                if ($this->supportsPropertyCoOwner()) {
+                    $ownerQuery->orWhere('co_owner_user_id', $user->id);
+                }
+            });
             if (!$hasStatusFilter) {
                 $query->where('moderation_status', '!=', 'deleted');
             }
@@ -617,7 +664,13 @@ class PropertyController extends Controller
         } elseif (!$user) {
             $query->where('moderation_status', 'approved');
         } elseif ($this->hasOwnPropertyScope($user)) {
-            $query->where('created_by', $user->id);
+            $query->where(function (Builder $ownerQuery) use ($user) {
+                $ownerQuery->where('created_by', $user->id);
+
+                if ($this->supportsPropertyCoOwner()) {
+                    $ownerQuery->orWhere('co_owner_user_id', $user->id);
+                }
+            });
             if (!$hasStatusFilter) {
                 $query->where('moderation_status', '!=', 'deleted');
             }
@@ -1540,6 +1593,10 @@ class PropertyController extends Controller
         abort_if($user->hasRole('intern'), 403, 'Стажер не может добавлять объекты.');
 
         $validated = $this->validateProperty($request);
+        $this->ensureValidCoOwner(
+            isset($validated['co_owner_user_id']) ? (int) $validated['co_owner_user_id'] : null,
+            $user->id
+        );
         $validated = $this->normalizeMopBranchGroupPayload($user, $validated);
         $this->ensureVisibleClientsForProperty($validated);
         $validated = $this->syncPropertyClientSnapshots($validated);
@@ -1609,7 +1666,7 @@ class PropertyController extends Controller
 
         $this->storePhotosFromRequest($request, $property);
 
-        return response()->json($property->load(['photos', 'contractType', 'ownerClient.type', 'buyerClient.type']));
+        return response()->json($property->load(['photos', 'contractType', 'ownerClient.type', 'buyerClient.type', 'coOwner.role']));
     }
 
     /**
@@ -1625,6 +1682,11 @@ class PropertyController extends Controller
         $user = $this->authorizePropertyMutation($property);
 
         $validated = $this->validateProperty($request, isUpdate: true, property: $property);
+        $ownerUserId = (int) ($validated['created_by'] ?? $property->created_by);
+        $this->ensureValidCoOwner(
+            array_key_exists('co_owner_user_id', $validated) ? (int) $validated['co_owner_user_id'] : null,
+            $ownerUserId
+        );
         $validated = $this->normalizeMopBranchGroupPayload($user, $validated);
         $validated = $this->applyListingTypeAccessRules($user, $validated);
         $this->ensureVisibleClientsForProperty($validated, $property);
@@ -1651,7 +1713,25 @@ class PropertyController extends Controller
             $this->applyOrder($property, $request->photo_order);
         }
 
-        return response()->json($property->load(['photos', 'contractType', 'ownerClient.type', 'buyerClient.type']));
+        return response()->json($property->load(['photos', 'contractType', 'ownerClient.type', 'buyerClient.type', 'coOwner.role']));
+    }
+
+    public function updateCoOwner(Request $request, Property $property)
+    {
+        $this->authorizePropertyMutation($property);
+
+        $validated = $request->validate([
+            'co_owner_user_id' => 'nullable|integer|exists:users,id',
+        ]);
+
+        $coOwnerUserId = $validated['co_owner_user_id'] ?? null;
+        $this->ensureValidCoOwner($coOwnerUserId ? (int) $coOwnerUserId : null, (int) $property->created_by);
+
+        $property->update([
+            'co_owner_user_id' => $coOwnerUserId,
+        ]);
+
+        return response()->json($property->fresh(['coOwner.role', 'creator.role', 'agent.role']));
     }
 
     private function storePhotosFromRequest(Request $request, Property $property, bool $append = false): void
@@ -1937,6 +2017,7 @@ class PropertyController extends Controller
             'latitude' => 'nullable|numeric|between:-90,90',
             'longitude' => 'nullable|numeric|between:-180,180',
             'agent_id' => 'nullable|exists:users,id',
+            'co_owner_user_id' => 'sometimes|nullable|integer|exists:users,id',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'owner_phone' => 'nullable|string|max:30',
             'listing_type' => 'sometimes|in:regular,vip,urgent',

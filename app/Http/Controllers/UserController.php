@@ -314,6 +314,58 @@ class UserController extends Controller
             });
     }
 
+    private function activeUserIds(array $userIds): array
+    {
+        $ids = array_values(array_unique(array_filter(array_map('intval', $userIds))));
+
+        if (empty($ids)) {
+            return [];
+        }
+
+        return User::query()
+            ->whereIn('id', $ids)
+            ->where(function (Builder $query) {
+                $query->where('status', User::STATUS_ACTIVE)
+                    ->orWhereNull('status');
+            })
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
+    }
+
+    private function transferPropertyToUser(Property $property, int $targetUserId, User $dismissedUser, User $actor, string $reason): void
+    {
+        $oldValues = [
+            'created_by' => $property->created_by,
+            'agent_id' => $property->agent_id,
+            'co_owner_user_id' => $property->co_owner_user_id,
+        ];
+
+        $newValues = [
+            'created_by' => $targetUserId,
+            'agent_id' => $targetUserId,
+            'co_owner_user_id' => null,
+        ];
+
+        Property::query()
+            ->whereKey($property->id)
+            ->update($newValues);
+
+        app(AuditLogger::class)->log(
+            subject: $property,
+            actor: $actor,
+            event: 'property_owner_transferred',
+            oldValues: $oldValues,
+            newValues: $newValues,
+            message: 'Объявление передано при увольнении пользователя',
+            context: [
+                'reason' => $reason,
+                'dismissed_user_id' => $dismissedUser->id,
+                'target_user_id' => $targetUserId,
+            ]
+        );
+    }
+
     // Список всех пользователей
     public function index(Request $request)
     {
@@ -575,11 +627,53 @@ class UserController extends Controller
             $this->ensureUserIsVisible($authUser, $target);
         }
 
-        DB::transaction(function () use ($user, $distribute, $agentId) {
+        $transferStats = [
+            'transferred_to_co_owner_count' => 0,
+            'redistributed_count' => 0,
+            'skipped_count' => 0,
+        ];
+
+        DB::transaction(function () use ($user, $authUser, $distribute, $agentId, &$transferStats) {
             // Передаём только активные объекты; закрытые остаются у уволенного пользователя.
             $props = $this->transferablePropertiesQuery($user)
                 ->lockForUpdate()
-                ->get(['id', 'created_by']);
+                ->get(['id', 'created_by', 'agent_id', 'co_owner_user_id']);
+
+            if ($props->isNotEmpty()) {
+                $activeCoOwnerIds = $this->activeUserIds(
+                    $props
+                        ->pluck('co_owner_user_id')
+                        ->filter(fn ($coOwnerId) => (int) $coOwnerId !== (int) $user->id)
+                        ->all()
+                );
+                $activeCoOwnerLookup = array_fill_keys($activeCoOwnerIds, true);
+
+                $remainingProps = collect();
+
+                foreach ($props->sortBy('id')->values() as $property) {
+                    $coOwnerId = (int) ($property->co_owner_user_id ?? 0);
+
+                    if ($coOwnerId > 0 && isset($activeCoOwnerLookup[$coOwnerId])) {
+                        $this->transferPropertyToUser(
+                            $property,
+                            $coOwnerId,
+                            $user,
+                            $authUser,
+                            'owner_dismissed_transfer_to_co_owner'
+                        );
+                        $transferStats['transferred_to_co_owner_count']++;
+                        continue;
+                    }
+
+                    $remainingProps->push($property);
+                }
+
+                if ($remainingProps->isEmpty()) {
+                    $props = collect();
+                } else {
+                    $props = $remainingProps;
+                }
+            }
 
             if ($props->isNotEmpty()) {
                 if ($distribute) {
@@ -640,12 +734,27 @@ class UserController extends Controller
                             $rotationIndex = ($rotationIndex + 1) % $agentCount;
                         }
 
-                        Property::whereKey($p->id)->update(['agent_id' => $nextAgentId, 'created_by' => $nextAgentId]);
+                        $this->transferPropertyToUser(
+                            $p,
+                            $nextAgentId,
+                            $user,
+                            $authUser,
+                            'owner_dismissed_auto_redistribution'
+                        );
                         $loadByAgent[$nextAgentId] = ($loadByAgent[$nextAgentId] ?? 0) + 1;
+                        $transferStats['redistributed_count']++;
                     }
                 } else {
-                    Property::whereKey($props->pluck('id')->all())
-                        ->update(['agent_id' => $agentId, 'created_by' => $agentId]);
+                    foreach ($props as $property) {
+                        $this->transferPropertyToUser(
+                            $property,
+                            (int) $agentId,
+                            $user,
+                            $authUser,
+                            'owner_dismissed_manual_transfer'
+                        );
+                        $transferStats['redistributed_count']++;
+                    }
                 }
             }
 
@@ -662,7 +771,10 @@ class UserController extends Controller
             $user->tokens()->delete();
         });
 
-        return response()->json(['message' => 'Пользователь уволен, доступ в систему отключён, объекты перераспределены.']);
+        return response()->json(array_merge([
+            'message' => 'Пользователь уволен, доступ в систему отключён, объекты переданы.',
+            'dismissed_user_id' => $user->id,
+        ], $transferStats));
     }
 
     public function restore(User $user)

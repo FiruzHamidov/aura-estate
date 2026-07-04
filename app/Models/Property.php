@@ -74,6 +74,7 @@ class Property extends Model
         'longitude',
         'created_by',
         'agent_id',
+        'co_owner_user_id',
         'external_agent_id',
         'external_property_request_id',
         'source_type',
@@ -171,6 +172,11 @@ class Property extends Model
     public function agent()
     {
         return $this->belongsTo(User::class, 'agent_id');
+    }
+
+    public function coOwner()
+    {
+        return $this->belongsTo(User::class, 'co_owner_user_id');
     }
 
     public function externalAgent()

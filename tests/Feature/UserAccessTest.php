@@ -59,6 +59,11 @@ class UserAccessTest extends TestCase
             $table->text('description')->nullable();
             $table->date('birthday')->nullable();
             $table->string('photo')->nullable();
+            $table->string('telegram_id')->nullable();
+            $table->string('telegram_username')->nullable();
+            $table->string('telegram_photo_url')->nullable();
+            $table->string('telegram_chat_id')->nullable();
+            $table->timestamp('telegram_linked_at')->nullable();
             $table->timestamps();
         });
 
@@ -100,6 +105,7 @@ class UserAccessTest extends TestCase
             $table->string('moderation_status')->nullable();
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('agent_id')->nullable();
+            $table->unsignedBigInteger('co_owner_user_id')->nullable();
             $table->timestamps();
         });
     }
@@ -250,6 +256,84 @@ class UserAccessTest extends TestCase
         $response->assertJsonPath('last_page', 1);
         $response->assertJsonPath('active_count', 2);
         $response->assertJsonPath('inactive_count', 1);
+    }
+
+    public function test_dismissal_transfers_properties_to_co_owner_before_redistribution(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $admin = User::create([
+            'name' => 'Admin',
+            'phone' => '900100001',
+            'password' => bcrypt('password'),
+            'role_id' => $adminRole->id,
+            'status' => 'active',
+        ]);
+
+        $dismissed = User::create([
+            'name' => 'Dismissed',
+            'phone' => '900100002',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+
+        $coOwner = User::create([
+            'name' => 'Co Owner',
+            'phone' => '900100003',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+
+        $fallbackAgent = User::create([
+            'name' => 'Fallback Agent',
+            'phone' => '900100004',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+
+        $withCoOwnerId = DB::table('properties')->insertGetId([
+            'title' => 'With co-owner',
+            'moderation_status' => 'approved',
+            'created_by' => $dismissed->id,
+            'agent_id' => $dismissed->id,
+            'co_owner_user_id' => $coOwner->id,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $withoutCoOwnerId = DB::table('properties')->insertGetId([
+            'title' => 'Without co-owner',
+            'moderation_status' => 'approved',
+            'created_by' => $dismissed->id,
+            'agent_id' => $dismissed->id,
+            'co_owner_user_id' => null,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        Sanctum::actingAs($admin);
+
+        $response = $this->deleteJson('/api/user/'.$dismissed->id, [
+            'distribute_to_agents' => true,
+        ]);
+
+        $response->assertOk()
+            ->assertJsonPath('transferred_to_co_owner_count', 1)
+            ->assertJsonPath('redistributed_count', 1);
+
+        $withCoOwner = DB::table('properties')->where('id', $withCoOwnerId)->first();
+        $this->assertSame($coOwner->id, (int) $withCoOwner->created_by);
+        $this->assertSame($coOwner->id, (int) $withCoOwner->agent_id);
+        $this->assertNull($withCoOwner->co_owner_user_id);
+
+        $withoutCoOwner = DB::table('properties')->where('id', $withoutCoOwnerId)->first();
+        $this->assertSame($fallbackAgent->id, (int) $withoutCoOwner->created_by);
+        $this->assertSame($fallbackAgent->id, (int) $withoutCoOwner->agent_id);
+        $this->assertNull($withoutCoOwner->co_owner_user_id);
     }
 
     public function test_branch_director_user_index_can_include_unassigned_users_when_requested(): void
