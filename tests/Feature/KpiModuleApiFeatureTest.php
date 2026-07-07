@@ -1883,6 +1883,45 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertSame(2, (int) data_get($row, 'metrics.objects.final_value'));
     }
 
+    public function test_daily_v2_objects_use_created_at_not_sold_at_for_closed_properties(): void
+    {
+        $this->createDailyKpiSystemTables();
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900002033', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900002034', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        \DB::table('properties')->insert([
+            [
+                'created_by' => $agent->id,
+                'agent_id' => $agent->id,
+                'sale_user_id' => $agent->id,
+                'moderation_status' => 'sold',
+                'sold_at' => '2026-05-16 12:00:00',
+                'created_at' => '2026-05-15 10:00:00',
+                'updated_at' => '2026-05-16 12:00:00',
+            ],
+            [
+                'created_by' => $agent->id,
+                'agent_id' => $agent->id,
+                'sale_user_id' => null,
+                'moderation_status' => 'approved',
+                'sold_at' => null,
+                'created_at' => '2026-05-16 10:00:00',
+                'updated_at' => '2026-05-16 10:00:00',
+            ],
+        ]);
+
+        $response = $this->getJson('/api/kpi/daily?v=2&date=2026-05-16&agent_id='.$agent->id)->assertOk();
+        $row = (array) $response->json('data.0');
+
+        $this->assertSame(1, (int) data_get($row, 'metrics.objects.final_value'));
+        $this->assertSame(1, (int) data_get($row, 'metrics.sales.final_value'));
+    }
+
     public function test_daily_v2_supports_mixed_source_with_manual_override_rule(): void
     {
         $this->createDailyKpiSystemTables();
