@@ -128,6 +128,38 @@ class DailyReportService
         ];
     }
 
+    public function autoMetricsDebug(User $user, string $reportDate, ?array $auto = null): array
+    {
+        [$startUtc, $endUtc] = $this->utcDayBounds($reportDate);
+        $localStart = Carbon::parse($reportDate, $this->timezone())->startOfDay();
+        $localEnd = Carbon::parse($reportDate, $this->timezone())->endOfDay();
+        $autoMetrics = $auto ?? $this->autoMetrics($user, $reportDate);
+
+        return [
+            'employee_id' => (int) $user->id,
+            'date' => $reportDate,
+            'timezone' => $this->timezone(),
+            'period_bounds' => [
+                'local' => [
+                    'start' => $localStart->toDateTimeString(),
+                    'end' => $localEnd->toDateTimeString(),
+                ],
+                'utc' => [
+                    'start' => $startUtc->toDateTimeString(),
+                    'end' => $endUtc->toDateTimeString(),
+                ],
+            ],
+            'object_ids' => $this->newPropertyIds($user, $startUtc, $endUtc),
+            'booking_ids' => $this->bookingIds($user, $startUtc, $endUtc),
+            'sales_property_ids' => $this->dealPropertyIds($user, $startUtc, $endUtc),
+            'metrics' => [
+                'objects' => ['fact' => (int) ($autoMetrics['new_properties_count'] ?? 0)],
+                'shows' => ['fact' => (int) ($autoMetrics['shows_count'] ?? 0)],
+                'sales' => ['fact' => (float) ($autoMetrics['sales_count'] ?? 0)],
+            ],
+        ];
+    }
+
     public function reportStatusPayload(User $user, ?string $reportDate = null): array
     {
         $date = $reportDate ?: $this->defaultReportDate($user);
@@ -155,16 +187,24 @@ class DailyReportService
 
     private function countBookings(User $user, Carbon $startUtc, Carbon $endUtc): int
     {
+        return count($this->bookingIds($user, $startUtc, $endUtc));
+    }
+
+    private function bookingIds(User $user, Carbon $startUtc, Carbon $endUtc): array
+    {
         if (! Schema::hasTable('bookings')
             || ! Schema::hasColumn('bookings', 'agent_id')
             || ! Schema::hasColumn('bookings', 'start_time')) {
-            return 0;
+            return [];
         }
 
-        return (int) DB::table('bookings')
+        return DB::table('bookings')
             ->where('agent_id', $user->id)
             ->whereBetween('start_time', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
-            ->count();
+            ->orderBy('id')
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
     }
 
     private function countCalls(User $user, Carbon $startUtc, Carbon $endUtc): int
@@ -245,18 +285,23 @@ class DailyReportService
 
     private function countNewProperties(User $user, Carbon $startUtc, Carbon $endUtc): int
     {
+        return count($this->newPropertyIds($user, $startUtc, $endUtc));
+    }
+
+    private function newPropertyIds(User $user, Carbon $startUtc, Carbon $endUtc): array
+    {
         if (! Schema::hasTable('properties') || ! Schema::hasColumn('properties', 'created_at')) {
-            return 0;
+            return [];
         }
 
         $hasCreatedBy = Schema::hasColumn('properties', 'created_by');
         $hasAgentId = Schema::hasColumn('properties', 'agent_id');
 
         if (! $hasCreatedBy && ! $hasAgentId) {
-            return 0;
+            return [];
         }
 
-        return (int) DB::table('properties')
+        return DB::table('properties')
             ->where(function ($query) use ($user) {
                 $hasCreatedBy = Schema::hasColumn('properties', 'created_by');
                 $hasAgentId = Schema::hasColumn('properties', 'agent_id');
@@ -282,36 +327,66 @@ class DailyReportService
                 }
             })
             ->whereBetween('created_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
-            ->count();
+            ->orderBy('id')
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
     }
 
     private function countDeals(User $user, Carbon $startUtc, Carbon $endUtc): float
     {
+        return $this->dealCredits($user, $startUtc, $endUtc)['sales_count'];
+    }
+
+    private function dealPropertyIds(User $user, Carbon $startUtc, Carbon $endUtc): array
+    {
+        return $this->dealCredits($user, $startUtc, $endUtc)['property_ids'];
+    }
+
+    private function dealCredits(User $user, Carbon $startUtc, Carbon $endUtc): array
+    {
         if (! Schema::hasTable('properties')
             || ! Schema::hasColumn('properties', 'moderation_status')
             || ! Schema::hasColumn('properties', 'sold_at')) {
-            return 0.0;
+            return ['sales_count' => 0.0, 'property_ids' => []];
+        }
+
+        $select = ['id', 'moderation_status', 'agent_id', 'sale_user_id', 'created_by'];
+        if (Schema::hasColumn('properties', 'sale_agent_id')) {
+            $select[] = 'sale_agent_id';
         }
 
         $soldProperties = DB::table('properties')
-            ->select(['id', 'moderation_status', 'agent_id', 'sale_user_id', 'created_by'])
-            ->whereIn('moderation_status', ['sold'])
+            ->select($select)
+            ->whereIn('moderation_status', ['sold', 'sold_by_owner', 'rented'])
             ->whereBetween('sold_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
             ->get();
 
         if ($soldProperties->isEmpty()) {
-            return 0.0;
+            return ['sales_count' => 0.0, 'property_ids' => []];
         }
 
-        $creditsByProperty = $this->salesAttributionService->creditsByProperty($soldProperties, ['sold', 'rented']);
+        $creditsByProperty = $this->salesAttributionService->creditsByProperty($soldProperties, ['sold', 'sold_by_owner', 'rented']);
 
         $credit = 0.0;
+        $propertyIds = [];
         foreach ($soldProperties as $property) {
             $propertyId = (int) ($property->id ?? 0);
-            $credit += (float) ($creditsByProperty[$propertyId][$user->id] ?? 0.0);
+            $propertyCredit = (float) ($creditsByProperty[$propertyId][$user->id] ?? 0.0);
+            if ($propertyCredit <= 0) {
+                continue;
+            }
+
+            $propertyIds[] = $propertyId;
+            $credit += $propertyCredit;
         }
 
-        return round((float) $credit, 4);
+        sort($propertyIds);
+
+        return [
+            'sales_count' => round((float) $credit, 4),
+            'property_ids' => array_values(array_unique($propertyIds)),
+        ];
     }
 
     private function utcDayBounds(string $reportDate): array

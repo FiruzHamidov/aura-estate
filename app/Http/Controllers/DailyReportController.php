@@ -188,6 +188,7 @@ class DailyReportController extends Controller
         return response()->json([
             'report_date' => $date,
             'metrics' => $metricsBundle['metrics'],
+            'auto' => $auto,
             'manual' => [
                 'ads' => (int) ($report?->ad_count ?? 0),
                 'calls' => (int) ($report?->calls_count ?? 0),
@@ -200,6 +201,7 @@ class DailyReportController extends Controller
                 'locked' => $this->isDateLocked($user, $date),
                 'debug' => [
                     'plan_resolution' => $metricsBundle['plan_resolution_debug'],
+                    'auto_metrics' => $this->dailyReports->autoMetricsDebug($user, $date, $auto),
                 ],
             ],
         ]);
@@ -741,11 +743,11 @@ class DailyReportController extends Controller
 
         return [
             'metrics' => [
-            'objects' => $this->metricPayload((int) ($autoMetrics['new_properties_count'] ?? 0), $planMap['objects']['target_value'], 'system', $planMap['objects']['plan_source']),
-            'shows' => $this->metricPayload((int) ($autoMetrics['shows_count'] ?? 0), $planMap['shows']['target_value'], 'system', $planMap['shows']['plan_source']),
-            'ads' => $this->metricPayload((int) ($report?->ad_count ?? 0), $planMap['ads']['target_value'], 'manual', $planMap['ads']['plan_source']),
-            'calls' => $this->metricPayload((int) ($report?->calls_count ?? 0), $planMap['calls']['target_value'], 'manual', $planMap['calls']['plan_source']),
-            'sales' => $this->metricPayload((float) ($autoMetrics['sales_count'] ?? 0), $planMap['sales']['target_value'], 'system', $planMap['sales']['plan_source']),
+                'objects' => $this->metricPayload((int) ($autoMetrics['new_properties_count'] ?? 0), $planMap['objects']['target_value'], 'system', $planMap['objects']['plan_source']),
+                'shows' => $this->metricPayload((int) ($autoMetrics['shows_count'] ?? 0), $planMap['shows']['target_value'], 'system', $planMap['shows']['plan_source']),
+                'ads' => $this->metricPayload((int) ($report?->ad_count ?? 0), $planMap['ads']['target_value'], 'manual', $planMap['ads']['plan_source']),
+                'calls' => $this->metricPayload((int) ($report?->calls_count ?? 0), $planMap['calls']['target_value'], 'manual', $planMap['calls']['plan_source']),
+                'sales' => $this->metricPayload((float) ($autoMetrics['sales_count'] ?? 0), $planMap['sales']['target_value'], 'system', $planMap['sales']['plan_source']),
             ],
             'plan_resolution_debug' => [
                 'employee_id' => (int) $user->id,

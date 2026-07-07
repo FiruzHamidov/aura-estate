@@ -73,6 +73,21 @@ class KpiDailyMyReportStrictApiTest extends TestCase
             $t->date('effective_to')->nullable();
             $t->timestamps();
         });
+        Schema::create('properties', function (Blueprint $t) {
+            $t->id();
+            $t->unsignedBigInteger('created_by')->nullable();
+            $t->unsignedBigInteger('agent_id')->nullable();
+            $t->unsignedBigInteger('sale_user_id')->nullable();
+            $t->string('moderation_status')->default('approved');
+            $t->timestamp('sold_at')->nullable();
+            $t->timestamps();
+        });
+        Schema::create('bookings', function (Blueprint $t) {
+            $t->id();
+            $t->unsignedBigInteger('agent_id')->nullable();
+            $t->timestamp('start_time')->nullable();
+            $t->timestamps();
+        });
 
         Schema::create('personal_access_tokens', function (Blueprint $t) {
             $t->id();
@@ -204,6 +219,88 @@ class KpiDailyMyReportStrictApiTest extends TestCase
             ->assertJsonPath('meta.debug.plan_resolution.date', '2026-05-11')
             ->assertJsonPath('meta.debug.plan_resolution.metrics.objects.resolved_from', 'system')
             ->assertJsonPath('meta.debug.plan_resolution.metrics.objects.target_value', null);
+    }
+
+    public function test_my_report_returns_auto_metrics_and_debug_breakdown_for_requested_date(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-07-07 12:00:00', 'Asia/Dushanbe'));
+
+        $agent = $this->makeUser('agent');
+        $other = $this->makeUser('agent');
+        Sanctum::actingAs($agent);
+
+        $objectId = \DB::table('properties')->insertGetId([
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+            'moderation_status' => 'approved',
+            'created_at' => '2026-07-06 10:00:00',
+            'updated_at' => '2026-07-06 10:00:00',
+        ]);
+        \DB::table('properties')->insert([
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+            'moderation_status' => 'approved',
+            'created_at' => '2026-07-06 20:00:00',
+            'updated_at' => '2026-07-06 20:00:00',
+        ]);
+        \DB::table('properties')->insert([
+            'created_by' => $other->id,
+            'agent_id' => $other->id,
+            'moderation_status' => 'approved',
+            'created_at' => '2026-07-06 10:00:00',
+            'updated_at' => '2026-07-06 10:00:00',
+        ]);
+
+        $bookingId = \DB::table('bookings')->insertGetId([
+            'agent_id' => $agent->id,
+            'start_time' => '2026-07-06 09:00:00',
+            'created_at' => '2026-07-06 09:00:00',
+            'updated_at' => '2026-07-06 09:00:00',
+        ]);
+        \DB::table('bookings')->insert([
+            'agent_id' => $other->id,
+            'start_time' => '2026-07-06 09:00:00',
+            'created_at' => '2026-07-06 09:00:00',
+            'updated_at' => '2026-07-06 09:00:00',
+        ]);
+
+        $soldId = \DB::table('properties')->insertGetId([
+            'created_by' => $other->id,
+            'agent_id' => $other->id,
+            'sale_user_id' => $agent->id,
+            'moderation_status' => 'sold_by_owner',
+            'sold_at' => '2026-07-06 12:00:00',
+            'created_at' => '2026-07-01 10:00:00',
+            'updated_at' => '2026-07-06 12:00:00',
+        ]);
+        \DB::table('properties')->insert([
+            'created_by' => $other->id,
+            'agent_id' => $other->id,
+            'sale_user_id' => $agent->id,
+            'moderation_status' => 'rented',
+            'sold_at' => '2026-07-06 20:00:00',
+            'created_at' => '2026-07-01 10:00:00',
+            'updated_at' => '2026-07-06 20:00:00',
+        ]);
+
+        $this->getJson('/api/kpi/daily/my-report?date=2026-07-06')
+            ->assertOk()
+            ->assertJsonPath('report_date', '2026-07-06')
+            ->assertJsonPath('metrics.objects.fact', 1)
+            ->assertJsonPath('metrics.shows.fact', 1)
+            ->assertJsonPath('metrics.sales.fact', 1)
+            ->assertJsonPath('auto.new_properties_count', 1)
+            ->assertJsonPath('auto.shows_count', 1)
+            ->assertJsonPath('auto.deals_count', 1)
+            ->assertJsonPath('meta.debug.auto_metrics.employee_id', $agent->id)
+            ->assertJsonPath('meta.debug.auto_metrics.date', '2026-07-06')
+            ->assertJsonPath('meta.debug.auto_metrics.timezone', 'Asia/Dushanbe')
+            ->assertJsonPath('meta.debug.auto_metrics.object_ids', [$objectId])
+            ->assertJsonPath('meta.debug.auto_metrics.booking_ids', [$bookingId])
+            ->assertJsonPath('meta.debug.auto_metrics.sales_property_ids', [$soldId])
+            ->assertJsonPath('meta.debug.auto_metrics.metrics.objects.fact', 1)
+            ->assertJsonPath('meta.debug.auto_metrics.metrics.shows.fact', 1)
+            ->assertJsonPath('meta.debug.auto_metrics.metrics.sales.fact', 1);
     }
 
     private function makeUser(string $roleSlug): User
