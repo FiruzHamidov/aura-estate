@@ -363,7 +363,7 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
 
         Sanctum::actingAs($agentA);
 
-        $this->postJson("/api/properties/{$sameBranchProperty->id}/deal", $this->depositPayload())
+        $this->patchJson("/api/properties/{$sameBranchProperty->id}/moderation-listing", $this->depositPayload())
             ->assertOk();
 
         $sameBranchProperty->refresh();
@@ -383,7 +383,7 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
 
         $this->assertSame($agentA->id, $sameBranchProperty->fresh()->sale_user_id);
 
-        $this->postJson("/api/properties/{$otherBranchProperty->id}/deal", $this->depositPayload())
+        $this->patchJson("/api/properties/{$otherBranchProperty->id}/moderation-listing", $this->depositPayload())
             ->assertOk();
 
         $this->assertSame('deposit', $otherBranchProperty->fresh()->moderation_status);

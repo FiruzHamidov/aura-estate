@@ -1924,12 +1924,17 @@ class PropertyController extends Controller
         SavePropertyDealRequest $request,
         Property $property
     ) {
-        $user = $this->authorizePropertyMutation($property);
+        $user = $this->authorizePropertyDealMutation(
+            $property,
+            $request->moderation_status,
+            $request->filled('sale_user_id') ? (int) $request->input('sale_user_id') : null
+        );
+        $isColleagueProperty = !$this->canMutateProperty($user, $property);
         $this->ensureDealAssignmentUsersInScope($user, $request->validated(), $property);
         $isDepositStatus = $request->moderation_status === 'deposit';
         $isSaleStatus = in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true);
 
-        DB::transaction(function () use ($request, $property, $user, $isDepositStatus, $isSaleStatus) {
+        DB::transaction(function () use ($request, $property, $user, $isColleagueProperty, $isDepositStatus, $isSaleStatus) {
 
             /**
              * 1️⃣ ОБНОВЛЯЕМ ВСЁ, ЧТО ПРИШЛО
@@ -1979,7 +1984,9 @@ class PropertyController extends Controller
             }
 
             if ($isSaleStatus && !array_key_exists('sale_user_id', $payload)) {
-                $payload['sale_user_id'] = $property->sale_user_id ?? $user->id;
+                $payload['sale_user_id'] = $isColleagueProperty
+                    ? $user->id
+                    : ($property->sale_user_id ?? $user->id);
             }
 
             $payload = $this->applyListingTypeAccessRules($user, $payload);
