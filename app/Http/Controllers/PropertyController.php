@@ -270,6 +270,17 @@ class PropertyController extends Controller
             && (int) $actor->branch_id === (int) $assignee->branch_id;
     }
 
+    private function canAssignSpecificCoOwner(User $actor, User $coOwner): bool
+    {
+        if ($actor->hasRole('admin') || $actor->hasRole('superadmin')) {
+            return true;
+        }
+
+        return !empty($actor->branch_id)
+            && !empty($coOwner->branch_id)
+            && (int) $actor->branch_id === (int) $coOwner->branch_id;
+    }
+
     private function ensureDealAssigneeInScope(User $actor, int $assigneeId, string $message): void
     {
         $assignee = User::query()->find($assigneeId);
@@ -278,7 +289,7 @@ class PropertyController extends Controller
         abort_unless($this->canAssignSpecificDealUser($actor, $assignee), 403, $message);
     }
 
-    private function ensureValidCoOwner(?int $coOwnerUserId, ?int $ownerUserId): void
+    private function ensureValidCoOwner(User $actor, ?int $coOwnerUserId, ?int $ownerUserId): void
     {
         if (!$coOwnerUserId) {
             return;
@@ -294,6 +305,11 @@ class PropertyController extends Controller
 
         abort_unless($coOwner, 422, 'Соучастник не найден.');
         abort_unless($coOwner->status === User::STATUS_ACTIVE, 422, 'Соучастник должен быть активным пользователем.');
+        abort_unless(
+            $this->canAssignSpecificCoOwner($actor, $coOwner),
+            403,
+            'Недостаточно прав, чтобы назначить этого соучастника.'
+        );
     }
 
     private function ensureDealAssignmentUsersInScope(User $actor, array $data, ?Property $property = null): void
@@ -1755,14 +1771,14 @@ class PropertyController extends Controller
 
     public function updateCoOwner(Request $request, Property $property)
     {
-        $this->authorizePropertyMutation($property);
+        $actor = $this->authorizePropertyMutation($property);
 
         $validated = $request->validate([
             'co_owner_user_id' => 'nullable|integer|exists:users,id',
         ]);
 
         $coOwnerUserId = $validated['co_owner_user_id'] ?? null;
-        $this->ensureValidCoOwner($coOwnerUserId ? (int) $coOwnerUserId : null, (int) $property->created_by);
+        $this->ensureValidCoOwner($actor, $coOwnerUserId ? (int) $coOwnerUserId : null, (int) $property->created_by);
 
         $property->update([
             'co_owner_user_id' => $coOwnerUserId,

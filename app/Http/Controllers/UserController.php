@@ -69,6 +69,18 @@ class UserController extends Controller
             return $query;
         }
 
+        if ($roleSlug === 'mop') {
+            if (empty($authUser->branch_id)) {
+                return $query->whereRaw('1 = 0');
+            }
+
+            return $query->where('branch_id', $authUser->branch_id);
+        }
+
+        if ($roleSlug === 'agent' && ! empty($authUser->branch_id)) {
+            return $query->where('branch_id', $authUser->branch_id);
+        }
+
         if (! $this->isBranchScopedManager($roleSlug) || empty($authUser->branch_id)) {
             return $query->whereRaw('1 = 0');
         }

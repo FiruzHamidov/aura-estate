@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\Branch;
 use App\Models\BranchGroup;
+use App\Models\Property;
 use App\Models\Role;
 use App\Models\User;
 use Illuminate\Database\Schema\Blueprint;
@@ -106,6 +107,16 @@ class UserAccessTest extends TestCase
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('agent_id')->nullable();
             $table->unsignedBigInteger('co_owner_user_id')->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('property_logs', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('property_id');
+            $table->unsignedBigInteger('user_id')->nullable();
+            $table->string('action');
+            $table->json('changes')->nullable();
+            $table->text('comment')->nullable();
             $table->timestamps();
         });
     }
@@ -1742,5 +1753,101 @@ class UserAccessTest extends TestCase
 
         Sanctum::actingAs($agentA);
         $this->postJson('/api/user/'.$inactiveUserInB->id.'/restore')->assertForbidden();
+    }
+
+    public function test_agent_user_index_returns_only_active_users_from_own_branch(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $agent = User::create(['name' => 'Agent A', 'phone' => '900000201', 'role_id' => $agentRole->id, 'branch_id' => $branchA->id, 'status' => 'active']);
+        $peer = User::create(['name' => 'Peer A', 'phone' => '900000202', 'role_id' => $agentRole->id, 'branch_id' => $branchA->id, 'status' => 'active']);
+        $otherBranch = User::create(['name' => 'Peer B', 'phone' => '900000203', 'role_id' => $agentRole->id, 'branch_id' => $branchB->id, 'status' => 'active']);
+        User::create(['name' => 'Inactive A', 'phone' => '900000204', 'role_id' => $agentRole->id, 'branch_id' => $branchA->id, 'status' => 'inactive']);
+
+        Sanctum::actingAs($agent);
+
+        $response = $this->getJson('/api/user?status=active&page=1&per_page=100');
+
+        $response->assertOk()
+            ->assertJsonPath('meta.total', 2)
+            ->assertJsonPath('meta.last_page', 1)
+            ->assertJsonCount(2, 'data')
+            ->assertJsonPath('data.0.id', $peer->id)
+            ->assertJsonPath('data.0.role.slug', 'agent')
+            ->assertJsonMissing(['id' => $otherBranch->id]);
+    }
+
+    public function test_mop_user_index_returns_only_active_users_from_own_branch(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $groupA = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Group A']);
+        $groupB = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Group B']);
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+
+        $mop = User::create(['name' => 'MOP A', 'phone' => '900000211', 'role_id' => $mopRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $groupA->id, 'status' => 'active']);
+        $peer = User::create(['name' => 'Peer A', 'phone' => '900000212', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $groupA->id, 'status' => 'active']);
+        $otherGroup = User::create(['name' => 'Peer B', 'phone' => '900000213', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $groupB->id, 'status' => 'active']);
+        $otherBranch = Branch::create(['name' => 'Branch B']);
+        $foreignPeer = User::create(['name' => 'Peer C', 'phone' => '900000214', 'role_id' => $agentRole->id, 'branch_id' => $otherBranch->id, 'status' => 'active']);
+
+        Sanctum::actingAs($mop);
+
+        $this->getJson('/api/user?status=active&page=1&per_page=100')
+            ->assertOk()
+            ->assertJsonPath('meta.total', 3)
+            ->assertJsonPath('meta.last_page', 1)
+            ->assertJsonCount(3, 'data')
+            ->assertJsonFragment(['id' => $peer->id])
+            ->assertJsonFragment(['id' => $otherGroup->id])
+            ->assertJsonPath('data.0.role.slug', 'agent')
+            ->assertJsonMissing(['id' => $foreignPeer->id]);
+    }
+
+    public function test_agent_and_mop_can_assign_only_co_owners_in_their_scope(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+        $groupA = BranchGroup::create(['branch_id' => $branchA->id, 'name' => 'Group A']);
+        $groupB = BranchGroup::create(['branch_id' => $branchA->id, 'name' => 'Group B']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+
+        $agent = User::create(['name' => 'Agent A', 'phone' => '900000221', 'role_id' => $agentRole->id, 'branch_id' => $branchA->id, 'status' => 'active']);
+        $agentPeer = User::create(['name' => 'Agent peer', 'phone' => '900000222', 'role_id' => $agentRole->id, 'branch_id' => $branchA->id, 'status' => 'active', 'photo' => 'peer.jpg']);
+        $foreignAgent = User::create(['name' => 'Agent B', 'phone' => '900000223', 'role_id' => $agentRole->id, 'branch_id' => $branchB->id, 'status' => 'active']);
+        $agentProperty = Property::create(['title' => 'Agent property', 'created_by' => $agent->id]);
+
+        Sanctum::actingAs($agent);
+        $this->patchJson('/api/properties/'.$agentProperty->id.'/co-owner', ['co_owner_user_id' => $agentPeer->id])
+            ->assertOk()
+            ->assertJsonPath('co_owner_user_id', $agentPeer->id)
+            ->assertJsonPath('co_owner.id', $agentPeer->id)
+            ->assertJsonPath('co_owner.name', 'Agent peer')
+            ->assertJsonPath('co_owner.phone', '900000222')
+            ->assertJsonPath('co_owner.photo', 'peer.jpg');
+        $this->patchJson('/api/properties/'.$agentProperty->id.'/co-owner', ['co_owner_user_id' => 999999])->assertUnprocessable();
+        $this->patchJson('/api/properties/'.$agentProperty->id.'/co-owner', ['co_owner_user_id' => $foreignAgent->id])->assertForbidden();
+        $this->patchJson('/api/properties/'.$agentProperty->id.'/co-owner', ['co_owner_user_id' => $agent->id])->assertUnprocessable();
+
+        $mop = User::create(['name' => 'MOP A', 'phone' => '900000224', 'role_id' => $mopRole->id, 'branch_id' => $branchA->id, 'branch_group_id' => $groupA->id, 'status' => 'active']);
+        $mopPeer = User::create(['name' => 'MOP peer', 'phone' => '900000225', 'role_id' => $agentRole->id, 'branch_id' => $branchA->id, 'branch_group_id' => $groupA->id, 'status' => 'active']);
+        $otherGroup = User::create(['name' => 'Other group', 'phone' => '900000226', 'role_id' => $agentRole->id, 'branch_id' => $branchA->id, 'branch_group_id' => $groupB->id, 'status' => 'active']);
+        $mopProperty = Property::create(['title' => 'MOP property', 'created_by' => $mop->id]);
+
+        Sanctum::actingAs($mop);
+        $this->patchJson('/api/properties/'.$mopProperty->id.'/co-owner', ['co_owner_user_id' => $mopPeer->id])
+            ->assertOk()
+            ->assertJsonPath('co_owner_user_id', $mopPeer->id)
+            ->assertJsonPath('co_owner.id', $mopPeer->id);
+        $this->patchJson('/api/properties/'.$mopProperty->id.'/co-owner', ['co_owner_user_id' => $otherGroup->id])
+            ->assertOk()
+            ->assertJsonPath('co_owner.id', $otherGroup->id);
+        $this->patchJson('/api/properties/'.$mopProperty->id.'/co-owner', ['co_owner_user_id' => $foreignAgent->id])->assertForbidden();
+
+        Sanctum::actingAs($foreignAgent);
+        $this->patchJson('/api/properties/'.$agentProperty->id.'/co-owner', ['co_owner_user_id' => $agentPeer->id])->assertForbidden();
     }
 }
