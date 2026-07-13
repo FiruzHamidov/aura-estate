@@ -199,6 +199,43 @@ class PropertyController extends Controller
         return $user;
     }
 
+    /**
+     * An agent may accept a deposit or close a colleague's property from any
+     * branch. For a sale, an agent can only set themselves as seller.
+     * This does not grant general edit access to colleagues' properties.
+     */
+    private function authorizePropertyDealMutation(
+        Property $property,
+        string $moderationStatus,
+        ?int $saleUserId = null
+    ): User
+    {
+        /** @var User|null $user */
+        $user = auth()->user();
+
+        abort_unless($user, 401, 'Unauthenticated.');
+        $user->loadMissing('role');
+
+        if ($this->canMutateProperty($user, $property)) {
+            return $user;
+        }
+
+        $isColleagueDealAction = $moderationStatus === 'deposit'
+            || in_array($moderationStatus, ['sold', 'sold_by_owner', 'rented'], true);
+
+        $canManageColleagueDeal = $isColleagueDealAction
+            && $user->hasRole('agent')
+            && (
+                $moderationStatus === 'deposit'
+                || $saleUserId === null
+                || $saleUserId === (int) $user->id
+            );
+
+        abort_unless($canManageColleagueDeal, 403, 'Доступ запрещён');
+
+        return $user;
+    }
+
     private function canAssignDealUser(User $actor): bool
     {
         return $actor->hasRole('admin')
@@ -2509,7 +2546,11 @@ class PropertyController extends Controller
         SavePropertyDealRequest $request,
         Property                $property
     ) {
-        $user = $this->authorizePropertyMutation($property);
+        $user = $this->authorizePropertyDealMutation(
+            $property,
+            $request->moderation_status,
+            $request->filled('sale_user_id') ? (int) $request->input('sale_user_id') : null
+        );
         $this->ensureDealAssignmentUsersInScope($user, $request->validated(), $property);
         $isDepositStatus = $request->moderation_status === 'deposit';
         $isSaleStatus = in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true);

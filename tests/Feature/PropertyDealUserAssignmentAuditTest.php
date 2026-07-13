@@ -342,7 +342,7 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
         $this->assertTrue(true);
     }
 
-    public function test_agent_cannot_deposit_or_sell_another_agents_property(): void
+    public function test_agent_can_deposit_or_sell_another_agents_property_from_any_branch_but_can_only_assign_self_as_seller(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
         $branchB = Branch::create(['name' => 'Branch B']);
@@ -363,20 +363,37 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
 
         Sanctum::actingAs($agentA);
 
-        foreach ([$sameBranchProperty, $otherBranchProperty] as $property) {
-            $this->postJson("/api/properties/{$property->id}/deal", $this->depositPayload())
-                ->assertForbidden();
+        $this->postJson("/api/properties/{$sameBranchProperty->id}/deal", $this->depositPayload())
+            ->assertOk();
 
-            $this->assertSame('approved', $property->fresh()->moderation_status);
-            $this->assertNull($property->fresh()->deposit_user_id);
+        $sameBranchProperty->refresh();
+        $this->assertSame('deposit', $sameBranchProperty->moderation_status);
+        $this->assertSame($agentA->id, $sameBranchProperty->deposit_user_id);
 
-            $this->postJson("/api/properties/{$property->id}/deal", $this->salePayload())
-                ->assertForbidden();
+        $this->postJson("/api/properties/{$sameBranchProperty->id}/deal", $this->salePayload())
+            ->assertOk();
 
-            $this->assertSame('approved', $property->fresh()->moderation_status);
-            $this->assertNull($property->fresh()->sale_user_id);
-            $this->assertNull($property->fresh()->sold_at);
-        }
+        $this->assertSame('sold', $sameBranchProperty->fresh()->moderation_status);
+        $this->assertSame($agentA->id, $sameBranchProperty->fresh()->sale_user_id);
+        $this->assertNotNull($sameBranchProperty->fresh()->sold_at);
+
+        $this->postJson("/api/properties/{$sameBranchProperty->id}/deal", $this->salePayload([
+            'sale_user_id' => $agentB->id,
+        ]))->assertForbidden();
+
+        $this->assertSame($agentA->id, $sameBranchProperty->fresh()->sale_user_id);
+
+        $this->postJson("/api/properties/{$otherBranchProperty->id}/deal", $this->depositPayload())
+            ->assertOk();
+
+        $this->assertSame('deposit', $otherBranchProperty->fresh()->moderation_status);
+        $this->assertSame($agentA->id, $otherBranchProperty->fresh()->deposit_user_id);
+
+        $this->postJson("/api/properties/{$otherBranchProperty->id}/deal", $this->salePayload())
+            ->assertOk();
+
+        $this->assertSame('sold', $otherBranchProperty->fresh()->moderation_status);
+        $this->assertSame($agentA->id, $otherBranchProperty->fresh()->sale_user_id);
     }
 
     public function test_agent_can_assign_deposit_sale_and_shared_agent_to_same_branch_user(): void
