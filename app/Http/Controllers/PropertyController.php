@@ -1647,6 +1647,7 @@ class PropertyController extends Controller
 
         $validated = $this->validateProperty($request);
         $this->ensureValidCoOwner(
+            $user,
             isset($validated['co_owner_user_id']) ? (int) $validated['co_owner_user_id'] : null,
             $user->id
         );
@@ -1737,6 +1738,7 @@ class PropertyController extends Controller
         $validated = $this->validateProperty($request, isUpdate: true, property: $property);
         $ownerUserId = (int) ($validated['created_by'] ?? $property->created_by);
         $this->ensureValidCoOwner(
+            $user,
             array_key_exists('co_owner_user_id', $validated) ? (int) $validated['co_owner_user_id'] : null,
             $ownerUserId
         );
