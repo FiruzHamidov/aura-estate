@@ -249,27 +249,6 @@ class PropertyController extends Controller
             || $actor->hasRole('operator');
     }
 
-    private function canAssignSpecificDealUser(User $actor, User $assignee): bool
-    {
-        if ((int) $actor->id === (int) $assignee->id) {
-            return true;
-        }
-
-        if ($actor->hasRole('admin') || $actor->hasRole('superadmin')) {
-            return true;
-        }
-
-        if ($actor->hasRole('mop')) {
-            return !empty($actor->branch_group_id)
-                && !empty($assignee->branch_group_id)
-                && (int) $actor->branch_group_id === (int) $assignee->branch_group_id;
-        }
-
-        return !empty($actor->branch_id)
-            && !empty($assignee->branch_id)
-            && (int) $actor->branch_id === (int) $assignee->branch_id;
-    }
-
     private function canAssignSpecificCoOwner(User $actor, User $coOwner): bool
     {
         if ($actor->hasRole('admin') || $actor->hasRole('superadmin')) {
@@ -281,12 +260,11 @@ class PropertyController extends Controller
             && (int) $actor->branch_id === (int) $coOwner->branch_id;
     }
 
-    private function ensureDealAssigneeInScope(User $actor, int $assigneeId, string $message): void
+    private function ensureDealAssigneeExists(int $assigneeId): void
     {
         $assignee = User::query()->find($assigneeId);
 
         abort_unless($assignee, 422, 'Указанный сотрудник не найден.');
-        abort_unless($this->canAssignSpecificDealUser($actor, $assignee), 403, $message);
     }
 
     private function ensureValidCoOwner(User $actor, ?int $coOwnerUserId, ?int $ownerUserId): void
@@ -334,7 +312,7 @@ class PropertyController extends Controller
                 $message
             );
 
-            $this->ensureDealAssigneeInScope($actor, (int) $data[$field], $message);
+            $this->ensureDealAssigneeExists((int) $data[$field]);
         }
 
         foreach (($data['agents'] ?? []) as $index => $agent) {
@@ -348,11 +326,7 @@ class PropertyController extends Controller
                 "Недостаточно прав, чтобы добавить соисполнителя #".($index + 1)."."
             );
 
-            $this->ensureDealAssigneeInScope(
-                $actor,
-                (int) $agent['agent_id'],
-                "Недостаточно прав, чтобы добавить соисполнителя #".($index + 1)."."
-            );
+            $this->ensureDealAssigneeExists((int) $agent['agent_id']);
         }
     }
 
