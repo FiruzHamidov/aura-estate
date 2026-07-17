@@ -1197,6 +1197,14 @@ class KpiModuleService
             ->get()
             ->groupBy('user_id');
 
+        // Do not call DailyReportService::autoMetrics() for every user/day.  That
+        // method issues several queries per invocation, which made a 50-user
+        // monthly page fan out into thousands of SQL statements.  Load each
+        // source once for the whole page and aggregate it in memory.
+        $autoMetricsByUserDate = $this->preloadAutoMetricsByUserDate($userIds->all(), $from, $to);
+        $planResolutions = $this->preloadPeriodTargetMaps(collect($usersPaginator->items()), $from, (array) config('kpi.v2.targets', []));
+        $lockedScopes = $this->preloadLockedScopes($periodType, $from);
+
         $mapping = (array) config('kpi.v2.metric_mapping', []);
         $defaultTargetMap = (array) config('kpi.v2.targets', []);
         $weightMap = (array) config('kpi.v2.weights', []);
@@ -1208,36 +1216,21 @@ class KpiModuleService
         $planTraceRows = [];
         $preloadedSalesByUserDate = $this->preloadSalesCreditsByUserDate($userIds->all(), $from, $to);
 
-        $data = collect($usersPaginator->items())->map(function (User $user) use ($reports, $periodType, $from, $to, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, $preloadedSalesByUserDate, &$globalSourceError, &$planTraceRows) {
+        $data = collect($usersPaginator->items())->map(function (User $user) use ($reports, $periodType, $from, $to, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, $preloadedSalesByUserDate, $autoMetricsByUserDate, $planResolutions, $lockedScopes, &$globalSourceError, &$planTraceRows) {
             $rows = collect($reports->get($user->id, collect()));
-            $autoByDate = [];
+            $autoByDate = $autoMetricsByUserDate[(int) $user->id] ?? [];
             $sourceErrors = [];
-            $targetResolution = $this->resolvePeriodTargetMapForUser($user, $from, $defaultTargetMap);
+            $targetResolution = $planResolutions[(int) $user->id] ?? $this->defaultPeriodTargetMap($defaultTargetMap, $from);
             $targetMap = $targetResolution['targets'];
             $metricPlanSourceMap = $targetResolution['sources'];
             $metricPlanDailyMap = $targetResolution['plan_daily_values'];
             $metricPlanMetaMap = $targetResolution['plan_meta'];
 
-            $periodStart = $from->copy()->startOfDay();
-            $periodEnd = $to->copy()->startOfDay();
-            for ($date = $periodStart; $date->lte($periodEnd); $date->addDay()) {
-                $dayKey = $date->toDateString();
-                try {
-                    $autoByDate[$dayKey] = $this->dailyReportService->autoMetrics($user, $dayKey);
-                } catch (Throwable) {
-                    $salesCredit = (float) ($preloadedSalesByUserDate[(int) $user->id][$dayKey] ?? 0.0);
-                    $autoByDate[$dayKey] = [
-                        'ad_count' => 0,
-                        'calls_count' => 0,
-                        'meetings_count' => 0,
-                        'shows_count' => 0,
-                        'new_clients_count' => 0,
-                        'new_properties_count' => 0,
-                        'deals_count' => (int) floor($salesCredit),
-                        'sales_count' => $salesCredit,
-                    ];
-                    $sourceErrors[$dayKey] = true;
-                }
+            foreach ($preloadedSalesByUserDate[(int) $user->id] ?? [] as $dayKey => $salesCredit) {
+                $autoByDate[$dayKey] = array_merge($autoByDate[$dayKey] ?? [], [
+                    'deals_count' => (int) floor($salesCredit),
+                    'sales_count' => $salesCredit,
+                ]);
             }
 
             $metrics = $this->buildMetricsForRows($rows, $autoByDate, $sourceErrors, $mapping, $targetMap, $periodType, $daysInPeriod, $metricPlanSourceMap);
@@ -1245,7 +1238,7 @@ class KpiModuleService
             $kpiValue = $score['kpi_value'];
             $kpiPercent = $score['kpi_percent'];
             $status = $this->statusForKpiPercent($kpiPercent, $score);
-            $locked = $this->isPeriodLockedForUser($periodType, $from, $user);
+            $locked = isset($lockedScopes[(string) $user->branch_id.'|'.(string) $user->branch_group_id]);
             $rowSourceError = collect($metrics)->contains(fn (array $metric) => (bool) $metric['source_error']);
             $globalSourceError = $globalSourceError || $rowSourceError;
 
@@ -1416,7 +1409,7 @@ class KpiModuleService
 
         $soldProperties = DB::table('properties')
             ->select($select)
-            ->whereIn('moderation_status', ['sold'])
+            ->whereIn('moderation_status', ['sold', 'sold_by_owner', 'rented'])
             ->whereBetween('sold_at', [
                 $from->copy()->startOfDay()->setTimezone('UTC')->toDateTimeString(),
                 $to->copy()->endOfDay()->setTimezone('UTC')->toDateTimeString(),
@@ -1429,7 +1422,7 @@ class KpiModuleService
 
         $targetUsers = array_fill_keys($userIds, true);
         $result = [];
-        $creditsByProperty = $this->salesAttributionService->creditsByProperty($soldProperties, ['sold', 'rented']);
+        $creditsByProperty = $this->salesAttributionService->creditsByProperty($soldProperties, ['sold', 'sold_by_owner', 'rented']);
 
         foreach ($soldProperties as $property) {
             $soldAt = $property->sold_at ? Carbon::parse((string) $property->sold_at, 'UTC')->setTimezone(self::TZ) : null;
@@ -1448,6 +1441,136 @@ class KpiModuleService
         }
 
         return $result;
+    }
+
+    /**
+     * Loads all automatic KPI facts for the paginated users in a bounded number
+     * of index-friendly range queries. Dates are converted in PHP so the SQL
+     * predicates remain sargable (no DATE()/CONVERT_TZ() on indexed columns).
+     */
+    private function preloadAutoMetricsByUserDate(array $userIds, Carbon $from, Carbon $to): array
+    {
+        $userIds = array_values(array_unique(array_map('intval', $userIds)));
+        if ($userIds === []) {
+            return [];
+        }
+
+        $start = $from->copy()->startOfDay()->setTimezone('UTC')->toDateTimeString();
+        $end = $to->copy()->endOfDay()->setTimezone('UTC')->toDateTimeString();
+        $result = [];
+        $put = static function (array &$target, int $userId, string $date, string $metric, float $value): void {
+            $target[$userId][$date][$metric] = (float) ($target[$userId][$date][$metric] ?? 0) + $value;
+        };
+        $localDate = static fn ($value): string => Carbon::parse((string) $value, 'UTC')->setTimezone(self::TZ)->toDateString();
+
+        if (Schema::hasTable('crm_tasks') && Schema::hasTable('crm_task_types')) {
+            $tasks = DB::table('crm_tasks')
+                ->join('crm_task_types', 'crm_task_types.id', '=', 'crm_tasks.task_type_id')
+                ->select(['crm_tasks.assignee_id', 'crm_tasks.completed_at', 'crm_task_types.code'])
+                ->whereIn('crm_tasks.assignee_id', $userIds)
+                ->where('crm_tasks.status', 'done')
+                ->whereIn('crm_task_types.code', ['CALL', 'AD_PUBLICATION', 'AD_CREATE'])
+                ->whereBetween('crm_tasks.completed_at', [$start, $end])
+                ->get();
+            foreach ($tasks as $task) {
+                $metric = $task->code === 'CALL' ? 'calls_count' : 'ad_count';
+                $put($result, (int) $task->assignee_id, $localDate($task->completed_at), $metric, 1);
+            }
+        }
+
+        if (Schema::hasTable('bookings')) {
+            foreach (DB::table('bookings')->select(['agent_id', 'start_time'])
+                ->whereIn('agent_id', $userIds)->whereBetween('start_time', [$start, $end])->get() as $booking) {
+                $date = $localDate($booking->start_time);
+                $put($result, (int) $booking->agent_id, $date, 'shows_count', 1);
+                $put($result, (int) $booking->agent_id, $date, 'meetings_count', 1);
+            }
+        }
+
+        if (Schema::hasTable('clients')) {
+            foreach (DB::table('clients')->select(['created_by', 'responsible_agent_id', 'created_at'])
+                ->whereBetween('created_at', [$start, $end])
+                ->where(function ($q) use ($userIds) {
+                    $q->whereIn('created_by', $userIds)->orWhereIn('responsible_agent_id', $userIds);
+                })->get() as $client) {
+                $userId = in_array((int) $client->created_by, $userIds, true) ? (int) $client->created_by : (int) $client->responsible_agent_id;
+                if ($userId > 0) {
+                    $put($result, $userId, $localDate($client->created_at), 'new_clients_count', 1);
+                }
+            }
+        }
+
+        if (Schema::hasTable('properties')) {
+            foreach (DB::table('properties')->select(['created_by', 'agent_id', 'created_at'])
+                ->whereBetween('created_at', [$start, $end])
+                ->where(function ($q) use ($userIds) {
+                    $q->whereIn('created_by', $userIds)->orWhere(function ($legacy) use ($userIds) {
+                        $legacy->whereIn('agent_id', $userIds)->where(function ($creatorMissing) {
+                            $creatorMissing->whereNull('created_by')->orWhere('created_by', 0);
+                        });
+                    });
+                })->get() as $property) {
+                $creator = (int) $property->created_by;
+                $userId = $creator > 0 ? $creator : (int) $property->agent_id;
+                if ($userId > 0) {
+                    $put($result, $userId, $localDate($property->created_at), 'new_properties_count', 1);
+                }
+            }
+        }
+
+        return $result;
+    }
+
+    private function defaultPeriodTargetMap(array $defaultTargetMap, Carbon $date): array
+    {
+        $targets = collect($defaultTargetMap)->mapWithKeys(fn ($value, $key) => [(string) $key => (float) $value * max(1, $date->daysInMonth)])->all();
+        return ['targets' => $targets, 'sources' => array_fill_keys(array_keys($targets), 'system'), 'plan_daily_values' => array_fill_keys(array_keys($targets), null), 'plan_meta' => array_fill_keys(array_keys($targets), null)];
+    }
+
+    private function preloadPeriodTargetMaps(Collection $users, Carbon $date, array $defaultTargetMap): array
+    {
+        if ($users->isEmpty() || ! Schema::hasTable('kpi_plans')) {
+            return [];
+        }
+        $userIds = $users->pluck('id')->map(fn ($id) => (int) $id)->all();
+        $plans = KpiPlan::query()->where(function ($q) use ($userIds) {
+            $q->whereIn('user_id', $userIds)->orWhereNull('user_id');
+        })->where(function ($q) use ($date) {
+            $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $date->toDateString());
+        })->where(function ($q) use ($date) {
+            $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $date->toDateString());
+        })->orderBy('id')->get();
+
+        $result = [];
+        foreach ($users as $user) {
+            $resolution = $this->defaultPeriodTargetMap($defaultTargetMap, $date);
+            $scopeCandidates = [[$user->branch_group_id, $user->branch_id], [null, $user->branch_id], [null, null]];
+            $common = collect();
+            foreach ($scopeCandidates as [$groupId, $branchId]) {
+                $candidate = $plans->filter(fn (KpiPlan $plan) => $plan->user_id === null
+                    && $plan->role_slug === ($user->role?->slug ?? '')
+                    && (int) ($plan->branch_group_id ?? 0) === (int) ($groupId ?? 0)
+                    && (int) ($plan->branch_id ?? 0) === (int) ($branchId ?? 0));
+                if ($candidate->isNotEmpty()) { $common = $candidate; break; }
+            }
+            $effective = $common->concat($plans->filter(fn (KpiPlan $plan) => (int) $plan->user_id === (int) $user->id));
+            foreach ($effective as $plan) {
+                $key = (string) $plan->metric_key;
+                $resolution['targets'][$key] = (float) $plan->daily_plan;
+                $resolution['sources'][$key] = $plan->user_id === null ? 'common' : 'personal';
+                $resolution['plan_daily_values'][$key] = (float) $plan->daily_plan;
+                $resolution['plan_meta'][$key] = ['plan_id' => (int) $plan->id, 'user_id' => $plan->user_id ? (int) $plan->user_id : null, 'branch_id' => $plan->branch_id ? (int) $plan->branch_id : null, 'branch_group_id' => $plan->branch_group_id ? (int) $plan->branch_group_id : null, 'effective_from' => optional($plan->effective_from)->toDateString(), 'effective_to' => optional($plan->effective_to)->toDateString()];
+            }
+            $result[(int) $user->id] = $resolution;
+        }
+        return $result;
+    }
+
+    private function preloadLockedScopes(string $periodType, Carbon $periodStart): array
+    {
+        $periodKey = $periodType === 'month' ? $periodStart->format('Y-m') : $periodStart->toDateString();
+        return KpiPeriodLock::query()->where('period_type', $periodType)->where('period_key', $periodKey)->get()
+            ->mapWithKeys(fn (KpiPeriodLock $lock) => [(string) $lock->branch_id.'|'.(string) $lock->branch_group_id => true])->all();
     }
 
     private function buildMetricsForRows(

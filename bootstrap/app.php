@@ -41,6 +41,7 @@ return Application::configure(basePath: dirname(__DIR__))
             'daily.report' => EnsureDailyReportSubmitted::class,
             'non.client' => EnsureUserIsNotClient::class,
             'rop.branch.scope' => EnforceRopBranchScope::class,
+            'kpi.performance' => \App\Http\Middleware\LogKpiPerformance::class,
         ]);
 
         $middleware->redirectGuestsTo(function (Request $request): ?string {
