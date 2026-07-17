@@ -17,7 +17,9 @@ use App\Support\Notifications\NotificationCategory;
 use App\Support\Notifications\NotificationChannel;
 use App\Support\Notifications\NotificationStatus;
 use App\Support\Notifications\NotificationType;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
@@ -845,6 +847,10 @@ class NotificationService
             ->reject(fn (User $user) => $actor && (int) $user->id === (int) $actor->id)
             ->values();
 
+        if ($recipients->isEmpty()) {
+            return;
+        }
+
         Log::info('Notification recipients resolved.', [
             'type' => $type,
             'actor_id' => $actor?->id,
@@ -1035,15 +1041,17 @@ class NotificationService
         $from = now();
         $to = now()->copy()->addMinutes(5);
 
-        $leads = Lead::query()
+        $leads = $this->leadReminderQuery()
             ->whereNotIn('status', Lead::closedStatuses())
             ->whereNull('first_contacted_at')
             ->whereBetween('first_contact_due_at', [$from, $to])
             ->get();
 
         foreach ($leads as $lead) {
+            $recipients = $this->recipients->leadManagers($lead);
+
             $this->notifyUsers(
-                $this->recipients->leadManagers($lead),
+                $recipients,
                 NotificationType::LEAD_SLA_DUE_SOON,
                 'SLA первого контакта подходит',
                 sprintf('По лиду #%d скоро истечёт SLA первого контакта.', $lead->id),
@@ -1057,7 +1065,7 @@ class NotificationService
             );
 
             $this->notifyUsers(
-                $this->recipients->leadManagers($lead),
+                $recipients,
                 NotificationType::MOTIVATION_MANAGER_LEAD_HOT,
                 'Горячий лид ждёт контакта',
                 'Свяжитесь с клиентом быстрее, пока интерес максимально высокий.',
@@ -1076,7 +1084,7 @@ class NotificationService
 
     private function dispatchLeadSlaOverdue(): int
     {
-        $leads = Lead::query()
+        $leads = $this->leadReminderQuery()
             ->whereNotIn('status', Lead::closedStatuses())
             ->whereNull('first_contacted_at')
             ->whereNotNull('first_contact_due_at')
@@ -1107,7 +1115,7 @@ class NotificationService
         $from = now();
         $to = now()->copy()->addMinutes(5);
 
-        $leads = Lead::query()
+        $leads = $this->leadReminderQuery()
             ->whereNotIn('status', Lead::closedStatuses())
             ->whereBetween('next_follow_up_at', [$from, $to])
             ->get();
@@ -1133,7 +1141,7 @@ class NotificationService
 
     private function dispatchLeadFollowUpOverdue(): int
     {
-        $leads = Lead::query()
+        $leads = $this->leadReminderQuery()
             ->whereNotIn('status', Lead::closedStatuses())
             ->whereNotNull('next_follow_up_at')
             ->where('next_follow_up_at', '<', now())
@@ -1162,7 +1170,7 @@ class NotificationService
     {
         $threshold = now()->copy()->subHours(4);
 
-        $leads = Lead::query()
+        $leads = $this->leadReminderQuery()
             ->whereNotIn('status', Lead::closedStatuses())
             ->where(function ($query) use ($threshold) {
                 $query->whereNull('last_activity_at')->orWhere('last_activity_at', '<', $threshold);
@@ -1186,6 +1194,47 @@ class NotificationService
         }
 
         return $leads->count();
+    }
+
+    /**
+     * Limit recurring lead reminders to leads that can actually reach an active manager.
+     *
+     * This prevents the five-minute scheduler from repeatedly resolving and logging
+     * permanently unassigned leads. A lead without a branch retains the existing
+     * behaviour: any active manager may receive its reminder.
+     *
+     * @return Builder<Lead>
+     */
+    private function leadReminderQuery(): Builder
+    {
+        return Lead::query()->where(function (Builder $query) {
+            $query
+                ->whereHas('responsibleAgent', function (Builder $userQuery) {
+                    $this->scopeActiveManagers($userQuery);
+                })
+                ->orWhereHas('branch.users', function (Builder $userQuery) {
+                    $this->scopeActiveManagers($userQuery);
+                })
+                ->orWhere(function (Builder $unassignedBranchQuery) {
+                    $unassignedBranchQuery
+                        ->whereNull('leads.branch_id')
+                        ->whereExists(function (QueryBuilder $userQuery) {
+                            $userQuery
+                                ->selectRaw('1')
+                                ->from('users')
+                                ->join('roles', 'roles.id', '=', 'users.role_id')
+                                ->where('users.status', User::STATUS_ACTIVE)
+                                ->where('roles.slug', 'manager');
+                        });
+                });
+        });
+    }
+
+    private function scopeActiveManagers(Builder $query): void
+    {
+        $query
+            ->where('status', User::STATUS_ACTIVE)
+            ->whereHas('role', fn (Builder $roleQuery) => $roleQuery->where('slug', 'manager'));
     }
 
     private function dispatchDealDeadlineSoon(): int

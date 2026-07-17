@@ -5,14 +5,17 @@ namespace Tests\Feature;
 use App\Models\Branch;
 use App\Models\Client;
 use App\Models\ClientType;
+use App\Models\Lead;
 use App\Models\Notification;
 use App\Models\Role;
 use App\Models\User;
+use App\Services\NotificationService;
 use App\Support\Notifications\NotificationCategory;
 use App\Support\Notifications\NotificationStatus;
 use App\Support\Notifications\NotificationType;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
@@ -267,6 +270,54 @@ class NotificationFeatureTest extends TestCase
         $this->getJson('/api/notifications/unread-count')
             ->assertOk()
             ->assertJsonPath('unread_count', 0);
+    }
+
+    public function test_overdue_lead_without_a_manager_is_skipped_without_an_info_log(): void
+    {
+        $branch = Branch::create(['name' => 'Central']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = $this->createUser($agentRole, $branch, 'Agent');
+        $lead = Lead::create([
+            'full_name' => 'Unassigned lead',
+            'branch_id' => $branch->id,
+            'responsible_agent_id' => $agent->id,
+            'status' => Lead::STATUS_NEW,
+            'first_contact_due_at' => now()->subMinute(),
+        ]);
+
+        Log::spy();
+
+        $method = new \ReflectionMethod(NotificationService::class, 'dispatchLeadSlaOverdue');
+        $method->invoke(app(NotificationService::class));
+
+        $this->assertDatabaseMissing('notifications', [
+            'subject_type' => $lead->getMorphClass(),
+            'subject_id' => $lead->id,
+        ]);
+        Log::shouldNotHaveReceived('info');
+    }
+
+    public function test_overdue_lead_with_an_active_branch_manager_is_not_skipped(): void
+    {
+        $branch = Branch::create(['name' => 'Central']);
+        $managerRole = Role::create(['name' => 'Manager', 'slug' => 'manager']);
+        $manager = $this->createUser($managerRole, $branch, 'Manager');
+        $lead = Lead::create([
+            'full_name' => 'Overdue lead',
+            'branch_id' => $branch->id,
+            'status' => Lead::STATUS_NEW,
+            'first_contact_due_at' => now()->subMinute(),
+        ]);
+
+        $method = new \ReflectionMethod(NotificationService::class, 'dispatchLeadSlaOverdue');
+        $method->invoke(app(NotificationService::class));
+
+        $this->assertDatabaseHas('notifications', [
+            'user_id' => $manager->id,
+            'type' => NotificationType::LEAD_SLA_OVERDUE,
+            'subject_type' => $lead->getMorphClass(),
+            'subject_id' => $lead->id,
+        ]);
     }
 
     private function createUser(Role $role, Branch $branch, string $name): User
