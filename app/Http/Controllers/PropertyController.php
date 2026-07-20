@@ -600,6 +600,22 @@ class PropertyController extends Controller
         return response()->json($query->latest()->paginate($perPage));
     }
 
+    /**
+     * Public count of properties matching the same filters as the public list.
+     * This deliberately uses SQL COUNT(*) and never eager-loads relations.
+     */
+    public function count(Request $request)
+    {
+        $this->validateListFilters($request);
+
+        $query = Property::query()->publicSearchable();
+        $this->applyFilters($query, $request);
+
+        return response()->json([
+            'count' => $query->count(),
+        ]);
+    }
+
     public function myProperties(Request $request)
     {
         $this->validateListFilters($request);
@@ -689,7 +705,7 @@ class PropertyController extends Controller
         if ($user && ($user->hasRole('admin') || $user->hasRole('superadmin'))) {
             // без ограничений
         } elseif (!$user) {
-            $query->where('moderation_status', 'approved');
+            $query->publicSearchable();
         } elseif ($this->hasOwnPropertyScope($user)) {
             $query->where(function (Builder $ownerQuery) use ($user) {
                 $ownerQuery->where('created_by', $user->id);
@@ -1358,6 +1374,13 @@ class PropertyController extends Controller
         }
 
         // Точные поля (включая мультиселект через whereIn)
+        // Aliases are kept here so the public list, map, and count endpoints
+        // always apply an identical filter set.
+        $fieldAliases = [
+            'type_id' => ['propertyTypes', 'propertyType'],
+            'location_id' => ['city'],
+            'repair_type_id' => ['repairs'],
+        ];
         $exactFields = [
             'type_id', 'status_id', 'location_id', 'repair_type_id',
             'currency', 'offer_type',
@@ -1368,7 +1391,20 @@ class PropertyController extends Controller
             // при желании можно и lat/lng, но для карты они задаются bbox'ом
         ];
         foreach ($exactFields as $field) {
-            if ($request->has($field)) {
+            $filterInput = $request->input($field);
+            $hasFilter = $request->has($field);
+
+            if (!$hasFilter) {
+                foreach ($fieldAliases[$field] ?? [] as $alias) {
+                    if ($request->has($alias)) {
+                        $hasFilter = true;
+                        $filterInput = $request->input($alias);
+                        break;
+                    }
+                }
+            }
+
+            if ($hasFilter) {
                 // normalize boolean-like params: support true/false (bool), 'true'/'false' (strings), and '1'/'0'
                 $booleanFields = [
                     'has_garden','has_parking','is_mortgage_available','is_from_developer',
@@ -1376,7 +1412,7 @@ class PropertyController extends Controller
                 ];
 
                 if (in_array($field, $booleanFields, true)) {
-                    $raw = $request->input($field);
+                    $raw = $filterInput;
                     if ($raw === null || $raw === '') {
                         continue; // nothing to apply
                     }
@@ -1406,9 +1442,9 @@ class PropertyController extends Controller
                     continue;
                 }
 
-                $vals = $toArray($request->input($field));
+                $vals = $toArray($filterInput);
                 if (empty($vals)) {
-                    $val = $request->input($field);
+                    $val = $filterInput;
                     if ($val !== null && $val !== '') {
                         $query->where($field, $val);
                     }
@@ -2303,7 +2339,9 @@ class PropertyController extends Controller
                 'total_area','floor','price','currency','created_at','moderation_status',
                 'latitude','longitude'
             ])
-            ->whereNotIn('moderation_status', ['deleted', 'rejected', 'denied', 'draft', 'sold', 'rented', 'sold_by_owner']);
+            ->whereNotIn('moderation_status', ['deleted', 'rejected', 'denied', 'draft', 'sold', 'rented', 'sold_by_owner'])
+            // Продажа и аренда одного объекта — это разные объявления, не дубли.
+            ->where('offer_type', $data['offer_type']);
 
         // --- Грубая SQL-фаза: сильно сузим кандидатов ---
         $q->where(function ($qq) use ($phoneNorm, $addrNormNew, $floor, $area, $latNew, $lngNew) {
