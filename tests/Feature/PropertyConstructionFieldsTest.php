@@ -79,6 +79,7 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->boolean('has_parking')->default(false);
             $table->boolean('is_mortgage_available')->default(false);
             $table->boolean('is_from_developer')->default(false);
+            $table->boolean('is_full_apartment')->default(false);
             $table->string('moderation_status')->default('pending');
             $table->string('landmark')->nullable();
             $table->decimal('latitude', 10, 8)->nullable();
@@ -253,6 +254,62 @@ class PropertyConstructionFieldsTest extends TestCase
             'address' => 'проспект Рудаки, 55',
             'floor' => 9,
             'total_area' => 120,
+        ]);
+
+        $response->assertOk();
+        $this->assertDatabaseCount('properties', 2);
+    }
+
+    public function test_property_store_does_not_flag_sale_as_duplicate_of_rent(): void
+    {
+        $agentRole = Role::create([
+            'name' => 'Agent',
+            'slug' => 'agent',
+        ]);
+
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000103',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $status = \App\Models\PropertyStatus::create(['name' => 'Available']);
+
+        \App\Models\Property::query()->create([
+            'title' => 'Rental property',
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 5000,
+            'currency' => 'TJS',
+            'offer_type' => 'rent',
+            'moderation_status' => 'approved',
+            'created_by' => $user->id,
+            'agent_id' => $user->id,
+            'owner_phone' => '+992 90 111 2255',
+            'address' => 'улица Рудаки, 15',
+            'floor' => 5,
+            'total_area' => 80,
+            'latitude' => 38.5598,
+            'longitude' => 68.7870,
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $response = $this->postJson('/api/properties', [
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 180000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'owner_phone' => '901112255',
+            'address' => 'улица Рудаки, 15',
+            'floor' => 5,
+            'total_area' => 80,
+            'latitude' => 38.5598,
+            'longitude' => 68.7870,
         ]);
 
         $response->assertOk();
@@ -479,6 +536,102 @@ class PropertyConstructionFieldsTest extends TestCase
 
         $response->assertStatus(422);
         $response->assertJsonValidationErrors(['construction_status']);
+    }
+
+    public function test_public_property_count_includes_only_publicly_visible_properties(): void
+    {
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000240',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $activeStatus = \App\Models\PropertyStatus::create(['name' => 'Available', 'slug' => 'available']);
+        $archivedStatus = \App\Models\PropertyStatus::create(['name' => 'Archived', 'slug' => 'archived']);
+
+        foreach ([
+            ['title' => 'Visible', 'moderation_status' => 'approved', 'status_id' => $activeStatus->id],
+            ['title' => 'Pending', 'moderation_status' => 'pending', 'status_id' => $activeStatus->id],
+            ['title' => 'Rejected', 'moderation_status' => 'rejected', 'status_id' => $activeStatus->id],
+            ['title' => 'Deleted', 'moderation_status' => 'deleted', 'status_id' => $activeStatus->id],
+            ['title' => 'Archived', 'moderation_status' => 'approved', 'status_id' => $archivedStatus->id],
+        ] as $attributes) {
+            \App\Models\Property::query()->create(array_merge($attributes, [
+                'type_id' => $type->id,
+                'price' => 100000,
+                'currency' => 'TJS',
+                'offer_type' => 'sale',
+                'created_by' => $user->id,
+            ]));
+        }
+
+        $this->getJson('/api/properties/count')
+            ->assertOk()
+            ->assertExactJson(['count' => 1]);
+    }
+
+    public function test_public_property_count_matches_list_for_supported_filters(): void
+    {
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000241',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+        $apartment = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $house = \App\Models\PropertyType::create(['name' => 'House']);
+        $status = \App\Models\PropertyStatus::create(['name' => 'Available', 'slug' => 'available']);
+
+        foreach ([
+            ['type_id' => $apartment->id, 'price' => 150000, 'rooms' => 3, 'total_area' => 80, 'floor' => 5, 'district' => 'Сино', 'offer_type' => 'sale', 'listing_type' => 'vip', 'is_full_apartment' => true, 'construction_status' => 'built', 'landmark' => 'Парк'],
+            ['type_id' => $house->id, 'price' => 70000, 'rooms' => 1, 'total_area' => 40, 'floor' => 1, 'district' => 'Фирдавси', 'offer_type' => 'rent', 'listing_type' => 'regular', 'is_full_apartment' => false, 'construction_status' => 'commissioned', 'landmark' => 'Рынок'],
+        ] as $attributes) {
+            \App\Models\Property::query()->create(array_merge($attributes, [
+                'status_id' => $status->id,
+                'currency' => 'TJS',
+                'moderation_status' => 'approved',
+                'created_by' => $user->id,
+            ]));
+        }
+
+        $filters = [
+            'propertyTypes' => [$apartment->id],
+            'roomsFrom' => 3,
+            'roomsTo' => 3,
+            'priceFrom' => 100000,
+            'priceTo' => 200000,
+            'areaFrom' => 70,
+            'areaTo' => 90,
+            'floorFrom' => 5,
+            'floorTo' => 5,
+            'district' => 'Сино',
+            'offer_type' => 'sale',
+            'listing_type' => 'vip',
+            'is_full_apartment' => 'true',
+            'construction_status' => 'built',
+            'landmark' => 'Парк',
+        ];
+        $query = http_build_query($filters);
+
+        $list = $this->getJson('/api/properties?' . $query)
+            ->assertOk()
+            ->json('total');
+
+        $this->getJson('/api/properties/count?' . $query)
+            ->assertOk()
+            ->assertExactJson(['count' => $list]);
+    }
+
+    public function test_public_property_count_returns_zero_when_nothing_matches(): void
+    {
+        $this->getJson('/api/properties/count?offer_type=rent')
+            ->assertOk()
+            ->assertExactJson(['count' => 0]);
     }
 
     public function test_rop_can_set_urgent_listing_type_without_auto_moderation(): void

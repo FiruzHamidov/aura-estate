@@ -562,6 +562,11 @@ class ExternalPropertyRequestService
     {
         $query = Property::query()->where('moderation_status', '!=', 'deleted');
 
+        // Продажа и аренда одного объекта могут существовать одновременно.
+        if (in_array($request->offer_type, ['rent', 'sale'], true)) {
+            $query->where('offer_type', $request->offer_type);
+        }
+
         $normalizedPhone = ClientPhone::normalize($request->owner_phone);
         $lastNine = $normalizedPhone ? substr($normalizedPhone, -9) : null;
 

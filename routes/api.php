@@ -84,6 +84,7 @@ Route::post('/telegram/auth/login', [TelegramAuthController::class, 'login']);
 Route::post('/lead-requests', [LeadRequestController::class, 'store'])->middleware('throttle:20,1');
 
 Route::get('/properties', [PropertyController::class, 'index']);
+Route::get('/properties/count', [PropertyController::class, 'count']);
 Route::get('/properties/map', [PropertyController::class, 'map']);
 Route::get('/properties/search', [PropertyController::class, 'search']);
 Route::get('/properties/{property}', [PropertyController::class, 'show']);
