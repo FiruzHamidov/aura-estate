@@ -538,7 +538,7 @@ class PropertyConstructionFieldsTest extends TestCase
         $response->assertJsonValidationErrors(['construction_status']);
     }
 
-    public function test_public_property_count_includes_only_publicly_visible_properties(): void
+    public function test_public_property_count_includes_only_approved_properties(): void
     {
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
         $user = User::create([
@@ -550,14 +550,11 @@ class PropertyConstructionFieldsTest extends TestCase
         ]);
         $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
         $activeStatus = \App\Models\PropertyStatus::create(['name' => 'Available', 'slug' => 'available']);
-        $archivedStatus = \App\Models\PropertyStatus::create(['name' => 'Archived', 'slug' => 'archived']);
-
         foreach ([
             ['title' => 'Visible', 'moderation_status' => 'approved', 'status_id' => $activeStatus->id],
             ['title' => 'Pending', 'moderation_status' => 'pending', 'status_id' => $activeStatus->id],
             ['title' => 'Rejected', 'moderation_status' => 'rejected', 'status_id' => $activeStatus->id],
             ['title' => 'Deleted', 'moderation_status' => 'deleted', 'status_id' => $activeStatus->id],
-            ['title' => 'Archived', 'moderation_status' => 'approved', 'status_id' => $archivedStatus->id],
         ] as $attributes) {
             \App\Models\Property::query()->create(array_merge($attributes, [
                 'type_id' => $type->id,

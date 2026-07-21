@@ -608,7 +608,7 @@ class PropertyController extends Controller
     {
         $this->validateListFilters($request);
 
-        $query = Property::query()->publicSearchable();
+        $query = Property::query()->where('moderation_status', Property::PUBLIC_MODERATION_STATUS);
         $this->applyFilters($query, $request);
 
         return response()->json([
@@ -705,7 +705,7 @@ class PropertyController extends Controller
         if ($user && ($user->hasRole('admin') || $user->hasRole('superadmin'))) {
             // без ограничений
         } elseif (!$user) {
-            $query->publicSearchable();
+            $query->where('moderation_status', Property::PUBLIC_MODERATION_STATUS);
         } elseif ($this->hasOwnPropertyScope($user)) {
             $query->where(function (Builder $ownerQuery) use ($user) {
                 $ownerQuery->where('created_by', $user->id);
