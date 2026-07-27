@@ -9,6 +9,7 @@ use App\Models\PropertyPhoto;
 use App\Models\PropertyStatus;
 use App\Models\PropertyType;
 use App\Models\Role;
+use App\Models\Tag;
 use App\Models\User;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
@@ -115,6 +116,22 @@ class PropertySearchFeatureTest extends TestCase
             $table->string('file_path');
             $table->unsignedInteger('position')->default(0);
             $table->timestamps();
+        });
+
+        Schema::create('tags', function (Blueprint $table) {
+            $table->id();
+            $table->string('name', 100);
+            $table->string('slug', 120)->unique();
+            $table->string('color', 20)->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('property_tag', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('property_id');
+            $table->unsignedBigInteger('tag_id');
+            $table->timestamps();
+            $table->unique(['property_id', 'tag_id']);
         });
 
         Schema::create('property_logs', function (Blueprint $table) {
@@ -249,6 +266,42 @@ class PropertySearchFeatureTest extends TestCase
             ]))
             ->assertOk()
             ->assertJsonPath('data.0.id', $match->id);
+    }
+
+    public function test_search_finds_by_tag_text_and_filters_by_tag_id(): void
+    {
+        $mountainView = Tag::query()->create([
+            'name' => 'Вид на горы',
+            'slug' => 'mountain-view',
+            'color' => '#2563EB',
+        ]);
+        $urgent = Tag::query()->create([
+            'name' => 'Срочная продажа',
+            'slug' => 'urgent-sale',
+            'color' => '#DC2626',
+        ]);
+
+        $match = $this->createProperty(['title' => 'Просторная квартира']);
+        $match->tags()->sync([$mountainView->id, $urgent->id]);
+
+        $other = $this->createProperty(['title' => 'Квартира во дворе']);
+        $other->tags()->sync([$urgent->id]);
+
+        $this->getJson('/api/properties/search?q='.urlencode('горы'))
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonPath('data.0.id', $match->id)
+            ->assertJsonPath('data.0.tags.0.slug', 'mountain-view');
+
+        $response = $this->getJson('/api/properties/search?'.http_build_query([
+            'tag_ids' => [$mountainView->id],
+        ]));
+
+        $response->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonPath('data.0.id', $match->id);
+
+        $this->assertNotContains($other->id, collect($response->json('data'))->pluck('id')->all());
     }
 
     public function test_owner_name_search_requires_bearer_token(): void

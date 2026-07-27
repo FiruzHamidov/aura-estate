@@ -65,6 +65,7 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->string('offer_type')->default('sale');
             $table->tinyInteger('rooms')->nullable();
             $table->string('youtube_link')->nullable();
+            $table->string('instagram_link', 2048)->nullable();
             $table->float('total_area')->nullable();
             $table->decimal('land_size', 10, 2)->nullable();
             $table->float('living_area')->nullable();
@@ -95,6 +96,38 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->text('rejection_comment')->nullable();
             $table->text('status_comment')->nullable();
             $table->timestamps();
+        });
+
+        Schema::create('features', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->unique();
+            $table->string('icon', 100)->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('feature_property', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('property_id');
+            $table->unsignedBigInteger('feature_id');
+            $table->timestamps();
+            $table->unique(['property_id', 'feature_id']);
+        });
+
+        Schema::create('tags', function (Blueprint $table) {
+            $table->id();
+            $table->string('name', 100);
+            $table->string('slug', 120)->unique();
+            $table->string('color', 20)->nullable();
+            $table->timestamps();
+        });
+
+        Schema::create('property_tag', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('property_id');
+            $table->unsignedBigInteger('tag_id');
+            $table->timestamps();
+            $table->unique(['property_id', 'tag_id']);
         });
 
         Schema::create('property_logs', function (Blueprint $table) {
@@ -206,6 +239,179 @@ class PropertyConstructionFieldsTest extends TestCase
             'id' => $response->json('id'),
             'status_id' => null,
         ]);
+    }
+
+    public function test_property_instagram_link_can_be_created_updated_and_returned(): void
+    {
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000097',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+
+        Sanctum::actingAs($user);
+
+        $created = $this->postJson('/api/properties', [
+            'type_id' => $type->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'instagram_link' => ' https://www.instagram.com/reel/example/ ',
+        ]);
+
+        $created->assertOk()
+            ->assertJsonPath('instagram_link', 'https://www.instagram.com/reel/example/');
+
+        $propertyId = $created->json('id');
+
+        $this->getJson('/api/properties/'.$propertyId)
+            ->assertOk()
+            ->assertJsonPath('instagram_link', 'https://www.instagram.com/reel/example/');
+
+        $updated = $this->putJson('/api/properties/'.$propertyId, [
+            'type_id' => $type->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'instagram_link' => 'https://instagram.com/p/updated/',
+        ]);
+
+        $updated->assertOk()
+            ->assertJsonPath('instagram_link', 'https://instagram.com/p/updated/');
+
+        $this->postJson('/api/properties', [
+            'type_id' => $type->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'instagram_link' => 'https://example.com/instagram',
+        ])->assertUnprocessable()->assertJsonPath(
+            'details.errors.instagram_link.0',
+            'Поле Инстаграм должно содержать HTTPS-ссылку на instagram.com.'
+        );
+    }
+
+    public function test_property_features_can_be_selected_replaced_and_cleared(): void
+    {
+        $agentRole = Role::create([
+            'name' => 'Agent',
+            'slug' => 'agent',
+        ]);
+
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000099',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $parking = \App\Models\Feature::create([
+            'name' => 'Паркинг',
+            'slug' => 'parking',
+            'icon' => 'car',
+        ]);
+        $security = \App\Models\Feature::create([
+            'name' => 'Охрана',
+            'slug' => 'security',
+            'icon' => 'shield-check',
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $created = $this->postJson('/api/properties', [
+            'type_id' => $type->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'features' => [$parking->id, $security->id],
+        ]);
+
+        $created->assertOk()
+            ->assertJsonCount(2, 'features')
+            ->assertJsonPath('features.0.icon', 'car')
+            ->assertJsonPath('features.1.icon', 'shield-check');
+
+        $propertyId = $created->json('id');
+        $this->assertDatabaseHas('feature_property', [
+            'property_id' => $propertyId,
+            'feature_id' => $parking->id,
+        ]);
+
+        $replaced = $this->putJson('/api/properties/'.$propertyId, [
+            'type_id' => $type->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'features' => [$security->id],
+        ]);
+
+        $replaced->assertOk()
+            ->assertJsonCount(1, 'features')
+            ->assertJsonPath('features.0.id', $security->id);
+
+        $cleared = $this->putJson('/api/properties/'.$propertyId, [
+            'type_id' => $type->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'features' => [],
+        ]);
+
+        $cleared->assertOk()->assertJsonCount(0, 'features');
+        $this->assertDatabaseMissing('feature_property', [
+            'property_id' => $propertyId,
+        ]);
+    }
+
+    public function test_property_tags_can_be_selected_and_cleared(): void
+    {
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000098',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $tag = \App\Models\Tag::create([
+            'name' => 'Срочная продажа',
+            'slug' => 'urgent-sale',
+            'color' => '#DC2626',
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $created = $this->postJson('/api/properties', [
+            'type_id' => $type->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'tags' => [$tag->id],
+        ]);
+
+        $created->assertOk()
+            ->assertJsonCount(1, 'tags')
+            ->assertJsonPath('tags.0.slug', 'urgent-sale');
+
+        $propertyId = $created->json('id');
+
+        $cleared = $this->putJson('/api/properties/'.$propertyId, [
+            'type_id' => $type->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'tags' => [],
+        ]);
+
+        $cleared->assertOk()->assertJsonCount(0, 'tags');
+        $this->assertDatabaseMissing('property_tag', ['property_id' => $propertyId]);
     }
 
     public function test_property_store_does_not_flag_duplicate_by_phone_only(): void

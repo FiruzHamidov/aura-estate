@@ -33,6 +33,9 @@ return [
         'youtube_link' => [
             'url' => 'Ссылка на YouTube должна быть корректным URL.',
         ],
+        'instagram_link' => [
+            'url' => 'Ссылка на Instagram должна быть корректным URL.',
+        ],
         'photos' => [
             'max' => 'Нельзя загрузить более :max фотографий.',
         ],
@@ -80,6 +83,7 @@ return [
         'offer_type'       => 'Тип предложения',
         'rooms'            => 'Комнат',
         'youtube_link'     => 'Ссылка на YouTube',
+        'instagram_link'   => 'Ссылка на Instagram',
         'total_area'       => 'Общая площадь',
         'living_area'      => 'Жилая площадь',
         'floor'            => 'Этаж',

@@ -29,6 +29,7 @@ class DatabaseSeeder extends Seeder
             ConstructionStageSeeder::class,
             MaterialSeeder::class,
             FeatureSeeder::class,
+            TagSeeder::class,
             DeveloperSeeder::class,
             DemoNewBuildingSeeder::class,
             KpiModuleSeeder::class,

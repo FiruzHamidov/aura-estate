@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Support\Facades\Schema;
 
 class Property extends Model
@@ -54,6 +55,7 @@ class Property extends Model
         'offer_type',
         'rooms',
         'youtube_link',
+        'instagram_link',
         'total_area',
         'land_size',
         'living_area',
@@ -157,6 +159,18 @@ class Property extends Model
     public function photos()
     {
         return $this->hasMany(PropertyPhoto::class)->orderBy('position');
+    }
+
+    public function features(): BelongsToMany
+    {
+        return $this->belongsToMany(Feature::class, 'feature_property')
+            ->withTimestamps();
+    }
+
+    public function tags(): BelongsToMany
+    {
+        return $this->belongsToMany(Tag::class, 'property_tag')
+            ->withTimestamps();
     }
 
     public function reels()

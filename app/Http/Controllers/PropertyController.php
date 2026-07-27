@@ -61,12 +61,56 @@ class PropertyController extends Controller
             $relations[] = 'coOwner.role';
         }
 
+        if ($this->supportsPropertyFeatures()) {
+            $relations[] = 'features';
+        }
+
+        if ($this->supportsPropertyTags()) {
+            $relations[] = 'tags';
+        }
+
         return $relations;
     }
 
     private function supportsPropertyCoOwner(): bool
     {
         return Schema::hasColumn('properties', 'co_owner_user_id');
+    }
+
+    private function supportsPropertyFeatures(): bool
+    {
+        return Schema::hasTable('features') && Schema::hasTable('feature_property');
+    }
+
+    private function supportsPropertyTags(): bool
+    {
+        return Schema::hasTable('tags') && Schema::hasTable('property_tag');
+    }
+
+    private function propertyMutationRelations(): array
+    {
+        $relations = ['photos', 'contractType', 'ownerClient.type', 'buyerClient.type', 'coOwner.role'];
+
+        if ($this->supportsPropertyFeatures()) {
+            $relations[] = 'features';
+        }
+
+        if ($this->supportsPropertyTags()) {
+            $relations[] = 'tags';
+        }
+
+        return $relations;
+    }
+
+    private function propertySearchRelations(): array
+    {
+        $relations = ['type', 'status', 'location', 'photos', 'creator', 'developer'];
+
+        if ($this->supportsPropertyTags()) {
+            $relations[] = 'tags';
+        }
+
+        return $relations;
     }
 
     private function propertyShowAuthUser(Request $request): ?User
@@ -650,6 +694,14 @@ class PropertyController extends Controller
             $relations[] = 'coOwner.role';
         }
 
+        if ($this->supportsPropertyFeatures()) {
+            $relations[] = 'features';
+        }
+
+        if ($this->supportsPropertyTags()) {
+            $relations[] = 'tags';
+        }
+
         return $relations;
     }
 
@@ -753,6 +805,8 @@ class PropertyController extends Controller
             'rooms_to' => ['sometimes', 'nullable', 'integer'],
             'area_from' => ['sometimes', 'nullable', 'numeric'],
             'area_to' => ['sometimes', 'nullable', 'numeric'],
+            'tag_ids' => ['sometimes', 'array'],
+            'tag_ids.*' => ['integer', 'distinct', 'exists:tags,id'],
             'sort' => ['sometimes', 'nullable', Rule::in(['relevance', 'newest', 'price_asc', 'price_desc'])],
         ]);
 
@@ -769,14 +823,8 @@ class PropertyController extends Controller
         $sort = $validated['sort'] ?? 'relevance';
         $perPage = min((int) ($validated['per_page'] ?? 20), 50);
 
-        $query = $this->baseQuery($request, [
-            'type',
-            'status',
-            'location',
-            'photos',
-            'creator',
-            'developer',
-        ])->publicSearchable();
+        $query = $this->baseQuery($request, $this->propertySearchRelations())
+            ->publicSearchable();
 
         $this->applyPropertySearchFilters($query, $validated);
 
@@ -796,14 +844,8 @@ class PropertyController extends Controller
                 'error' => $e->getMessage(),
             ]);
 
-            $query = $this->baseQuery($request, [
-                'type',
-                'status',
-                'location',
-                'photos',
-                'creator',
-                'developer',
-            ])->publicSearchable();
+            $query = $this->baseQuery($request, $this->propertySearchRelations())
+                ->publicSearchable();
 
             $this->applyPropertySearchFilters($query, $validated);
             $this->applyPropertySearchSafeFallback($query, $q);
@@ -858,6 +900,15 @@ class PropertyController extends Controller
                 $query->where($column, $operator, $filters[$param]);
             }
         }
+
+        if (
+            $this->supportsPropertyTags()
+            && !empty($filters['tag_ids'])
+        ) {
+            $tagIds = array_values(array_unique(array_map('intval', $filters['tag_ids'])));
+
+            $query->whereHas('tags', fn (Builder $tagQuery) => $tagQuery->whereIn('tags.id', $tagIds));
+        }
     }
 
     private function applyPropertySearchText(Builder $query, string $term, bool $includeCrmFields): void
@@ -896,6 +947,12 @@ class PropertyController extends Controller
                 ->orWhereHas('status', fn (Builder $statusQuery) => $statusQuery
                     ->whereRaw("LOWER(name) LIKE ? ESCAPE '\\'", [$like])
                     ->orWhereRaw("LOWER(slug) LIKE ? ESCAPE '\\'", [$like]));
+
+            if ($this->supportsPropertyTags()) {
+                $searchQuery->orWhereHas('tags', fn (Builder $tagQuery) => $tagQuery
+                    ->whereRaw("LOWER(tags.name) LIKE ? ESCAPE '\\'", [$like])
+                    ->orWhereRaw("LOWER(tags.slug) LIKE ? ESCAPE '\\'", [$like]));
+            }
         });
     }
 
@@ -944,6 +1001,18 @@ class PropertyController extends Controller
                 $cases[] = "WHEN LOWER(properties.{$column}) LIKE ? ESCAPE '\\' THEN 240";
                 $bindings[] = $like;
             }
+        }
+
+        if ($this->supportsPropertyTags()) {
+            $cases[] = "WHEN EXISTS (
+                SELECT 1
+                FROM property_tag
+                INNER JOIN tags ON tags.id = property_tag.tag_id
+                WHERE property_tag.property_id = properties.id
+                  AND (LOWER(tags.name) LIKE ? ESCAPE '\\' OR LOWER(tags.slug) LIKE ? ESCAPE '\\')
+            ) THEN 500";
+            $bindings[] = $like;
+            $bindings[] = $like;
         }
 
         $caseSql = implode("\n", $cases);
@@ -1026,12 +1095,21 @@ class PropertyController extends Controller
             'currency' => $property->currency,
             'address' => $property->address,
             'district' => $property->district,
+            'instagram_link' => $property->instagram_link,
             'location' => $property->location ? [
                 'id' => (int) $property->location->id,
                 'name' => $property->location->name,
             ] : null,
             'type' => $property->type?->slug ?? $property->type?->name,
             'status' => $property->status?->slug ?? $property->status?->name,
+            'tags' => $property->relationLoaded('tags')
+                ? $property->tags->map(fn ($tag) => [
+                    'id' => (int) $tag->id,
+                    'name' => $tag->name,
+                    'slug' => $tag->slug,
+                    'color' => $tag->color,
+                ])->values()
+                : [],
             'photos' => $property->photos
                 ->map(fn ($photo) => [
                     'id' => (int) $photo->id,
@@ -1251,6 +1329,15 @@ class PropertyController extends Controller
             if (is_array($value)) return array_values(array_filter($value, fn($v) => $v !== '' && $v !== null));
             return array_values(array_filter(array_map('trim', explode(',', $value)), fn($v) => $v !== ''));
         };
+
+        if ($this->supportsPropertyTags()) {
+            $rawTags = $request->input('tag_ids', $request->input('tags'));
+            $tagIds = array_values(array_unique(array_filter(array_map('intval', $toArray($rawTags)))));
+
+            if (!empty($tagIds)) {
+                $query->whereHas('tags', fn (Builder $tagQuery) => $tagQuery->whereIn('tags.id', $tagIds));
+            }
+        }
 
         if ($request->filled('branch_id')) {
             $branchIds = array_values(array_filter(
@@ -1656,6 +1743,10 @@ class PropertyController extends Controller
         abort_if($user->hasRole('intern'), 403, 'Стажер не может добавлять объекты.');
 
         $validated = $this->validateProperty($request);
+        $featureIds = $validated['features'] ?? [];
+        $tagIds = $validated['tags'] ?? [];
+        unset($validated['features']);
+        unset($validated['tags']);
         $this->ensureValidCoOwner(
             $user,
             isset($validated['co_owner_user_id']) ? (int) $validated['co_owner_user_id'] : null,
@@ -1728,9 +1819,17 @@ class PropertyController extends Controller
 
         $property = Property::create($validated);
 
+        if ($this->supportsPropertyFeatures()) {
+            $property->features()->sync($featureIds);
+        }
+
+        if ($this->supportsPropertyTags()) {
+            $property->tags()->sync($tagIds);
+        }
+
         $this->storePhotosFromRequest($request, $property);
 
-        return response()->json($property->load(['photos', 'contractType', 'ownerClient.type', 'buyerClient.type', 'coOwner.role']));
+        return response()->json($property->load($this->propertyMutationRelations()));
     }
 
     /**
@@ -1746,6 +1845,12 @@ class PropertyController extends Controller
         $user = $this->authorizePropertyMutation($property);
 
         $validated = $this->validateProperty($request, isUpdate: true, property: $property);
+        $shouldSyncFeatures = array_key_exists('features', $validated);
+        $featureIds = $validated['features'] ?? [];
+        $shouldSyncTags = array_key_exists('tags', $validated);
+        $tagIds = $validated['tags'] ?? [];
+        unset($validated['features']);
+        unset($validated['tags']);
         $ownerUserId = (int) ($validated['created_by'] ?? $property->created_by);
         $this->ensureValidCoOwner(
             $user,
@@ -1758,6 +1863,14 @@ class PropertyController extends Controller
         $validated = $this->syncPropertyClientSnapshots($validated);
 
         $property->update($validated);
+
+        if ($shouldSyncFeatures && $this->supportsPropertyFeatures()) {
+            $property->features()->sync($featureIds);
+        }
+
+        if ($shouldSyncTags && $this->supportsPropertyTags()) {
+            $property->tags()->sync($tagIds);
+        }
 
         // Если статус закрытый и sold_at ещё не установлен — ставим текущую дату
         if (
@@ -1778,7 +1891,7 @@ class PropertyController extends Controller
             $this->applyOrder($property, $request->photo_order);
         }
 
-        return response()->json($property->load(['photos', 'contractType', 'ownerClient.type', 'buyerClient.type', 'coOwner.role']));
+        return response()->json($property->load($this->propertyMutationRelations()));
     }
 
     public function updateCoOwner(Request $request, Property $property)
@@ -2052,6 +2165,12 @@ class PropertyController extends Controller
      */
     public function validateProperty(Request $request, bool $isUpdate = false, ?Property $property = null)
     {
+        if (is_string($request->input('instagram_link'))) {
+            $request->merge([
+                'instagram_link' => trim($request->input('instagram_link')),
+            ]);
+        }
+
         $validated = $request->validate([
             'title' => 'nullable|string',
             'description' => 'nullable|string',
@@ -2071,6 +2190,20 @@ class PropertyController extends Controller
             'offer_type' => 'required|in:rent,sale',
             'rooms' => 'nullable|integer|min:1|max:10',
             'youtube_link' => 'nullable|url',
+            'instagram_link' => [
+                'nullable',
+                'url',
+                'max:2048',
+                function (string $attribute, mixed $value, \Closure $fail): void {
+                    $scheme = strtolower((string) parse_url((string) $value, PHP_URL_SCHEME));
+                    $host = strtolower((string) parse_url((string) $value, PHP_URL_HOST));
+                    $isInstagramHost = $host === 'instagram.com' || str_ends_with($host, '.instagram.com');
+
+                    if ($scheme !== 'https' || !$isInstagramHost) {
+                        $fail('Поле Инстаграм должно содержать HTTPS-ссылку на instagram.com.');
+                    }
+                },
+            ],
             'total_area' => 'nullable|numeric',
             'land_size' => 'sometimes|nullable|numeric|min:0|max:65535',
             'living_area' => 'nullable|numeric',
@@ -2097,6 +2230,10 @@ class PropertyController extends Controller
             'owner_client_id' => 'nullable|exists:clients,id',
             'object_key' => 'nullable|string|max:255',
             'rejection_comment' => 'nullable|string',
+            'features' => 'sometimes|array',
+            'features.*' => 'integer|distinct|exists:features,id',
+            'tags' => 'sometimes|array',
+            'tags.*' => 'integer|distinct|exists:tags,id',
 
             // Photos (optional on update)
             'photos' => [$isUpdate ? 'sometimes' : 'nullable', 'array', 'max:40'],

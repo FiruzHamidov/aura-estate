@@ -61,6 +61,7 @@ use App\Http\Controllers\RoleController;
 use App\Http\Controllers\SelectionController;
 use App\Http\Controllers\SupportConversationController;
 use App\Http\Controllers\TelegramAuthController;
+use App\Http\Controllers\TagController;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\StoryController;
 use App\Http\Controllers\AdminStoryController;
@@ -161,6 +162,7 @@ Route::scopeBindings()->group(function () {
     Route::apiResource('construction-stages', ConstructionStageController::class)->only(['index', 'show']);
     Route::apiResource('materials', MaterialController::class)->only(['index', 'show']);
     Route::apiResource('features', FeatureController::class)->only(['index', 'show']);
+    Route::apiResource('tags', TagController::class)->only(['index', 'show']);
 
     Route::get('new-buildings/plans', [NewBuildingPlanController::class, 'index']);
     Route::apiResource('new-buildings', NewBuildingController::class)->only(['index', 'show']);
@@ -341,6 +343,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         Route::apiResource('branch-groups', BranchGroupController::class)->middleware('rop.branch.scope');
         Route::apiResource('developers', DeveloperController::class)->except(['index', 'show']);
         Route::apiResource('features', FeatureController::class)->except(['index', 'show']);
+        Route::apiResource('tags', TagController::class)->except(['index', 'show']);
         Route::apiResource('materials', MaterialController::class)->except(['index', 'show']);
         Route::apiResource('construction-stages', ConstructionStageController::class)->except(['index', 'show']);
 

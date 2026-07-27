@@ -33,6 +33,7 @@ class FeatureController extends Controller
         $data = $request->validate([
             'name' => ['required','string','max:255'],
             'slug' => ['nullable','string','max:255','unique:features,slug'],
+            'icon' => ['nullable','string','max:100','regex:/^[a-zA-Z0-9_-]+$/'],
         ]);
 
         $data['slug'] = $data['slug'] ?? Str::slug($data['name']);
@@ -50,6 +51,7 @@ class FeatureController extends Controller
         $data = $request->validate([
             'name' => ['sometimes','string','max:255'],
             'slug' => ['sometimes','string','max:255', Rule::unique('features','slug')->ignore($feature->id)],
+            'icon' => ['sometimes','nullable','string','max:100','regex:/^[a-zA-Z0-9_-]+$/'],
         ]);
 
         if (isset($data['name']) && !isset($data['slug'])) {
