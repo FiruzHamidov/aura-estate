@@ -87,6 +87,7 @@ class Property extends Model
         'owner_phone',
         'listing_type',
         'contract_type_id',
+        'document_type_id',
         'views_count',
         'owner_name',
         'owner_client_id',
@@ -245,6 +246,11 @@ class Property extends Model
     public function contractType()
     {
         return $this->belongsTo(ContractType::class);
+    }
+
+    public function documentType()
+    {
+        return $this->belongsTo(DocumentType::class);
     }
 
     public function logs()

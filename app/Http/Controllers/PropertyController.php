@@ -47,6 +47,7 @@ class PropertyController extends Controller
             'photos',
             'creator',
             'contractType',
+            'documentType',
             'developer',
             'heating',
             'parking',
@@ -89,7 +90,7 @@ class PropertyController extends Controller
 
     private function propertyMutationRelations(): array
     {
-        $relations = ['photos', 'contractType', 'ownerClient.type', 'buyerClient.type', 'coOwner.role'];
+        $relations = ['photos', 'contractType', 'documentType', 'ownerClient.type', 'buyerClient.type', 'coOwner.role'];
 
         if ($this->supportsPropertyFeatures()) {
             $relations[] = 'features';
@@ -629,8 +630,8 @@ class PropertyController extends Controller
     /**
      * GET /api/properties
      *
-     * @queryParam contract_type_ids array Multiple document type IDs. Example: [1,3]
-     * @queryParam contract_type_id integer Legacy single document type ID. Example: 1
+     * @queryParam document_type_ids array Multiple property document type IDs. Example: [1,3]
+     * @queryParam document_type_id integer Single property document type ID. Example: 1
      * @queryParam construction_status string Filter by construction stage.
      * Allowed: under_construction, built, commissioned.
      * Example: commissioned
@@ -650,8 +651,8 @@ class PropertyController extends Controller
      * Public count of properties matching the same filters as the public list.
      * This deliberately uses SQL COUNT(*) and never eager-loads relations.
      *
-     * @queryParam contract_type_ids array Multiple document type IDs. Example: [1,3]
-     * @queryParam contract_type_id integer Legacy single document type ID. Example: 1
+     * @queryParam document_type_ids array Multiple property document type IDs. Example: [1,3]
+     * @queryParam document_type_id integer Single property document type ID. Example: 1
      */
     public function count(Request $request)
     {
@@ -668,8 +669,8 @@ class PropertyController extends Controller
     /**
      * GET /api/my-properties
      *
-     * @queryParam contract_type_ids array Multiple document type IDs. Example: [1,3]
-     * @queryParam contract_type_id integer Legacy single document type ID. Example: 1
+     * @queryParam document_type_ids array Multiple property document type IDs. Example: [1,3]
+     * @queryParam document_type_id integer Single property document type ID. Example: 1
      */
     public function myProperties(Request $request)
     {
@@ -699,6 +700,10 @@ class PropertyController extends Controller
 
         if (Schema::hasTable('contract_types')) {
             $relations[] = 'contractType';
+        }
+
+        if (Schema::hasTable('document_types') && Schema::hasColumn('properties', 'document_type_id')) {
+            $relations[] = 'documentType';
         }
 
         if ($this->supportsPropertyCoOwner()) {
@@ -816,9 +821,9 @@ class PropertyController extends Controller
             'rooms_to' => ['sometimes', 'nullable', 'integer'],
             'area_from' => ['sometimes', 'nullable', 'numeric'],
             'area_to' => ['sometimes', 'nullable', 'numeric'],
-            'contract_type_id' => ['sometimes', 'nullable', 'integer', 'exists:contract_types,id'],
-            'contract_type_ids' => ['sometimes', 'nullable', 'array'],
-            'contract_type_ids.*' => ['integer', 'distinct', 'exists:contract_types,id'],
+            'document_type_id' => ['sometimes', 'nullable', 'integer', 'exists:document_types,id'],
+            'document_type_ids' => ['sometimes', 'nullable', 'array'],
+            'document_type_ids.*' => ['integer', 'distinct', 'exists:document_types,id'],
             'tag_ids' => ['sometimes', 'array'],
             'tag_ids.*' => ['integer', 'distinct', 'exists:tags,id'],
             'sort' => ['sometimes', 'nullable', Rule::in(['relevance', 'newest', 'price_asc', 'price_desc'])],
@@ -902,13 +907,13 @@ class PropertyController extends Controller
             }
         }
 
-        if (!empty($filters['contract_type_ids'])) {
+        if (!empty($filters['document_type_ids'])) {
             $query->whereIn(
-                'contract_type_id',
-                array_values(array_unique(array_map('intval', $filters['contract_type_ids'])))
+                'document_type_id',
+                array_values(array_unique(array_map('intval', $filters['document_type_ids'])))
             );
-        } elseif (!empty($filters['contract_type_id'])) {
-            $query->where('contract_type_id', (int) $filters['contract_type_id']);
+        } elseif (!empty($filters['document_type_id'])) {
+            $query->where('document_type_id', (int) $filters['document_type_id']);
         }
 
         foreach ([
@@ -1152,8 +1157,8 @@ class PropertyController extends Controller
     /**
      * GET /api/properties/map
      *
-     * @queryParam contract_type_ids array Multiple document type IDs. Example: [1,3]
-     * @queryParam contract_type_id integer Legacy single document type ID. Example: 1
+     * @queryParam document_type_ids array Multiple property document type IDs. Example: [1,3]
+     * @queryParam document_type_id integer Single property document type ID. Example: 1
      * @queryParam construction_status string Filter by construction stage.
      * Allowed: under_construction, built, commissioned.
      * Example: built
@@ -1492,13 +1497,13 @@ class PropertyController extends Controller
             'type_id' => ['propertyTypes', 'propertyType'],
             'location_id' => ['city'],
             'repair_type_id' => ['repairs'],
-            'contract_type_id' => ['contract_type_ids'],
+            'document_type_id' => ['document_type_ids'],
         ];
         $exactFields = [
             'type_id', 'status_id', 'location_id', 'repair_type_id',
             'currency', 'offer_type',
             'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
-            'agent_id', 'listing_type', 'created_by', 'contract_type_id',
+            'agent_id', 'listing_type', 'created_by', 'contract_type_id', 'document_type_id',
             'is_business_owner', 'is_full_apartment', 'is_for_aura', 'developer_id',
             'heating_type_id', 'parking_type_id', 'construction_status'
             // при желании можно и lat/lng, но для карты они задаются bbox'ом
@@ -1507,11 +1512,9 @@ class PropertyController extends Controller
             $filterInput = $request->input($field);
             $hasFilter = $request->has($field);
 
-            // The documented multi-value contract takes priority over the
-            // legacy singular parameter when both are present.
-            if ($field === 'contract_type_id' && $request->has('contract_type_ids')) {
+            if ($field === 'document_type_id' && $request->has('document_type_ids')) {
                 $hasFilter = true;
-                $filterInput = $request->input('contract_type_ids');
+                $filterInput = $request->input('document_type_ids');
             } elseif (!$hasFilter) {
                 foreach ($fieldAliases[$field] ?? [] as $alias) {
                     if ($request->has($alias)) {
@@ -1647,8 +1650,8 @@ class PropertyController extends Controller
      * Returns 422 for unsupported construction_status values.
      *
      * @queryParam construction_status string Filter by construction stage.
-     * @queryParam contract_type_ids array Multiple document type IDs. Example: [1,3]
-     * @queryParam contract_type_id integer Legacy single document type ID. Example: 1
+     * @queryParam document_type_ids array Multiple property document type IDs. Example: [1,3]
+     * @queryParam document_type_id integer Single property document type ID. Example: 1
      * Allowed: under_construction, built, commissioned.
      * Example: built
      */
@@ -1656,9 +1659,9 @@ class PropertyController extends Controller
     {
         $request->validate([
             'construction_status' => ['sometimes', 'nullable', Rule::in(['under_construction', 'built', 'commissioned'])],
-            'contract_type_id' => ['sometimes', 'nullable', 'integer', 'exists:contract_types,id'],
-            'contract_type_ids' => ['sometimes', 'nullable', 'array'],
-            'contract_type_ids.*' => ['integer', 'distinct', 'exists:contract_types,id'],
+            'document_type_id' => ['sometimes', 'nullable', 'integer', 'exists:document_types,id'],
+            'document_type_ids' => ['sometimes', 'nullable', 'array'],
+            'document_type_ids.*' => ['integer', 'distinct', 'exists:document_types,id'],
         ], [
             'construction_status.in' => 'Поле construction_status должно быть одним из значений: under_construction, built, commissioned.',
         ]);
@@ -2216,6 +2219,7 @@ class PropertyController extends Controller
             // --- Moderation status with deposit and fixed enum
             'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,deposit,sold,rented,sold_by_owner,denied',
             'contract_type_id' => 'nullable|exists:contract_types,id',
+            'document_type_id' => 'nullable|exists:document_types,id',
             'type_id' => 'required|exists:property_types,id',
             'status_id' => 'nullable|exists:property_statuses,id',
             'location_id' => 'nullable|exists:locations,id',

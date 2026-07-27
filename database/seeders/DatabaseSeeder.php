@@ -25,6 +25,7 @@ class DatabaseSeeder extends Seeder
             HeatingTypeSeeder::class,
             RepairTypeSeeder::class,
             ContractTypesSeeder::class,
+            DocumentTypeSeeder::class,
             PropertySeeder::class,
             ConstructionStageSeeder::class,
             MaterialSeeder::class,

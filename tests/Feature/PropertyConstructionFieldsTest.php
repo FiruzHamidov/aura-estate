@@ -59,6 +59,13 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('document_types', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->unique();
+            $table->timestamps();
+        });
+
         Schema::create('properties', function (Blueprint $table) {
             $table->id();
             $table->string('title')->nullable();
@@ -68,6 +75,7 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->unsignedBigInteger('location_id')->nullable();
             $table->unsignedBigInteger('repair_type_id')->nullable();
             $table->unsignedBigInteger('contract_type_id')->nullable()->index();
+            $table->unsignedBigInteger('document_type_id')->nullable()->index();
             $table->decimal('price', 15, 2);
             $table->string('currency')->default('TJS');
             $table->string('offer_type')->default('sale');
@@ -301,6 +309,62 @@ class PropertyConstructionFieldsTest extends TestCase
             'details.errors.instagram_link.0',
             'Поле Инстаграм должно содержать HTTPS-ссылку на instagram.com.'
         );
+    }
+
+    public function test_property_keeps_contract_type_and_document_type_separate(): void
+    {
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000096',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $contractType = \App\Models\ContractType::create([
+            'name' => 'Эксклюзивный договор',
+            'slug' => 'exclusive',
+        ]);
+        $technicalPassport = \App\Models\DocumentType::create([
+            'name' => 'Техпаспорт',
+            'slug' => 'technical-passport',
+        ]);
+        $certificate = \App\Models\DocumentType::create([
+            'name' => 'Свидетельство',
+            'slug' => 'certificate',
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $created = $this->postJson('/api/properties', [
+            'type_id' => $type->id,
+            'contract_type_id' => $contractType->id,
+            'document_type_id' => $technicalPassport->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ]);
+
+        $created->assertOk()
+            ->assertJsonPath('contract_type_id', $contractType->id)
+            ->assertJsonPath('contract_type.id', $contractType->id)
+            ->assertJsonPath('document_type_id', $technicalPassport->id)
+            ->assertJsonPath('document_type.id', $technicalPassport->id);
+
+        $updated = $this->putJson('/api/properties/'.$created->json('id'), [
+            'type_id' => $type->id,
+            'contract_type_id' => $contractType->id,
+            'document_type_id' => $certificate->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ]);
+
+        $updated->assertOk()
+            ->assertJsonPath('contract_type_id', $contractType->id)
+            ->assertJsonPath('document_type_id', $certificate->id)
+            ->assertJsonPath('document_type.id', $certificate->id);
     }
 
     public function test_property_features_can_be_selected_replaced_and_cleared(): void
@@ -729,7 +793,7 @@ class PropertyConstructionFieldsTest extends TestCase
         $response->assertJsonPath('data.0.construction_status', 'built');
     }
 
-    public function test_contract_type_multi_filter_is_consistent_across_property_collections(): void
+    public function test_document_type_multi_filter_is_consistent_across_property_collections(): void
     {
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
         $user = User::create([
@@ -741,18 +805,23 @@ class PropertyConstructionFieldsTest extends TestCase
         ]);
         $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
         $status = \App\Models\PropertyStatus::create(['name' => 'Available']);
+        $contractType = \App\Models\ContractType::create([
+            'name' => 'Эксклюзивный договор',
+            'slug' => 'exclusive',
+        ]);
         $documents = collect([
             ['name' => 'Свидетельство', 'slug' => 'certificate'],
             ['name' => 'Техпаспорт', 'slug' => 'technical-passport'],
             ['name' => 'Договор', 'slug' => 'contract'],
-        ])->map(fn (array $data) => \App\Models\ContractType::create($data));
+        ])->map(fn (array $data) => \App\Models\DocumentType::create($data));
 
-        $properties = $documents->values()->map(function ($document, int $index) use ($user, $type, $status) {
+        $properties = $documents->values()->map(function ($document, int $index) use ($user, $type, $status, $contractType) {
             return \App\Models\Property::create([
                 'title' => 'Object '.($index + 1),
                 'type_id' => $type->id,
                 'status_id' => $status->id,
-                'contract_type_id' => $document->id,
+                'contract_type_id' => $contractType->id,
+                'document_type_id' => $document->id,
                 'price' => 100000 + ($index * 10000),
                 'currency' => 'TJS',
                 'offer_type' => 'sale',
@@ -768,7 +837,7 @@ class PropertyConstructionFieldsTest extends TestCase
         Sanctum::actingAs($user);
 
         $query = http_build_query([
-            'contract_type_ids' => [$documents[0]->id, $documents[1]->id],
+            'document_type_ids' => [$documents[0]->id, $documents[1]->id],
         ]);
 
         $list = $this->getJson('/api/properties?'.$query)->assertOk();
@@ -784,7 +853,7 @@ class PropertyConstructionFieldsTest extends TestCase
         $map = $this->getJson('/api/properties/map?'.http_build_query([
             'bbox' => '38.4,68.6,38.8,69.1',
             'zoom' => 12,
-            'contract_type_ids' => [$documents[0]->id, $documents[1]->id],
+            'document_type_ids' => [$documents[0]->id, $documents[1]->id],
         ]))->assertOk();
         $this->assertEqualsCanonicalizing(
             [$properties[0]->id, $properties[1]->id],
@@ -802,7 +871,8 @@ class PropertyConstructionFieldsTest extends TestCase
             'title' => 'Foreign object',
             'type_id' => $type->id,
             'status_id' => $status->id,
-            'contract_type_id' => $documents[0]->id,
+            'contract_type_id' => $contractType->id,
+            'document_type_id' => $documents[0]->id,
             'price' => 125000,
             'currency' => 'TJS',
             'offer_type' => 'sale',
@@ -818,36 +888,43 @@ class PropertyConstructionFieldsTest extends TestCase
         );
 
         $this->getJson('/api/properties?'.http_build_query([
-            'contract_type_ids' => [$documents[1]->id, $documents[2]->id],
+            'document_type_ids' => [$documents[1]->id, $documents[2]->id],
             'roomsFrom' => 3,
         ]))
             ->assertOk()
             ->assertJsonCount(1, 'data')
             ->assertJsonPath('data.0.id', $properties[2]->id);
 
-        $this->getJson('/api/properties?contract_type_id='.$documents[2]->id)
+        $this->getJson('/api/properties')
+            ->assertOk()
+            ->assertJsonCount(3, 'data');
+
+        $this->getJson('/api/properties?document_type_ids=')
+            ->assertOk()
+            ->assertJsonCount(3, 'data');
+
+        // Singular filter remains compatible.
+        $this->getJson('/api/properties?document_type_id='.$documents[2]->id)
             ->assertOk()
             ->assertJsonCount(1, 'data')
             ->assertJsonPath('data.0.id', $properties[2]->id);
 
+        // Multi-value filter takes priority when both parameters are sent.
         $this->getJson('/api/properties?'.http_build_query([
-            'contract_type_id' => $documents[2]->id,
-            'contract_type_ids' => [$documents[0]->id],
+            'document_type_id' => $documents[2]->id,
+            'document_type_ids' => [$documents[0]->id],
         ]))
             ->assertOk()
             ->assertJsonCount(1, 'data')
             ->assertJsonPath('data.0.id', $properties[0]->id);
 
-        $this->getJson('/api/properties')
-            ->assertOk()
-            ->assertJsonCount(3, 'data');
-
-        $this->getJson('/api/properties?contract_type_ids=')
+        // Contract type remains a separate, unchanged filter.
+        $this->getJson('/api/properties?contract_type_id='.$contractType->id)
             ->assertOk()
             ->assertJsonCount(3, 'data');
     }
 
-    public function test_contract_type_multi_filter_validation_rejects_invalid_values(): void
+    public function test_document_type_multi_filter_validation_rejects_invalid_values(): void
     {
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
         $user = User::create([
@@ -857,7 +934,7 @@ class PropertyConstructionFieldsTest extends TestCase
             'role_id' => $agentRole->id,
             'status' => 'active',
         ]);
-        $document = \App\Models\ContractType::create([
+        $document = \App\Models\DocumentType::create([
             'name' => 'Свидетельство',
             'slug' => 'certificate',
         ]);
@@ -865,22 +942,34 @@ class PropertyConstructionFieldsTest extends TestCase
         Sanctum::actingAs($user);
 
         $this->getJson('/api/properties?'.http_build_query([
-            'contract_type_ids' => [999999],
+            'document_type_id' => 999999,
         ]))
             ->assertUnprocessable()
-            ->assertJsonStructure(['details' => ['errors' => ['contract_type_ids.0']]]);
+            ->assertJsonStructure(['details' => ['errors' => ['document_type_id']]]);
 
         $this->getJson('/api/properties?'.http_build_query([
-            'contract_type_ids' => ['not-an-id'],
+            'document_type_id' => 'not-an-id',
         ]))
             ->assertUnprocessable()
-            ->assertJsonStructure(['details' => ['errors' => ['contract_type_ids.0']]]);
+            ->assertJsonStructure(['details' => ['errors' => ['document_type_id']]]);
 
         $this->getJson('/api/properties?'.http_build_query([
-            'contract_type_ids' => [$document->id, $document->id],
+            'document_type_ids' => [999999],
         ]))
             ->assertUnprocessable()
-            ->assertJsonStructure(['details' => ['errors' => ['contract_type_ids.1']]]);
+            ->assertJsonStructure(['details' => ['errors' => ['document_type_ids.0']]]);
+
+        $this->getJson('/api/properties?'.http_build_query([
+            'document_type_ids' => ['not-an-id'],
+        ]))
+            ->assertUnprocessable()
+            ->assertJsonStructure(['details' => ['errors' => ['document_type_ids.0']]]);
+
+        $this->getJson('/api/properties?'.http_build_query([
+            'document_type_ids' => [$document->id, $document->id],
+        ]))
+            ->assertUnprocessable()
+            ->assertJsonStructure(['details' => ['errors' => ['document_type_ids.1']]]);
     }
 
     public function test_properties_index_returns_422_for_invalid_construction_status_filter(): void

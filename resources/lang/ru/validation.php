@@ -70,6 +70,8 @@ return [
         'address'          => 'Адрес',
         'moderation_status'=> 'Статус модерации',
         'contract_type_id' => 'Тип договора',
+        'document_type_id' => 'Тип документа объекта',
+        'document_type_ids' => 'Типы документов объекта',
         'type_id'          => 'Тип недвижимости',
         'status_id'        => 'Статус',
         'location_id'      => 'Локация',
