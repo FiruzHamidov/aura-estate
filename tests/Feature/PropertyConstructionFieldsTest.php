@@ -52,6 +52,13 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('contract_types', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->unique();
+            $table->timestamps();
+        });
+
         Schema::create('properties', function (Blueprint $table) {
             $table->id();
             $table->string('title')->nullable();
@@ -60,6 +67,7 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->unsignedBigInteger('status_id')->nullable();
             $table->unsignedBigInteger('location_id')->nullable();
             $table->unsignedBigInteger('repair_type_id')->nullable();
+            $table->unsignedBigInteger('contract_type_id')->nullable()->index();
             $table->decimal('price', 15, 2);
             $table->string('currency')->default('TJS');
             $table->string('offer_type')->default('sale');
@@ -719,6 +727,160 @@ class PropertyConstructionFieldsTest extends TestCase
         $response->assertJsonCount(1, 'data');
         $response->assertJsonPath('data.0.title', 'Built Match');
         $response->assertJsonPath('data.0.construction_status', 'built');
+    }
+
+    public function test_contract_type_multi_filter_is_consistent_across_property_collections(): void
+    {
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000219',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $status = \App\Models\PropertyStatus::create(['name' => 'Available']);
+        $documents = collect([
+            ['name' => 'Свидетельство', 'slug' => 'certificate'],
+            ['name' => 'Техпаспорт', 'slug' => 'technical-passport'],
+            ['name' => 'Договор', 'slug' => 'contract'],
+        ])->map(fn (array $data) => \App\Models\ContractType::create($data));
+
+        $properties = $documents->values()->map(function ($document, int $index) use ($user, $type, $status) {
+            return \App\Models\Property::create([
+                'title' => 'Object '.($index + 1),
+                'type_id' => $type->id,
+                'status_id' => $status->id,
+                'contract_type_id' => $document->id,
+                'price' => 100000 + ($index * 10000),
+                'currency' => 'TJS',
+                'offer_type' => 'sale',
+                'rooms' => $index + 1,
+                'moderation_status' => 'approved',
+                'created_by' => $user->id,
+                'agent_id' => $user->id,
+                'latitude' => 38.55 + ($index * 0.01),
+                'longitude' => 68.75 + ($index * 0.01),
+            ]);
+        });
+
+        Sanctum::actingAs($user);
+
+        $query = http_build_query([
+            'contract_type_ids' => [$documents[0]->id, $documents[1]->id],
+        ]);
+
+        $list = $this->getJson('/api/properties?'.$query)->assertOk();
+        $this->assertEqualsCanonicalizing(
+            [$properties[0]->id, $properties[1]->id],
+            collect($list->json('data'))->pluck('id')->all()
+        );
+
+        $this->getJson('/api/properties/count?'.$query)
+            ->assertOk()
+            ->assertJsonPath('count', 2);
+
+        $map = $this->getJson('/api/properties/map?'.http_build_query([
+            'bbox' => '38.4,68.6,38.8,69.1',
+            'zoom' => 12,
+            'contract_type_ids' => [$documents[0]->id, $documents[1]->id],
+        ]))->assertOk();
+        $this->assertEqualsCanonicalizing(
+            [$properties[0]->id, $properties[1]->id],
+            collect($map->json('features'))->pluck('properties.id')->all()
+        );
+
+        $otherUser = User::create([
+            'name' => 'Other Agent',
+            'phone' => '930000217',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+        \App\Models\Property::create([
+            'title' => 'Foreign object',
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'contract_type_id' => $documents[0]->id,
+            'price' => 125000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'moderation_status' => 'approved',
+            'created_by' => $otherUser->id,
+            'agent_id' => $otherUser->id,
+        ]);
+
+        $myProperties = $this->getJson('/api/my-properties?'.$query)->assertOk();
+        $this->assertEqualsCanonicalizing(
+            [$properties[0]->id, $properties[1]->id],
+            collect($myProperties->json('data'))->pluck('id')->all()
+        );
+
+        $this->getJson('/api/properties?'.http_build_query([
+            'contract_type_ids' => [$documents[1]->id, $documents[2]->id],
+            'roomsFrom' => 3,
+        ]))
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $properties[2]->id);
+
+        $this->getJson('/api/properties?contract_type_id='.$documents[2]->id)
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $properties[2]->id);
+
+        $this->getJson('/api/properties?'.http_build_query([
+            'contract_type_id' => $documents[2]->id,
+            'contract_type_ids' => [$documents[0]->id],
+        ]))
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $properties[0]->id);
+
+        $this->getJson('/api/properties')
+            ->assertOk()
+            ->assertJsonCount(3, 'data');
+
+        $this->getJson('/api/properties?contract_type_ids=')
+            ->assertOk()
+            ->assertJsonCount(3, 'data');
+    }
+
+    public function test_contract_type_multi_filter_validation_rejects_invalid_values(): void
+    {
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000218',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+        $document = \App\Models\ContractType::create([
+            'name' => 'Свидетельство',
+            'slug' => 'certificate',
+        ]);
+
+        Sanctum::actingAs($user);
+
+        $this->getJson('/api/properties?'.http_build_query([
+            'contract_type_ids' => [999999],
+        ]))
+            ->assertUnprocessable()
+            ->assertJsonStructure(['details' => ['errors' => ['contract_type_ids.0']]]);
+
+        $this->getJson('/api/properties?'.http_build_query([
+            'contract_type_ids' => ['not-an-id'],
+        ]))
+            ->assertUnprocessable()
+            ->assertJsonStructure(['details' => ['errors' => ['contract_type_ids.0']]]);
+
+        $this->getJson('/api/properties?'.http_build_query([
+            'contract_type_ids' => [$document->id, $document->id],
+        ]))
+            ->assertUnprocessable()
+            ->assertJsonStructure(['details' => ['errors' => ['contract_type_ids.1']]]);
     }
 
     public function test_properties_index_returns_422_for_invalid_construction_status_filter(): void
