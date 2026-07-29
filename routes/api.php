@@ -1,6 +1,8 @@
 <?php
 
 use App\Http\Controllers\AccountDeletionController;
+use App\Http\Controllers\AdminStoryController;
+use App\Http\Controllers\ApiRequestLogController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\B24AuthController;
 use App\Http\Controllers\BookingController;
@@ -14,34 +16,38 @@ use App\Http\Controllers\ClientNeedStatusController;
 use App\Http\Controllers\ClientNeedTypeController;
 use App\Http\Controllers\ClientSourceController;
 use App\Http\Controllers\ClientTypeController;
+use App\Http\Controllers\ConstructionStageController;
+use App\Http\Controllers\ContractTypeController;
 use App\Http\Controllers\ConversationController;
 use App\Http\Controllers\ConversationMessageController;
 use App\Http\Controllers\ConversationParticipantController;
-use App\Http\Controllers\ConstructionStageController;
-use App\Http\Controllers\ContractTypeController;
 use App\Http\Controllers\CrmActivityController;
+use App\Http\Controllers\CrmReportController;
 use App\Http\Controllers\CrmTaskController;
 use App\Http\Controllers\CrmTaskTypeController;
-use App\Http\Controllers\CrmReportController;
+use App\Http\Controllers\DailyReportController;
 use App\Http\Controllers\DealController;
 use App\Http\Controllers\DealPipelineController;
 use App\Http\Controllers\DealStageController;
-use App\Http\Controllers\DailyReportController;
 use App\Http\Controllers\DeveloperController;
-use App\Http\Controllers\DocumentTypeController;
 use App\Http\Controllers\DeveloperUnitController;
 use App\Http\Controllers\DeveloperUnitPhotoController;
+use App\Http\Controllers\DocumentTypeController;
 use App\Http\Controllers\ExternalPropertyRequestController;
 use App\Http\Controllers\FavoriteController;
 use App\Http\Controllers\FeatureController;
 use App\Http\Controllers\HeatingTypeController;
-use App\Http\Controllers\KpiReportController;
 use App\Http\Controllers\KpiModuleController;
+use App\Http\Controllers\KpiPeriodLockController;
+use App\Http\Controllers\KpiReportController;
 use App\Http\Controllers\KpiRopPlanController;
 use App\Http\Controllers\LeadController;
 use App\Http\Controllers\LeadRequestController;
 use App\Http\Controllers\LocationController;
+use App\Http\Controllers\LocationTrackingController;
 use App\Http\Controllers\MaterialController;
+use App\Http\Controllers\MotivationController;
+use App\Http\Controllers\MyReminderController;
 use App\Http\Controllers\NewBuildingBlockController;
 use App\Http\Controllers\NewBuildingController;
 use App\Http\Controllers\NewBuildingPhotoController;
@@ -55,21 +61,16 @@ use App\Http\Controllers\PropertyStatusController;
 use App\Http\Controllers\PropertyTypeController;
 use App\Http\Controllers\PublicRealtorController;
 use App\Http\Controllers\PublicTeamController;
-use App\Http\Controllers\RepairTypeController;
 use App\Http\Controllers\ReelController;
+use App\Http\Controllers\RepairTypeController;
 use App\Http\Controllers\ReviewController;
 use App\Http\Controllers\RoleController;
 use App\Http\Controllers\SelectionController;
-use App\Http\Controllers\SupportConversationController;
-use App\Http\Controllers\TelegramAuthController;
-use App\Http\Controllers\TagController;
-use App\Http\Controllers\UserController;
 use App\Http\Controllers\StoryController;
-use App\Http\Controllers\AdminStoryController;
-use App\Http\Controllers\ApiRequestLogController;
-use App\Http\Controllers\KpiPeriodLockController;
-use App\Http\Controllers\MyReminderController;
-use App\Http\Controllers\MotivationController;
+use App\Http\Controllers\SupportConversationController;
+use App\Http\Controllers\TagController;
+use App\Http\Controllers\TelegramAuthController;
+use App\Http\Controllers\UserController;
 use Illuminate\Support\Facades\Route;
 
 // --- ПИНГ ---
@@ -127,6 +128,21 @@ Route::get('/agents/{agent}/reviews', [ReviewController::class, 'index'])->where
 Route::post('/agents/{agent}/reviews', [ReviewController::class, 'store'])->middleware('throttle:10,1')->whereNumber('agent');
 
 Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
+    Route::prefix('location-tracking')->group(function () {
+        Route::get('/me/policy', [LocationTrackingController::class, 'policy']);
+        Route::put('/me/device', [LocationTrackingController::class, 'upsertDevice']);
+        Route::post('/me/points', [LocationTrackingController::class, 'storePoints'])->middleware('throttle:120,1');
+        Route::post('/me/status', [LocationTrackingController::class, 'storeStatus']);
+        Route::get('/me/current', [LocationTrackingController::class, 'myCurrent']);
+        Route::get('/available-users', [LocationTrackingController::class, 'availableUsers']);
+        Route::get('/watchlist', [LocationTrackingController::class, 'watchlist']);
+        Route::put('/watchlist', [LocationTrackingController::class, 'updateWatchlist']);
+        Route::get('/map', [LocationTrackingController::class, 'map']);
+        Route::get('/users/{user}/history', [LocationTrackingController::class, 'history'])->whereNumber('user');
+        Route::get('/admin/users/{user}/settings', [LocationTrackingController::class, 'settings'])->whereNumber('user');
+        Route::patch('/admin/users/{user}/settings', [LocationTrackingController::class, 'updateSettings'])->whereNumber('user');
+    });
+
     Route::get('/mobile/clients/filters', [ClientController::class, 'mobileFilters']);
 
     Route::prefix('external/property-requests')->group(function () {

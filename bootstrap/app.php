@@ -2,11 +2,11 @@
 
 use App\Http\Middleware\B24Jwt;
 use App\Http\Middleware\DetectClientLocale;
+use App\Http\Middleware\EnforceRopBranchScope;
 use App\Http\Middleware\EnsureDailyReportSubmitted;
 use App\Http\Middleware\EnsureTraceId;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\EnsureUserIsNotClient;
-use App\Http\Middleware\EnforceRopBranchScope;
 use App\Http\Middleware\LogApiRequest;
 use Illuminate\Auth\AuthenticationException;
 use Illuminate\Console\Scheduling\Schedule;
@@ -102,5 +102,6 @@ return Application::configure(basePath: dirname(__DIR__))
         $schedule->command('notifications:dispatch-reminders')->everyFiveMinutes();
         $schedule->command('stories:expire')->everyFiveMinutes();
         $schedule->command('audit:prune-api-request-logs')->dailyAt('03:30');
+        $schedule->command('locations:prune-history')->dailyAt('04:00');
     })
     ->create();

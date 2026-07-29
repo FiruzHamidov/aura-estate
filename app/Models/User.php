@@ -2,14 +2,14 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
-use Illuminate\Database\Eloquent\Factories\HasFactory;
-use Illuminate\Database\Eloquent\Relations\BelongsToMany;
-use Illuminate\Database\Eloquent\Relations\MorphMany;
-use Illuminate\Database\Eloquent\Relations\HasMany;
-use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class User extends Authenticatable
 {
@@ -53,7 +53,6 @@ class User extends Authenticatable
     {
         return $this->deleted_at !== null || $this->deletion_requested_at !== null;
     }
-
 
     public function role()
     {
@@ -125,7 +124,7 @@ class User extends Authenticatable
                 'role',
                 'agent_commission_amount',
                 'agent_commission_currency',
-                'agent_paid_at'
+                'agent_paid_at',
             ]);
     }
 
@@ -194,5 +193,20 @@ class User extends Authenticatable
     public function storyViews(): HasMany
     {
         return $this->hasMany(StoryView::class, 'viewer_user_id');
+    }
+
+    public function locationTrackingSetting(): HasOne
+    {
+        return $this->hasOne(UserLocationTrackingSetting::class);
+    }
+
+    public function currentLocation(): HasOne
+    {
+        return $this->hasOne(UserCurrentLocation::class);
+    }
+
+    public function locationPoints(): HasMany
+    {
+        return $this->hasMany(UserLocationPoint::class);
     }
 }
