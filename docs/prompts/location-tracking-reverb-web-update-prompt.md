@@ -160,6 +160,9 @@ WebSocket может пропустить события, поэтому reconne
 
 Измени старый polling:
 
+- источник истины для режима — `meta.realtime_enabled` из `GET /api/location-tracking/map`;
+- если `meta.realtime_enabled === false`, не подключай Echo/Reverb и используй HTTP polling каждые `meta.polling_interval_seconds` секунд;
+- если `meta.realtime_enabled === true`, подключай Echo/Reverb, но сохраняй HTTP polling как fallback;
 - при подключённом WebSocket — reconciliation раз в 3–5 минут;
 - при `unavailable/failed` — polling каждые 30 секунд;
 - при восстановлении WebSocket — вернуть редкий polling;

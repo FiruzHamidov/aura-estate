@@ -13,6 +13,7 @@ use App\Services\LocationTracking\LocationAccessService;
 use Database\Seeders\DushanbeUserLocationSeeder;
 use Illuminate\Broadcasting\BroadcastManager;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
@@ -35,6 +36,7 @@ class LocationTrackingFeatureTest extends TestCase
         config([
             'location_tracking.default_enabled' => true,
             'location_tracking.default_mode' => 'always',
+            'location_tracking.realtime_broadcast_enabled' => true,
             'broadcasting.default' => 'reverb',
             'broadcasting.connections.reverb.key' => 'test-key',
             'broadcasting.connections.reverb.secret' => 'test-secret',
@@ -211,6 +213,35 @@ class LocationTrackingFeatureTest extends TestCase
         });
     }
 
+    public function test_http_ingestion_works_when_realtime_broadcasting_is_disabled(): void
+    {
+        config(['location_tracking.realtime_broadcast_enabled' => false]);
+        $context = $this->context();
+        Sanctum::actingAs($context['agentA']);
+        $device = $this->devicePayload();
+        $this->putJson('/api/location-tracking/me/device', $device)->assertOk();
+
+        $this->postJson('/api/location-tracking/me/points', [
+            'device_uuid' => $device['device_uuid'],
+            'points' => [
+                $this->pointPayload(now()->subMinute()->toISOString(), 38.5598, 68.7870),
+            ],
+        ])->assertOk()
+            ->assertJsonPath('data.accepted.0.current_location_updated', true);
+
+        Event::assertNotDispatched(UserLocationUpdated::class);
+        $this->assertDatabaseHas('user_current_locations', [
+            'user_id' => $context['agentA']->id,
+            'latitude' => 38.5598,
+            'longitude' => 68.787,
+        ]);
+
+        $this->getJson('/api/location-tracking/map')
+            ->assertOk()
+            ->assertJsonPath('meta.realtime_enabled', false)
+            ->assertJsonPath('meta.polling_interval_seconds', 30);
+    }
+
     public function test_private_location_channel_uses_the_same_scope_as_map(): void
     {
         $context = $this->context();
@@ -257,6 +288,90 @@ class LocationTrackingFeatureTest extends TestCase
             'user_ids' => [$context['agentB']->id],
         ])->assertStatus(422)
             ->assertJsonPath('code', 'LOCATION_INVALID_WATCHLIST');
+    }
+
+    public function test_available_users_returns_real_branch_and_branch_group_relations(): void
+    {
+        $context = $this->context();
+        Sanctum::actingAs($context['admin']);
+
+        $response = $this->getJson('/api/location-tracking/available-users')->assertOk();
+        $user = collect($response->json('data'))->firstWhere('id', $context['agentA']->id);
+
+        $this->assertSame([
+            'id' => $context['branchA']->id,
+            'name' => 'Главный офис',
+        ], $user['branch']);
+        $this->assertSame([
+            'id' => $context['groupA1']->id,
+            'name' => 'Группа Душанбе',
+            'branch_id' => $context['branchA']->id,
+        ], $user['branch_group']);
+        $this->assertSame($context['branchA']->id, $user['branch_id']);
+        $this->assertSame($context['groupA1']->id, $user['branch_group_id']);
+        $this->assertStringNotContainsString('#', $user['branch']['name']);
+        $this->assertStringNotContainsString('#', $user['branch_group']['name']);
+    }
+
+    public function test_map_returns_the_same_branch_structure_inside_user_and_nulls_without_assignment(): void
+    {
+        $context = $this->context();
+        $unassigned = $this->user($context['roles']['agent'], null, null, 'Agent Without Branch');
+        Sanctum::actingAs($context['admin']);
+
+        $availableResponse = $this->getJson('/api/location-tracking/available-users')->assertOk();
+        $availableWithoutAssignment = collect($availableResponse->json('data'))->firstWhere('id', $unassigned->id);
+        $this->assertNull($availableWithoutAssignment['branch_id']);
+        $this->assertNull($availableWithoutAssignment['branch']);
+        $this->assertNull($availableWithoutAssignment['branch_group_id']);
+        $this->assertNull($availableWithoutAssignment['branch_group']);
+
+        $response = $this->getJson('/api/location-tracking/map')->assertOk();
+        $assigned = collect($response->json('data'))->firstWhere('user.id', $context['agentA']->id);
+        $withoutAssignment = collect($response->json('data'))->firstWhere('user.id', $unassigned->id);
+
+        $this->assertSame([
+            'id' => $context['branchA']->id,
+            'name' => 'Главный офис',
+        ], $assigned['user']['branch']);
+        $this->assertSame([
+            'id' => $context['groupA1']->id,
+            'name' => 'Группа Душанбе',
+            'branch_id' => $context['branchA']->id,
+        ], $assigned['user']['branch_group']);
+        $this->assertNull($withoutAssignment['user']['branch_id']);
+        $this->assertNull($withoutAssignment['user']['branch']);
+        $this->assertNull($withoutAssignment['user']['branch_group_id']);
+        $this->assertNull($withoutAssignment['user']['branch_group']);
+    }
+
+    public function test_available_users_eager_loads_employee_relations_without_per_user_queries(): void
+    {
+        $context = $this->context();
+        Sanctum::actingAs($context['admin']);
+        DB::enableQueryLog();
+
+        foreach ([
+            '/api/location-tracking/available-users',
+            '/api/location-tracking/map',
+        ] as $endpoint) {
+            DB::flushQueryLog();
+            $this->getJson($endpoint)->assertOk();
+
+            $queries = collect(DB::getQueryLog())->pluck('query');
+            foreach (['branches', 'branch_groups', 'user_location_tracking_settings', 'user_location_devices'] as $table) {
+                $matchingQueries = $queries->filter(
+                    fn (string $sql) => str_contains($sql, 'from "'.$table.'"')
+                        || str_contains($sql, 'from `'.$table.'`')
+                );
+
+                $this->assertLessThanOrEqual(
+                    1,
+                    $matchingQueries->count(),
+                    "Expected {$table} to be eager-loaded in a single query for {$endpoint}."
+                );
+            }
+        }
     }
 
     public function test_rop_sees_only_agents_and_mops_of_own_branch(): void
@@ -308,13 +423,19 @@ class LocationTrackingFeatureTest extends TestCase
                 'slug' => $slug,
                 'description' => $slug,
             ])]);
-        $branchA = Branch::query()->create(['name' => 'A']);
-        $branchB = Branch::query()->create(['name' => 'B']);
-        $groupA1 = BranchGroup::query()->create(['name' => 'A1', 'branch_id' => $branchA->id]);
-        $groupA2 = BranchGroup::query()->create(['name' => 'A2', 'branch_id' => $branchA->id]);
-        $groupB = BranchGroup::query()->create(['name' => 'B1', 'branch_id' => $branchB->id]);
+        $branchA = Branch::query()->create(['name' => 'Главный офис']);
+        $branchB = Branch::query()->create(['name' => 'Худжандский офис']);
+        $groupA1 = BranchGroup::query()->create(['name' => 'Группа Душанбе', 'branch_id' => $branchA->id]);
+        $groupA2 = BranchGroup::query()->create(['name' => 'Вторая группа Душанбе', 'branch_id' => $branchA->id]);
+        $groupB = BranchGroup::query()->create(['name' => 'Группа Худжанд', 'branch_id' => $branchB->id]);
 
         return [
+            'roles' => $roles,
+            'branchA' => $branchA,
+            'branchB' => $branchB,
+            'groupA1' => $groupA1,
+            'groupA2' => $groupA2,
+            'groupB' => $groupB,
             'agentA' => $this->user($roles['agent'], $branchA, $groupA1, 'Agent A'),
             'agentOtherGroup' => $this->user($roles['agent'], $branchA, $groupA2, 'Agent A2'),
             'agentB' => $this->user($roles['agent'], $branchB, $groupB, 'Agent B'),

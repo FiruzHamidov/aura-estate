@@ -140,17 +140,21 @@ class LocationIngestionService
 
         $device->forceFill(['last_seen_at' => now()])->save();
 
-        if ($broadcastPoint) {
-            UserLocationUpdated::dispatch([
-                'user_id' => (int) $broadcastPoint->user_id,
-                'point_id' => (int) $broadcastPoint->id,
-                'latitude' => (float) $broadcastPoint->latitude,
-                'longitude' => (float) $broadcastPoint->longitude,
-                'accuracy_m' => (float) $broadcastPoint->accuracy_m,
-                'quality' => $broadcastPoint->quality,
-                'captured_at' => $broadcastPoint->captured_at->toISOString(),
-                'received_at' => $broadcastPoint->received_at->toISOString(),
-            ]);
+        if ($broadcastPoint && config('location_tracking.realtime_broadcast_enabled', false)) {
+            try {
+                UserLocationUpdated::dispatch([
+                    'user_id' => (int) $broadcastPoint->user_id,
+                    'point_id' => (int) $broadcastPoint->id,
+                    'latitude' => (float) $broadcastPoint->latitude,
+                    'longitude' => (float) $broadcastPoint->longitude,
+                    'accuracy_m' => (float) $broadcastPoint->accuracy_m,
+                    'quality' => $broadcastPoint->quality,
+                    'captured_at' => $broadcastPoint->captured_at->toISOString(),
+                    'received_at' => $broadcastPoint->received_at->toISOString(),
+                ]);
+            } catch (\Throwable $exception) {
+                report($exception);
+            }
         }
 
         return $result;

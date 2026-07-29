@@ -17,7 +17,9 @@ class LocationTrackingPolicyService
 
     public function settingsFor(User $user): UserLocationTrackingSetting
     {
-        $stored = $user->locationTrackingSetting()->first();
+        $stored = $user->relationLoaded('locationTrackingSetting')
+            ? $user->getRelation('locationTrackingSetting')
+            : $user->locationTrackingSetting()->first();
 
         if ($stored) {
             return $stored;

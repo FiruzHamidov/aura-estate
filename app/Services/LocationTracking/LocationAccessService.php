@@ -38,7 +38,14 @@ class LocationAccessService
         $role = $this->role($viewer);
         $query = User::query()
             ->where('status', User::STATUS_ACTIVE)
-            ->with(['role', 'branch', 'branchGroup', 'currentLocation']);
+            ->with([
+                'role',
+                'branch',
+                'branchGroup',
+                'currentLocation',
+                'locationTrackingSetting',
+                'latestActiveLocationDevice',
+            ]);
 
         return match ($role) {
             'agent' => $query->whereKey($viewer->id),

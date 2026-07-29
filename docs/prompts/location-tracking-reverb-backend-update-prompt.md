@@ -60,6 +60,7 @@ Payload:
 
 ```dotenv
 BROADCAST_CONNECTION=reverb
+LOCATION_REALTIME_BROADCAST_ENABLED=true
 QUEUE_CONNECTION=redis
 
 REVERB_APP_ID=aura-estate-production

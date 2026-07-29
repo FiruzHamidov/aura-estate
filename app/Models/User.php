@@ -205,6 +205,13 @@ class User extends Authenticatable
         return $this->hasOne(UserCurrentLocation::class);
     }
 
+    public function latestActiveLocationDevice(): HasOne
+    {
+        return $this->hasOne(UserLocationDevice::class)
+            ->whereNull('revoked_at')
+            ->latestOfMany('last_seen_at');
+    }
+
     public function locationPoints(): HasMany
     {
         return $this->hasMany(UserLocationPoint::class);

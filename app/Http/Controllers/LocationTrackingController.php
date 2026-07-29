@@ -216,7 +216,9 @@ class LocationTrackingController extends Controller
                 'photo' => $user->photo,
                 'role' => $user->role?->slug,
                 'branch_id' => $user->branch_id,
+                'branch' => $this->branchPayload($user),
                 'branch_group_id' => $user->branch_group_id,
+                'branch_group' => $this->branchGroupPayload($user),
                 'tracking_enabled' => $this->policies->isEligible($user) && (bool) $settings->tracking_enabled,
                 'selected' => in_array($user->id, $selected, true),
                 'location_status' => $this->locationStatus($user),
@@ -316,7 +318,11 @@ class LocationTrackingController extends Controller
 
         return response()->json([
             'data' => $items,
-            'meta' => ['server_time' => now()->toISOString()],
+            'meta' => [
+                'server_time' => now()->toISOString(),
+                'realtime_enabled' => (bool) config('location_tracking.realtime_broadcast_enabled', false),
+                'polling_interval_seconds' => (int) config('location_tracking.fallback_polling_interval_seconds', 30),
+            ],
         ]);
     }
 
@@ -414,7 +420,14 @@ class LocationTrackingController extends Controller
 
     private function mapItem(User $user): array
     {
-        $user->loadMissing(['role', 'branch', 'branchGroup', 'currentLocation']);
+        $user->loadMissing([
+            'role',
+            'branch',
+            'branchGroup',
+            'currentLocation',
+            'locationTrackingSetting',
+            'latestActiveLocationDevice',
+        ]);
         $settings = $this->policies->settingsFor($user);
         $current = $user->currentLocation;
 
@@ -425,7 +438,9 @@ class LocationTrackingController extends Controller
                 'photo' => $user->photo,
                 'role' => $user->role?->slug,
                 'branch_id' => $user->branch_id,
+                'branch' => $this->branchPayload($user),
                 'branch_group_id' => $user->branch_group_id,
+                'branch_group' => $this->branchGroupPayload($user),
             ],
             'tracking' => [
                 'enabled' => $this->policies->isEligible($user) && (bool) $settings->tracking_enabled,
@@ -442,6 +457,31 @@ class LocationTrackingController extends Controller
         ];
     }
 
+    private function branchPayload(User $user): ?array
+    {
+        if (! $user->branch) {
+            return null;
+        }
+
+        return [
+            'id' => $user->branch->id,
+            'name' => $user->branch->name,
+        ];
+    }
+
+    private function branchGroupPayload(User $user): ?array
+    {
+        if (! $user->branchGroup) {
+            return null;
+        }
+
+        return [
+            'id' => $user->branchGroup->id,
+            'name' => $user->branchGroup->name,
+            'branch_id' => $user->branchGroup->branch_id,
+        ];
+    }
+
     private function locationStatus(User $user): string
     {
         $settings = $this->policies->settingsFor($user);
@@ -449,7 +489,13 @@ class LocationTrackingController extends Controller
             return 'tracking_disabled';
         }
 
-        $device = UserLocationDevice::query()->where('user_id', $user->id)->whereNull('revoked_at')->latest('last_seen_at')->first();
+        $device = $user->relationLoaded('latestActiveLocationDevice')
+            ? $user->getRelation('latestActiveLocationDevice')
+            : UserLocationDevice::query()
+                ->where('user_id', $user->id)
+                ->whereNull('revoked_at')
+                ->latest('last_seen_at')
+                ->first();
         if ($device?->permission_status === 'denied' || $device?->permission_status === 'restricted') {
             return 'permission_denied';
         }

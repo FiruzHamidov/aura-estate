@@ -349,7 +349,9 @@ GET /api/location-tracking/users/1/history?from={startOfTodayISO}&to={endOfToday
 Режим «Сейчас»:
 
 - первоначальный snapshot загружать через `/map`;
-- текущие изменения получать через private Laravel Reverb channels;
+- проверять `meta.realtime_enabled` в ответе `/map`;
+- при `meta.realtime_enabled=false` не подключать Reverb и обновлять `/map` через HTTP каждые `meta.polling_interval_seconds` секунд;
+- при `meta.realtime_enabled=true` текущие изменения получать через private Laravel Reverb channels;
 - детали интеграции выполнить по `docs/prompts/location-tracking-reverb-web-update-prompt.md`;
 - при подключённом WebSocket выполнять reconciliation polling раз в 3–5 минут;
 - при недоступном WebSocket включать polling `/map` каждые 30 секунд;

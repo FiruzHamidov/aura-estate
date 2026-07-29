@@ -718,7 +718,16 @@ GET /api/location-tracking/map?role=&branch_id=&branch_group_id=&status=&updated
     "photo": null,
     "role": "agent",
     "branch_id": 2,
-    "branch_group_id": 7
+    "branch": {
+      "id": 2,
+      "name": "Главный офис"
+    },
+    "branch_group_id": 7,
+    "branch_group": {
+      "id": 7,
+      "name": "Группа Душанбе",
+      "branch_id": 2
+    }
   },
   "tracking": {
     "enabled": true,
@@ -738,7 +747,19 @@ GET /api/location-tracking/map?role=&branch_id=&branch_group_id=&status=&updated
 
 Если координат нет, `location=null`, но пользователь остаётся в ответе со статусом причины.
 
-`updated_since` позволяет polling-клиенту получать только изменившиеся записи. Ответ также содержит `server_time` и новый cursor.
+Ответ содержит transport metadata:
+
+```json
+{
+  "meta": {
+    "server_time": "2026-07-29T08:42:17.014Z",
+    "realtime_enabled": false,
+    "polling_interval_seconds": 30
+  }
+}
+```
+
+При `realtime_enabled=false` frontend работает только через HTTP polling. При `true` frontend использует WebSocket и сохраняет HTTP polling для reconciliation и fallback.
 
 ### 14.10. История пользователя
 

@@ -24,4 +24,6 @@ return [
     'stale_threshold_seconds' => 900,
     'suspect_speed_kmh' => 250,
     'max_batch_size' => 50,
+    'realtime_broadcast_enabled' => env('LOCATION_REALTIME_BROADCAST_ENABLED', false),
+    'fallback_polling_interval_seconds' => 30,
 ];
