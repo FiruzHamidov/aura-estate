@@ -62,6 +62,7 @@ use App\Http\Controllers\PropertyTypeController;
 use App\Http\Controllers\PublicRealtorController;
 use App\Http\Controllers\PublicTeamController;
 use App\Http\Controllers\ReelController;
+use App\Http\Controllers\ReferenceCatalogController;
 use App\Http\Controllers\RepairTypeController;
 use App\Http\Controllers\ReviewController;
 use App\Http\Controllers\RoleController;
@@ -128,6 +129,18 @@ Route::get('/agents/{agent}/reviews', [ReviewController::class, 'index'])->where
 Route::post('/agents/{agent}/reviews', [ReviewController::class, 'store'])->middleware('throttle:10,1')->whereNumber('agent');
 
 Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
+    Route::prefix('admin/catalogs')->group(function () {
+        Route::get('/{catalog}/{item}/usage', [ReferenceCatalogController::class, 'usage'])
+            ->where('catalog', '[a-z0-9-]+')
+            ->whereNumber('item');
+        Route::post('/{catalog}/{item}/merge', [ReferenceCatalogController::class, 'merge'])
+            ->where('catalog', '[a-z0-9-]+')
+            ->whereNumber('item');
+        Route::delete('/{catalog}/{item}', [ReferenceCatalogController::class, 'destroy'])
+            ->where('catalog', '[a-z0-9-]+')
+            ->whereNumber('item');
+    });
+
     Route::prefix('location-tracking')->group(function () {
         Route::get('/me/policy', [LocationTrackingController::class, 'policy']);
         Route::put('/me/device', [LocationTrackingController::class, 'upsertDevice']);
