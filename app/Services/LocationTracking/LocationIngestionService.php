@@ -2,6 +2,7 @@
 
 namespace App\Services\LocationTracking;
 
+use App\Events\UserLocationUpdated;
 use App\Models\User;
 use App\Models\UserCurrentLocation;
 use App\Models\UserLocationDevice;
@@ -37,6 +38,7 @@ class LocationIngestionService
         }
 
         $result = ['accepted' => [], 'duplicates' => [], 'rejected' => []];
+        $broadcastPoint = null;
 
         foreach ($points as $point) {
             $eventId = (string) ($point['event_id'] ?? '');
@@ -125,6 +127,9 @@ class LocationIngestionService
             }
 
             [$stored, $currentUpdated, $quality] = $saved;
+            if ($currentUpdated) {
+                $broadcastPoint = $stored;
+            }
             $result['accepted'][] = [
                 'event_id' => $eventId,
                 'point_id' => $stored->id,
@@ -134,6 +139,19 @@ class LocationIngestionService
         }
 
         $device->forceFill(['last_seen_at' => now()])->save();
+
+        if ($broadcastPoint) {
+            UserLocationUpdated::dispatch([
+                'user_id' => (int) $broadcastPoint->user_id,
+                'point_id' => (int) $broadcastPoint->id,
+                'latitude' => (float) $broadcastPoint->latitude,
+                'longitude' => (float) $broadcastPoint->longitude,
+                'accuracy_m' => (float) $broadcastPoint->accuracy_m,
+                'quality' => $broadcastPoint->quality,
+                'captured_at' => $broadcastPoint->captured_at->toISOString(),
+                'received_at' => $broadcastPoint->received_at->toISOString(),
+            ]);
+        }
 
         return $result;
     }

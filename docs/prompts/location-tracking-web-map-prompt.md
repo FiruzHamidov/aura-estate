@@ -344,13 +344,17 @@ GET /api/location-tracking/users/1/history?from={startOfTodayISO}&to={endOfToday
 - сохранять выбранный base layer только если это соответствует текущим настройкам приложения;
 - attribution map provider обязательно оставить видимым.
 
-## Polling и cache
+## Realtime, polling и cache
 
 Режим «Сейчас»:
 
-- polling `/map` каждые 30 секунд;
-- останавливать polling, когда вкладка скрыта;
-- немедленно обновлять при возврате вкладки;
+- первоначальный snapshot загружать через `/map`;
+- текущие изменения получать через private Laravel Reverb channels;
+- детали интеграции выполнить по `docs/prompts/location-tracking-reverb-web-update-prompt.md`;
+- при подключённом WebSocket выполнять reconciliation polling раз в 3–5 минут;
+- при недоступном WebSocket включать polling `/map` каждые 30 секунд;
+- останавливать частый polling, когда вкладка скрыта;
+- немедленно синхронизировать `/map` при возврате вкладки и после reconnect;
 - сохранять предыдущие данные во время refetch, чтобы маркеры не мигали;
 - не анимировать резкий прыжок старой точки как реальное движение.
 

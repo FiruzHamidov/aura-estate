@@ -2,14 +2,18 @@
 
 namespace Tests\Feature;
 
+use App\Events\UserLocationUpdated;
 use App\Models\Branch;
 use App\Models\BranchGroup;
 use App\Models\Role;
 use App\Models\User;
 use App\Models\UserCurrentLocation;
 use App\Models\UserLocationPoint;
+use App\Services\LocationTracking\LocationAccessService;
 use Database\Seeders\DushanbeUserLocationSeeder;
+use Illuminate\Broadcasting\BroadcastManager;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Laravel\Sanctum\Sanctum;
@@ -31,7 +35,17 @@ class LocationTrackingFeatureTest extends TestCase
         config([
             'location_tracking.default_enabled' => true,
             'location_tracking.default_mode' => 'always',
+            'broadcasting.default' => 'reverb',
+            'broadcasting.connections.reverb.key' => 'test-key',
+            'broadcasting.connections.reverb.secret' => 'test-secret',
+            'broadcasting.connections.reverb.app_id' => 'test-app',
+            'broadcasting.connections.reverb.options.host' => 'localhost',
+            'broadcasting.connections.reverb.options.port' => 8080,
+            'broadcasting.connections.reverb.options.scheme' => 'http',
         ]);
+        app(BroadcastManager::class)->setDefaultDriver('reverb');
+        require base_path('routes/channels.php');
+        Event::fake([UserLocationUpdated::class]);
     }
 
     private function createBaseSchema(): void
@@ -172,6 +186,47 @@ class LocationTrackingFeatureTest extends TestCase
             ->assertJsonCount(1, 'data.duplicates');
 
         $this->assertDatabaseCount('user_location_points', 1);
+    }
+
+    public function test_batch_broadcasts_only_the_latest_current_location_once(): void
+    {
+        $context = $this->context();
+        Sanctum::actingAs($context['agentA']);
+        $device = $this->devicePayload();
+        $this->putJson('/api/location-tracking/me/device', $device)->assertOk();
+
+        $this->postJson('/api/location-tracking/me/points', [
+            'device_uuid' => $device['device_uuid'],
+            'points' => [
+                $this->pointPayload(now()->subMinutes(2)->toISOString(), 38.5590, 68.7860),
+                $this->pointPayload(now()->subMinute()->toISOString(), 38.5600, 68.7880),
+            ],
+        ])->assertOk()->assertJsonCount(2, 'data.accepted');
+
+        Event::assertDispatchedTimes(UserLocationUpdated::class, 1);
+        Event::assertDispatched(UserLocationUpdated::class, function (UserLocationUpdated $event) {
+            return $event->location['user_id'] === 1
+                && abs($event->location['latitude'] - 38.5600) < 0.0000001
+                && abs($event->location['longitude'] - 68.7880) < 0.0000001;
+        });
+    }
+
+    public function test_private_location_channel_uses_the_same_scope_as_map(): void
+    {
+        $context = $this->context();
+        Sanctum::actingAs($context['mopA']);
+        $this->assertTrue(app(LocationAccessService::class)->canView($context['mopA'], $context['agentA']));
+
+        $allowedResponse = $this->postJson('/api/broadcasting/auth', [
+            'socket_id' => '1234.5678',
+            'channel_name' => 'private-location.user.'.$context['agentA']->id,
+        ]);
+        $allowedResponse->assertOk()->assertJsonStructure(['auth']);
+
+        $this->postJson('/api/broadcasting/auth', [
+            'socket_id' => '1234.5678',
+            'channel_name' => 'private-location.user.'.$context['agentB']->id,
+        ])->assertForbidden();
     }
 
     public function test_mop_scope_and_selected_watchlist_cannot_include_foreign_group(): void

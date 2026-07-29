@@ -794,7 +794,29 @@ Bulk endpoint принимает не более 200 пользователей 
 
 Изменение обязательно содержит `change_reason`.
 
-### 14.12. Экспорт истории
+### 14.12. WebSocket текущей позиции
+
+Мобильные приложения сохраняют точки только через HTTP ingestion. После успешного сохранения backend публикует одно событие с самой свежей позицией через Laravel Reverb:
+
+```text
+private-location.user.{userId}
+.location.updated
+```
+
+Авторизация подписки:
+
+```http
+POST /api/broadcasting/auth
+Authorization: Bearer <token>
+```
+
+Channel authorization использует тот же `LocationAccessService`, что карта и история. Public/presence channels для координат запрещены.
+
+Один offline batch может создать максимум одно realtime-событие. История не передаётся через WebSocket.
+
+После reconnect web-клиент обязан выполнить `GET /api/location-tracking/map`, потому что WebSocket не гарантирует доставку событий во время разрыва соединения.
+
+### 14.13. Экспорт истории
 
 Экспорт не входит в базовый MVP. Если будет включён:
 

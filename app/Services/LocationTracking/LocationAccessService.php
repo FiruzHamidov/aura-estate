@@ -67,8 +67,17 @@ class LocationAccessService
 
     public function assertCanView(User $viewer, User $target): void
     {
-        if (! $this->availableUsersQuery($viewer)->whereKey($target->id)->exists()) {
+        if (! $this->canView($viewer, $target)) {
             $this->deny(self::FORBIDDEN_SCOPE, 'Нет доступа к местоположению пользователя.');
+        }
+    }
+
+    public function canView(User $viewer, User $target): bool
+    {
+        try {
+            return $this->availableUsersQuery($viewer)->whereKey($target->id)->exists();
+        } catch (\Throwable) {
+            return false;
         }
     }
 
