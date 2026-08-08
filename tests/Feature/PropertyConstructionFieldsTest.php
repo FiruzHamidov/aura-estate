@@ -77,6 +77,10 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->unsignedBigInteger('contract_type_id')->nullable()->index();
             $table->unsignedBigInteger('document_type_id')->nullable()->index();
             $table->decimal('price', 15, 2);
+            $table->decimal('discount_price', 15, 2)->nullable();
+            $table->decimal('effective_price', 15, 2)
+                ->storedAs('COALESCE(discount_price, price)')
+                ->index();
             $table->string('currency')->default('TJS');
             $table->string('offer_type')->default('sale');
             $table->tinyInteger('rooms')->nullable();
@@ -1086,6 +1090,45 @@ class PropertyConstructionFieldsTest extends TestCase
         $this->getJson('/api/properties/count?offer_type=rent')
             ->assertOk()
             ->assertExactJson(['count' => 0]);
+    }
+
+    public function test_price_range_uses_discount_price_when_present(): void
+    {
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000242',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'New building']);
+
+        $discounted = \App\Models\Property::query()->create([
+            'title' => 'Discounted match',
+            'type_id' => $type->id,
+            'price' => 1050000,
+            'discount_price' => 955000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'moderation_status' => 'approved',
+            'created_by' => $user->id,
+        ]);
+        \App\Models\Property::query()->create([
+            'title' => 'Regular non-match',
+            'type_id' => $type->id,
+            'price' => 1050000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'moderation_status' => 'approved',
+            'created_by' => $user->id,
+        ]);
+
+        $response = $this->getJson('/api/properties?priceFrom=955000&priceTo=955000');
+
+        $response->assertOk();
+        $response->assertJsonCount(1, 'data');
+        $response->assertJsonPath('data.0.id', $discounted->id);
     }
 
     public function test_rop_can_set_urgent_listing_type_without_auto_moderation(): void

@@ -42,6 +42,10 @@ class Property extends Model
         'branch_group_id',
     ];
 
+    protected $hidden = [
+        'effective_price',
+    ];
+
     protected $fillable = [
         'title',
         'description',

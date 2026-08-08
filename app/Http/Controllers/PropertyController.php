@@ -1580,7 +1580,6 @@ class PropertyController extends Controller
 
         // Диапазоны
         foreach ([
-                     'price' => 'price',
                      'rooms' => 'rooms',
                      'total_area' => 'total_area',
                      'living_area' => 'living_area',
@@ -1594,6 +1593,12 @@ class PropertyController extends Controller
             if ($from !== null && $from !== '') $query->where($column, '>=', $from);
             if ($to !== null && $to !== '') $query->where($column, '<=', $to);
         }
+
+        $this->applyEffectivePriceRange(
+            $query,
+            $request->input('priceFrom'),
+            $request->input('priceTo')
+        );
 
         // Диапазон по датам (date_from, date_to) — фильтрация по created_at.
         // Формат ожидается YYYY-MM-DD или любой распознаваемый Carbon формát.
@@ -1643,6 +1648,50 @@ class PropertyController extends Controller
                 // можно логировать при необходимости
             }
         }
+    }
+
+    /**
+     * Filter by the customer-facing price: discount_price when present,
+     * otherwise the regular price.
+     *
+     * Production uses the indexed generated effective_price column. The
+     * fallback keeps isolated tests and rolling deployments compatible until
+     * the migration has been applied everywhere.
+     */
+    private function applyEffectivePriceRange(Builder $query, mixed $from, mixed $to): void
+    {
+        $hasFrom = $from !== null && $from !== '';
+        $hasTo = $to !== null && $to !== '';
+
+        if (!$hasFrom && !$hasTo) {
+            return;
+        }
+
+        if (Schema::hasColumn('properties', 'effective_price')) {
+            if ($hasFrom) $query->where('effective_price', '>=', $from);
+            if ($hasTo) $query->where('effective_price', '<=', $to);
+            return;
+        }
+
+        if (!Schema::hasColumn('properties', 'discount_price')) {
+            if ($hasFrom) $query->where('price', '>=', $from);
+            if ($hasTo) $query->where('price', '<=', $to);
+            return;
+        }
+
+        $query->where(function (Builder $effectivePriceQuery) use ($from, $to, $hasFrom, $hasTo) {
+            $effectivePriceQuery
+                ->where(function (Builder $discountedQuery) use ($from, $to, $hasFrom, $hasTo) {
+                    $discountedQuery->whereNotNull('discount_price');
+                    if ($hasFrom) $discountedQuery->where('discount_price', '>=', $from);
+                    if ($hasTo) $discountedQuery->where('discount_price', '<=', $to);
+                })
+                ->orWhere(function (Builder $regularQuery) use ($from, $to, $hasFrom, $hasTo) {
+                    $regularQuery->whereNull('discount_price');
+                    if ($hasFrom) $regularQuery->where('price', '>=', $from);
+                    if ($hasTo) $regularQuery->where('price', '<=', $to);
+                });
+        });
     }
 
     /**
