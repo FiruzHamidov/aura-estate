@@ -79,7 +79,7 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->decimal('price', 15, 2);
             $table->decimal('discount_price', 15, 2)->nullable();
             $table->decimal('effective_price', 15, 2)
-                ->storedAs('COALESCE(discount_price, price)')
+                ->storedAs('COALESCE(NULLIF(discount_price, 0), price)')
                 ->index();
             $table->string('currency')->default('TJS');
             $table->string('offer_type')->default('sale');
@@ -1076,11 +1076,11 @@ class PropertyConstructionFieldsTest extends TestCase
         ];
         $query = http_build_query($filters);
 
-        $list = $this->getJson('/api/properties?' . $query)
+        $list = $this->getJson('/api/properties?'.$query)
             ->assertOk()
             ->json('total');
 
-        $this->getJson('/api/properties/count?' . $query)
+        $this->getJson('/api/properties/count?'.$query)
             ->assertOk()
             ->assertExactJson(['count' => $list]);
     }
@@ -1113,11 +1113,13 @@ class PropertyConstructionFieldsTest extends TestCase
             'offer_type' => 'sale',
             'moderation_status' => 'approved',
             'created_by' => $user->id,
+            'latitude' => 38.55,
+            'longitude' => 68.75,
         ]);
-        \App\Models\Property::query()->create([
+        $regular = \App\Models\Property::query()->create([
             'title' => 'Regular non-match',
             'type_id' => $type->id,
-            'price' => 1050000,
+            'price' => 980000,
             'currency' => 'TJS',
             'offer_type' => 'sale',
             'moderation_status' => 'approved',
@@ -1129,6 +1131,115 @@ class PropertyConstructionFieldsTest extends TestCase
         $response->assertOk();
         $response->assertJsonCount(1, 'data');
         $response->assertJsonPath('data.0.id', $discounted->id);
+
+        $sortedIds = collect($this->getJson('/api/properties?'.http_build_query([
+            'priceFrom' => 900000,
+            'priceTo' => 1100000,
+            'sort' => 'price',
+            'dir' => 'asc',
+        ]))->assertOk()->json('data'))->pluck('id')->all();
+        $this->assertSame([$discounted->id, $regular->id], $sortedIds);
+
+        $map = $this->getJson('/api/properties/map?'.http_build_query([
+            'bbox' => '38.4,68.6,38.8,69.1',
+            'zoom' => 11,
+            'priceFrom' => 955000,
+            'priceTo' => 955000,
+        ]))->assertOk();
+        $map->assertJsonPath('features.0.properties.point_count', 1);
+        $map->assertJsonPath('features.0.properties.min_price', 955000);
+    }
+
+    public function test_property_rejects_zero_discount_and_invalid_filter_ranges(): void
+    {
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000243',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+
+        Sanctum::actingAs($user);
+
+        $this->postJson('/api/properties', [
+            'type_id' => $type->id,
+            'price' => 100000,
+            'discount_price' => 0,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ])->assertUnprocessable();
+
+        $this->getJson('/api/properties?priceFrom=200000&priceTo=100000')
+            ->assertUnprocessable();
+
+        $this->getJson('/api/properties?moderation_status=unknown')
+            ->assertUnprocessable();
+
+        $this->getJson('/api/properties?per_page=1000')
+            ->assertUnprocessable();
+    }
+
+    public function test_map_cache_and_count_respect_authenticated_property_scope(): void
+    {
+        \Illuminate\Support\Facades\Cache::flush();
+
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $firstAgent = User::create([
+            'name' => 'First Agent',
+            'phone' => '930000244',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+        $secondAgent = User::create([
+            'name' => 'Second Agent',
+            'phone' => '930000245',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+
+        $firstProperty = \App\Models\Property::query()->create([
+            'title' => 'First scoped property',
+            'type_id' => $type->id,
+            'price' => 100000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'moderation_status' => 'approved',
+            'created_by' => $firstAgent->id,
+            'latitude' => 38.55,
+            'longitude' => 68.75,
+        ]);
+        $secondProperty = \App\Models\Property::query()->create([
+            'title' => 'Second scoped property',
+            'type_id' => $type->id,
+            'price' => 110000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'moderation_status' => 'approved',
+            'created_by' => $secondAgent->id,
+            'latitude' => 38.56,
+            'longitude' => 68.76,
+        ]);
+        $mapUrl = '/api/properties/map?bbox=38.4,68.6,38.8,69.1&zoom=12';
+
+        Sanctum::actingAs($firstAgent);
+        $firstMapIds = collect($this->getJson($mapUrl)->assertOk()->json('features'))
+            ->pluck('properties.id')
+            ->all();
+        $this->assertSame([$firstProperty->id], $firstMapIds);
+        $this->getJson('/api/properties/count')->assertOk()->assertJsonPath('count', 1);
+
+        Sanctum::actingAs($secondAgent);
+        $secondMapIds = collect($this->getJson($mapUrl)->assertOk()->json('features'))
+            ->pluck('properties.id')
+            ->all();
+        $this->assertSame([$secondProperty->id], $secondMapIds);
+        $this->getJson('/api/properties/count')->assertOk()->assertJsonPath('count', 1);
     }
 
     public function test_rop_can_set_urgent_listing_type_without_auto_moderation(): void

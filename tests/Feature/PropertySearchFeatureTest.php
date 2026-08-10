@@ -18,11 +18,17 @@ use Tests\TestCase;
 class PropertySearchFeatureTest extends TestCase
 {
     private Role $agentRole;
+
     private User $agent;
+
     private PropertyType $apartmentType;
+
     private PropertyType $houseType;
+
     private PropertyStatus $activeStatus;
+
     private Location $dushanbe;
+
     private Developer $developer;
 
     protected function setUp(): void
@@ -91,8 +97,13 @@ class PropertySearchFeatureTest extends TestCase
             $table->unsignedBigInteger('status_id');
             $table->unsignedBigInteger('location_id')->nullable();
             $table->decimal('price', 15, 2);
+            $table->decimal('discount_price', 15, 2)->nullable();
+            $table->decimal('effective_price', 15, 2)
+                ->storedAs('COALESCE(NULLIF(discount_price, 0), price)')
+                ->index();
             $table->string('currency')->default('USD');
             $table->string('offer_type')->default('sale');
+            $table->string('listing_type')->default('regular');
             $table->tinyInteger('rooms')->nullable();
             $table->float('total_area')->nullable();
             $table->string('moderation_status')->default('approved');
@@ -189,7 +200,7 @@ class PropertySearchFeatureTest extends TestCase
             'moderation_status' => 'draft',
         ]);
 
-        $response = $this->getJson('/api/properties/search?q=' . $visible->id);
+        $response = $this->getJson('/api/properties/search?q='.$visible->id);
 
         $response->assertOk();
         $response->assertJsonPath('total', 1);
@@ -219,12 +230,13 @@ class PropertySearchFeatureTest extends TestCase
             'type_id' => $this->houseType->id,
         ]);
 
-        $response = $this->getJson('/api/properties/search?' . http_build_query([
+        $response = $this->getJson('/api/properties/search?'.http_build_query([
             'q' => 'modern',
             'deal_type' => 'sale',
             'property_type_id' => $this->apartmentType->id,
             'price_from' => 80000,
             'price_to' => 90000,
+            'currency' => 'USD',
             'rooms_from' => 2,
             'rooms_to' => 2,
             'area_from' => 60,
@@ -258,7 +270,7 @@ class PropertySearchFeatureTest extends TestCase
         $token = $this->agent->createToken('api-token', ['*'], now()->addHours(24))->plainTextToken;
 
         $this->withToken($token)
-            ->getJson('/api/properties/search?' . http_build_query([
+            ->getJson('/api/properties/search?'.http_build_query([
                 'page' => 1,
                 'per_page' => 20,
                 'sort' => 'relevance',
@@ -407,6 +419,61 @@ class PropertySearchFeatureTest extends TestCase
         $this->assertNotContains($closedDeal->id, $ids);
     }
 
+    public function test_search_filter_sort_and_similar_use_effective_price(): void
+    {
+        $discounted = $this->createProperty([
+            'title' => 'Discounted searchable listing',
+            'price' => 150000,
+            'discount_price' => 85000,
+        ]);
+        $regular = $this->createProperty([
+            'title' => 'Regular listing',
+            'price' => 100000,
+        ]);
+
+        $filtered = $this->getJson('/api/properties/search?'.http_build_query([
+            'price_from' => 84000,
+            'price_to' => 86000,
+            'currency' => 'USD',
+            'sort' => 'price_asc',
+        ]))->assertOk();
+
+        $filtered->assertJsonPath('total', 1);
+        $filtered->assertJsonPath('data.0.id', $discounted->id);
+        $filtered->assertJsonPath('data.0.discount_price', 85000);
+
+        $sorted = $this->getJson('/api/properties/search?sort=price_asc')->assertOk();
+        $sortedIds = collect($sorted->json('data'))->pluck('id')->all();
+        $this->assertLessThan(
+            array_search($regular->id, $sortedIds, true),
+            array_search($discounted->id, $sortedIds, true)
+        );
+
+        $similarDiscounted = $this->createProperty([
+            'title' => 'Similar through discount',
+            'price' => 250000,
+            'discount_price' => 88000,
+        ]);
+        $similarIds = collect(
+            $this->getJson("/api/properties/{$discounted->id}/similar?use_radius=0")
+                ->assertOk()
+                ->json()
+        )->pluck('id')->all();
+
+        $this->assertContains($similarDiscounted->id, $similarIds);
+
+        $chatResults = app(\App\Services\Chat\PropertyRepository::class)->search([
+            'price_min' => 84000,
+            'price_max' => 86000,
+            'currency' => 'USD',
+        ]);
+        $this->assertCount(1, $chatResults);
+        $this->assertSame($discounted->id, $chatResults[0]['id']);
+        $this->assertSame(85000.0, $chatResults[0]['price']);
+        $this->assertSame(150000.0, $chatResults[0]['original_price']);
+        $this->assertSame(85000.0, $chatResults[0]['discount_price']);
+    }
+
     private function createProperty(array $attributes = []): Property
     {
         $property = Property::create(array_merge([
@@ -430,7 +497,7 @@ class PropertySearchFeatureTest extends TestCase
 
         PropertyPhoto::create([
             'property_id' => $property->id,
-            'file_path' => 'properties/' . $property->id . '.jpg',
+            'file_path' => 'properties/'.$property->id.'.jpg',
             'position' => 0,
         ]);
 

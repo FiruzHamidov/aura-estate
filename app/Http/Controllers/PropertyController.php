@@ -5,9 +5,9 @@ namespace App\Http\Controllers;
 use App\Http\Requests\SavePropertyDealRequest;
 use App\Models\Client;
 use App\Models\Property;
+use App\Models\User;
 use App\Services\Crm\ClientAttachService;
 use App\Services\Crm\Matching\ClientPropertyMatcher;
-use App\Models\User;
 use App\Support\ClientAccess;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\QueryException;
@@ -25,13 +25,16 @@ use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 class PropertyController extends Controller
 {
     protected ImageManager $imageManager;
+
     protected ClientAccess $clientAccess;
+
     protected ClientAttachService $clientAttachService;
+
     protected ClientPropertyMatcher $clientPropertyMatcher;
 
     public function __construct()
     {
-        $this->imageManager = new ImageManager(new Driver());
+        $this->imageManager = new ImageManager(new Driver);
         $this->clientAccess = app(ClientAccess::class);
         $this->clientAttachService = app(ClientAttachService::class);
         $this->clientPropertyMatcher = app(ClientPropertyMatcher::class);
@@ -149,13 +152,13 @@ class PropertyController extends Controller
 
     private function applyListingTypeAccessRules(User $user, array $payload): array
     {
-        if (!array_key_exists('listing_type', $payload)) {
+        if (! array_key_exists('listing_type', $payload)) {
             return $payload;
         }
 
         $requestedListingType = (string) $payload['listing_type'];
 
-        if (!in_array($requestedListingType, ['vip', 'urgent'], true)) {
+        if (! in_array($requestedListingType, ['vip', 'urgent'], true)) {
             return $payload;
         }
 
@@ -174,7 +177,7 @@ class PropertyController extends Controller
 
         $existingComment = isset($payload['status_comment']) ? trim((string) $payload['status_comment']) : '';
         $payload['status_comment'] = $existingComment !== ''
-            ? $existingComment . PHP_EOL . $autoComment
+            ? $existingComment.PHP_EOL.$autoComment
             : $autoComment;
 
         return $payload;
@@ -192,7 +195,7 @@ class PropertyController extends Controller
 
         if (
             $this->supportsPropertyCoOwner()
-            && !empty($property->co_owner_user_id)
+            && ! empty($property->co_owner_user_id)
             && (int) $property->co_owner_user_id === (int) $user->id
         ) {
             return true;
@@ -209,11 +212,11 @@ class PropertyController extends Controller
 
             $propertyBranchGroupId = $this->resolvePropertyBranchGroupId($property);
 
-            return !empty($propertyBranchGroupId)
+            return ! empty($propertyBranchGroupId)
                 && (int) $propertyBranchGroupId === (int) $user->branch_group_id;
         }
 
-        if (!$user->hasRole('branch_director') && !$user->hasRole('rop')) {
+        if (! $user->hasRole('branch_director') && ! $user->hasRole('rop')) {
             return false;
         }
 
@@ -226,7 +229,7 @@ class PropertyController extends Controller
         $propertyBranchId = $property->agent?->branch_id
             ?: $property->creator?->branch_id;
 
-        return !empty($propertyBranchId) && (int) $propertyBranchId === (int) $user->branch_id;
+        return ! empty($propertyBranchId) && (int) $propertyBranchId === (int) $user->branch_id;
     }
 
     private function authorizePropertyMutation(Property $property): User
@@ -237,7 +240,7 @@ class PropertyController extends Controller
         abort_unless($user, 401, 'Unauthenticated.');
         $user->loadMissing('role');
 
-        if (!$this->canMutateProperty($user, $property)) {
+        if (! $this->canMutateProperty($user, $property)) {
             abort(403, 'Доступ запрещён');
         }
 
@@ -253,8 +256,7 @@ class PropertyController extends Controller
         Property $property,
         string $moderationStatus,
         ?int $saleUserId = null
-    ): User
-    {
+    ): User {
         /** @var User|null $user */
         $user = auth()->user();
 
@@ -300,8 +302,8 @@ class PropertyController extends Controller
             return true;
         }
 
-        return !empty($actor->branch_id)
-            && !empty($coOwner->branch_id)
+        return ! empty($actor->branch_id)
+            && ! empty($coOwner->branch_id)
             && (int) $actor->branch_id === (int) $coOwner->branch_id;
     }
 
@@ -314,7 +316,7 @@ class PropertyController extends Controller
 
     private function ensureValidCoOwner(User $actor, ?int $coOwnerUserId, ?int $ownerUserId): void
     {
-        if (!$coOwnerUserId) {
+        if (! $coOwnerUserId) {
             return;
         }
 
@@ -368,7 +370,7 @@ class PropertyController extends Controller
             abort_unless(
                 $this->canAssignDealUser($actor),
                 403,
-                "Недостаточно прав, чтобы добавить соисполнителя #".($index + 1)."."
+                'Недостаточно прав, чтобы добавить соисполнителя #'.($index + 1).'.'
             );
 
             $this->ensureDealAssigneeExists((int) $agent['agent_id']);
@@ -475,7 +477,7 @@ class PropertyController extends Controller
             }
         }
 
-        if (empty($userId) || !Schema::hasColumn('users', 'branch_id')) {
+        if (empty($userId) || ! Schema::hasColumn('users', 'branch_id')) {
             return null;
         }
 
@@ -494,7 +496,7 @@ class PropertyController extends Controller
             }
         }
 
-        if (empty($userId) || !Schema::hasColumn('users', 'branch_group_id')) {
+        if (empty($userId) || ! Schema::hasColumn('users', 'branch_group_id')) {
             return null;
         }
 
@@ -514,7 +516,7 @@ class PropertyController extends Controller
 
     private function normalizeMopBranchGroupPayload(User $user, array $data): array
     {
-        if (!$user->hasRole('mop')) {
+        if (! $user->hasRole('mop')) {
             return $data;
         }
 
@@ -540,7 +542,7 @@ class PropertyController extends Controller
 
     private function syncClientContactKind(?Client $client, string $contactKind): void
     {
-        if (!$client) {
+        if (! $client) {
             return;
         }
 
@@ -554,7 +556,7 @@ class PropertyController extends Controller
 
     private function syncPropertyClientSnapshots(array $data): array
     {
-        if (!empty($data['owner_client_id'])) {
+        if (! empty($data['owner_client_id'])) {
             $ownerClient = Client::query()->with('type')->find($data['owner_client_id']);
             if ($ownerClient) {
                 $this->syncClientContactKind($ownerClient, Client::CONTACT_KIND_SELLER);
@@ -564,7 +566,7 @@ class PropertyController extends Controller
             }
         }
 
-        if (!empty($data['buyer_client_id'])) {
+        if (! empty($data['buyer_client_id'])) {
             $buyerClient = Client::query()->with('type')->find($data['buyer_client_id']);
             if ($buyerClient) {
                 $this->syncClientContactKind($buyerClient, Client::CONTACT_KIND_BUYER);
@@ -581,7 +583,7 @@ class PropertyController extends Controller
         $authUser = auth()->user();
         $currentProperty = null;
 
-        if (!$authUser) {
+        if (! $authUser) {
             return;
         }
 
@@ -616,7 +618,7 @@ class PropertyController extends Controller
             } catch (HttpExceptionInterface $exception) {
                 if (
                     $exception->getStatusCode() !== 403
-                    || !$this->clientAttachService->canAttachClient($authUser, $client, $attachContext)
+                    || ! $this->clientAttachService->canAttachClient($authUser, $client, $attachContext)
                 ) {
                     throw $exception;
                 }
@@ -643,12 +645,13 @@ class PropertyController extends Controller
         $query = $this->baseQuery($request);
         $this->applyFilters($query, $request);
         $this->applySorts($query, $request->input('sort'), $request->input('dir'));
-        $perPage = (int)$request->input('per_page', 20);
+        $perPage = (int) $request->input('per_page', 20);
+
         return response()->json($query->latest()->paginate($perPage));
     }
 
     /**
-     * Public count of properties matching the same filters as the public list.
+     * Count properties using the same filters and access scope as the list.
      * This deliberately uses SQL COUNT(*) and never eager-loads relations.
      *
      * @queryParam document_type_ids array Multiple property document type IDs. Example: [1,3]
@@ -658,7 +661,7 @@ class PropertyController extends Controller
     {
         $this->validateListFilters($request);
 
-        $query = Property::query()->where('moderation_status', Property::PUBLIC_MODERATION_STATUS);
+        $query = $this->baseQuery($request, []);
         $this->applyFilters($query, $request);
 
         return response()->json([
@@ -679,7 +682,8 @@ class PropertyController extends Controller
         $query = $this->baseQueryMyProperties($request);
         $this->applyFilters($query, $request);
         $this->applySorts($query, $request->input('sort'), $request->input('dir'));
-        $perPage = (int)$request->input('per_page', 20);
+        $perPage = (int) $request->input('per_page', 20);
+
         return response()->json($query->latest()->paginate($perPage));
     }
 
@@ -730,7 +734,7 @@ class PropertyController extends Controller
 
         if ($user && ($user->hasRole('admin') || $user->hasRole('superadmin'))) {
             // без ограничений
-        } elseif (!$user) {
+        } elseif (! $user) {
             $query->where('moderation_status', 'approved');
         } elseif ($this->hasOwnPropertyScope($user)) {
             $query->where(function (Builder $ownerQuery) use ($user) {
@@ -740,7 +744,7 @@ class PropertyController extends Controller
                     $ownerQuery->orWhere('co_owner_user_id', $user->id);
                 }
             });
-            if (!$hasStatusFilter) {
+            if (! $hasStatusFilter) {
                 $query->where('moderation_status', '!=', 'deleted');
             }
         } elseif ($user->hasRole('mop')) {
@@ -750,11 +754,11 @@ class PropertyController extends Controller
                 $this->applyBranchGroupFilter($query, [$user->branch_group_id]);
             }
 
-            if (!$hasStatusFilter) {
+            if (! $hasStatusFilter) {
                 $query->where('moderation_status', '!=', 'deleted');
             }
         } elseif ($user->hasRole('client')) {
-            if (!$hasStatusFilter) {
+            if (! $hasStatusFilter) {
                 $query->where('moderation_status', '!=', 'deleted');
             }
         }
@@ -772,7 +776,7 @@ class PropertyController extends Controller
 
         if ($user && ($user->hasRole('admin') || $user->hasRole('superadmin'))) {
             // без ограничений
-        } elseif (!$user) {
+        } elseif (! $user) {
             $query->where('moderation_status', Property::PUBLIC_MODERATION_STATUS);
         } elseif ($this->hasOwnPropertyScope($user)) {
             $query->where(function (Builder $ownerQuery) use ($user) {
@@ -782,7 +786,7 @@ class PropertyController extends Controller
                     $ownerQuery->orWhere('co_owner_user_id', $user->id);
                 }
             });
-            if (!$hasStatusFilter) {
+            if (! $hasStatusFilter) {
                 $query->where('moderation_status', '!=', 'deleted');
             }
         } elseif ($user->hasRole('mop')) {
@@ -792,11 +796,11 @@ class PropertyController extends Controller
                 $this->applyBranchGroupFilter($query, [$user->branch_group_id]);
             }
 
-            if (!$hasStatusFilter) {
+            if (! $hasStatusFilter) {
                 $query->where('moderation_status', '!=', 'deleted');
             }
         } elseif ($user->hasRole('client')) {
-            if (!$hasStatusFilter) {
+            if (! $hasStatusFilter) {
                 $query->where('moderation_status', '!=', 'deleted');
             }
         }
@@ -815,12 +819,13 @@ class PropertyController extends Controller
             'status_id' => ['sometimes', 'nullable', 'integer'],
             'location_id' => ['sometimes', 'nullable', 'integer'],
             'district' => ['sometimes', 'nullable', 'string'],
-            'price_from' => ['sometimes', 'nullable', 'numeric'],
-            'price_to' => ['sometimes', 'nullable', 'numeric'],
-            'rooms_from' => ['sometimes', 'nullable', 'integer'],
-            'rooms_to' => ['sometimes', 'nullable', 'integer'],
-            'area_from' => ['sometimes', 'nullable', 'numeric'],
-            'area_to' => ['sometimes', 'nullable', 'numeric'],
+            'price_from' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'price_to' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'currency' => ['sometimes', 'nullable', Rule::in(['TJS', 'USD'])],
+            'rooms_from' => ['sometimes', 'nullable', 'integer', 'min:1'],
+            'rooms_to' => ['sometimes', 'nullable', 'integer', 'min:1'],
+            'area_from' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'area_to' => ['sometimes', 'nullable', 'numeric', 'min:0'],
             'document_type_id' => ['sometimes', 'nullable', 'integer', 'exists:document_types,id'],
             'document_type_ids' => ['sometimes', 'nullable', 'array'],
             'document_type_ids.*' => ['integer', 'distinct', 'exists:document_types,id'],
@@ -829,9 +834,15 @@ class PropertyController extends Controller
             'sort' => ['sometimes', 'nullable', Rule::in(['relevance', 'newest', 'price_asc', 'price_desc'])],
         ]);
 
+        $this->validateRangeOrder($validated, [
+            ['price_from', 'price_to'],
+            ['rooms_from', 'rooms_to'],
+            ['area_from', 'area_to'],
+        ]);
+
         $q = trim((string) ($validated['q'] ?? ''));
 
-        if ($q !== '' && mb_strlen($q, 'UTF-8') < 2 && !ctype_digit($q)) {
+        if ($q !== '' && mb_strlen($q, 'UTF-8') < 2 && ! ctype_digit($q)) {
             return response()->json([
                 'message' => 'Минимум 2 символа для поиска',
             ], 422);
@@ -888,7 +899,7 @@ class PropertyController extends Controller
 
     private function canSearchPropertyCrmFields(?User $user): bool
     {
-        return $user !== null && !$user->hasRole('client');
+        return $user !== null && ! $user->hasRole('client');
     }
 
     private function applyPropertySearchFilters(Builder $query, array $filters): void
@@ -899,6 +910,7 @@ class PropertyController extends Controller
             'status_id' => 'status_id',
             'location_id' => 'location_id',
             'district' => 'district',
+            'currency' => 'currency',
         ];
 
         foreach ($map as $param => $column) {
@@ -907,18 +919,16 @@ class PropertyController extends Controller
             }
         }
 
-        if (!empty($filters['document_type_ids'])) {
+        if (! empty($filters['document_type_ids'])) {
             $query->whereIn(
                 'document_type_id',
                 array_values(array_unique(array_map('intval', $filters['document_type_ids'])))
             );
-        } elseif (!empty($filters['document_type_id'])) {
+        } elseif (! empty($filters['document_type_id'])) {
             $query->where('document_type_id', (int) $filters['document_type_id']);
         }
 
         foreach ([
-            'price_from' => ['price', '>='],
-            'price_to' => ['price', '<='],
             'rooms_from' => ['rooms', '>='],
             'rooms_to' => ['rooms', '<='],
             'area_from' => ['total_area', '>='],
@@ -929,9 +939,22 @@ class PropertyController extends Controller
             }
         }
 
+        $hasPriceRange = isset($filters['price_from']) || isset($filters['price_to']);
+        if ($hasPriceRange) {
+            if (empty($filters['currency'])) {
+                $query->where('currency', 'TJS');
+            }
+
+            $this->applyEffectivePriceRange(
+                $query,
+                $filters['price_from'] ?? null,
+                $filters['price_to'] ?? null
+            );
+        }
+
         if (
             $this->supportsPropertyTags()
-            && !empty($filters['tag_ids'])
+            && ! empty($filters['tag_ids'])
         ) {
             $tagIds = array_values(array_unique(array_map('intval', $filters['tag_ids'])));
 
@@ -941,7 +964,7 @@ class PropertyController extends Controller
 
     private function applyPropertySearchText(Builder $query, string $term, bool $includeCrmFields): void
     {
-        $like = '%' . $this->escapeLikeTerm(mb_strtolower($term, 'UTF-8')) . '%';
+        $like = '%'.$this->escapeLikeTerm(mb_strtolower($term, 'UTF-8')).'%';
         $isNumericId = ctype_digit($term);
         $roomCount = $this->extractRoomSearchHint($term);
 
@@ -988,21 +1011,26 @@ class PropertyController extends Controller
     {
         if ($sort === 'newest' || ($sort === 'relevance' && $term === '')) {
             $query->orderByDesc('properties.created_at')->orderByDesc('properties.id');
+
             return;
         }
 
         if ($sort === 'price_asc') {
-            $query->orderBy('properties.price')->orderByDesc('properties.created_at');
+            $query->orderByRaw($this->effectivePriceSql('properties').' ASC')
+                ->orderByDesc('properties.created_at');
+
             return;
         }
 
         if ($sort === 'price_desc') {
-            $query->orderByDesc('properties.price')->orderByDesc('properties.created_at');
+            $query->orderByRaw($this->effectivePriceSql('properties').' DESC')
+                ->orderByDesc('properties.created_at');
+
             return;
         }
 
         $lowerTerm = mb_strtolower($term, 'UTF-8');
-        $like = '%' . $this->escapeLikeTerm($lowerTerm) . '%';
+        $like = '%'.$this->escapeLikeTerm($lowerTerm).'%';
         $cases = ['WHEN properties.id = ? THEN 1000'];
         $bindings = [ctype_digit($term) ? (int) $term : 0];
 
@@ -1120,6 +1148,7 @@ class PropertyController extends Controller
             'id' => (int) $property->id,
             'title' => $property->title,
             'price' => $this->normalizeRawNumber($property->price),
+            'discount_price' => $this->normalizeRawNumber($property->discount_price),
             'currency' => $property->currency,
             'address' => $property->address,
             'district' => $property->district,
@@ -1141,7 +1170,7 @@ class PropertyController extends Controller
             'photos' => $property->photos
                 ->map(fn ($photo) => [
                     'id' => (int) $photo->id,
-                    'url' => $photo->file_path ? asset('storage/' . ltrim($photo->file_path, '/')) : null,
+                    'url' => $photo->file_path ? asset('storage/'.ltrim($photo->file_path, '/')) : null,
                 ])
                 ->values(),
             'creator' => $property->creator ? [
@@ -1176,18 +1205,32 @@ class PropertyController extends Controller
         [$south, $west, $north, $east] = array_map('floatval', $parts);
 
         // Нормализация (на случай перепутанных значений)
-        if ($south > $north) [$south, $north] = [$north, $south];
-        if ($west > $east) [$west, $east] = [$east, $west];
+        if ($south > $north) {
+            [$south, $north] = [$north, $south];
+        }
+        if ($west > $east) {
+            [$west, $east] = [$east, $west];
+        }
 
-        $zoom = (int)$request->query('zoom', 12);
+        $zoom = (int) $request->query('zoom', 12);
         $zoom = max(1, min(22, $zoom));
 
         // Ключ кэша: bbox округлим до сетки, чтобы лучше переиспользовать
-        $round = fn(float $n) => round($n * 400) / 400; // ~0.0025°
+        $round = fn (float $n) => round($n * 400) / 400; // ~0.0025°
         $bboxKey = implode(',', [$round($south), $round($west), $round($north), $round($east)]);
         $filtersKey = md5(json_encode($request->except(['bbox', 'zoom'])));
+        $authUser = $this->propertyShowAuthUser($request);
+        $accessScopeKey = $authUser
+            ? implode(':', [
+                'user',
+                $authUser->id,
+                $authUser->role?->slug ?? 'no-role',
+                $authUser->branch_id ?? 'no-branch',
+                $authUser->branch_group_id ?? 'no-group',
+            ])
+            : 'guest';
 
-        $cacheKey = "map:{$bboxKey}:z{$zoom}:{$filtersKey}";
+        $cacheKey = "map:{$accessScopeKey}:{$bboxKey}:z{$zoom}:{$filtersKey}";
         $ttl = now()->addSeconds(20);
 
         return Cache::remember($cacheKey, $ttl, function () use ($request, $south, $west, $north, $east, $zoom) {
@@ -1206,12 +1249,13 @@ class PropertyController extends Controller
             // Низкие зумы: грубая кластеризация "по сетке"
             if ($zoom <= 11) {
                 $cell = 0.02; // шаг сетки ~2 км (подберите под город)
+                $effectivePriceSql = $this->effectivePriceSql();
                 $rows = $query
                     ->selectRaw("
                         FLOOR(latitude  / {$cell}) as gx,
                         FLOOR(longitude / {$cell}) as gy,
                         COUNT(*) as cnt,
-                        MIN(price)      as min_price,
+                        MIN({$effectivePriceSql}) as min_price,
                         COUNT(DISTINCT currency) as currency_count,
                         MIN(currency) as currency_single,
                         AVG(latitude)  as lat_avg,
@@ -1223,19 +1267,19 @@ class PropertyController extends Controller
 
                 $features = $rows->map(function ($r) {
                     $minPrice = $this->normalizeRawNumber($r->min_price);
-                    $currency = ((int)$r->currency_count === 1) ? ($r->currency_single ?: null) : null;
-                    $priceFromLabel = $minPrice !== null ? 'от ' . $this->formatCompactPrice($minPrice) : null;
+                    $currency = ((int) $r->currency_count === 1) ? ($r->currency_single ?: null) : null;
+                    $priceFromLabel = $minPrice !== null ? 'от '.$this->formatCompactPrice($minPrice) : null;
 
                     return [
                         'type' => 'Feature',
                         'geometry' => [
                             'type' => 'Point',
                             // ВНИМАНИЕ: проверь порядок в вашей карте. Для Yandex чаще [lat, lng]
-                            'coordinates' => [(float)$r->lat_avg, (float)$r->lng_avg],
+                            'coordinates' => [(float) $r->lat_avg, (float) $r->lng_avg],
                         ],
                         'properties' => [
                             'cluster' => true,
-                            'point_count' => (int)$r->cnt,
+                            'point_count' => (int) $r->cnt,
                             'min_price' => $minPrice,
                             'currency' => $currency,
                             'price_from_label' => $priceFromLabel,
@@ -1263,11 +1307,11 @@ class PropertyController extends Controller
                     'type' => 'Feature',
                     'geometry' => [
                         'type' => 'Point',
-                        'coordinates' => [(float)$p->latitude, (float)$p->longitude],
+                        'coordinates' => [(float) $p->latitude, (float) $p->longitude],
                     ],
                     'properties' => [
-                        'id' => (int)$p->id,
-                        'title' => (string)$p->title,
+                        'id' => (int) $p->id,
+                        'title' => (string) $p->title,
                         'price' => $price,
                         'discount_price' => $discountPrice,
                         'currency' => $p->currency ?: null,
@@ -1294,13 +1338,13 @@ class PropertyController extends Controller
             return $value;
         }
 
-        if (!is_numeric($value)) {
+        if (! is_numeric($value)) {
             return $value;
         }
 
-        $numeric = (float)$value;
+        $numeric = (float) $value;
         if (fmod($numeric, 1.0) === 0.0) {
-            return (int)$numeric;
+            return (int) $numeric;
         }
 
         return $numeric;
@@ -1308,11 +1352,11 @@ class PropertyController extends Controller
 
     private function formatCompactPrice($price): ?string
     {
-        if ($price === null || $price === '' || !is_numeric($price)) {
+        if ($price === null || $price === '' || ! is_numeric($price)) {
             return null;
         }
 
-        $value = (float)$price;
+        $value = (float) $price;
         $abs = abs($value);
 
         if ($abs >= 1000000000) {
@@ -1328,7 +1372,7 @@ class PropertyController extends Controller
         }
 
         if (fmod($value, 1.0) === 0.0) {
-            return (string)(int)$value;
+            return (string) (int) $value;
         }
 
         return rtrim(rtrim(number_format($value, 2, '.', ''), '0'), '.');
@@ -1339,7 +1383,7 @@ class PropertyController extends Controller
         $rounded = round($value, 1);
 
         if (fmod($rounded, 1.0) === 0.0) {
-            $formatted = (string)(int)$rounded;
+            $formatted = (string) (int) $rounded;
         } else {
             $formatted = rtrim(rtrim(number_format($rounded, 1, '.', ''), '0'), '.');
         }
@@ -1355,16 +1399,21 @@ class PropertyController extends Controller
     private function applyFilters(Builder $query, Request $request): void
     {
         $toArray = function ($value) {
-            if ($value === null || $value === '') return [];
-            if (is_array($value)) return array_values(array_filter($value, fn($v) => $v !== '' && $v !== null));
-            return array_values(array_filter(array_map('trim', explode(',', $value)), fn($v) => $v !== ''));
+            if ($value === null || $value === '') {
+                return [];
+            }
+            if (is_array($value)) {
+                return array_values(array_filter($value, fn ($v) => $v !== '' && $v !== null));
+            }
+
+            return array_values(array_filter(array_map('trim', explode(',', $value)), fn ($v) => $v !== ''));
         };
 
         if ($this->supportsPropertyTags()) {
             $rawTags = $request->input('tag_ids', $request->input('tags'));
             $tagIds = array_values(array_unique(array_filter(array_map('intval', $toArray($rawTags)))));
 
-            if (!empty($tagIds)) {
+            if (! empty($tagIds)) {
                 $query->whereHas('tags', fn (Builder $tagQuery) => $tagQuery->whereIn('tags.id', $tagIds));
             }
         }
@@ -1374,7 +1423,7 @@ class PropertyController extends Controller
                 array_map('intval', $toArray($request->input('branch_id')))
             ));
 
-            if (!empty($branchIds)) {
+            if (! empty($branchIds)) {
                 $this->applyBranchIdFilter($query, $branchIds);
             }
         }
@@ -1384,7 +1433,7 @@ class PropertyController extends Controller
                 array_map('intval', $toArray($request->input('branch_group_id')))
             ));
 
-            if (!empty($branchGroupIds)) {
+            if (! empty($branchGroupIds)) {
                 $this->applyBranchGroupFilter($query, $branchGroupIds);
             }
         }
@@ -1395,7 +1444,7 @@ class PropertyController extends Controller
                 ['external_agent']
             ));
 
-            if (!empty($sourceTypes)) {
+            if (! empty($sourceTypes)) {
                 $query->whereIn('source_type', $sourceTypes);
             }
         }
@@ -1405,7 +1454,7 @@ class PropertyController extends Controller
                 array_map('intval', $toArray($request->input('external_agent_id')))
             ));
 
-            if (!empty($externalAgentIds)) {
+            if (! empty($externalAgentIds)) {
                 $query->whereIn('external_agent_id', $externalAgentIds);
             }
         }
@@ -1414,7 +1463,7 @@ class PropertyController extends Controller
         if ($request->filled('moderation_status')) {
             $available = ['pending', 'approved', 'rejected', 'draft', 'deleted', 'sold', 'rented', 'sold_by_owner', 'denied', 'deposit'];
             $statuses = array_values(array_intersect($toArray($request->input('moderation_status')), $available));
-            if (!empty($statuses)) {
+            if (! empty($statuses)) {
                 $query->whereIn('moderation_status', $statuses);
             }
         }
@@ -1422,16 +1471,18 @@ class PropertyController extends Controller
         // ---- districts (мультиселект) с похожестью ≥ 0.7 ----
         if ($request->has('districts')) {
             $selected = $toArray($request->input('districts'));
-            $selected = array_values(array_filter($selected, fn($v) => $v !== ''));
+            $selected = array_values(array_filter($selected, fn ($v) => $v !== ''));
 
-            if (!empty($selected)) {
+            if (! empty($selected)) {
                 // 1) Грубая выборка кандидатов по LIKE (по первым 3 символам каждого значения)
                 $coarse = Property::query()->select(['id', 'district']);
 
                 $coarse->where(function ($q) use ($selected) {
                     foreach ($selected as $d) {
                         $needle = mb_strtolower(trim($d), 'UTF-8');
-                        if ($needle === '') continue;
+                        if ($needle === '') {
+                            continue;
+                        }
                         $prefix = mb_substr($needle, 0, 3, 'UTF-8'); // берём первые 3 символа
                         if ($prefix !== '') {
                             $q->orWhereRaw('LOWER(district) LIKE ?', ['%'.$prefix.'%']);
@@ -1451,10 +1502,10 @@ class PropertyController extends Controller
                 $ids = [];
 
                 foreach ($candidates as $row) {
-                    $cand = (string)($row->district ?? '');
+                    $cand = (string) ($row->district ?? '');
                     foreach ($selected as $needle) {
-                        if ($this->jaccard($cand, (string)$needle, 3) >= $THRESHOLD) {
-                            $ids[] = (int)$row->id;
+                        if ($this->jaccard($cand, (string) $needle, 3) >= $THRESHOLD) {
+                            $ids[] = (int) $row->id;
                             break;
                         }
                     }
@@ -1463,6 +1514,7 @@ class PropertyController extends Controller
                 // если нет совпадений — заведомо пустой результат
                 if (empty($ids)) {
                     $query->whereRaw('1 = 0');
+
                     return;
                 }
 
@@ -1478,12 +1530,12 @@ class PropertyController extends Controller
                 if (empty($terms)) {
                     $val = $request->input($field);
                     if ($val !== null && $val !== '') {
-                        $query->where($field, 'like', '%' . $val . '%');
+                        $query->where($field, 'like', '%'.$val.'%');
                     }
                 } else {
                     $query->where(function ($q) use ($field, $terms) {
                         foreach ($terms as $t) {
-                            $q->orWhere($field, 'like', '%' . $t . '%');
+                            $q->orWhere($field, 'like', '%'.$t.'%');
                         }
                     });
                 }
@@ -1505,7 +1557,7 @@ class PropertyController extends Controller
             'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
             'agent_id', 'listing_type', 'created_by', 'contract_type_id', 'document_type_id',
             'is_business_owner', 'is_full_apartment', 'is_for_aura', 'developer_id',
-            'heating_type_id', 'parking_type_id', 'construction_status'
+            'heating_type_id', 'parking_type_id', 'construction_status',
             // при желании можно и lat/lng, но для карты они задаются bbox'ом
         ];
         foreach ($exactFields as $field) {
@@ -1515,7 +1567,7 @@ class PropertyController extends Controller
             if ($field === 'document_type_id' && $request->has('document_type_ids')) {
                 $hasFilter = true;
                 $filterInput = $request->input('document_type_ids');
-            } elseif (!$hasFilter) {
+            } elseif (! $hasFilter) {
                 foreach ($fieldAliases[$field] ?? [] as $alias) {
                     if ($request->has($alias)) {
                         $hasFilter = true;
@@ -1528,8 +1580,8 @@ class PropertyController extends Controller
             if ($hasFilter) {
                 // normalize boolean-like params: support true/false (bool), 'true'/'false' (strings), and '1'/'0'
                 $booleanFields = [
-                    'has_garden','has_parking','is_mortgage_available','is_from_developer',
-                    'is_business_owner','is_full_apartment','is_for_aura'
+                    'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
+                    'is_business_owner', 'is_full_apartment', 'is_for_aura',
                 ];
 
                 if (in_array($field, $booleanFields, true)) {
@@ -1541,8 +1593,11 @@ class PropertyController extends Controller
                     $vals = [];
                     if (is_array($raw)) {
                         foreach ($raw as $v) {
-                            if ($v === true || $v === 'true' || $v === '1' || $v === 1) $vals[] = '1';
-                            elseif ($v === false || $v === 'false' || $v === '0' || $v === 0) $vals[] = '0';
+                            if ($v === true || $v === 'true' || $v === '1' || $v === 1) {
+                                $vals[] = '1';
+                            } elseif ($v === false || $v === 'false' || $v === '0' || $v === 0) {
+                                $vals[] = '0';
+                            }
                         }
                     } else {
                         $v = $raw;
@@ -1555,8 +1610,8 @@ class PropertyController extends Controller
                         }
                     }
 
-                    $vals = array_values(array_unique(array_filter($vals, fn($x) => $x !== '')));
-                    if (!empty($vals)) {
+                    $vals = array_values(array_unique(array_filter($vals, fn ($x) => $x !== '')));
+                    if (! empty($vals)) {
                         $query->whereIn($field, $vals);
                     }
 
@@ -1575,23 +1630,34 @@ class PropertyController extends Controller
             }
         }
 
+        if (
+            ($request->filled('priceFrom') || $request->filled('priceTo'))
+            && ! $request->filled('currency')
+        ) {
+            $query->where('currency', 'TJS');
+        }
+
         // Алиасы
         $aliases = ['area' => 'total_area'];
 
         // Диапазоны
         foreach ([
-                     'rooms' => 'rooms',
-                     'total_area' => 'total_area',
-                     'living_area' => 'living_area',
-                     'floor' => 'floor',
-                     'total_floors' => 'total_floors',
-                     'year_built' => 'year_built',
-                     'area' => $aliases['area'],
-                 ] as $param => $column) {
-            $from = $request->input($param . 'From');
-            $to = $request->input($param . 'To');
-            if ($from !== null && $from !== '') $query->where($column, '>=', $from);
-            if ($to !== null && $to !== '') $query->where($column, '<=', $to);
+            'rooms' => 'rooms',
+            'total_area' => 'total_area',
+            'living_area' => 'living_area',
+            'floor' => 'floor',
+            'total_floors' => 'total_floors',
+            'year_built' => 'year_built',
+            'area' => $aliases['area'],
+        ] as $param => $column) {
+            $from = $request->input($param.'From');
+            $to = $request->input($param.'To');
+            if ($from !== null && $from !== '') {
+                $query->where($column, '>=', $from);
+            }
+            if ($to !== null && $to !== '') {
+                $query->where($column, '<=', $to);
+            }
         }
 
         $this->applyEffectivePriceRange(
@@ -1607,7 +1673,7 @@ class PropertyController extends Controller
             $to = $request->input('date_to');
 
             try {
-                if (!empty($from)) {
+                if (! empty($from)) {
                     $query->whereDate('created_at', '>=', \Carbon\Carbon::parse($from)->toDateString());
                 }
             } catch (\Exception $e) {
@@ -1615,7 +1681,7 @@ class PropertyController extends Controller
             }
 
             try {
-                if (!empty($to)) {
+                if (! empty($to)) {
                     $query->whereDate('created_at', '<=', \Carbon\Carbon::parse($to)->toDateString());
                 }
             } catch (\Exception $e) {
@@ -1624,16 +1690,16 @@ class PropertyController extends Controller
         }
 
         // Диапазон по датам продажи (sold_at_from, sold_at_to) — фильтрация по sold_at
-// Применяется только к закрытым статусам
+        // Применяется только к закрытым статусам
         if ($request->has('sold_at_from') || $request->has('sold_at_to')) {
             $soldFrom = $request->input('sold_at_from');
-            $soldTo   = $request->input('sold_at_to');
+            $soldTo = $request->input('sold_at_to');
 
             // sold_at имеет смысл только для закрытых объявлений
-//            $query->whereIn('moderation_status', ['sold', 'rented', 'sold_by_owner']);
+            //            $query->whereIn('moderation_status', ['sold', 'rented', 'sold_by_owner']);
 
             try {
-                if (!empty($soldFrom)) {
+                if (! empty($soldFrom)) {
                     $query->whereDate('sold_at', '>=', \Carbon\Carbon::parse($soldFrom)->toDateString());
                 }
             } catch (\Exception $e) {
@@ -1641,7 +1707,7 @@ class PropertyController extends Controller
             }
 
             try {
-                if (!empty($soldTo)) {
+                if (! empty($soldTo)) {
                     $query->whereDate('sold_at', '<=', \Carbon\Carbon::parse($soldTo)->toDateString());
                 }
             } catch (\Exception $e) {
@@ -1663,35 +1729,72 @@ class PropertyController extends Controller
         $hasFrom = $from !== null && $from !== '';
         $hasTo = $to !== null && $to !== '';
 
-        if (!$hasFrom && !$hasTo) {
+        if (! $hasFrom && ! $hasTo) {
             return;
         }
 
         if (Schema::hasColumn('properties', 'effective_price')) {
-            if ($hasFrom) $query->where('effective_price', '>=', $from);
-            if ($hasTo) $query->where('effective_price', '<=', $to);
+            if ($hasFrom) {
+                $query->where('effective_price', '>=', $from);
+            }
+            if ($hasTo) {
+                $query->where('effective_price', '<=', $to);
+            }
+
             return;
         }
 
-        if (!Schema::hasColumn('properties', 'discount_price')) {
-            if ($hasFrom) $query->where('price', '>=', $from);
-            if ($hasTo) $query->where('price', '<=', $to);
+        if (! Schema::hasColumn('properties', 'discount_price')) {
+            if ($hasFrom) {
+                $query->where('price', '>=', $from);
+            }
+            if ($hasTo) {
+                $query->where('price', '<=', $to);
+            }
+
             return;
         }
 
         $query->where(function (Builder $effectivePriceQuery) use ($from, $to, $hasFrom, $hasTo) {
             $effectivePriceQuery
                 ->where(function (Builder $discountedQuery) use ($from, $to, $hasFrom, $hasTo) {
-                    $discountedQuery->whereNotNull('discount_price');
-                    if ($hasFrom) $discountedQuery->where('discount_price', '>=', $from);
-                    if ($hasTo) $discountedQuery->where('discount_price', '<=', $to);
+                    $discountedQuery->where('discount_price', '>', 0);
+                    if ($hasFrom) {
+                        $discountedQuery->where('discount_price', '>=', $from);
+                    }
+                    if ($hasTo) {
+                        $discountedQuery->where('discount_price', '<=', $to);
+                    }
                 })
                 ->orWhere(function (Builder $regularQuery) use ($from, $to, $hasFrom, $hasTo) {
-                    $regularQuery->whereNull('discount_price');
-                    if ($hasFrom) $regularQuery->where('price', '>=', $from);
-                    if ($hasTo) $regularQuery->where('price', '<=', $to);
+                    $regularQuery->where(function (Builder $noDiscountQuery) {
+                        $noDiscountQuery
+                            ->whereNull('discount_price')
+                            ->orWhere('discount_price', '<=', 0);
+                    });
+                    if ($hasFrom) {
+                        $regularQuery->where('price', '>=', $from);
+                    }
+                    if ($hasTo) {
+                        $regularQuery->where('price', '<=', $to);
+                    }
                 });
         });
+    }
+
+    private function effectivePriceSql(?string $table = null): string
+    {
+        $prefix = $table ? $table.'.' : '';
+
+        if (Schema::hasColumn('properties', 'effective_price')) {
+            return $prefix.'effective_price';
+        }
+
+        if (Schema::hasColumn('properties', 'discount_price')) {
+            return "COALESCE(NULLIF({$prefix}discount_price, 0), {$prefix}price)";
+        }
+
+        return $prefix.'price';
     }
 
     /**
@@ -1706,22 +1809,108 @@ class PropertyController extends Controller
      */
     private function validateListFilters(Request $request): void
     {
-        $request->validate([
+        $validated = $request->validate([
             'construction_status' => ['sometimes', 'nullable', Rule::in(['under_construction', 'built', 'commissioned'])],
             'document_type_id' => ['sometimes', 'nullable', 'integer', 'exists:document_types,id'],
             'document_type_ids' => ['sometimes', 'nullable', 'array'],
             'document_type_ids.*' => ['integer', 'distinct', 'exists:document_types,id'],
+            'priceFrom' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'priceTo' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'roomsFrom' => ['sometimes', 'nullable', 'integer', 'min:1'],
+            'roomsTo' => ['sometimes', 'nullable', 'integer', 'min:1'],
+            'total_areaFrom' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'total_areaTo' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'living_areaFrom' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'living_areaTo' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'areaFrom' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'areaTo' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'floorFrom' => ['sometimes', 'nullable', 'integer'],
+            'floorTo' => ['sometimes', 'nullable', 'integer'],
+            'total_floorsFrom' => ['sometimes', 'nullable', 'integer', 'min:0'],
+            'total_floorsTo' => ['sometimes', 'nullable', 'integer', 'min:0'],
+            'year_builtFrom' => ['sometimes', 'nullable', 'integer', 'min:1800'],
+            'year_builtTo' => ['sometimes', 'nullable', 'integer', 'min:1800'],
+            'date_from' => ['sometimes', 'nullable', 'date'],
+            'date_to' => ['sometimes', 'nullable', 'date'],
+            'sold_at_from' => ['sometimes', 'nullable', 'date'],
+            'sold_at_to' => ['sometimes', 'nullable', 'date'],
+            'page' => ['sometimes', 'integer', 'min:1'],
+            'per_page' => ['sometimes', 'integer', 'min:1', 'max:100'],
+            'sort' => ['sometimes', 'nullable', Rule::in(['none', 'listing_type', 'created_at', 'date', 'price', 'total_area', 'area', 'rooms', 'views_count', 'id'])],
+            'dir' => ['sometimes', 'nullable', Rule::in(['asc', 'desc'])],
         ], [
             'construction_status.in' => 'Поле construction_status должно быть одним из значений: under_construction, built, commissioned.',
         ]);
+
+        $this->validateRangeOrder($validated, [
+            ['priceFrom', 'priceTo'],
+            ['roomsFrom', 'roomsTo'],
+            ['total_areaFrom', 'total_areaTo'],
+            ['living_areaFrom', 'living_areaTo'],
+            ['areaFrom', 'areaTo'],
+            ['floorFrom', 'floorTo'],
+            ['total_floorsFrom', 'total_floorsTo'],
+            ['year_builtFrom', 'year_builtTo'],
+            ['date_from', 'date_to'],
+            ['sold_at_from', 'sold_at_to'],
+        ]);
+
+        foreach ([
+            'moderation_status' => ['pending', 'approved', 'rejected', 'draft', 'deleted', 'sold', 'rented', 'sold_by_owner', 'denied', 'deposit'],
+            'source_type' => ['external_agent'],
+        ] as $field => $allowed) {
+            if (! $request->filled($field)) {
+                continue;
+            }
+
+            $values = is_array($request->input($field))
+                ? $request->input($field)
+                : explode(',', (string) $request->input($field));
+            $invalid = array_diff(array_map('trim', $values), $allowed);
+
+            if ($invalid !== []) {
+                throw \Illuminate\Validation\ValidationException::withMessages([
+                    $field => 'Передано недопустимое значение фильтра.',
+                ]);
+            }
+        }
+    }
+
+    private function validateRangeOrder(array $values, array $ranges): void
+    {
+        foreach ($ranges as [$fromKey, $toKey]) {
+            if (
+                ! array_key_exists($fromKey, $values)
+                || ! array_key_exists($toKey, $values)
+                || $values[$fromKey] === null
+                || $values[$toKey] === null
+            ) {
+                continue;
+            }
+
+            $fromValue = $values[$fromKey];
+            $toValue = $values[$toKey];
+
+            if (str_contains($fromKey, 'date') || str_contains($fromKey, 'sold_at')) {
+                $fromValue = \Carbon\Carbon::parse($fromValue)->getTimestamp();
+                $toValue = \Carbon\Carbon::parse($toValue)->getTimestamp();
+            }
+
+            if ($fromValue > $toValue) {
+                throw \Illuminate\Validation\ValidationException::withMessages([
+                    $toKey => "Поле {$toKey} должно быть больше или равно {$fromKey}.",
+                ]);
+            }
+        }
     }
 
     private function applyBranchGroupFilter(Builder $query, array $branchGroupIds): void
     {
         $branchGroupIds = array_values(array_filter(array_map('intval', $branchGroupIds)));
 
-        if (empty($branchGroupIds) || !Schema::hasColumn('users', 'branch_group_id')) {
+        if (empty($branchGroupIds) || ! Schema::hasColumn('users', 'branch_group_id')) {
             $query->whereRaw('1 = 0');
+
             return;
         }
 
@@ -1771,14 +1960,16 @@ class PropertyController extends Controller
 
         if (empty($branchIds)) {
             $query->whereRaw('1 = 0');
+
             return;
         }
 
         $hasPropertyBranchId = Schema::hasColumn('properties', 'branch_id');
         $hasUsersBranchId = Schema::hasColumn('users', 'branch_id');
 
-        if (!$hasPropertyBranchId && !$hasUsersBranchId) {
+        if (! $hasPropertyBranchId && ! $hasUsersBranchId) {
             $query->whereRaw('1 = 0');
+
             return;
         }
 
@@ -1787,7 +1978,7 @@ class PropertyController extends Controller
                 $branchQuery->whereIn('branch_id', $branchIds);
             }
 
-            if (!$hasUsersBranchId) {
+            if (! $hasUsersBranchId) {
                 return;
             }
 
@@ -1845,9 +2036,9 @@ class PropertyController extends Controller
         $validated = $this->syncPropertyClientSnapshots($validated);
 
         // --- Дубликаты: пропускаем только если force=1
-        $force = (bool)$request->boolean('force', false);
+        $force = (bool) $request->boolean('force', false);
 
-        if (!$force) {
+        if (! $force) {
             $dups = $this->findDuplicateCandidates($validated);
 
             if ($dups->count() > 0) {
@@ -1859,7 +2050,7 @@ class PropertyController extends Controller
         }
 
         $validated['created_by'] = $user->id;
-//        $validated['moderation_status'] = auth()->user()->hasRole('client') ? 'pending' : 'approved';
+        //        $validated['moderation_status'] = auth()->user()->hasRole('client') ? 'pending' : 'approved';
         $validated['listing_type'] = $request->input('listing_type', 'regular');
         $validated = $this->applyListingTypeAccessRules($user, $validated);
 
@@ -1873,33 +2064,33 @@ class PropertyController extends Controller
                     $title = isset($d['title']) && $d['title'] !== ''
                         ? $d['title']
                         : ($rooms ? "{$rooms} ком" : 'Объект');
-                    $score = isset($d['score']) ? (string)$d['score'] : 'n/a';
+                    $score = isset($d['score']) ? (string) $d['score'] : 'n/a';
                     $id = $d['id'] ?? '';
-                    $url = 'https://aura.tj/apartment/' . $id;
+                    $url = 'https://aura.tj/apartment/'.$id;
 
                     $titleEsc = e($title);
                     $urlEsc = e($url);
 
                     return [
                         'text' => "[ID {$id}] {$title} (Совпадения: {$score}%)",
-                        'html' => "<a href=\"{$urlEsc}\" target=\"_blank\" rel=\"noopener noreferrer\">[ID {$id}] {$titleEsc}</a> (score: {$score})"
+                        'html' => "<a href=\"{$urlEsc}\" target=\"_blank\" rel=\"noopener noreferrer\">[ID {$id}] {$titleEsc}</a> (score: {$score})",
                     ];
                 })->toArray();
 
-                $textItems = array_map(fn($x) => $x['text'], $items);
-                $htmlItems = array_map(fn($x) => $x['html'], $items);
+                $textItems = array_map(fn ($x) => $x['text'], $items);
+                $htmlItems = array_map(fn ($x) => $x['html'], $items);
 
                 $listText = implode('; ', $textItems);
-                $listHtml = '<ul><li>' . implode('</li><li>', $htmlItems) . '</li></ul>';
+                $listHtml = '<ul><li>'.implode('</li><li>', $htmlItems).'</li></ul>';
 
                 if ($dupCount > 10) {
-                    $listText .= "; ... и ещё " . ($dupCount - 10) . " штук.";
-                    $listHtml .= "<p>... и ещё " . ($dupCount - 10) . " штук.</p>";
+                    $listText .= '; ... и ещё '.($dupCount - 10).' штук.';
+                    $listHtml .= '<p>... и ещё '.($dupCount - 10).' штук.</p>';
                 }
 
                 $validated['moderation_status'] = 'pending';
                 // сохраняем HTML в поле rejection_comment — фронтенд будет рендерить как HTML
-                $validated['rejection_comment'] = "<p>Причина автоматически: Найдены возможные дубликаты ({$dupCount}):</p>" . $listHtml;
+                $validated['rejection_comment'] = "<p>Причина автоматически: Найдены возможные дубликаты ({$dupCount}):</p>".$listHtml;
                 // можно дополнительно сохранить plain-text, если есть поле
                 // $validated['rejection_comment_text'] = "Найдены возможные дубликаты ({$dupCount}): " . $listText;
             }
@@ -1927,7 +2118,6 @@ class PropertyController extends Controller
      *  - Площадь близка (±1 м²) — порог можно вынести в конфиг
      *  - (Опционально) тот же created_by/agent_id/адрес, если нужно ужесточить
      */
-
     public function update(Request $request, Property $property)
     {
         $user = $this->authorizePropertyMutation($property);
@@ -2010,12 +2200,12 @@ class PropertyController extends Controller
             }
         }
 
-        if (!$request->hasFile('photos')) {
+        if (! $request->hasFile('photos')) {
             return;
         }
 
         // Determine base position (append to the end)
-        $basePos = $append ? (int)($property->photos()->max('position') ?? -1) + 1 : 0;
+        $basePos = $append ? (int) ($property->photos()->max('position') ?? -1) + 1 : 0;
 
         $files = $request->file('photos');
         $positions = $request->input('photo_positions', []); // optional parallel array
@@ -2023,11 +2213,11 @@ class PropertyController extends Controller
         foreach (array_values($files) as $i => $photo) {
             $image = $this->imageManager->read($photo)->scaleDown(1600, null);
             $watermark = $this->imageManager->read(public_path('watermark/logo.png'))
-                ->scale((int)round($image->width() * 0.14));
+                ->scale((int) round($image->width() * 0.14));
             $image->place($watermark, 'bottom-right', 36, 28);
 
             $binary = $image->encode(new JpegEncoder(50));
-            $filename = 'properties/' . uniqid('', true) . '.jpg';
+            $filename = 'properties/'.uniqid('', true).'.jpg';
             \Storage::disk('public')->put($filename, $binary);
 
             $position = $positions[$i] ?? ($basePos + $i);
@@ -2054,7 +2244,7 @@ class PropertyController extends Controller
     {
         $photos = $property->photos()->orderBy('position')->orderBy('id')->get();
         foreach ($photos as $idx => $p) {
-            if ((int)$p->position !== $idx) {
+            if ((int) $p->position !== $idx) {
                 $p->update(['position' => $idx]);
             }
         }
@@ -2120,34 +2310,34 @@ class PropertyController extends Controller
         return response()->json(['message' => 'Объект помечен как удалён']);
     }
 
-//    public function updateModerationAndListingType(Request $request, Property $property)
-//    {
-//        $user = auth()->user();
-//
-//        if (!$user || (!$user->hasRole('admin') && !$user->hasRole('agent'))) {
-//            return response()->json(['message' => 'Доступ запрещён'], 403);
-//        }
-//
-//        $validated = $request->validate([
-//            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,sold,rented,sold_by_owner,denied',
-//            'listing_type' => 'sometimes|in:regular,vip,urgent',
-//            'status_comment' => 'nullable|string',
-//        ]);
-//
-//        if (
-//            isset($validated['moderation_status']) &&
-//            in_array($validated['moderation_status'], ['sold', 'rented', 'sold_by_owner'], true)
-//        ) {
-//            $validated['sold_at'] = now();
-//        }
-//
-//        $property->update($validated);
-//
-//        return response()->json([
-//            'message' => 'Обновлено успешно',
-//            'data' => $property->only(['id', 'moderation_status', 'listing_type']),
-//        ]);
-//    }
+    //    public function updateModerationAndListingType(Request $request, Property $property)
+    //    {
+    //        $user = auth()->user();
+    //
+    //        if (!$user || (!$user->hasRole('admin') && !$user->hasRole('agent'))) {
+    //            return response()->json(['message' => 'Доступ запрещён'], 403);
+    //        }
+    //
+    //        $validated = $request->validate([
+    //            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,sold,rented,sold_by_owner,denied',
+    //            'listing_type' => 'sometimes|in:regular,vip,urgent',
+    //            'status_comment' => 'nullable|string',
+    //        ]);
+    //
+    //        if (
+    //            isset($validated['moderation_status']) &&
+    //            in_array($validated['moderation_status'], ['sold', 'rented', 'sold_by_owner'], true)
+    //        ) {
+    //            $validated['sold_at'] = now();
+    //        }
+    //
+    //        $property->update($validated);
+    //
+    //        return response()->json([
+    //            'message' => 'Обновлено успешно',
+    //            'data' => $property->only(['id', 'moderation_status', 'listing_type']),
+    //        ]);
+    //    }
 
     public function updateModerationAndListingType(
         SavePropertyDealRequest $request,
@@ -2158,7 +2348,7 @@ class PropertyController extends Controller
             $request->moderation_status,
             $request->filled('sale_user_id') ? (int) $request->input('sale_user_id') : null
         );
-        $isColleagueProperty = !$this->canMutateProperty($user, $property);
+        $isColleagueProperty = ! $this->canMutateProperty($user, $property);
         $this->ensureDealAssignmentUsersInScope($user, $request->validated(), $property);
         $isDepositStatus = $request->moderation_status === 'deposit';
         $isSaleStatus = in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true);
@@ -2208,11 +2398,11 @@ class PropertyController extends Controller
                 ->mapWithKeys(fn ($field) => [$field => $request->$field])
                 ->toArray();
 
-            if ($isDepositStatus && !array_key_exists('deposit_user_id', $payload)) {
+            if ($isDepositStatus && ! array_key_exists('deposit_user_id', $payload)) {
                 $payload['deposit_user_id'] = $property->deposit_user_id ?? $user->id;
             }
 
-            if ($isSaleStatus && !array_key_exists('sale_user_id', $payload)) {
+            if ($isSaleStatus && ! array_key_exists('sale_user_id', $payload)) {
                 $payload['sale_user_id'] = $isColleagueProperty
                     ? $user->id
                     : ($property->sale_user_id ?? $user->id);
@@ -2248,7 +2438,6 @@ class PropertyController extends Controller
     }
 
     /**
-     * @param Request $request
      * @return array
      */
     public function validateProperty(Request $request, bool $isUpdate = false, ?Property $property = null)
@@ -2274,7 +2463,7 @@ class PropertyController extends Controller
             'location_id' => 'nullable|exists:locations,id',
             'repair_type_id' => 'nullable|exists:repair_types,id',
             'price' => 'required|numeric',
-            'discount_price' => 'nullable|numeric|min:0',
+            'discount_price' => 'nullable|numeric|gt:0',
             'currency' => 'required|in:TJS,USD',
             'offer_type' => 'required|in:rent,sale',
             'rooms' => 'nullable|integer|min:1|max:10',
@@ -2288,7 +2477,7 @@ class PropertyController extends Controller
                     $host = strtolower((string) parse_url((string) $value, PHP_URL_HOST));
                     $isInstagramHost = $host === 'instagram.com' || str_ends_with($host, '.instagram.com');
 
-                    if ($scheme !== 'https' || !$isInstagramHost) {
+                    if ($scheme !== 'https' || ! $isInstagramHost) {
                         $fail('Поле Инстаграм должно содержать HTTPS-ссылку на instagram.com.');
                     }
                 },
@@ -2298,7 +2487,7 @@ class PropertyController extends Controller
             'living_area' => 'nullable|numeric',
             'floor' => 'nullable|integer',
             'total_floors' => 'nullable|integer',
-            'year_built' => 'nullable|integer|min:1900|max:' . date('Y'),
+            'year_built' => 'nullable|integer|min:1900|max:'.date('Y'),
             'condition' => 'nullable|string',
             'construction_status' => 'nullable|in:under_construction,built,commissioned',
             'renovation_permission_status' => 'nullable|in:not_allowed,allowed',
@@ -2414,6 +2603,13 @@ class PropertyController extends Controller
             ELSE 4 END";
             // Сначала по listing_type согласно CASE, затем по дате (чтобы детерминировать порядок)
             $query->orderByRaw($orderExpr)->orderBy('created_at', $dir);
+
+            return;
+        }
+
+        if ($sort === 'price') {
+            $query->orderByRaw($this->effectivePriceSql()." {$dir}");
+
             return;
         }
 
@@ -2421,7 +2617,6 @@ class PropertyController extends Controller
         $allowed = [
             'created_at' => 'created_at', // можно также принимать alias 'date'
             'date' => 'created_at',
-            'price' => 'price',
             'total_area' => 'total_area',
             'area' => 'total_area',
             'rooms' => 'rooms',
@@ -2433,6 +2628,7 @@ class PropertyController extends Controller
         if (isset($allowed[$sort])) {
             $col = $allowed[$sort];
             $query->orderBy($col, $dir);
+
             return;
         }
 
@@ -2444,14 +2640,14 @@ class PropertyController extends Controller
     {
         // Ключ "видел" = по объекту + IP + UA + текущая дата
         $fingerprint = sha1(
-            ($request->ip() ?? '0.0.0.0') . '|' .
-            (string)$request->userAgent() . '|' .
+            ($request->ip() ?? '0.0.0.0').'|'.
+            (string) $request->userAgent().'|'.
             now()->format('Y-m-d')
         );
         $cacheKey = "prop:{$property->id}:viewed:{$fingerprint}";
 
         // Инкрементим только если ещё не считали сегодня
-        if (!Cache::has($cacheKey)) {
+        if (! Cache::has($cacheKey)) {
             $property->increment('views_count'); // атомарно
             Cache::put($cacheKey, 1, now()->addDay());
         }
@@ -2462,23 +2658,29 @@ class PropertyController extends Controller
     // === НОРМАЛИЗАЦИЯ ===
     private function normalizePhone(?string $raw): string
     {
-        if (!$raw) return '';
+        if (! $raw) {
+            return '';
+        }
         // только цифры; для Таджикистана можно нормализовать префикс 992 при необходимости
         $digits = preg_replace('/\D+/', '', $raw);
         if (str_starts_with($digits, '992') === false && strlen($digits) === 9) {
             // пример: локальный -> добавим код страны (подстрой под свои правила)
-            $digits = '992' . $digits;
+            $digits = '992'.$digits;
         }
+
         return $digits;
     }
 
     private function normalizeAddress(?string $raw): string
     {
-        if (!$raw) return '';
+        if (! $raw) {
+            return '';
+        }
         $s = mb_strtolower($raw, 'UTF-8');
         $s = strtr($s, ['ё' => 'е']);                    // русские варианты
         $s = preg_replace('/[^\p{L}\p{N}\s]+/u', ' ', $s); // убрать знаки препинания
         $s = preg_replace('/\s+/u', ' ', trim($s));       // схлопнуть пробелы
+
         return $s;
     }
 
@@ -2488,16 +2690,21 @@ class PropertyController extends Controller
      */
     private function applyAddressCoarseFilter(\Illuminate\Database\Eloquent\Builder $q, string $addressNorm): void
     {
-        if ($addressNorm === '') return;
+        if ($addressNorm === '') {
+            return;
+        }
 
-        $tokens = array_values(array_filter(explode(' ', $addressNorm), fn($t) => mb_strlen($t, 'UTF-8') >= 3));
-        if (count($tokens) === 0) return;
+        $tokens = array_values(array_filter(explode(' ', $addressNorm), fn ($t) => mb_strlen($t, 'UTF-8') >= 3));
+        if (count($tokens) === 0) {
+            return;
+        }
 
         // ограничимся первыми 3-4 токенами, чтобы не раздувать запрос
         $tokens = array_slice($tokens, 0, 4);
 
         if (count($tokens) === 1) {
-            $q->where('address', 'like', '%' . $tokens[0] . '%');
+            $q->where('address', 'like', '%'.$tokens[0].'%');
+
             return;
         }
 
@@ -2512,8 +2719,8 @@ class PropertyController extends Controller
 
                     $qq->orWhere(function ($pairQuery) use ($first, $second) {
                         $pairQuery
-                            ->where('address', 'like', '%' . $first . '%')
-                            ->where('address', 'like', '%' . $second . '%');
+                            ->where('address', 'like', '%'.$first.'%')
+                            ->where('address', 'like', '%'.$second.'%');
                     });
                 }
             }
@@ -2523,9 +2730,12 @@ class PropertyController extends Controller
     /** Похожесть адресов для тонкой сортировки (уже в PHP) */
     private function addressSimilarity(string $a, string $b): float
     {
-        if ($a === '' || $b === '') return 0.0;
+        if ($a === '' || $b === '') {
+            return 0.0;
+        }
         similar_text($a, $b, $pct); // 0..100
-        return (float)$pct;
+
+        return (float) $pct;
     }
 
     /** Быстрая проверка близости гео — ~150 м (можно подстроить) */
@@ -2533,6 +2743,7 @@ class PropertyController extends Controller
     {
         $dLat = 0.0015; // ~ 167 м
         $dLng = 0.0015 * max(0.2, cos(deg2rad(max(1e-6, $lat))));
+
         return abs($lat - $candLat) <= $dLat && abs($lng - $candLng) <= $dLng;
     }
 
@@ -2551,19 +2762,19 @@ class PropertyController extends Controller
      */
     private function findDuplicateCandidates(array $data)
     {
-        $phoneNorm   = $this->normalizePhone($data['owner_phone'] ?? null);
+        $phoneNorm = $this->normalizePhone($data['owner_phone'] ?? null);
         $addrNormNew = $this->normalizeAddress($data['address'] ?? null);
 
-        $floor   = isset($data['floor']) ? (int)$data['floor'] : null;
-        $area    = isset($data['total_area']) ? (float)$data['total_area'] : null;
-        $latNew  = isset($data['latitude']) ? (float)$data['latitude'] : null;
-        $lngNew  = isset($data['longitude']) ? (float)$data['longitude'] : null;
+        $floor = isset($data['floor']) ? (int) $data['floor'] : null;
+        $area = isset($data['total_area']) ? (float) $data['total_area'] : null;
+        $latNew = isset($data['latitude']) ? (float) $data['latitude'] : null;
+        $lngNew = isset($data['longitude']) ? (float) $data['longitude'] : null;
 
         $q = Property::query()
             ->select([
-                'id','title','address','owner_name','owner_phone',
-                'total_area','floor','price','currency','created_at','moderation_status',
-                'latitude','longitude'
+                'id', 'title', 'address', 'owner_name', 'owner_phone',
+                'total_area', 'floor', 'price', 'currency', 'created_at', 'moderation_status',
+                'latitude', 'longitude',
             ])
             ->whereNotIn('moderation_status', ['deleted', 'rejected', 'denied', 'draft', 'sold', 'rented', 'sold_by_owner'])
             // Продажа и аренда одного объекта — это разные объявления, не дубли.
@@ -2577,8 +2788,12 @@ class PropertyController extends Controller
                     // убираем нецифры: +, -, пробелы, скобки
                     $normalizedSql = "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(owner_phone, '+', ''), '-', ''), ' ', ''), '(', ''), ')', '')";
                     $qPhone->whereRaw("$normalizedSql LIKE ?", ["%{$phoneNorm}%"]);
-                    if ($floor !== null) $qPhone->where('floor', $floor);
-                    if ($area !== null)  $qPhone->whereBetween('total_area', [$area - 1.0, $area + 1.0]);
+                    if ($floor !== null) {
+                        $qPhone->where('floor', $floor);
+                    }
+                    if ($area !== null) {
+                        $qPhone->whereBetween('total_area', [$area - 1.0, $area + 1.0]);
+                    }
                 });
             }
 
@@ -2586,8 +2801,12 @@ class PropertyController extends Controller
             if ($addrNormNew !== '') {
                 $qq->orWhere(function ($qAddr) use ($addrNormNew, $floor, $area) {
                     $this->applyAddressCoarseFilter($qAddr, $addrNormNew);
-                    if ($floor !== null) $qAddr->where('floor', $floor);
-                    if ($area !== null)  $qAddr->whereBetween('total_area', [$area - 2.0, $area + 2.0]);
+                    if ($floor !== null) {
+                        $qAddr->where('floor', $floor);
+                    }
+                    if ($area !== null) {
+                        $qAddr->whereBetween('total_area', [$area - 2.0, $area + 2.0]);
+                    }
                 });
             }
 
@@ -2596,10 +2815,14 @@ class PropertyController extends Controller
                 $dLat = 0.0015;
                 $dLng = 0.0015 * max(0.2, cos(deg2rad(max(1e-6, $latNew))));
                 $qq->orWhere(function ($qGeo) use ($latNew, $lngNew, $dLat, $dLng, $floor, $area) {
-                    $qGeo->whereBetween('latitude',  [$latNew - $dLat, $latNew + $dLat])
+                    $qGeo->whereBetween('latitude', [$latNew - $dLat, $latNew + $dLat])
                         ->whereBetween('longitude', [$lngNew - $dLng, $lngNew + $dLng]);
-                    if ($floor !== null) $qGeo->where('floor', $floor);
-                    if ($area !== null)  $qGeo->whereBetween('total_area', [$area - 2.0, $area + 2.0]);
+                    if ($floor !== null) {
+                        $qGeo->where('floor', $floor);
+                    }
+                    if ($area !== null) {
+                        $qGeo->whereBetween('total_area', [$area - 2.0, $area + 2.0]);
+                    }
                 });
             }
         });
@@ -2611,32 +2834,40 @@ class PropertyController extends Controller
         $result = [];
         foreach ($candidates as $p) {
             $pPhoneNorm = $this->normalizePhone($p->owner_phone);
-            $pAddrNorm  = $this->normalizeAddress($p->address);
+            $pAddrNorm = $this->normalizeAddress($p->address);
 
-            $phoneMatch   = ($phoneNorm !== '' && $pPhoneNorm !== '' && $pPhoneNorm === $phoneNorm);
-            $floorMatch   = ($floor !== null && $p->floor !== null && (int)$p->floor === $floor);
-            $areaDelta    = ($area !== null && $p->total_area !== null) ? abs((float)$p->total_area - $area) : null;
-            $areaMatch    = ($areaDelta !== null && $areaDelta <= 1.5);
-            $addrScore    = $this->addressSimilarity($addrNormNew, $pAddrNorm); // 0..100
-            $geoNear      = ($latNew !== null && $lngNew !== null && $p->latitude !== null && $p->longitude !== null)
-                ? $this->withinGeoBox($latNew, $lngNew, (float)$p->latitude, (float)$p->longitude) : false;
+            $phoneMatch = ($phoneNorm !== '' && $pPhoneNorm !== '' && $pPhoneNorm === $phoneNorm);
+            $floorMatch = ($floor !== null && $p->floor !== null && (int) $p->floor === $floor);
+            $areaDelta = ($area !== null && $p->total_area !== null) ? abs((float) $p->total_area - $area) : null;
+            $areaMatch = ($areaDelta !== null && $areaDelta <= 1.5);
+            $addrScore = $this->addressSimilarity($addrNormNew, $pAddrNorm); // 0..100
+            $geoNear = ($latNew !== null && $lngNew !== null && $p->latitude !== null && $p->longitude !== null)
+                ? $this->withinGeoBox($latNew, $lngNew, (float) $p->latitude, (float) $p->longitude) : false;
             $hasSupportingSignal = $this->hasSupportingDuplicateSignal($floorMatch, $areaMatch, $geoNear, $addrScore);
 
             // Композитный скор:
             // телефон — самый сильный сигнал; затем адрес; затем гео; бонусы за этаж/площадь
             $score = 0.0;
-            if ($phoneMatch) $score += 55;
+            if ($phoneMatch) {
+                $score += 55;
+            }
             $score += min(35.0, $addrScore * 0.35);     // макс +35
-            if ($geoNear)    $score += 20;              // +20
-            if ($floorMatch) $score += 8;               // +8
-            if ($areaMatch)  $score += 8;               // +8
+            if ($geoNear) {
+                $score += 20;
+            }              // +20
+            if ($floorMatch) {
+                $score += 8;
+            }               // +8
+            if ($areaMatch) {
+                $score += 8;
+            }               // +8
             $score = min(100.0, $score);
 
             // Телефон сам по себе не должен блокировать новое объявление:
             // у одного владельца может быть несколько объектов.
             if (($phoneMatch && $hasSupportingSignal) || $score >= 60.0) {
                 $result[] = [
-                    'id' => (int)$p->id,
+                    'id' => (int) $p->id,
                     'title' => $p->title,
                     'address' => $p->address,
                     'owner_name' => $p->owner_name,
@@ -2663,7 +2894,7 @@ class PropertyController extends Controller
         }
 
         // Отсортируем по score
-        usort($result, fn($a, $b) => $b['score'] <=> $a['score']);
+        usort($result, fn ($a, $b) => $b['score'] <=> $a['score']);
 
         // Вернём коллекцию
         return collect($result);
@@ -2674,6 +2905,7 @@ class PropertyController extends Controller
     {
         $s = mb_strtolower($s, 'UTF-8');
         $s = preg_replace('/\s+/u', ' ', trim($s));
+
         return $s ?? '';
     }
 
@@ -2681,13 +2913,18 @@ class PropertyController extends Controller
     private function ngrams(string $s, int $n = 3): array
     {
         $len = mb_strlen($s, 'UTF-8');
-        if ($len === 0) return [];
-        if ($len < $n) return [$s]; // короткие строки целиком
+        if ($len === 0) {
+            return [];
+        }
+        if ($len < $n) {
+            return [$s];
+        } // короткие строки целиком
 
         $grams = [];
         for ($i = 0; $i <= $len - $n; $i++) {
             $grams[] = mb_substr($s, $i, $n, 'UTF-8');
         }
+
         return $grams;
     }
 
@@ -2696,27 +2933,44 @@ class PropertyController extends Controller
     {
         $a = $this->norm($a);
         $b = $this->norm($b);
-        if ($a === '' || $b === '') return 0.0;
+        if ($a === '' || $b === '') {
+            return 0.0;
+        }
 
         $A = array_unique($this->ngrams($a, $n));
         $B = array_unique($this->ngrams($b, $n));
 
-        if (empty($A) && empty($B)) return 1.0;
-        if (empty($A) || empty($B)) return 0.0;
+        if (empty($A) && empty($B)) {
+            return 1.0;
+        }
+        if (empty($A) || empty($B)) {
+            return 0.0;
+        }
 
         $Ai = array_fill_keys($A, true);
         $inter = 0;
-        foreach ($B as $g) if (isset($Ai[$g])) $inter++;
+        foreach ($B as $g) {
+            if (isset($Ai[$g])) {
+                $inter++;
+            }
+        }
 
         $union = count($A) + count($B) - $inter;
+
         return $union > 0 ? $inter / $union : 0.0;
     }
 
     public function similar(Property $property, Request $request)
     {
-        $limit = (int) $request->input('limit', 6);
-        $priceTolerance = (float) $request->input('price_tolerance', 0.2); // 20%
-        $radiusKm = (float) $request->input('radius_km', 5); // 5 km by default
+        $validated = $request->validate([
+            'limit' => ['sometimes', 'integer', 'min:1', 'max:50'],
+            'price_tolerance' => ['sometimes', 'numeric', 'min:0', 'max:1'],
+            'radius_km' => ['sometimes', 'numeric', 'gt:0', 'max:100'],
+            'use_radius' => ['sometimes', 'boolean'],
+        ]);
+        $limit = (int) ($validated['limit'] ?? 6);
+        $priceTolerance = (float) ($validated['price_tolerance'] ?? 0.2); // 20%
+        $radiusKm = (float) ($validated['radius_km'] ?? 5); // 5 km by default
         $useRadius = $request->boolean('use_radius', true);
 
         $query = Property::query()->publicSearchable();
@@ -2732,7 +2986,7 @@ class PropertyController extends Controller
         // совпадающая локация (город / район) — если есть
         if ($property->location_id) {
             $query->where('location_id', $property->location_id);
-        } elseif (!empty($property->district)) {
+        } elseif (! empty($property->district)) {
             $query->where('district', $property->district);
         }
 
@@ -2741,32 +2995,37 @@ class PropertyController extends Controller
         }
 
         // совпадающий тип предложения (продажа/аренда)
-        if (!empty($property->offer_type)) {
+        if (! empty($property->offer_type)) {
             $query->where('offer_type', $property->offer_type);
         }
 
+        if (! empty($property->currency)) {
+            $query->where('currency', $property->currency);
+        }
+
         // комнаты — если указаны
-        if (!empty($property->rooms)) {
+        if (! empty($property->rooms)) {
             // ищем либо ровно такое значение, либо +-1 комнату
             $query->whereBetween('rooms', [max(0, $property->rooms - 1), $property->rooms + 1]);
         }
 
         // ценовой диапазон
-        if (!empty($property->price) && is_numeric($property->price)) {
-            $minPrice = $property->price * (1 - $priceTolerance);
-            $maxPrice = $property->price * (1 + $priceTolerance);
-            $query->whereBetween('price', [$minPrice, $maxPrice]);
+        $sourcePrice = (float) (($property->discount_price > 0 ? $property->discount_price : null) ?? $property->price);
+        if ($sourcePrice > 0) {
+            $minPrice = $sourcePrice * (1 - $priceTolerance);
+            $maxPrice = $sourcePrice * (1 + $priceTolerance);
+            $this->applyEffectivePriceRange($query, $minPrice, $maxPrice);
         }
 
         // поиск по радиусу — если есть координаты и включена опция
         if ($useRadius && $property->latitude && $property->longitude) {
-            $lat = (float)$property->latitude;
-            $lng = (float)$property->longitude;
+            $lat = (float) $property->latitude;
+            $lng = (float) $property->longitude;
             // Хаверсин: расстояние в км
-            $haversine = "(6371 * acos(
+            $haversine = '(6371 * acos(
             cos(radians(?)) * cos(radians(latitude)) * cos(radians(longitude) - radians(?))
             + sin(radians(?)) * sin(radians(latitude))
-        ))";
+        ))';
 
             // присоединяем расстояние как поле и фильтруем по radius
             // используем selectRaw чтобы включить всё необходимое
@@ -2807,7 +3066,7 @@ class PropertyController extends Controller
 
     public function saveDeal(
         SavePropertyDealRequest $request,
-        Property                $property
+        Property $property
     ) {
         $user = $this->authorizePropertyDealMutation(
             $property,
@@ -2865,7 +3124,7 @@ class PropertyController extends Controller
     private function saleAgentsSyncPayload(array $agents): array
     {
         $payload = collect($agents)
-            ->filter(fn ($agent) => !empty($agent['agent_id']))
+            ->filter(fn ($agent) => ! empty($agent['agent_id']))
             ->groupBy(fn ($agent) => (int) $agent['agent_id'])
             ->map(function ($group, $agentId) {
                 $agent = collect($group)->first();
