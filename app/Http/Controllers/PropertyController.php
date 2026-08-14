@@ -1179,6 +1179,7 @@ class PropertyController extends Controller
                 'phone' => $property->creator->phone,
             ] : null,
             'created_at' => $property->created_at?->toJSON(),
+            'listing_updated_at' => $property->listing_updated_at?->toJSON(),
         ];
     }
 
@@ -1836,7 +1837,7 @@ class PropertyController extends Controller
             'sold_at_to' => ['sometimes', 'nullable', 'date'],
             'page' => ['sometimes', 'integer', 'min:1'],
             'per_page' => ['sometimes', 'integer', 'min:1', 'max:100'],
-            'sort' => ['sometimes', 'nullable', Rule::in(['none', 'listing_type', 'created_at', 'date', 'price', 'total_area', 'area', 'rooms', 'views_count', 'id'])],
+            'sort' => ['sometimes', 'nullable', Rule::in(['none', 'listing_type', 'created_at', 'listing_updated_at', 'date', 'price', 'total_area', 'area', 'rooms', 'views_count', 'id'])],
             'dir' => ['sometimes', 'nullable', Rule::in(['asc', 'desc'])],
         ], [
             'construction_status.in' => 'Поле construction_status должно быть одним из значений: under_construction, built, commissioned.',
@@ -2108,7 +2109,7 @@ class PropertyController extends Controller
 
         $this->storePhotosFromRequest($request, $property);
 
-        return response()->json($property->load($this->propertyMutationRelations()));
+        return response()->json($property->fresh($this->propertyMutationRelations()));
     }
 
     /**
@@ -2140,36 +2141,56 @@ class PropertyController extends Controller
         $this->ensureVisibleClientsForProperty($validated, $property);
         $validated = $this->syncPropertyClientSnapshots($validated);
 
-        $property->update($validated);
+        DB::transaction(function () use (
+            $request,
+            $property,
+            $validated,
+            $shouldSyncFeatures,
+            $featureIds,
+            $shouldSyncTags,
+            $tagIds
+        ): void {
+            $property->fill($validated);
+            $listingContentChanged = $property->isDirty(Property::LISTING_CONTENT_FIELDS);
+            $property->save();
 
-        if ($shouldSyncFeatures && $this->supportsPropertyFeatures()) {
-            $property->features()->sync($featureIds);
-        }
+            if ($shouldSyncFeatures && $this->supportsPropertyFeatures()) {
+                $syncChanges = $property->features()->sync($featureIds);
+                $listingContentChanged = $listingContentChanged || $this->relationSyncChanged($syncChanges);
+            }
 
-        if ($shouldSyncTags && $this->supportsPropertyTags()) {
-            $property->tags()->sync($tagIds);
-        }
+            if ($shouldSyncTags && $this->supportsPropertyTags()) {
+                $syncChanges = $property->tags()->sync($tagIds);
+                $listingContentChanged = $listingContentChanged || $this->relationSyncChanged($syncChanges);
+            }
 
-        // Если статус закрытый и sold_at ещё не установлен — ставим текущую дату
-        if (
-            $request->filled('moderation_status') &&
-            in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true) &&
-            empty($property->sold_at)
-        ) {
-            $property->update([
-                'sold_at' => now(),
-            ]);
-        }
+            // Если статус закрытый и sold_at ещё не установлен — ставим текущую дату
+            if (
+                $request->filled('moderation_status') &&
+                in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true) &&
+                empty($property->sold_at)
+            ) {
+                $property->update([
+                    'sold_at' => now(),
+                ]);
+            }
 
-        // Optional: allow adding more photos on update
-        $this->storePhotosFromRequest($request, $property, append: true);
+            // Optional: allow adding more photos on update
+            $listingContentChanged = $this->storePhotosFromRequest($request, $property, append: true)
+                || $listingContentChanged;
 
-        // Optional: reorder via `photo_order` = [photoId1, photoId2, ...]
-        if ($request->filled('photo_order') && is_array($request->photo_order)) {
-            $this->applyOrder($property, $request->photo_order);
-        }
+            // Optional: reorder via `photo_order` = [photoId1, photoId2, ...]
+            if ($request->filled('photo_order') && is_array($request->photo_order)) {
+                $listingContentChanged = $this->applyOrder($property, $request->photo_order)
+                    || $listingContentChanged;
+            }
 
-        return response()->json($property->load($this->propertyMutationRelations()));
+            if ($listingContentChanged) {
+                $property->markListingUpdated();
+            }
+        });
+
+        return response()->json($property->fresh($this->propertyMutationRelations()));
     }
 
     public function updateCoOwner(Request $request, Property $property)
@@ -2190,18 +2211,28 @@ class PropertyController extends Controller
         return response()->json($property->fresh(['coOwner.role', 'creator.role', 'agent.role']));
     }
 
-    private function storePhotosFromRequest(Request $request, Property $property, bool $append = false): void
+    private function relationSyncChanged(array $changes): bool
     {
+        return ! empty($changes['attached'])
+            || ! empty($changes['detached'])
+            || ! empty($changes['updated']);
+    }
+
+    private function storePhotosFromRequest(Request $request, Property $property, bool $append = false): bool
+    {
+        $changed = false;
+
         // Delete selected photos if requested
         if ($request->filled('delete_photo_ids')) {
             foreach ($property->photos()->whereIn('id', $request->delete_photo_ids)->get() as $old) {
                 \Storage::disk('public')->delete($old->file_path);
                 $old->delete();
+                $changed = true;
             }
         }
 
         if (! $request->hasFile('photos')) {
-            return;
+            return $changed;
         }
 
         // Determine base position (append to the end)
@@ -2226,28 +2257,41 @@ class PropertyController extends Controller
                 'file_path' => $filename,
                 'position' => $position,
             ]);
+            $changed = true;
         }
 
         // Normalize positions to be 0..N-1 with no gaps
-        $this->normalizePositions($property);
+        return $this->normalizePositions($property) || $changed;
     }
 
-    private function applyOrder(Property $property, array $orderedIds): void
+    private function applyOrder(Property $property, array $orderedIds): bool
     {
+        $changed = false;
+
         foreach ($orderedIds as $pos => $id) {
-            $property->photos()->whereKey($id)->update(['position' => $pos]);
+            $photo = $property->photos()->whereKey($id)->first();
+
+            if ($photo && (int) $photo->position !== $pos) {
+                $photo->update(['position' => $pos]);
+                $changed = true;
+            }
         }
-        $this->normalizePositions($property);
+
+        return $this->normalizePositions($property) || $changed;
     }
 
-    private function normalizePositions(Property $property): void
+    private function normalizePositions(Property $property): bool
     {
+        $changed = false;
         $photos = $property->photos()->orderBy('position')->orderBy('id')->get();
         foreach ($photos as $idx => $p) {
             if ((int) $p->position !== $idx) {
                 $p->update(['position' => $idx]);
+                $changed = true;
             }
         }
+
+        return $changed;
     }
 
     public function show(Request $request, Property $property)
@@ -2412,7 +2456,9 @@ class PropertyController extends Controller
             $this->ensureVisibleClientsForProperty($payload, $property);
             $payload = $this->syncPropertyClientSnapshots($payload);
 
-            $property->update($payload);
+            $property->fill($payload);
+            $listingContentChanged = $property->isDirty(Property::LISTING_CONTENT_FIELDS);
+            $property->save();
 
             /**
              * 2️⃣ ЛОГИКА ПО СТАТУСУ (ТОЛЬКО БИЗНЕС-ПРАВИЛА)
@@ -2428,6 +2474,10 @@ class PropertyController extends Controller
              */
             if ($request->moderation_status === 'sold' && $request->filled('agents')) {
                 $property->saleAgents()->sync($this->saleAgentsSyncPayload($request->agents));
+            }
+
+            if ($listingContentChanged) {
+                $property->markListingUpdated();
             }
         });
 
@@ -2508,9 +2558,9 @@ class PropertyController extends Controller
             'owner_client_id' => 'nullable|exists:clients,id',
             'object_key' => 'nullable|string|max:255',
             'rejection_comment' => 'nullable|string',
-            'features' => 'sometimes|array',
+            'features' => 'sometimes|nullable|array',
             'features.*' => 'integer|distinct|exists:features,id',
-            'tags' => 'sometimes|array',
+            'tags' => 'sometimes|nullable|array',
             'tags.*' => 'integer|distinct|exists:tags,id',
 
             // Photos (optional on update)
@@ -2609,6 +2659,15 @@ class PropertyController extends Controller
 
         if ($sort === 'price') {
             $query->orderByRaw($this->effectivePriceSql()." {$dir}");
+
+            return;
+        }
+
+        if ($sort === 'listing_updated_at') {
+            $column = Schema::hasColumn('properties', 'listing_updated_at')
+                ? 'COALESCE(listing_updated_at, created_at)'
+                : 'created_at';
+            $query->orderByRaw("{$column} {$dir}");
 
             return;
         }

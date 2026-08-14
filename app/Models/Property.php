@@ -2,8 +2,8 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Support\Facades\Schema;
@@ -11,6 +11,49 @@ use Illuminate\Support\Facades\Schema;
 class Property extends Model
 {
     use HasFactory;
+
+    public const LISTING_CONTENT_FIELDS = [
+        'title',
+        'description',
+        'type_id',
+        'status_id',
+        'location_id',
+        'repair_type_id',
+        'contract_type_id',
+        'document_type_id',
+        'price',
+        'discount_price',
+        'currency',
+        'offer_type',
+        'rooms',
+        'youtube_link',
+        'instagram_link',
+        'total_area',
+        'land_size',
+        'living_area',
+        'floor',
+        'total_floors',
+        'year_built',
+        'condition',
+        'construction_status',
+        'renovation_permission_status',
+        'apartment_type',
+        'has_garden',
+        'has_parking',
+        'is_mortgage_available',
+        'is_from_developer',
+        'landmark',
+        'latitude',
+        'longitude',
+        'district',
+        'address',
+        'listing_type',
+        'developer_id',
+        'is_full_apartment',
+        'is_for_aura',
+        'parking_type_id',
+        'heating_type_id',
+    ];
 
     public const PUBLIC_MODERATION_STATUS = 'approved';
 
@@ -40,6 +83,11 @@ class Property extends Model
 
     protected $appends = [
         'branch_group_id',
+        'listing_updated_at',
+    ];
+
+    protected $casts = [
+        'listing_updated_at' => 'datetime',
     ];
 
     protected $hidden = [
@@ -125,6 +173,44 @@ class Property extends Model
         'company_expected_income_currency',
         'planned_contract_signed_at',
     ];
+
+    protected static function booted(): void
+    {
+        static::creating(function (Property $property): void {
+            if (
+                Schema::hasColumn($property->getTable(), 'listing_updated_at')
+                && empty($property->getAttributes()['listing_updated_at'])
+            ) {
+                $property->setAttribute('listing_updated_at', $property->created_at ?? now());
+            }
+        });
+    }
+
+    public function getListingUpdatedAtAttribute($value)
+    {
+        $rawValue = $this->attributes['listing_updated_at'] ?? $value;
+
+        return $rawValue !== null
+            ? $this->asDateTime($rawValue)
+            : $this->created_at;
+    }
+
+    public function markListingUpdated($at = null): bool
+    {
+        if (! Schema::hasColumn($this->getTable(), 'listing_updated_at')) {
+            return false;
+        }
+
+        $this->setAttribute('listing_updated_at', $at ?? now());
+
+        if (! $this->save()) {
+            return false;
+        }
+
+        $this->refresh();
+
+        return true;
+    }
 
     public function type()
     {
@@ -274,7 +360,7 @@ class Property extends Model
                 'role',
                 'agent_commission_amount',
                 'agent_commission_currency',
-                'agent_paid_at'
+                'agent_paid_at',
             ])
             ->withTimestamps();
     }
@@ -324,7 +410,7 @@ class Property extends Model
 
     public function isDealClosed(): bool
     {
-        return !is_null($this->sold_at);
+        return ! is_null($this->sold_at);
     }
 
     public function getBranchGroupIdAttribute($value): ?int
@@ -363,7 +449,7 @@ class Property extends Model
             }
         }
 
-        if (empty($userId) || !Schema::hasColumn('users', 'branch_group_id')) {
+        if (empty($userId) || ! Schema::hasColumn('users', 'branch_group_id')) {
             return null;
         }
 

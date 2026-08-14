@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\Role;
 use App\Models\User;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
@@ -111,10 +112,12 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->string('address')->nullable();
             $table->string('owner_phone')->nullable();
             $table->string('listing_type')->default('regular');
+            $table->unsignedBigInteger('views_count')->default(0);
             $table->string('owner_name')->nullable();
             $table->string('object_key')->nullable();
             $table->text('rejection_comment')->nullable();
             $table->text('status_comment')->nullable();
+            $table->timestamp('listing_updated_at')->nullable()->index();
             $table->timestamps();
         });
 
@@ -190,6 +193,13 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->timestamp('expires_at')->nullable();
             $table->timestamps();
         });
+    }
+
+    protected function tearDown(): void
+    {
+        Carbon::setTestNow();
+
+        parent::tearDown();
     }
 
     public function test_property_store_accepts_construction_and_renovation_statuses(): void
@@ -436,7 +446,7 @@ class PropertyConstructionFieldsTest extends TestCase
             'price' => 150000,
             'currency' => 'TJS',
             'offer_type' => 'sale',
-            'features' => [],
+            'features' => null,
         ]);
 
         $cleared->assertOk()->assertJsonCount(0, 'features');
@@ -483,11 +493,235 @@ class PropertyConstructionFieldsTest extends TestCase
             'price' => 150000,
             'currency' => 'TJS',
             'offer_type' => 'sale',
-            'tags' => [],
+            'tags' => null,
         ]);
 
         $cleared->assertOk()->assertJsonCount(0, 'tags');
         $this->assertDatabaseMissing('property_tag', ['property_id' => $propertyId]);
+    }
+
+    public function test_property_can_be_created_without_features_and_tags(): void
+    {
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000097',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+
+        Sanctum::actingAs($user);
+
+        $this->postJson('/api/properties', [
+            'type_id' => $type->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'features' => null,
+            'tags' => null,
+        ])
+            ->assertOk()
+            ->assertJsonCount(0, 'features')
+            ->assertJsonCount(0, 'tags');
+    }
+
+    public function test_listing_update_date_changes_only_after_real_content_change(): void
+    {
+        Carbon::setTestNow('2026-08-14 09:00:00');
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000095',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+
+        Sanctum::actingAs($user);
+
+        $created = $this->postJson('/api/properties', [
+            'title' => 'Первоначальное название',
+            'type_id' => $type->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ])->assertOk();
+
+        $propertyId = $created->json('id');
+        $createdAt = $created->json('created_at');
+        $initialListingUpdatedAt = $created->json('listing_updated_at');
+        $this->assertSame($createdAt, $initialListingUpdatedAt);
+
+        Carbon::setTestNow('2026-08-14 10:00:00');
+        $changed = $this->putJson('/api/properties/'.$propertyId, [
+            'title' => 'Обновлённое название',
+            'type_id' => $type->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ])->assertOk();
+
+        $this->assertSame($createdAt, $changed->json('created_at'));
+        $this->assertNotSame($initialListingUpdatedAt, $changed->json('listing_updated_at'));
+        $changedListingUpdatedAt = $changed->json('listing_updated_at');
+
+        Carbon::setTestNow('2026-08-14 11:00:00');
+        $unchanged = $this->putJson('/api/properties/'.$propertyId, [
+            'title' => 'Обновлённое название',
+            'type_id' => $type->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'created_at' => '2000-01-01T00:00:00Z',
+            'listing_updated_at' => '2000-01-01T00:00:00Z',
+        ])->assertOk();
+
+        $this->assertSame($createdAt, $unchanged->json('created_at'));
+        $this->assertSame($changedListingUpdatedAt, $unchanged->json('listing_updated_at'));
+
+        Carbon::setTestNow('2026-08-14 12:00:00');
+        $moderated = $this->putJson('/api/properties/'.$propertyId, [
+            'title' => 'Обновлённое название',
+            'type_id' => $type->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'moderation_status' => 'approved',
+        ])->assertOk();
+        $this->assertSame($changedListingUpdatedAt, $moderated->json('listing_updated_at'));
+
+        Carbon::setTestNow('2026-08-14 13:00:00');
+        $this->postJson('/api/properties/'.$propertyId.'/view')->assertNoContent();
+        $property = \App\Models\Property::findOrFail($propertyId);
+
+        $this->assertSame($createdAt, $property->created_at?->toJSON());
+        $this->assertSame($changedListingUpdatedAt, $property->listing_updated_at?->toJSON());
+    }
+
+    public function test_features_tags_and_photo_order_update_listing_date_only_when_changed(): void
+    {
+        Carbon::setTestNow('2026-08-14 09:00:00');
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000094',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $feature = \App\Models\Feature::create(['name' => 'Паркинг', 'slug' => 'parking']);
+        $tag = \App\Models\Tag::create(['name' => 'Срочно', 'slug' => 'urgent']);
+
+        Sanctum::actingAs($user);
+
+        $created = $this->postJson('/api/properties', [
+            'type_id' => $type->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ])->assertOk();
+        $propertyId = $created->json('id');
+
+        Carbon::setTestNow('2026-08-14 10:00:00');
+        $relationsChanged = $this->putJson('/api/properties/'.$propertyId, [
+            'type_id' => $type->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'features' => [$feature->id],
+            'tags' => [$tag->id],
+        ])->assertOk();
+        $relationsUpdatedAt = $relationsChanged->json('listing_updated_at');
+        $this->assertNotSame($created->json('listing_updated_at'), $relationsUpdatedAt);
+
+        Carbon::setTestNow('2026-08-14 11:00:00');
+        $sameRelations = $this->putJson('/api/properties/'.$propertyId, [
+            'type_id' => $type->id,
+            'price' => 150000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'features' => [$feature->id],
+            'tags' => [$tag->id],
+        ])->assertOk();
+        $this->assertSame($relationsUpdatedAt, $sameRelations->json('listing_updated_at'));
+
+        $property = \App\Models\Property::findOrFail($propertyId);
+        $firstPhoto = $property->photos()->create(['file_path' => 'properties/first.jpg', 'position' => 0]);
+        $secondPhoto = $property->photos()->create(['file_path' => 'properties/second.jpg', 'position' => 1]);
+
+        Carbon::setTestNow('2026-08-14 12:00:00');
+        $reordered = $this->putJson('/api/properties/'.$propertyId.'/photos/reorder', [
+            'photo_order' => [$secondPhoto->id, $firstPhoto->id],
+        ])->assertOk();
+        $photoUpdatedAt = $reordered->json('listing_updated_at');
+        $this->assertNotSame($relationsUpdatedAt, $photoUpdatedAt);
+
+        Carbon::setTestNow('2026-08-14 13:00:00');
+        $sameOrder = $this->putJson('/api/properties/'.$propertyId.'/photos/reorder', [
+            'photo_order' => [$secondPhoto->id, $firstPhoto->id],
+        ])->assertOk();
+        $this->assertSame($photoUpdatedAt, $sameOrder->json('listing_updated_at'));
+        $this->assertSame($created->json('created_at'), $sameOrder->json('created_at'));
+    }
+
+    public function test_properties_can_be_sorted_by_listing_update_date(): void
+    {
+        Carbon::setTestNow('2026-08-14 09:00:00');
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent User',
+            'phone' => '930000093',
+            'password' => bcrypt('password'),
+            'role_id' => $agentRole->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        Sanctum::actingAs($user);
+
+        $firstId = $this->postJson('/api/properties', [
+            'title' => 'Первый',
+            'type_id' => $type->id,
+            'price' => 100000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ])->assertOk()->json('id');
+
+        Carbon::setTestNow('2026-08-14 10:00:00');
+        $secondId = $this->postJson('/api/properties', [
+            'title' => 'Второй',
+            'type_id' => $type->id,
+            'price' => 200000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ])->assertOk()->json('id');
+
+        Carbon::setTestNow('2026-08-14 11:00:00');
+        $this->putJson('/api/properties/'.$firstId, [
+            'title' => 'Первый обновлён',
+            'type_id' => $type->id,
+            'price' => 100000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+        ])->assertOk();
+
+        $this->getJson('/api/properties?sort=listing_updated_at&dir=desc')
+            ->assertOk()
+            ->assertJsonPath('data.0.id', $firstId)
+            ->assertJsonPath('data.1.id', $secondId);
+
+        $this->getJson('/api/properties?sort=listing_updated_at&dir=asc')
+            ->assertOk()
+            ->assertJsonPath('data.0.id', $secondId)
+            ->assertJsonPath('data.1.id', $firstId);
+
+        $this->getJson('/api/my-properties?sort=listing_updated_at&dir=desc')
+            ->assertOk()
+            ->assertJsonPath('data.0.id', $firstId)
+            ->assertJsonPath('data.1.id', $secondId);
     }
 
     public function test_property_store_does_not_flag_duplicate_by_phone_only(): void

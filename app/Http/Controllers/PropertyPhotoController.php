@@ -1,10 +1,12 @@
 <?php
+
 namespace App\Http\Controllers;
 
 use App\Models\Property;
 use App\Models\PropertyPhoto;
 use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Intervention\Image\Encoders\JpegEncoder;
 
@@ -47,11 +49,11 @@ class PropertyPhotoController extends Controller
                 $propertyBranchGroupId = $property->agent?->branch_group_id ?: $property->creator?->branch_group_id;
             }
 
-            return !empty($propertyBranchGroupId)
+            return ! empty($propertyBranchGroupId)
                 && (int) $propertyBranchGroupId === (int) $user->branch_group_id;
         }
 
-        if (!$user->hasRole('branch_director') && !$user->hasRole('rop')) {
+        if (! $user->hasRole('branch_director') && ! $user->hasRole('rop')) {
             return false;
         }
 
@@ -62,14 +64,14 @@ class PropertyPhotoController extends Controller
         $property->loadMissing(['agent', 'creator']);
         $propertyBranchId = $property->agent?->branch_id ?: $property->creator?->branch_id;
 
-        return !empty($propertyBranchId) && (int) $propertyBranchId === (int) $user->branch_id;
+        return ! empty($propertyBranchId) && (int) $propertyBranchId === (int) $user->branch_id;
     }
 
     private function authorizePropertyMutation(Property $property): void
     {
         $user = $this->crmAuthUser();
 
-        if (!$this->canMutateProperty($user, $property)) {
+        if (! $this->canMutateProperty($user, $property)) {
             abort(403, 'Доступ запрещён');
         }
     }
@@ -79,28 +81,32 @@ class PropertyPhotoController extends Controller
         $this->authorizePropertyMutation($property);
 
         $request->validate([
-            'photos' => ['required','array','max:40'],
-            'photos.*' => ['file','mimes:jpg,jpeg,png,webp','max:8192'],
-            'photo_positions' => ['nullable','array'],
-            'photo_positions.*' => ['integer','min:0'],
+            'photos' => ['required', 'array', 'max:40'],
+            'photos.*' => ['file', 'mimes:jpg,jpeg,png,webp', 'max:8192'],
+            'photo_positions' => ['nullable', 'array'],
+            'photo_positions.*' => ['integer', 'min:0'],
         ]);
 
-        $basePos = (int) ($property->photos()->max('position') ?? -1) + 1;
+        DB::transaction(function () use ($request, $property): void {
+            $basePos = (int) ($property->photos()->max('position') ?? -1) + 1;
 
-        foreach (array_values($request->file('photos')) as $i => $photo) {
-            $image = app('image')->read($photo)->scaleDown(1600, null);
-            $wm = app('image')->read(public_path('watermark/logo.png'))
-                ->scale((int) round($image->width() * 0.14));
-            $image->place($wm, 'bottom-right', 36, 28);
+            foreach (array_values($request->file('photos')) as $i => $photo) {
+                $image = app('image')->read($photo)->scaleDown(1600, null);
+                $wm = app('image')->read(public_path('watermark/logo.png'))
+                    ->scale((int) round($image->width() * 0.14));
+                $image->place($wm, 'bottom-right', 36, 28);
 
-            $binary = $image->encode(new JpegEncoder(50));
-            $filename = 'properties/' . uniqid('', true) . '.jpg';
-            \Storage::disk('public')->put($filename, $binary);
+                $binary = $image->encode(new JpegEncoder(50));
+                $filename = 'properties/'.uniqid('', true).'.jpg';
+                \Storage::disk('public')->put($filename, $binary);
 
-            $position = $request->input("photo_positions.$i", $basePos + $i);
+                $position = $request->input("photo_positions.$i", $basePos + $i);
 
-            $property->photos()->create(['file_path' => $filename, 'position' => $position]);
-        }
+                $property->photos()->create(['file_path' => $filename, 'position' => $position]);
+            }
+
+            $property->markListingUpdated();
+        });
 
         return response()->json($property->fresh('photos'));
     }
@@ -110,14 +116,19 @@ class PropertyPhotoController extends Controller
         $this->authorizePropertyMutation($property);
 
         abort_unless($photo->property_id === $property->id, 404);
-        \Storage::disk('public')->delete($photo->file_path);
-        $photo->delete();
 
-        // Re-pack positions
-        $photos = $property->photos()->orderBy('position')->get();
-        foreach ($photos as $idx => $p) {
-            $p->update(['position' => $idx]);
-        }
+        DB::transaction(function () use ($property, $photo): void {
+            \Storage::disk('public')->delete($photo->file_path);
+            $photo->delete();
+
+            // Re-pack positions
+            $photos = $property->photos()->orderBy('position')->get();
+            foreach ($photos as $idx => $p) {
+                $p->update(['position' => $idx]);
+            }
+
+            $property->markListingUpdated();
+        });
 
         return response()->json(['ok' => true]);
     }
@@ -127,13 +138,25 @@ class PropertyPhotoController extends Controller
         $this->authorizePropertyMutation($property);
 
         $data = $request->validate([
-            'photo_order' => ['required','array'],
-            'photo_order.*' => ['integer','exists:property_photos,id'],
+            'photo_order' => ['required', 'array'],
+            'photo_order.*' => ['integer', 'exists:property_photos,id'],
         ]);
 
-        foreach ($data['photo_order'] as $pos => $id) {
-            $property->photos()->whereKey($id)->update(['position' => $pos]);
-        }
+        DB::transaction(function () use ($data, $property): void {
+            $changed = false;
+            foreach ($data['photo_order'] as $pos => $id) {
+                $photo = $property->photos()->whereKey($id)->first();
+
+                if ($photo && (int) $photo->position !== $pos) {
+                    $photo->update(['position' => $pos]);
+                    $changed = true;
+                }
+            }
+
+            if ($changed) {
+                $property->markListingUpdated();
+            }
+        });
 
         return response()->json($property->fresh('photos'));
     }

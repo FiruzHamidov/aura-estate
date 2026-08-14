@@ -36,7 +36,7 @@ class PropertyObserver
         $changes = [];
         foreach ($property->getAttributes() as $field => $value) {
             // опционально: фильтровать служебные/временные поля
-            if (in_array($field, ['updated_at'])) {
+            if (in_array($field, ['updated_at', 'listing_updated_at'])) {
                 continue;
             }
             $changes[$field] = [
@@ -66,7 +66,7 @@ class PropertyObserver
         $changes = [];
 
         foreach ($changesRaw as $field => $newValue) {
-            if ($field === 'updated_at') {
+            if (in_array($field, ['updated_at', 'listing_updated_at'])) {
                 continue;
             } // обычно игнорируем
             $changes[$field] = [
