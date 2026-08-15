@@ -103,7 +103,7 @@ class KpiDailyMyReportStrictApiTest extends TestCase
 
     public function test_read_and_submit_strict_daily_my_report_contract(): void
     {
-        Carbon::setTestNow(Carbon::parse('2026-05-05 12:00:00', 'Asia/Dushanbe'));
+        Carbon::setTestNow(Carbon::parse('2026-05-05 20:05:00', 'Asia/Dushanbe'));
 
         $rop = $this->makeUser('rop');
         Sanctum::actingAs($rop);
@@ -173,6 +173,57 @@ class KpiDailyMyReportStrictApiTest extends TestCase
             ->assertJsonPath('message', 'Validation failed.')
             ->assertJsonPath('details.errors.deals.0', 'This metric is not writable for this endpoint.')
             ->assertJsonStructure(['trace_id']);
+    }
+
+    public function test_today_can_be_saved_as_draft_before_evening_and_submitted_after_cutoff(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-05-05 12:00:00', 'Asia/Dushanbe'));
+
+        $agent = $this->makeUser('agent');
+        Sanctum::actingAs($agent);
+
+        $this->putJson('/api/kpi/daily/my-report/draft', [
+            'report_date' => '2026-05-05',
+            'ads' => 4,
+            'calls' => 8,
+            'comment' => 'draft',
+            'plans_for_tomorrow' => 'plan',
+        ])->assertOk()
+            ->assertJsonPath('report_state', 'draft')
+            ->assertJsonPath('can_save_draft', true)
+            ->assertJsonPath('can_submit', false)
+            ->assertJsonPath('submitted', false);
+
+        $draft = DailyReport::query()->where('user_id', $agent->id)->firstOrFail();
+        $this->assertNull($draft->submitted_at);
+
+        $this->postJson('/api/kpi/daily/my-report', [
+            'report_date' => '2026-05-05',
+            'ads' => 4,
+            'calls' => 8,
+            'comment' => 'draft',
+            'plans_for_tomorrow' => 'plan',
+        ])->assertStatus(422)
+            ->assertJsonPath('code', 'KPI_REPORT_SUBMIT_TOO_EARLY')
+            ->assertJsonPath('details.submit_available_at', '2026-05-05T20:00:00+05:00');
+
+        Carbon::setTestNow(Carbon::parse('2026-05-05 20:00:00', 'Asia/Dushanbe'));
+
+        $this->postJson('/api/kpi/daily/my-report', [
+            'report_date' => '2026-05-05',
+            'ads' => 5,
+            'calls' => 9,
+            'comment' => 'final',
+            'plans_for_tomorrow' => 'final plan',
+        ])->assertOk()
+            ->assertJsonPath('report_state', 'submitted_live')
+            ->assertJsonPath('can_save_draft', false)
+            ->assertJsonPath('can_submit', false)
+            ->assertJsonPath('submitted', true)
+            ->assertJsonPath('manual.ads', 5)
+            ->assertJsonPath('manual.calls', 9);
+
+        $this->assertSame($draft->id, DailyReport::query()->where('user_id', $agent->id)->value('id'));
     }
 
     public function test_submit_historical_date_and_role_restrictions(): void

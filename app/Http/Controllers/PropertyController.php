@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Requests\SavePropertyDealRequest;
 use App\Models\Client;
 use App\Models\Property;
+use App\Models\PropertyLog;
 use App\Models\User;
 use App\Services\Crm\ClientAttachService;
 use App\Services\Crm\Matching\ClientPropertyMatcher;
@@ -247,6 +248,49 @@ class PropertyController extends Controller
         return $user;
     }
 
+    private function listingDateRefreshState(Property $property): array
+    {
+        $nextAvailableAt = null;
+
+        if (Schema::hasTable('property_logs')) {
+            $lastRefresh = PropertyLog::query()
+                ->where('property_id', $property->id)
+                ->where('action', 'listing_date_refreshed')
+                ->latest('created_at')
+                ->first();
+
+            if ($lastRefresh?->created_at) {
+                $cooldownSeconds = max(
+                    0,
+                    (int) config('property-listing.date_refresh_cooldown_seconds', 86_400)
+                );
+                $nextAvailableAt = $lastRefresh->created_at->copy()->addSeconds($cooldownSeconds);
+            }
+        }
+
+        $available = $property->moderation_status === Property::PUBLIC_MODERATION_STATUS
+            && ($nextAvailableAt === null || now()->greaterThanOrEqualTo($nextAvailableAt));
+
+        return [
+            'available' => $available,
+            'next_available_at' => $available ? null : $nextAvailableAt?->toJSON(),
+        ];
+    }
+
+    private function propertyCapabilities(?User $user, Property $property, ?array $refreshState = null): array
+    {
+        $canMutate = $user !== null && $this->canMutateProperty($user, $property);
+        $refreshState ??= $this->listingDateRefreshState($property);
+
+        return [
+            'can_edit' => $canMutate,
+            'can_refresh_listing_date' => $canMutate && $refreshState['available'],
+            'can_view_history' => $canMutate,
+            'can_moderate' => $canMutate,
+            'can_manage_co_owner' => $canMutate,
+        ];
+    }
+
     /**
      * An agent may accept a deposit or close a colleague's property from any
      * branch. For a sale, an agent can only set themselves as seller.
@@ -377,8 +421,10 @@ class PropertyController extends Controller
         }
     }
 
-    private function serializePropertyShow(Property $property, bool $includeAuthContacts): array
+    private function serializePropertyShow(Property $property, ?User $authUser): array
     {
+        $includeAuthContacts = $authUser !== null;
+
         if ($includeAuthContacts) {
             $property->loadMissing(['externalAgent', 'externalPropertyRequest']);
             $property->makeVisible([
@@ -418,6 +464,9 @@ class PropertyController extends Controller
                 'external_property_request_display_status' => $property->externalPropertyRequest?->display_status,
                 'submitted_at' => $property->externalPropertyRequest?->submitted_at?->toJSON(),
             ] : null;
+            $refreshState = $this->listingDateRefreshState($property);
+            $payload['capabilities'] = $this->propertyCapabilities($authUser, $property, $refreshState);
+            $payload['listing_date_refresh'] = $refreshState;
         }
 
         return $payload;
@@ -2307,8 +2356,75 @@ class PropertyController extends Controller
         }
 
         return response()->json(
-            $this->serializePropertyShow($property, $authUser !== null)
+            $this->serializePropertyShow($property, $authUser)
         );
+    }
+
+    public function refreshListingDate(Property $property)
+    {
+        $actor = $this->authorizePropertyMutation($property);
+
+        return DB::transaction(function () use ($property, $actor) {
+            /** @var Property $lockedProperty */
+            $lockedProperty = Property::query()
+                ->whereKey($property->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            if ($lockedProperty->moderation_status !== Property::PUBLIC_MODERATION_STATUS) {
+                return response()->json([
+                    'message' => 'Для этого статуса обновление даты недоступно',
+                    'code' => 'LISTING_DATE_REFRESH_STATUS_NOT_ALLOWED',
+                ], 422);
+            }
+
+            $refreshState = $this->listingDateRefreshState($lockedProperty);
+            if (! $refreshState['available']) {
+                return response()->json([
+                    'message' => 'Дата объявления недавно обновлялась',
+                    'code' => 'LISTING_DATE_REFRESH_COOLDOWN',
+                    'next_available_at' => $refreshState['next_available_at'],
+                    'listing_date_refresh' => $refreshState,
+                ], 409);
+            }
+
+            $createdAtBefore = $lockedProperty->getRawOriginal('created_at');
+            $oldListingUpdatedAt = $lockedProperty->listing_updated_at?->copy();
+            $newListingUpdatedAt = now();
+
+            if (! $lockedProperty->markListingUpdated($newListingUpdatedAt)) {
+                throw new \RuntimeException('Не удалось обновить дату объявления.');
+            }
+
+            if ((string) $lockedProperty->getRawOriginal('created_at') !== (string) $createdAtBefore) {
+                throw new \LogicException('Дата создания объявления была неожиданно изменена.');
+            }
+
+            PropertyLog::create([
+                'property_id' => $lockedProperty->id,
+                'user_id' => $actor->id,
+                'action' => 'listing_date_refreshed',
+                'changes' => [
+                    'listing_updated_at' => [
+                        'old' => $oldListingUpdatedAt?->toJSON(),
+                        'new' => $lockedProperty->listing_updated_at?->toJSON(),
+                    ],
+                ],
+            ]);
+
+            $nextState = $this->listingDateRefreshState($lockedProperty);
+
+            return response()->json([
+                'message' => 'Дата объявления обновлена',
+                'data' => [
+                    'id' => (int) $lockedProperty->id,
+                    'created_at' => $lockedProperty->created_at?->toJSON(),
+                    'listing_updated_at' => $lockedProperty->listing_updated_at?->toJSON(),
+                    'capabilities' => $this->propertyCapabilities($actor, $lockedProperty, $nextState),
+                    'listing_date_refresh' => $nextState,
+                ],
+            ]);
+        }, 3);
     }
 
     public function matchingClients(Request $request, Property $property)

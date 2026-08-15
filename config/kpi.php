@@ -10,6 +10,8 @@ return [
         ))),
         // Time in app timezone after which yesterday's missing daily report becomes required.
         'missing_report_check_time' => (string) env('DAILY_REPORT_MISSING_CHECK_TIME', '11:00'),
+        // Today's report may be submitted only after this time. Drafts remain available earlier.
+        'submit_start_time' => (string) env('DAILY_REPORT_SUBMIT_START_TIME', '20:00'),
     ],
 
     // Daily targets + weight for KPI formula.

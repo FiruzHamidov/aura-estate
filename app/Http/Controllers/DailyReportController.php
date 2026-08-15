@@ -15,6 +15,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 class DailyReportController extends Controller
@@ -35,7 +36,13 @@ class DailyReportController extends Controller
         $payload = $this->dailyReports->reportStatusPayload($user, $request->input('report_date'));
         $reportDate = (string) ($payload['report_date'] ?? $this->dailyReports->defaultReportDate($user));
         $report = $payload['report'] ?? null;
+        $workflow = $this->myReportWorkflow($user, $reportDate, $report instanceof DailyReport ? $report : null);
         $payload['can_edit_submitted'] = $this->canEditSubmittedDailyReport($user, $user, $reportDate, $report);
+        $payload['report_state'] = $workflow['state'];
+        $payload['can_save_draft'] = $workflow['can_save_draft'];
+        $payload['can_submit'] = $workflow['can_submit'];
+        $payload['submit_available_at'] = $workflow['submit_available_at'];
+        $payload['auto_metrics_live_until'] = $workflow['auto_metrics_live_until'];
 
         return response()->json($payload);
     }
@@ -137,9 +144,12 @@ class DailyReportController extends Controller
             $query->whereDate('report_date', '<=', $validated['date_to']);
         }
 
-        return response()->json(
-            $query->paginate((int) ($validated['per_page'] ?? 15))->withQueryString()
+        $paginator = $query->paginate((int) ($validated['per_page'] ?? 15))->withQueryString();
+        $paginator->setCollection(
+            $paginator->getCollection()->map(fn (DailyReport $report) => $this->serializeTeamReportRow($report))
         );
+
+        return response()->json($paginator);
     }
 
     public function showMine(string $date)
@@ -184,6 +194,7 @@ class DailyReportController extends Controller
         $auto = $this->dailyReports->autoMetrics($user, $date);
 
         $metricsBundle = $this->buildMetricsPayloadBundle($user, $date, $report, $auto);
+        $workflow = $this->myReportWorkflow($user, $date, $report);
 
         return response()->json([
             'report_date' => $date,
@@ -197,6 +208,11 @@ class DailyReportController extends Controller
             ],
             'submitted' => $report?->submitted_at !== null,
             'submitted_at' => $report?->submitted_at,
+            'report_state' => $workflow['state'],
+            'can_save_draft' => $workflow['can_save_draft'],
+            'can_submit' => $workflow['can_submit'],
+            'submit_available_at' => $workflow['submit_available_at'],
+            'auto_metrics_live_until' => $workflow['auto_metrics_live_until'],
             'meta' => [
                 'locked' => $this->isDateLocked($user, $date),
                 'debug' => [
@@ -207,6 +223,36 @@ class DailyReportController extends Controller
         ]);
     }
 
+    public function saveMyReportDraft(Request $request)
+    {
+        $user = $this->authUser();
+        $this->ensureDailyMyReportEditRole($user);
+        $this->validateStrictMetricKeys($request);
+
+        $validated = $this->validateMyReportPayload($request);
+        $reportDate = (string) $validated['report_date'];
+        $this->ensureCanEditByPeriodRules($user, $user, $reportDate, null, false);
+
+        $existing = DailyReport::query()
+            ->where('user_id', $user->id)
+            ->whereDate('report_date', $reportDate)
+            ->first();
+
+        if ($existing?->submitted_at !== null) {
+            $this->denyKpi('KPI_SUBMITTED_EDIT_FORBIDDEN', 'Submitted daily report cannot be edited by current settings.');
+        }
+
+        $payload = $this->myReportPersistencePayload($user, $reportDate, $validated);
+        $report = $existing ?? new DailyReport([
+            'user_id' => $user->id,
+            'report_date' => $reportDate,
+        ]);
+        $report->fill(array_merge($payload, ['submitted_at' => null]));
+        $report->save();
+
+        return $this->myReport(new Request(['date' => $reportDate]));
+    }
+
     public function submitMyReport(Request $request)
     {
         $user = $this->authUser();
@@ -214,19 +260,61 @@ class DailyReportController extends Controller
 
         $this->validateStrictMetricKeys($request);
 
-        $validated = $request->validate([
+        $validated = $this->validateMyReportPayload($request);
+
+        $reportDate = (string) $validated['report_date'];
+        // For self-submission, allow submitting reports for any date (subject to lock rules).
+        $this->ensureCanEditByPeriodRules($user, $user, $reportDate, null, false);
+        $workflow = $this->myReportWorkflow($user, $reportDate, null);
+        if (! $workflow['can_submit']) {
+            $this->denyKpi(
+                'KPI_REPORT_SUBMIT_TOO_EARLY',
+                'Today\'s daily report can be submitted after the configured start time.',
+                422,
+                ['submit_available_at' => $workflow['submit_available_at']]
+            );
+        }
+
+        $payload = array_merge(
+            $this->myReportPersistencePayload($user, $reportDate, $validated),
+            ['submitted_at' => now()]
+        );
+
+        $existing = DailyReport::query()
+            ->where('user_id', $user->id)
+            ->whereDate('report_date', $reportDate)
+            ->first();
+
+        if ($existing?->submitted_at !== null) {
+            $this->denyKpi('KPI_SUBMITTED_EDIT_FORBIDDEN', 'Submitted daily report cannot be edited by current settings.');
+        }
+
+        DB::transaction(function () use ($existing, $payload, $user, $reportDate): void {
+            $report = $existing ?? new DailyReport([
+                'user_id' => $user->id,
+                'report_date' => $reportDate,
+            ]);
+            $report->fill($payload);
+            $report->save();
+        });
+
+        return $this->myReport(new Request(['date' => $reportDate]));
+    }
+
+    private function validateMyReportPayload(Request $request): array
+    {
+        return $request->validate([
             'report_date' => 'required|date_format:Y-m-d',
             'ads' => 'required|integer|min:0',
             'calls' => 'required|integer|min:0',
             'comment' => 'nullable|string|max:2000',
             'plans_for_tomorrow' => 'nullable|string|max:2000',
         ]);
+    }
 
-        $reportDate = (string) $validated['report_date'];
-        // For self-submission, allow submitting reports for any date (subject to lock rules).
-        $this->ensureCanEditByPeriodRules($user, $user, $reportDate, null, false);
+    private function myReportPersistencePayload(User $user, string $reportDate, array $validated): array
+    {
         $metrics = $this->dailyReports->autoMetrics($user, $reportDate);
-
         $payload = [
             'role_slug' => $user->role?->slug,
             'ad_count' => (int) $validated['ads'],
@@ -238,28 +326,13 @@ class DailyReportController extends Controller
             'deals_count' => (int) ($metrics['deals_count'] ?? 0),
             'comment' => $validated['comment'] ?? '',
             'plans_for_tomorrow' => $validated['plans_for_tomorrow'] ?? '',
-            'submitted_at' => now(),
         ];
 
         if (\Illuminate\Support\Facades\Schema::hasColumn('daily_reports', 'sales_count')) {
             $payload['sales_count'] = (float) ($metrics['sales_count'] ?? 0);
         }
 
-        $existing = DailyReport::query()
-            ->where('user_id', $user->id)
-            ->whereDate('report_date', $reportDate)
-            ->first();
-
-        if ($existing) {
-            $this->denyKpi('KPI_SUBMITTED_EDIT_FORBIDDEN', 'Submitted daily report cannot be edited by current settings.');
-        }
-
-        DailyReport::query()->create(array_merge($payload, [
-            'user_id' => $user->id,
-            'report_date' => $reportDate,
-        ]));
-
-        return $this->myReport(new Request(['date' => $reportDate]));
+        return $payload;
     }
 
     public function scopeReport(Request $request)
@@ -889,6 +962,17 @@ class DailyReportController extends Controller
                 'comment' => (string) ($report->comment ?? ''),
                 'plans_for_tomorrow' => (string) ($report->plans_for_tomorrow ?? ''),
             ],
+            'ads' => (int) ($report->ad_count ?? 0),
+            'calls' => (int) ($report->calls_count ?? 0),
+            'calls_count' => (int) ($autoMetrics['calls_count'] ?? 0),
+            'meetings_count' => (int) ($autoMetrics['meetings_count'] ?? 0),
+            'shows_count' => (int) ($autoMetrics['shows_count'] ?? 0),
+            'new_clients_count' => (int) ($autoMetrics['new_clients_count'] ?? 0),
+            'new_properties_count' => (int) ($autoMetrics['new_properties_count'] ?? 0),
+            'deals_count' => (int) ($autoMetrics['deals_count'] ?? 0),
+            'sales_count' => (float) ($autoMetrics['sales_count'] ?? 0),
+            'comment' => (string) ($report->comment ?? ''),
+            'plans_for_tomorrow' => (string) ($report->plans_for_tomorrow ?? ''),
             'submitted' => $report->submitted_at !== null,
             'submitted_at' => $report->submitted_at,
             'created_at' => $report->created_at,
@@ -900,6 +984,60 @@ class DailyReportController extends Controller
     private function timezone(): string
     {
         return (string) config('app.timezone', 'Asia/Dushanbe');
+    }
+
+    /**
+     * Server-authoritative workflow state for the self-service daily report UI.
+     * Manual fields are fixed on submit, while system metrics remain live until
+     * the selected local day ends.
+     */
+    private function myReportWorkflow(User $user, string $reportDate, ?DailyReport $report): array
+    {
+        $timezone = $this->timezone();
+        $now = Carbon::now($timezone);
+        $day = Carbon::parse($reportDate, $timezone)->startOfDay();
+        $today = $now->copy()->startOfDay();
+        [$hour, $minute] = $this->dailyReportSubmitStartTime();
+        $submitAvailableAt = $day->copy()->setTime($hour, $minute);
+        $liveUntil = $day->copy()->endOfDay();
+        $locked = $this->isDateLocked($user, $reportDate);
+        $submitted = $report?->submitted_at !== null;
+
+        if ($submitted) {
+            $state = $day->equalTo($today) && $now->lte($liveUntil)
+                ? 'submitted_live'
+                : 'finalized';
+        } elseif ($day->lt($today) || ($day->equalTo($today) && $now->gte($submitAvailableAt))) {
+            $state = 'ready_to_submit';
+        } else {
+            $state = 'draft';
+        }
+
+        return [
+            'state' => $state,
+            'can_save_draft' => ! $submitted && ! $locked && $day->lte($today),
+            'can_submit' => ! $submitted
+                && ! $locked
+                && ($day->lt($today) || ($day->equalTo($today) && $now->gte($submitAvailableAt))),
+            'submit_available_at' => $submitAvailableAt->toIso8601String(),
+            'auto_metrics_live_until' => $liveUntil->toIso8601String(),
+        ];
+    }
+
+    /** @return array{0:int,1:int} */
+    private function dailyReportSubmitStartTime(): array
+    {
+        $raw = (string) config('kpi.daily_report.submit_start_time', '20:00');
+        if (preg_match('/^(\d{1,2}):(\d{2})$/', $raw, $matches) !== 1) {
+            return [20, 0];
+        }
+
+        $hour = (int) $matches[1];
+        $minute = (int) $matches[2];
+
+        return $hour >= 0 && $hour <= 23 && $minute >= 0 && $minute <= 59
+            ? [$hour, $minute]
+            : [20, 0];
     }
 
     private function denyKpi(string $code, string $message, int $status = 403, array $details = []): void

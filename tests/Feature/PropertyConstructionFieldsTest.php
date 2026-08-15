@@ -1521,4 +1521,121 @@ class PropertyConstructionFieldsTest extends TestCase
         $this->assertSame('approved', $property->moderation_status);
         $this->assertNull($property->status_comment);
     }
+
+    public function test_owner_can_refresh_listing_date_without_changing_created_at_and_cooldown_blocks_repeat(): void
+    {
+        config(['property-listing.date_refresh_cooldown_seconds' => 86_400]);
+        Carbon::setTestNow('2026-08-14 10:00:00');
+
+        [$owner, $property] = $this->createListingDateRefreshFixture('approved', '930000401');
+        $createdAt = $property->getRawOriginal('created_at');
+        $oldListingUpdatedAt = $property->listing_updated_at?->toJSON();
+
+        Carbon::setTestNow('2026-08-14 12:00:00');
+        Sanctum::actingAs($owner);
+
+        $response = $this->postJson("/api/properties/{$property->id}/refresh-listing-date", [
+            'listing_updated_at' => '2000-01-01T00:00:00Z',
+            'created_at' => '2000-01-01T00:00:00Z',
+        ]);
+
+        $response->assertOk()
+            ->assertJsonPath('message', 'Дата объявления обновлена')
+            ->assertJsonPath('data.id', $property->id)
+            ->assertJsonPath('data.created_at', '2026-08-14T05:00:00.000000Z')
+            ->assertJsonPath('data.listing_updated_at', '2026-08-14T07:00:00.000000Z')
+            ->assertJsonPath('data.capabilities.can_refresh_listing_date', false)
+            ->assertJsonPath('data.listing_date_refresh.available', false)
+            ->assertJsonPath('data.listing_date_refresh.next_available_at', '2026-08-15T07:00:00.000000Z');
+
+        $property->refresh();
+        $this->assertSame((string) $createdAt, (string) $property->getRawOriginal('created_at'));
+        $this->assertNotSame($oldListingUpdatedAt, $property->listing_updated_at?->toJSON());
+        $this->assertDatabaseHas('property_logs', [
+            'property_id' => $property->id,
+            'user_id' => $owner->id,
+            'action' => 'listing_date_refreshed',
+        ]);
+
+        $this->postJson("/api/properties/{$property->id}/refresh-listing-date")
+            ->assertStatus(409)
+            ->assertJsonPath('code', 'LISTING_DATE_REFRESH_COOLDOWN')
+            ->assertJsonPath('next_available_at', '2026-08-15T07:00:00.000000Z');
+
+        $this->assertSame(1, \App\Models\PropertyLog::query()
+            ->where('property_id', $property->id)
+            ->where('action', 'listing_date_refreshed')
+            ->count());
+    }
+
+    public function test_listing_date_refresh_rejects_disallowed_status_and_user_without_mutation_access(): void
+    {
+        [$owner, $pendingProperty] = $this->createListingDateRefreshFixture('pending', '930000402');
+        Sanctum::actingAs($owner);
+
+        $this->postJson("/api/properties/{$pendingProperty->id}/refresh-listing-date")
+            ->assertStatus(422)
+            ->assertJsonPath('code', 'LISTING_DATE_REFRESH_STATUS_NOT_ALLOWED');
+
+        [, $approvedProperty] = $this->createListingDateRefreshFixture('approved', '930000403');
+        $otherRole = Role::create(['name' => 'Other agent', 'slug' => 'other-agent']);
+        $otherUser = User::create([
+            'name' => 'Other User',
+            'phone' => '930000404',
+            'password' => bcrypt('password'),
+            'role_id' => $otherRole->id,
+            'status' => 'active',
+        ]);
+        Sanctum::actingAs($otherUser);
+
+        $this->postJson("/api/properties/{$approvedProperty->id}/refresh-listing-date")
+            ->assertForbidden();
+    }
+
+    public function test_authenticated_property_show_exposes_refresh_capability_and_guest_does_not(): void
+    {
+        [$owner, $property] = $this->createListingDateRefreshFixture('approved', '930000405');
+
+        $this->getJson("/api/properties/{$property->id}")
+            ->assertOk()
+            ->assertJsonMissingPath('capabilities')
+            ->assertJsonMissingPath('listing_date_refresh');
+
+        Sanctum::actingAs($owner);
+
+        $this->getJson("/api/properties/{$property->id}")
+            ->assertOk()
+            ->assertJsonPath('capabilities.can_edit', true)
+            ->assertJsonPath('capabilities.can_refresh_listing_date', true)
+            ->assertJsonPath('listing_date_refresh.available', true)
+            ->assertJsonPath('listing_date_refresh.next_available_at', null);
+    }
+
+    private function createListingDateRefreshFixture(string $moderationStatus, string $phone): array
+    {
+        $role = Role::create([
+            'name' => 'Agent '.$phone,
+            'slug' => 'agent-'.$phone,
+        ]);
+        $owner = User::create([
+            'name' => 'Listing Owner',
+            'phone' => $phone,
+            'password' => bcrypt('password'),
+            'role_id' => $role->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment '.$phone]);
+        $property = \App\Models\Property::query()->create([
+            'title' => 'Listing refresh target',
+            'type_id' => $type->id,
+            'price' => 100000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'moderation_status' => $moderationStatus,
+            'created_by' => $owner->id,
+            'agent_id' => $owner->id,
+        ]);
+
+        return [$owner, $property];
+    }
 }

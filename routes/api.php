@@ -217,6 +217,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::put('/me/reminders/daily-report', [MyReminderController::class, 'updateDailyReport']);
     Route::get('/kpi/daily/my-progress', [KpiModuleController::class, 'myDailyProgress']);
     Route::get('/kpi/daily/my-report', [DailyReportController::class, 'myReport']);
+    Route::put('/kpi/daily/my-report/draft', [DailyReportController::class, 'saveMyReportDraft']);
     Route::post('/kpi/daily/my-report', [DailyReportController::class, 'submitMyReport']);
     Route::get('/kpi/daily/report', [DailyReportController::class, 'scopeReport']);
     Route::patch('/kpi/daily/report', [DailyReportController::class, 'updateScopeReport']);
@@ -347,6 +348,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         Route::get('/properties/{property}/logs', [PropertyController::class, 'logs']);
         Route::get('/properties/{property}/matching-clients', [PropertyController::class, 'matchingClients']);
         Route::put('/properties/{property}', [PropertyController::class, 'update']);
+        Route::post('/properties/{property}/refresh-listing-date', [PropertyController::class, 'refreshListingDate']);
         Route::patch('/properties/{property}/co-owner', [PropertyController::class, 'updateCoOwner']);
         Route::delete('/properties/{property}', [PropertyController::class, 'destroy']);
         Route::patch('/properties/{property}/moderation-listing', [PropertyController::class, 'updateModerationAndListingType']);

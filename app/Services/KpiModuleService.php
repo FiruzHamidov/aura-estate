@@ -1085,6 +1085,11 @@ class KpiModuleService
                 $locked = $this->isPeriodLockedForUser($periodType, $from, $user);
                 $rowSourceError = collect($metrics)->contains(fn (array $metric) => (bool) $metric['source_error']);
                 $globalSourceError = $globalSourceError || $rowSourceError;
+                $liveClients = Schema::hasTable('clients')
+                    ? (float) collect($autoByDate)->sum(
+                        fn (array $dayMetrics) => (float) ($dayMetrics['new_clients_count'] ?? 0)
+                    )
+                    : (float) $rows->sum('new_clients_count');
 
                 $payload = [
                     'period_key' => $periodType === 'day' ? $from->toDateString() : ($periodType === 'week' ? $from->format('o-\WW') : $from->format('Y-m')),
@@ -1108,8 +1113,8 @@ class KpiModuleService
                     'ads_display' => $this->displayNumber((float) ($metrics['ads']['final_value'] ?? 0)),
                     'calls_raw' => (float) ($metrics['calls']['final_value'] ?? 0),
                     'calls_display' => $this->displayNumber((float) ($metrics['calls']['final_value'] ?? 0)),
-                    'clients_raw' => (float) $rows->sum('new_clients_count'),
-                    'clients_display' => $this->displayNumber((float) $rows->sum('new_clients_count')),
+                    'clients_raw' => $liveClients,
+                    'clients_display' => $this->displayNumber($liveClients),
                     'sales_raw' => (float) ($metrics['sales']['final_value'] ?? 0),
                     'sales_display' => $this->displayNumber((float) ($metrics['sales']['final_value'] ?? 0)),
                     'sales_count_raw' => (float) ($metrics['sales']['final_value'] ?? 0),
@@ -1118,7 +1123,7 @@ class KpiModuleService
                     'shows' => (float) ($metrics['shows']['final_value'] ?? 0),
                     'ads' => (float) ($metrics['ads']['final_value'] ?? 0),
                     'calls' => (float) ($metrics['calls']['final_value'] ?? 0),
-                    'clients' => (float) $rows->sum('new_clients_count'),
+                    'clients' => $liveClients,
                     'sales' => (float) ($metrics['sales']['final_value'] ?? 0),
                     'kpi_value' => $kpiValue,
                     'kpi_percent' => $kpiPercent,
@@ -1241,6 +1246,11 @@ class KpiModuleService
             $locked = isset($lockedScopes[(string) $user->branch_id.'|'.(string) $user->branch_group_id]);
             $rowSourceError = collect($metrics)->contains(fn (array $metric) => (bool) $metric['source_error']);
             $globalSourceError = $globalSourceError || $rowSourceError;
+            $liveClients = Schema::hasTable('clients')
+                ? (float) collect($autoByDate)->sum(
+                    fn (array $dayMetrics) => (float) ($dayMetrics['new_clients_count'] ?? 0)
+                )
+                : (float) $rows->sum('new_clients_count');
 
             foreach ($metrics as $metricKey => $metricPayload) {
                 $planTraceRows[] = [
@@ -1289,8 +1299,8 @@ class KpiModuleService
                 'ads_display' => $this->displayNumber((float) ($metrics['ads']['final_value'] ?? 0)),
                 'calls_raw' => (float) ($metrics['calls']['final_value'] ?? 0),
                 'calls_display' => $this->displayNumber((float) ($metrics['calls']['final_value'] ?? 0)),
-                'clients_raw' => (float) $rows->sum('new_clients_count'),
-                'clients_display' => $this->displayNumber((float) $rows->sum('new_clients_count')),
+                'clients_raw' => $liveClients,
+                'clients_display' => $this->displayNumber($liveClients),
                 'sales_raw' => (float) ($metrics['sales']['final_value'] ?? 0),
                 'sales_display' => $this->displayNumber((float) ($metrics['sales']['final_value'] ?? 0)),
                 'sales_count_raw' => (float) ($metrics['sales']['final_value'] ?? 0),
@@ -1299,7 +1309,7 @@ class KpiModuleService
                 'shows' => (float) ($metrics['shows']['final_value'] ?? 0),
                 'ads' => (float) ($metrics['ads']['final_value'] ?? 0),
                 'calls' => (float) ($metrics['calls']['final_value'] ?? 0),
-                'clients' => (float) $rows->sum('new_clients_count'),
+                'clients' => $liveClients,
                 'sales' => (float) ($metrics['sales']['final_value'] ?? 0),
                 'kpi_value' => $kpiValue,
                 'kpi_percent' => $kpiPercent,
@@ -1493,8 +1503,14 @@ class KpiModuleService
                 ->where(function ($q) use ($userIds) {
                     $q->whereIn('created_by', $userIds)->orWhereIn('responsible_agent_id', $userIds);
                 })->get() as $client) {
-                $userId = in_array((int) $client->created_by, $userIds, true) ? (int) $client->created_by : (int) $client->responsible_agent_id;
-                if ($userId > 0) {
+                $clientUserIds = array_values(array_unique([
+                    (int) $client->created_by,
+                    (int) $client->responsible_agent_id,
+                ]));
+                foreach ($clientUserIds as $userId) {
+                    if ($userId <= 0 || ! in_array($userId, $userIds, true)) {
+                        continue;
+                    }
                     $put($result, $userId, $localDate($client->created_at), 'new_clients_count', 1);
                 }
             }

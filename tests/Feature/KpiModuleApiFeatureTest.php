@@ -364,8 +364,25 @@ class KpiModuleApiFeatureTest extends TestCase
         $admin = User::create(['name' => 'Admin', 'phone' => '900010301', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'active']);
         $agent = User::create(['name' => 'Agent', 'phone' => '900010302', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'active']);
 
-        DailyReport::create(['user_id' => $agent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-04', 'new_clients_count' => 3, 'submitted_at' => now()]);
-        DailyReport::create(['user_id' => $agent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-05', 'new_clients_count' => 2, 'submitted_at' => now()]);
+        // The saved snapshot is intentionally stale: live CRM data added after
+        // submission must still be reflected in daily/weekly/monthly responses.
+        DailyReport::create(['user_id' => $agent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-04', 'new_clients_count' => 1, 'submitted_at' => now()]);
+        DailyReport::create(['user_id' => $agent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-05', 'new_clients_count' => 1, 'submitted_at' => now()]);
+
+        Schema::create('clients', function (Blueprint $t) {
+            $t->id();
+            $t->unsignedBigInteger('created_by')->nullable();
+            $t->unsignedBigInteger('responsible_agent_id')->nullable();
+            $t->timestamps();
+        });
+        foreach (['2026-05-04 08:00:00', '2026-05-04 09:00:00', '2026-05-04 10:00:00', '2026-05-05 08:00:00', '2026-05-05 09:00:00'] as $createdAt) {
+            \DB::table('clients')->insert([
+                'created_by' => $agent->id,
+                'responsible_agent_id' => $agent->id,
+                'created_at' => $createdAt,
+                'updated_at' => $createdAt,
+            ]);
+        }
 
         Sanctum::actingAs($admin);
 
