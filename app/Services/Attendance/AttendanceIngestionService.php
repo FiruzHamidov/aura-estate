@@ -207,8 +207,8 @@ final class AttendanceIngestionService
             'occurred_at' => $raw->occurred_at_utc,
             'verification_method' => $verificationMethod,
             'direction' => match ($eventType) {
-                'check_in' => 'in',
-                'check_out' => 'out',
+                'check_in', 'break_in' => 'in',
+                'check_out', 'break_out' => 'out',
                 default => null,
             },
             'is_duplicate' => $isDuplicate,

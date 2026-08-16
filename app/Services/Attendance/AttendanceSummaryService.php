@@ -7,6 +7,7 @@ use App\Models\AttendanceEvent;
 use App\Models\AttendanceWorkSchedule;
 use App\Models\User;
 use Carbon\CarbonImmutable;
+use Illuminate\Support\Collection;
 
 final class AttendanceSummaryService
 {
@@ -24,20 +25,26 @@ final class AttendanceSummaryService
             ->orderBy('id')
             ->get();
 
-        $first = $events->firstWhere('event_type', 'check_in') ?? $events->first();
-        $last = $events->where('event_type', 'check_out')->last();
-        if ($last === null && $events->count() > 1) {
-            $last = $events->last();
+        $punches = $events->where('event_type', 'punch');
+        $first = $events->firstWhere('event_type', 'check_in');
+        if ($first === null && $punches->isNotEmpty()) {
+            $first = $punches->first();
         }
-        if ($last?->is($first)) {
+        $last = $events->where('event_type', 'check_out')->last();
+        if ($last === null && $punches->count() > 1) {
+            $last = $punches->last();
+        }
+        if ($first === null || $last?->is($first)) {
             $last = null;
         }
 
         $firstAt = $first?->occurred_at;
         $lastAt = $last?->occurred_at;
-        $workedMinutes = $firstAt && $lastAt && $lastAt->greaterThanOrEqualTo($firstAt)
-            ? (int) $firstAt->diffInMinutes($lastAt)
-            : null;
+        $workedMinutes = null;
+        if ($firstAt && $lastAt && $lastAt->greaterThanOrEqualTo($firstAt)) {
+            $grossMinutes = (int) $firstAt->diffInMinutes($lastAt);
+            $workedMinutes = max(0, $grossMinutes - $this->completedBreakMinutes($events, $firstAt->toImmutable(), $lastAt->toImmutable()));
+        }
         $lateMinutes = $this->lateMinutes(
             $settings?->schedule ?? config('attendance.default_schedule', []),
             $firstAt?->toImmutable(),
@@ -45,7 +52,7 @@ final class AttendanceSummaryService
         );
         $status = $events->isEmpty()
             ? 'absent'
-            : ($lastAt === null ? 'incomplete' : ($lateMinutes > 0 ? 'late' : 'present'));
+            : ($firstAt === null || $lastAt === null ? 'incomplete' : ($lateMinutes > 0 ? 'late' : 'present'));
 
         return AttendanceDailySummary::query()->updateOrCreate(
             ['user_id' => $user->id, 'work_date' => $workDate],
@@ -78,6 +85,32 @@ final class AttendanceSummaryService
     public function timezoneFor(User $user): string
     {
         return $this->timezone($this->settings($user));
+    }
+
+    private function completedBreakMinutes(Collection $events, CarbonImmutable $firstAt, CarbonImmutable $lastAt): int
+    {
+        $breakStartedAt = null;
+        $minutes = 0;
+
+        foreach ($events as $event) {
+            $occurredAt = $event->occurred_at?->toImmutable();
+            if ($occurredAt === null || $occurredAt->lessThan($firstAt) || $occurredAt->greaterThan($lastAt)) {
+                continue;
+            }
+
+            if ($event->event_type === 'break_out' && $breakStartedAt === null) {
+                $breakStartedAt = $occurredAt;
+
+                continue;
+            }
+
+            if ($event->event_type === 'break_in' && $breakStartedAt !== null && $occurredAt->greaterThan($breakStartedAt)) {
+                $minutes += (int) $breakStartedAt->diffInMinutes($occurredAt);
+                $breakStartedAt = null;
+            }
+        }
+
+        return $minutes;
     }
 
     private function lateMinutes(array $weeklySchedule, ?CarbonImmutable $firstAtUtc, CarbonImmutable $localDay): int

@@ -28,6 +28,8 @@ return [
     'status_map' => [
         '0' => 'check_in',
         '1' => 'check_out',
+        '2' => 'break_out',
+        '3' => 'break_in',
         '4' => 'check_in',
         '5' => 'check_out',
     ],

@@ -119,6 +119,72 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->assertSame('2026-08-17 13:00:00', $device->fresh()->last_event_at->format('Y-m-d H:i:s'));
     }
 
+    public function test_break_statuses_are_normalized_without_becoming_arrival_or_departure(): void
+    {
+        $context = $this->context();
+        $device = $this->device('ZAM230-BREAKS', $context['branch'], $context['group']);
+        $this->map($device, $context['agent']);
+        $payload = implode("\n", [
+            $context['agent']->id."\t2026-08-17 09:00:00\t0\t15\t0",
+            $context['agent']->id."\t2026-08-17 12:00:00\t2\t15\t0",
+            $context['agent']->id."\t2026-08-17 13:00:00\t3\t15\t0",
+            $context['agent']->id."\t2026-08-17 18:00:00\t1\t15\t0",
+        ]);
+
+        $this->postDevicePayload('/iclock/cdata?SN=ZAM230-BREAKS&table=ATTLOG', $payload)
+            ->assertOk()
+            ->assertSeeText('OK: 4');
+
+        $events = AttendanceEvent::query()->orderBy('occurred_at')->get();
+        $this->assertSame(['check_in', 'break_out', 'break_in', 'check_out'], $events->pluck('event_type')->all());
+        $this->assertSame(['in', 'out', 'in', 'out'], $events->pluck('direction')->all());
+
+        $summary = AttendanceDailySummary::query()->firstOrFail();
+        $this->assertSame('2026-08-17 04:00:00', $summary->first_in_at->format('Y-m-d H:i:s'));
+        $this->assertSame('2026-08-17 13:00:00', $summary->last_out_at->format('Y-m-d H:i:s'));
+        $this->assertSame(480, $summary->worked_minutes);
+        $this->assertSame(4, $summary->events_count);
+        $this->assertSame('present', $summary->status);
+    }
+
+    public function test_break_event_after_checkout_does_not_replace_last_departure(): void
+    {
+        $context = $this->context();
+        $device = $this->device('ZAM230-LATE-BREAK', $context['branch'], $context['group']);
+        $this->map($device, $context['agent']);
+        $payload = implode("\n", [
+            $context['agent']->id."\t2026-08-16 19:50:49\t0\t15\t0",
+            $context['agent']->id."\t2026-08-16 20:03:09\t1\t15\t0",
+            $context['agent']->id."\t2026-08-16 20:34:57\t3\t15\t0",
+        ]);
+
+        $this->postDevicePayload('/iclock/cdata?SN=ZAM230-LATE-BREAK&table=ATTLOG', $payload)->assertOk();
+
+        $summary = AttendanceDailySummary::query()->firstOrFail();
+        $this->assertSame('2026-08-16 15:03:09', $summary->last_out_at->format('Y-m-d H:i:s'));
+        $this->assertSame(12, $summary->worked_minutes);
+        $this->assertSame(3, $summary->events_count);
+        $this->assertSame('present', $summary->status);
+    }
+
+    public function test_checkout_without_arrival_is_incomplete(): void
+    {
+        $context = $this->context();
+        $device = $this->device('ZAM230-CHECKOUT-ONLY', $context['branch'], $context['group']);
+        $this->map($device, $context['agent']);
+
+        $this->postDevicePayload(
+            '/iclock/cdata?SN=ZAM230-CHECKOUT-ONLY&table=ATTLOG',
+            $context['agent']->id."\t2026-08-16 18:00:00\t1\t15\t0"
+        )->assertOk();
+
+        $summary = AttendanceDailySummary::query()->firstOrFail();
+        $this->assertNull($summary->first_in_at);
+        $this->assertNull($summary->last_out_at);
+        $this->assertNull($summary->worked_minutes);
+        $this->assertSame('incomplete', $summary->status);
+    }
+
     public function test_real_zam230_fixture_flows_from_device_api_to_daily_summary(): void
     {
         $context = $this->context();
