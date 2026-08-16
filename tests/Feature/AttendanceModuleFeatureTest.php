@@ -163,6 +163,10 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->assertSame('2026-08-16 15:03:09', $summary->last_out_at->format('Y-m-d H:i:s'));
         $this->assertSame(12, $summary->worked_minutes);
         $this->assertSame(0, $summary->late_minutes);
+
+        $this->getJson('/api/attendance/daily?user_id='.$context['admin']->id.'&date_from=2026-08-16&date_to=2026-08-16')
+            ->assertOk()
+            ->assertJsonPath('data.0.work_date', '2026-08-16');
     }
 
     public function test_database_queue_accepts_first_and_normalizes_in_worker(): void
