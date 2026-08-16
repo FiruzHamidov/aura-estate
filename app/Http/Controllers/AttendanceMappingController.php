@@ -103,4 +103,31 @@ final class AttendanceMappingController extends Controller
 
         return response()->json(['data' => $mapping->fresh(['device', 'user.role']), 'reprocessed' => $reprocessed]);
     }
+
+    public function destroy(Request $request, AttendanceDeviceUser $mapping)
+    {
+        $this->access->assertCanManageMappings($request->user());
+        $old = $mapping->only([
+            'device_id',
+            'device_user_id',
+            'user_id',
+            'card_number',
+            'is_active',
+            'mapped_by',
+            'mapped_at',
+        ]);
+        $this->audit->record(
+            $request->user(),
+            'attendance_mapping.deleted',
+            $mapping,
+            $old,
+            [],
+            $request
+        );
+        $mapping->delete();
+
+        return response()->json([
+            'message' => 'Сопоставление удалено. ZKTeco ID можно назначить другому сотруднику.',
+        ]);
+    }
 }

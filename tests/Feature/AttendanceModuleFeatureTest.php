@@ -1182,6 +1182,39 @@ class AttendanceModuleFeatureTest extends TestCase
         ]);
     }
 
+    public function test_mapping_can_be_deleted_and_terminal_id_reused_without_reassigning_history(): void
+    {
+        $context = $this->context();
+        $device = $this->device('ZAM230-MAP-REUSE', $context['branch'], $context['group']);
+        $mapping = $this->map($device, $context['agent']);
+        $this->postDevicePayload(
+            '/iclock/cdata?SN=ZAM230-MAP-REUSE&table=ATTLOG',
+            $context['agent']->id."\t2026-08-16 09:00:00\t0\t15\t0"
+        )->assertOk();
+        Sanctum::actingAs($context['hr']);
+
+        $this->deleteJson('/api/attendance/device-users/'.$mapping->id)
+            ->assertOk()
+            ->assertJsonPath('message', 'Сопоставление удалено. ZKTeco ID можно назначить другому сотруднику.');
+
+        $this->assertDatabaseMissing('attendance_device_users', ['id' => $mapping->id]);
+        $this->assertDatabaseHas('attendance_events', ['user_id' => $context['agent']->id]);
+        $this->assertDatabaseHas('attendance_audit_logs', ['action' => 'attendance_mapping.deleted']);
+
+        $this->putJson('/api/attendance/device-users', [
+            'device_id' => $device->id,
+            'device_user_id' => (string) $context['agent']->id,
+            'user_id' => $context['otherAgent']->id,
+        ])->assertOk()->assertJsonPath('data.user_id', $context['otherAgent']->id);
+
+        $this->assertDatabaseHas('attendance_events', ['user_id' => $context['agent']->id]);
+        $this->assertDatabaseHas('attendance_device_users', [
+            'device_id' => $device->id,
+            'device_user_id' => (string) $context['agent']->id,
+            'user_id' => $context['otherAgent']->id,
+        ]);
+    }
+
     public function test_summarize_command_materializes_absence(): void
     {
         $context = $this->context();
