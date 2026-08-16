@@ -88,11 +88,12 @@ final class AttendanceReportController extends Controller
 
         return response()->streamDownload(function () use ($query) {
             $stream = fopen('php://output', 'wb');
+            fwrite($stream, "\xEF\xBB\xBF");
             fputcsv($stream, ['date', 'user_id', 'employee', 'first_in_at', 'last_out_at', 'worked_minutes', 'late_minutes', 'status']);
             $query->orderBy('work_date')->orderBy('user_id')->chunk(500, function ($rows) use ($stream) {
                 foreach ($rows as $row) {
                     fputcsv($stream, [
-                        $row->work_date?->toDateString(), $row->user_id, $row->user?->name,
+                        $row->work_date?->toDateString(), $row->user_id, $this->spreadsheetSafe($row->user?->name),
                         $row->first_in_at?->toISOString(), $row->last_out_at?->toISOString(),
                         $row->worked_minutes, $row->late_minutes, $row->status,
                     ]);
@@ -100,6 +101,13 @@ final class AttendanceReportController extends Controller
             });
             fclose($stream);
         }, 'attendance.csv', ['Content-Type' => 'text/csv; charset=UTF-8']);
+    }
+
+    private function spreadsheetSafe(?string $value): ?string
+    {
+        return $value !== null && preg_match('/^\s*[=+\-@]/u', $value) === 1
+            ? "'".$value
+            : $value;
     }
 
     private function filters(Request $request): array

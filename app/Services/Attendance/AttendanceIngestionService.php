@@ -74,7 +74,9 @@ final class AttendanceIngestionService
             $eventAt = CarbonImmutable::createFromTimestampUTC($latest);
             $drift = $eventAt->getTimestamp() - now()->getTimestamp();
             $measurementWindow = max(1, (int) config('attendance.clock_drift_measurement_window_seconds', 1800));
-            $deviceState['last_event_at'] = $eventAt;
+            if ($device->last_event_at === null || $eventAt->greaterThan($device->last_event_at)) {
+                $deviceState['last_event_at'] = $eventAt;
+            }
             if (abs($drift) <= $measurementWindow || $drift > 0) {
                 $deviceState['clock_drift_seconds'] = $drift;
                 if (abs($drift) > (int) config('attendance.clock_drift_warning_seconds', 300)) {
