@@ -3,6 +3,7 @@
 namespace App\Console\Commands;
 
 use App\Models\User;
+use App\Services\Attendance\AttendanceParticipantService;
 use App\Services\Attendance\AttendanceSummaryService;
 use Carbon\CarbonImmutable;
 use Illuminate\Console\Command;
@@ -13,7 +14,7 @@ final class SummarizeAttendanceCommand extends Command
 
     protected $description = 'Rebuild attendance summaries, including absences, for a work date';
 
-    public function handle(AttendanceSummaryService $summaries): int
+    public function handle(AttendanceSummaryService $summaries, AttendanceParticipantService $participants): int
     {
         $timezone = (string) config('attendance.timezone', 'Asia/Dushanbe');
         $date = $this->argument('date') ?: CarbonImmutable::now($timezone)->subDay()->toDateString();
@@ -23,9 +24,7 @@ final class SummarizeAttendanceCommand extends Command
             return self::INVALID;
         }
         $count = 0;
-        User::query()
-            ->where('status', User::STATUS_ACTIVE)
-            ->whereHas('role', fn ($roles) => $roles->whereIn('slug', config('attendance.tracked_roles', [])))
+        $participants->query()
             ->orderBy('id')
             ->each(function (User $user) use ($summaries, $date, &$count) {
                 if (! $summaries->isWorkingDay($user, (string) $date)) {

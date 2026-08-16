@@ -9,6 +9,7 @@ use App\Models\User;
 use App\Services\Attendance\AttendanceAccessService;
 use App\Services\Attendance\AttendanceAuditService;
 use App\Services\Attendance\AttendanceIngestionService;
+use App\Services\Attendance\AttendanceParticipantService;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
 
@@ -18,6 +19,7 @@ final class AttendanceMappingController extends Controller
         private readonly AttendanceAccessService $access,
         private readonly AttendanceAuditService $audit,
         private readonly AttendanceIngestionService $ingestion,
+        private readonly AttendanceParticipantService $participants,
     ) {}
 
     public function index(Request $request)
@@ -48,10 +50,8 @@ final class AttendanceMappingController extends Controller
             'card_number' => ['nullable', 'string', 'max:100'],
             'is_active' => ['sometimes', 'boolean'],
         ]);
-        $target = User::query()->with('role')->findOrFail($data['user_id']);
-        if (! in_array($target->role?->slug, config('attendance.tracked_roles', []), true)) {
-            throw ValidationException::withMessages(['user_id' => ['Роль сотрудника не участвует в учёте посещаемости.']]);
-        }
+        $target = User::query()->findOrFail($data['user_id']);
+        $this->participants->assertEligible($target);
 
         $mapping = AttendanceDeviceUser::query()
             ->where('device_id', $data['device_id'])

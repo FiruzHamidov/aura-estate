@@ -7,6 +7,8 @@ use Illuminate\Database\Eloquent\Builder;
 
 final class AttendanceAccessService
 {
+    public function __construct(private readonly AttendanceParticipantService $participants) {}
+
     public function role(User $user): ?string
     {
         $user->loadMissing('role');
@@ -16,8 +18,8 @@ final class AttendanceAccessService
 
     public function assertCanViewModule(User $user): void
     {
-        if (! in_array($this->role($user), config('attendance.viewer_roles', []), true)) {
-            $this->deny('ATTENDANCE_FORBIDDEN_ROLE', 'Нет доступа к модулю посещаемости.');
+        if (! $this->participants->isEligible($user)) {
+            $this->deny('ATTENDANCE_INACTIVE_USER', 'Учёт посещаемости доступен только активным пользователям.');
         }
     }
 
@@ -31,7 +33,7 @@ final class AttendanceAccessService
     public function visibleUsersQuery(User $viewer): Builder
     {
         $this->assertCanViewModule($viewer);
-        $query = User::query()->with(['role', 'branch', 'branchGroup']);
+        $query = $this->participants->query()->with(['role', 'branch', 'branchGroup']);
 
         return match ($this->role($viewer)) {
             'agent', 'intern' => $query->whereKey($viewer->id),
@@ -46,13 +48,9 @@ final class AttendanceAccessService
             }),
             'rop', 'branch_director' => $viewer->branch_id === null
                 ? $query->whereKey($viewer->id)
-                : $query->where('branch_id', $viewer->branch_id)
-                    ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', config('attendance.tracked_roles', []))),
-            'hr', 'admin', 'superadmin', 'owner' => $query->whereHas(
-                'role',
-                fn (Builder $roles) => $roles->whereIn('slug', config('attendance.tracked_roles', []))
-            ),
-            default => $query->whereRaw('1 = 0'),
+                : $query->where('branch_id', $viewer->branch_id),
+            'hr', 'admin', 'superadmin', 'owner' => $query,
+            default => $query->whereKey($viewer->id),
         };
     }
 

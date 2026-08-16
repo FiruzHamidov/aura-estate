@@ -123,33 +123,46 @@ class AttendanceModuleFeatureTest extends TestCase
     {
         $context = $this->context();
         $device = $this->device('WCF3254200047', $context['branch'], $context['group']);
-        AttendanceDeviceUser::create([
-            'device_id' => $device->id,
-            'device_user_id' => '1',
-            'user_id' => $context['agent']->id,
-            'is_active' => true,
-            'mapped_at' => now(),
-        ]);
         $payload = file_get_contents(base_path('tests/Fixtures/zkteco/zam230_wcf3254200047_attlog.txt'));
 
         $this->postDevicePayload('/iclock/cdata?SN=WCF3254200047&table=ATTLOG', $payload)
             ->assertOk()
-            ->assertSeeText('OK: 1');
+            ->assertSeeText('OK: 2');
 
-        $raw = AttendanceRawEvent::query()->firstOrFail();
+        $this->assertDatabaseCount('attendance_raw_events', 2);
+        $this->assertSame(2, AttendanceRawEvent::query()->where('processing_status', 'unmapped')->count());
+        $this->assertDatabaseCount('attendance_events', 0);
+
+        Sanctum::actingAs($context['admin']);
+        $this->putJson('/api/attendance/device-users', [
+            'device_id' => $device->id,
+            'device_user_id' => '1',
+            'user_id' => $context['admin']->id,
+        ])->assertOk()
+            ->assertJsonPath('reprocessed.processed', 2)
+            ->assertJsonPath('reprocessed.unmapped', 0);
+
+        $raw = AttendanceRawEvent::query()->orderBy('occurred_at_utc')->firstOrFail();
         $this->assertSame('1', $raw->device_user_id);
         $this->assertSame('2026-08-16 19:50:49', $raw->occurred_at_local->format('Y-m-d H:i:s'));
         $this->assertSame('processed', $raw->processing_status);
 
-        $event = AttendanceEvent::query()->firstOrFail();
-        $this->assertSame($context['agent']->id, $event->user_id);
+        $this->assertDatabaseCount('attendance_events', 2);
+        $event = AttendanceEvent::query()->orderBy('occurred_at')->firstOrFail();
+        $this->assertSame($context['admin']->id, $event->user_id);
         $this->assertSame('face', $event->verification_method);
         $this->assertSame('2026-08-16 14:50:49', $event->occurred_at->format('Y-m-d H:i:s'));
+        $lastEvent = AttendanceEvent::query()->orderByDesc('occurred_at')->firstOrFail();
+        $this->assertSame('check_out', $lastEvent->event_type);
+        $this->assertSame('2026-08-16 15:03:09', $lastEvent->occurred_at->format('Y-m-d H:i:s'));
 
         $summary = AttendanceDailySummary::query()->firstOrFail();
         $this->assertSame('2026-08-16', $summary->work_date->toDateString());
-        $this->assertSame('incomplete', $summary->status);
+        $this->assertSame('present', $summary->status);
         $this->assertSame('2026-08-16 14:50:49', $summary->first_in_at->format('Y-m-d H:i:s'));
+        $this->assertSame('2026-08-16 15:03:09', $summary->last_out_at->format('Y-m-d H:i:s'));
+        $this->assertSame(12, $summary->worked_minutes);
+        $this->assertSame(0, $summary->late_minutes);
     }
 
     public function test_database_queue_accepts_first_and_normalizes_in_worker(): void
@@ -275,6 +288,42 @@ class AttendanceModuleFeatureTest extends TestCase
 
         Sanctum::actingAs($context['admin']);
         $this->getJson('/api/attendance/daily')->assertOk()->assertJsonCount(2, 'data');
+    }
+
+    public function test_any_active_role_can_participate_and_view_own_attendance(): void
+    {
+        $context = $this->context();
+        $device = $this->device('ZAM230-MARKETING', $context['branch'], $context['group']);
+        $marketingRole = Role::query()->firstOrCreate(['slug' => 'marketing'], ['name' => 'Marketing']);
+        $marketing = User::query()->create([
+            'name' => 'Marketing User',
+            'phone' => '992000009999',
+            'role_id' => $marketingRole->id,
+            'branch_id' => $context['branch']->id,
+            'branch_group_id' => $context['group']->id,
+            'status' => User::STATUS_ACTIVE,
+            'auth_method' => 'password',
+        ]);
+
+        Sanctum::actingAs($context['admin']);
+        $this->putJson('/api/attendance/device-users', [
+            'device_id' => $device->id,
+            'device_user_id' => 'marketing-1',
+            'user_id' => $marketing->id,
+        ])->assertOk()->assertJsonPath('data.user_id', $marketing->id);
+
+        $this->postDevicePayload(
+            '/iclock/cdata?SN=ZAM230-MARKETING&table=ATTLOG',
+            "marketing-1\t2026-08-17 09:00:00\t0\t15\t0"
+        )->assertOk();
+        $this->assertDatabaseHas('attendance_events', ['user_id' => $marketing->id]);
+
+        Sanctum::actingAs($marketing);
+        $this->getJson('/api/attendance/me')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.user_id', $marketing->id)
+            ->assertJsonPath('data.0.status', 'incomplete');
     }
 
     public function test_daily_and_csv_export_apply_device_filter_and_rbac(): void
@@ -431,7 +480,7 @@ class AttendanceModuleFeatureTest extends TestCase
         }
     }
 
-    public function test_admin_can_configure_only_tracked_user_schedule(): void
+    public function test_admin_can_configure_schedule_for_any_active_user(): void
     {
         $context = $this->context();
         Sanctum::actingAs($context['admin']);
@@ -456,8 +505,43 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->putJson('/api/attendance/users/'.$context['admin']->id.'/schedule', [
             'timezone' => 'Asia/Dushanbe',
             'schedule' => $schedule,
-            'change_reason' => 'Недопустимая роль',
-        ])->assertStatus(422);
+            'change_reason' => 'График администратора',
+        ])->assertOk()->assertJsonPath('data.user_id', $context['admin']->id);
+
+        $context['otherAgent']->update(['status' => User::STATUS_INACTIVE]);
+        $this->putJson('/api/attendance/users/'.$context['otherAgent']->id.'/schedule', [
+            'timezone' => 'Asia/Dushanbe',
+            'schedule' => $schedule,
+            'change_reason' => 'Неактивный пользователь',
+        ])->assertStatus(422)
+            ->assertJsonPath('details.errors.user_id.0', 'Учёт посещаемости доступен только активным пользователям.');
+    }
+
+    public function test_inactive_mapped_user_does_not_receive_new_attendance(): void
+    {
+        $context = $this->context();
+        $device = $this->device('ZAM230-INACTIVE', $context['branch'], $context['group']);
+        $this->map($device, $context['agent']);
+        $context['agent']->update(['status' => User::STATUS_INACTIVE]);
+
+        $this->postDevicePayload(
+            '/iclock/cdata?SN=ZAM230-INACTIVE&table=ATTLOG',
+            $context['agent']->id."\t2026-08-17 09:00:00\t0\t15\t0"
+        )->assertOk();
+
+        $this->assertDatabaseHas('attendance_raw_events', [
+            'device_user_id' => (string) $context['agent']->id,
+            'processing_status' => 'unmapped',
+        ]);
+        $this->assertDatabaseCount('attendance_events', 0);
+
+        Sanctum::actingAs($context['admin']);
+        $this->putJson('/api/attendance/device-users', [
+            'device_id' => $device->id,
+            'device_user_id' => '999',
+            'user_id' => $context['agent']->id,
+        ])->assertStatus(422)
+            ->assertJsonPath('details.errors.user_id.0', 'Учёт посещаемости доступен только активным пользователям.');
     }
 
     public function test_offline_device_is_marked_notified_only_once_until_reconnection(): void

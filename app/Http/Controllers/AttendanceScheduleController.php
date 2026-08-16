@@ -6,14 +6,15 @@ use App\Models\AttendanceWorkSchedule;
 use App\Models\User;
 use App\Services\Attendance\AttendanceAccessService;
 use App\Services\Attendance\AttendanceAuditService;
+use App\Services\Attendance\AttendanceParticipantService;
 use Illuminate\Http\Request;
-use Illuminate\Validation\ValidationException;
 
 final class AttendanceScheduleController extends Controller
 {
     public function __construct(
         private readonly AttendanceAccessService $access,
         private readonly AttendanceAuditService $audit,
+        private readonly AttendanceParticipantService $participants,
     ) {}
 
     public function show(Request $request, User $user)
@@ -33,12 +34,7 @@ final class AttendanceScheduleController extends Controller
     public function update(Request $request, User $user)
     {
         $this->access->assertCanAdminister($request->user());
-        $user->loadMissing('role');
-        if (! in_array($user->role?->slug, config('attendance.tracked_roles', []), true)) {
-            throw ValidationException::withMessages([
-                'user_id' => ['Роль сотрудника не участвует в учёте посещаемости.'],
-            ]);
-        }
+        $this->participants->assertEligible($user);
         $data = $request->validate([
             'timezone' => ['required', 'timezone'],
             'schedule' => ['required', 'array:1,2,3,4,5,6,7'],

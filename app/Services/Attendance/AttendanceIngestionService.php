@@ -19,6 +19,7 @@ final class AttendanceIngestionService
     public function __construct(
         private readonly AttendanceDeviceProtocol $protocol,
         private readonly AttendanceSummaryService $summaries,
+        private readonly AttendanceParticipantService $participants,
     ) {}
 
     /** @return array{accepted:int,duplicates:int,unmapped:int,rejected:list<array<string,mixed>>} */
@@ -111,7 +112,7 @@ final class AttendanceIngestionService
                 ->where('device_user_id', $lockedRaw->device_user_id)
                 ->where('is_active', true)
                 ->first();
-            if ($mapping === null) {
+            if ($mapping === null || ! $this->participants->isEligible($mapping->user)) {
                 $lockedRaw->forceFill(['processing_status' => 'unmapped'])->save();
 
                 return 'unmapped';
@@ -146,6 +147,9 @@ final class AttendanceIngestionService
                 ->where('device_user_id', $incoming['device_user_id'])
                 ->where('is_active', true)
                 ->first();
+            if ($mapping !== null && ! $this->participants->isEligible($mapping->user)) {
+                $mapping = null;
+            }
             $raw = AttendanceRawEvent::query()->firstOrCreate(
                 ['event_hash' => $hash],
                 [

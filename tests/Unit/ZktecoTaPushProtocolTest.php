@@ -43,7 +43,7 @@ class ZktecoTaPushProtocolTest extends TestCase
 
         $result = (new ZktecoTaPushProtocol)->parse($payload, 'Asia/Dushanbe');
 
-        $this->assertCount(1, $result['events']);
+        $this->assertCount(2, $result['events']);
         $this->assertSame([], $result['rejected']);
         $this->assertSame('1', $result['events'][0]['device_user_id']);
         $this->assertSame('2026-08-16 19:50:49', $result['events'][0]['occurred_at_local']->format('Y-m-d H:i:s'));
@@ -51,5 +51,10 @@ class ZktecoTaPushProtocolTest extends TestCase
         $this->assertSame('15', $result['events'][0]['verify_mode']);
         $this->assertSame('0', $result['events'][0]['work_code']);
         $this->assertSame(['0', '0', '255', '0', '0'], $result['events'][0]['reserved']);
+        $this->assertSame('2026-08-16 20:03:09', $result['events'][1]['occurred_at_local']->format('Y-m-d H:i:s'));
+        $this->assertSame('1', $result['events'][1]['attendance_status']);
+        $this->assertSame('15', $result['events'][1]['verify_mode']);
+        $this->assertSame('0', $result['events'][1]['work_code']);
+        $this->assertSame(['0', '0', '255', '0', '0'], $result['events'][1]['reserved']);
     }
 }

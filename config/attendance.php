@@ -14,8 +14,6 @@ return [
         'trim',
         explode(',', (string) env('ATTENDANCE_ALLOWED_IPS', ''))
     ))),
-    'tracked_roles' => ['agent', 'mop', 'intern'],
-    'viewer_roles' => ['agent', 'intern', 'mop', 'rop', 'branch_director', 'hr', 'admin', 'superadmin', 'owner'],
     'administrator_roles' => ['admin', 'superadmin', 'owner'],
     'default_schedule' => [
         '1' => ['start' => '09:00', 'end' => '18:00', 'grace_minutes' => 0],
