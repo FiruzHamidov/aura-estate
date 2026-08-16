@@ -12,6 +12,7 @@ use App\Models\AttendanceWorkSchedule;
 use App\Models\User;
 use App\Services\Attendance\AttendanceAccessService;
 use App\Services\Attendance\AttendanceHolidayCalendar;
+use App\Services\Attendance\AttendanceScheduleResolver;
 use Carbon\CarbonImmutable;
 use Carbon\CarbonPeriod;
 use Illuminate\Database\Eloquent\Builder;
@@ -26,6 +27,7 @@ final class AttendanceWebController extends Controller
     public function __construct(
         private readonly AttendanceAccessService $access,
         private readonly AttendanceHolidayCalendar $holidays,
+        private readonly AttendanceScheduleResolver $scheduleResolver,
     ) {}
 
     public function matrix(Request $request)
@@ -93,7 +95,7 @@ final class AttendanceWebController extends Controller
 
         $user->loadMissing(['role', 'branch', 'branchGroup']);
         $summary = AttendanceDailySummary::query()->where('user_id', $user->id)->whereDate('work_date', $date)->first();
-        $settings = AttendanceWorkSchedule::query()->where('user_id', $user->id)->first();
+        $settings = $this->scheduleResolver->forUser($user);
         $leave = AttendanceLeave::query()->where('user_id', $user->id)
             ->whereDate('date_from', '<=', $date)->whereDate('date_to', '>=', $date)->first();
         $duty = AttendanceDuty::query()->where('user_id', $user->id)
@@ -394,12 +396,12 @@ final class AttendanceWebController extends Controller
         if ($globalHolidays?->has($date) || ($globalHolidays === null && $this->holidays->isHoliday($date))) {
             return false;
         }
-        $day = CarbonImmutable::parse($date, $settings?->timezone ?: config('attendance.timezone'));
+        $day = CarbonImmutable::parse($date, $this->scheduleResolver->timezone($settings));
         if ($settings && in_array($date, $settings->holidays ?? [], true)) {
             return false;
         }
 
-        return is_array(($settings?->schedule ?? config('attendance.default_schedule', []))[(string) $day->dayOfWeekIso] ?? null);
+        return is_array($this->scheduleResolver->schedule($settings)[(string) $day->dayOfWeekIso] ?? null);
     }
 
     private function summary(User $viewer, int $activeUsers, CarbonImmutable $from, CarbonImmutable $to): array

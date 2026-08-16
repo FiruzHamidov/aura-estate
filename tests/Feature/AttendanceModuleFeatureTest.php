@@ -41,6 +41,7 @@ class AttendanceModuleFeatureTest extends TestCase
         (require database_path('migrations/2026_08_16_000003_create_attendance_leaves_table.php'))->up();
         (require database_path('migrations/2026_08_16_000004_create_attendance_holidays_table.php'))->up();
         (require database_path('migrations/2026_08_16_000005_create_attendance_duties_table.php'))->up();
+        (require database_path('migrations/2026_08_16_000006_create_attendance_global_schedules_table.php'))->up();
         config([
             'attendance.timezone' => 'Asia/Dushanbe',
             'attendance.duplicate_window_seconds' => 10,
@@ -828,6 +829,53 @@ class AttendanceModuleFeatureTest extends TestCase
             'change_reason' => 'Неактивный пользователь',
         ])->assertStatus(422)
             ->assertJsonPath('details.errors.user_id.0', 'Учёт посещаемости доступен только активным пользователям.');
+    }
+
+    public function test_hr_can_manage_global_schedule_and_individual_schedule_has_priority(): void
+    {
+        $context = $this->context();
+        $globalSchedule = config('attendance.default_schedule');
+        $globalSchedule['1'] = null;
+
+        Sanctum::actingAs($context['hr']);
+        $this->putJson('/api/attendance/schedule', [
+            'timezone' => 'Asia/Dushanbe',
+            'schedule' => $globalSchedule,
+            'change_reason' => 'Общий выходной по понедельникам',
+        ])->assertOk()
+            ->assertJsonPath('data.source', 'global')
+            ->assertJsonPath('data.schedule.1', null);
+
+        $this->getJson('/api/attendance/schedule')
+            ->assertOk()->assertJsonPath('data.change_reason', 'Общий выходной по понедельникам');
+        $this->getJson('/api/attendance/users/'.$context['agent']->id.'/schedule')
+            ->assertOk()->assertJsonPath('data.source', 'global')->assertJsonPath('data.schedule.1', null);
+
+        $matrix = $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&view=users')
+            ->assertOk()->json('data');
+        $agentRow = collect($matrix)->firstWhere('user.id', $context['agent']->id);
+        $this->assertFalse($agentRow['days']['2026-08-17']['is_working_day']);
+
+        $individual = config('attendance.default_schedule');
+        $this->putJson('/api/attendance/users/'.$context['agent']->id.'/schedule', [
+            'timezone' => 'Asia/Dushanbe',
+            'schedule' => $individual,
+            'holidays' => [],
+            'change_reason' => 'Индивидуальный график',
+        ])->assertOk();
+        $this->getJson('/api/attendance/users/'.$context['agent']->id.'/schedule')
+            ->assertOk()->assertJsonPath('data.source', 'individual');
+
+        $matrix = $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&view=users')
+            ->assertOk()->json('data');
+        $agentRow = collect($matrix)->firstWhere('user.id', $context['agent']->id);
+        $this->assertTrue($agentRow['days']['2026-08-17']['is_working_day']);
+        $this->assertDatabaseHas('attendance_audit_logs', ['action' => 'attendance_global_schedule.created']);
+
+        Sanctum::actingAs($context['agent']);
+        $this->putJson('/api/attendance/schedule', [
+            'timezone' => 'Asia/Dushanbe', 'schedule' => $individual, 'change_reason' => 'Запрещено',
+        ])->assertStatus(403)->assertJsonPath('code', 'ATTENDANCE_SCHEDULE_FORBIDDEN');
     }
 
     public function test_hr_can_manage_vacations_and_matrix_marks_leave_days(): void

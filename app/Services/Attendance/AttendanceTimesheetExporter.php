@@ -15,7 +15,10 @@ use ZipArchive;
 
 final class AttendanceTimesheetExporter
 {
-    public function __construct(private readonly AttendanceHolidayCalendar $holidayCalendar) {}
+    public function __construct(
+        private readonly AttendanceHolidayCalendar $holidayCalendar,
+        private readonly AttendanceScheduleResolver $scheduleResolver,
+    ) {}
 
     private const STATUS_LABELS = [
         'present' => 'Вовремя',
@@ -252,12 +255,12 @@ final class AttendanceTimesheetExporter
         if ($globalHolidays->has($date)) {
             return false;
         }
-        $day = CarbonImmutable::parse($date, $settings?->timezone ?: config('attendance.timezone'));
+        $day = CarbonImmutable::parse($date, $this->scheduleResolver->timezone($settings));
         if ($settings && in_array($date, $settings->holidays ?? [], true)) {
             return false;
         }
 
-        return is_array(($settings?->schedule ?? config('attendance.default_schedule', []))[(string) $day->dayOfWeekIso] ?? null);
+        return is_array($this->scheduleResolver->schedule($settings)[(string) $day->dayOfWeekIso] ?? null);
     }
 
     private function leaveForDate(Collection $leaves, string $date): ?AttendanceLeave

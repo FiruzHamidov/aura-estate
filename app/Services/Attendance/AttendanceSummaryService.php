@@ -4,6 +4,7 @@ namespace App\Services\Attendance;
 
 use App\Models\AttendanceDailySummary;
 use App\Models\AttendanceEvent;
+use App\Models\AttendanceGlobalSchedule;
 use App\Models\AttendanceLeave;
 use App\Models\AttendanceWorkSchedule;
 use App\Models\User;
@@ -12,7 +13,10 @@ use Illuminate\Support\Collection;
 
 final class AttendanceSummaryService
 {
-    public function __construct(private readonly AttendanceHolidayCalendar $holidays) {}
+    public function __construct(
+        private readonly AttendanceHolidayCalendar $holidays,
+        private readonly AttendanceScheduleResolver $schedules,
+    ) {}
 
     public function recompute(User $user, string $workDate): AttendanceDailySummary
     {
@@ -85,7 +89,7 @@ final class AttendanceSummaryService
         $settings = $this->settings($user);
         $timezone = $this->timezone($settings);
         $day = CarbonImmutable::parse($workDate, $timezone);
-        if ($settings && in_array($day->toDateString(), $settings->holidays ?? [], true)) {
+        if ($settings instanceof AttendanceWorkSchedule && in_array($day->toDateString(), $settings->holidays ?? [], true)) {
             return false;
         }
 
@@ -143,13 +147,13 @@ final class AttendanceSummaryService
         return $firstLocal->greaterThan($start) ? (int) $start->diffInMinutes($firstLocal) : 0;
     }
 
-    private function settings(User $user): ?AttendanceWorkSchedule
+    private function settings(User $user): AttendanceWorkSchedule|AttendanceGlobalSchedule|null
     {
-        return AttendanceWorkSchedule::query()->where('user_id', $user->id)->first();
+        return $this->schedules->forUser($user);
     }
 
-    private function timezone(?AttendanceWorkSchedule $settings): string
+    private function timezone(AttendanceWorkSchedule|AttendanceGlobalSchedule|null $settings): string
     {
-        return $settings?->timezone ?: (string) config('attendance.timezone', 'Asia/Dushanbe');
+        return $this->schedules->timezone($settings);
     }
 }

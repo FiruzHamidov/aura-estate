@@ -187,6 +187,8 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         Route::get('/export', [AttendanceReportController::class, 'export']);
         Route::get('/users/{user}/schedule', [AttendanceScheduleController::class, 'show'])->whereNumber('user');
         Route::put('/users/{user}/schedule', [AttendanceScheduleController::class, 'update'])->whereNumber('user');
+        Route::get('/schedule', [AttendanceScheduleController::class, 'showGlobal']);
+        Route::put('/schedule', [AttendanceScheduleController::class, 'updateGlobal']);
         Route::get('/users/{user}/leaves', [AttendanceLeaveController::class, 'index'])->whereNumber('user');
         Route::post('/users/{user}/leaves', [AttendanceLeaveController::class, 'store'])->whereNumber('user');
         Route::delete('/users/{user}/leaves/{leave}', [AttendanceLeaveController::class, 'destroy'])
