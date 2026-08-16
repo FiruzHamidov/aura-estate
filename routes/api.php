@@ -3,10 +3,12 @@
 use App\Http\Controllers\AccountDeletionController;
 use App\Http\Controllers\AdminStoryController;
 use App\Http\Controllers\ApiRequestLogController;
+use App\Http\Controllers\AttendanceCommentController;
 use App\Http\Controllers\AttendanceDeviceController;
 use App\Http\Controllers\AttendanceMappingController;
 use App\Http\Controllers\AttendanceReportController;
 use App\Http\Controllers\AttendanceScheduleController;
+use App\Http\Controllers\AttendanceWebController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\B24AuthController;
 use App\Http\Controllers\BookingController;
@@ -161,6 +163,7 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     });
 
     Route::prefix('attendance')->group(function () {
+        Route::get('/matrix', [AttendanceWebController::class, 'matrix']);
         Route::get('/devices', [AttendanceDeviceController::class, 'index']);
         Route::post('/devices', [AttendanceDeviceController::class, 'store']);
         Route::patch('/devices/{device}', [AttendanceDeviceController::class, 'update']);
@@ -170,6 +173,12 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         Route::get('/daily', [AttendanceReportController::class, 'daily']);
         Route::get('/me', [AttendanceReportController::class, 'me']);
         Route::get('/users/{user}/daily', [AttendanceReportController::class, 'userDaily'])->whereNumber('user');
+        Route::get('/users/{user}/days/{date}', [AttendanceWebController::class, 'day'])
+            ->whereNumber('user')->where('date', '\\d{4}-\\d{2}-\\d{2}');
+        Route::put('/users/{user}/days/{date}/comment', [AttendanceCommentController::class, 'upsert'])
+            ->whereNumber('user')->where('date', '\\d{4}-\\d{2}-\\d{2}');
+        Route::delete('/users/{user}/days/{date}/comment', [AttendanceCommentController::class, 'destroy'])
+            ->whereNumber('user')->where('date', '\\d{4}-\\d{2}-\\d{2}');
         Route::get('/unmapped-events', [AttendanceReportController::class, 'unmapped']);
         Route::post('/events/reprocess', [AttendanceReportController::class, 'reprocess']);
         Route::get('/export', [AttendanceReportController::class, 'export']);

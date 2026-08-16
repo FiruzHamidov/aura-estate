@@ -34,6 +34,7 @@ class AttendanceModuleFeatureTest extends TestCase
         Schema::dropAllTables();
         $this->createBaseSchema();
         (require database_path('migrations/2026_08_16_000001_create_attendance_tables.php'))->up();
+        (require database_path('migrations/2026_08_16_000002_create_attendance_daily_comments_table.php'))->up();
         config([
             'attendance.timezone' => 'Asia/Dushanbe',
             'attendance.duplicate_window_seconds' => 10,
@@ -394,6 +395,154 @@ class AttendanceModuleFeatureTest extends TestCase
             ->assertJsonCount(1, 'data')
             ->assertJsonPath('data.0.user_id', $marketing->id)
             ->assertJsonPath('data.0.status', 'incomplete');
+    }
+
+    public function test_web_matrix_returns_complete_rows_and_enforces_table_scope(): void
+    {
+        $context = $this->context();
+        $device = $this->device('ZAM230-WEB-MATRIX', $context['branch'], $context['group']);
+        AttendanceDailySummary::query()->create([
+            'user_id' => $context['agent']->id,
+            'work_date' => '2026-08-17',
+            'first_in_at' => '2026-08-17 04:07:00',
+            'last_out_at' => '2026-08-17 13:00:00',
+            'worked_minutes' => 533,
+            'late_minutes' => 7,
+            'events_count' => 2,
+            'status' => 'late',
+        ]);
+        AttendanceDailySummary::query()->create([
+            'user_id' => $context['otherAgent']->id,
+            'work_date' => '2026-08-17',
+            'status' => 'absent',
+        ]);
+        AttendanceEvent::query()->create([
+            'user_id' => $context['agent']->id,
+            'device_id' => $device->id,
+            'device_user_id' => (string) $context['agent']->id,
+            'event_type' => 'check_in',
+            'occurred_at' => '2026-08-17 04:07:00',
+            'verification_method' => 'face',
+        ]);
+
+        Sanctum::actingAs($context['admin']);
+        $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&view=users&status=late')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.user.id', $context['agent']->id)
+            ->assertJsonPath('data.0.days.2026-08-17.status', 'late')
+            ->assertJsonPath('data.0.days.2026-08-17.verification_methods.0', 'face')
+            ->assertJsonPath('meta.permissions.can_manage_devices', true)
+            ->assertJsonPath('meta.timezone', 'Asia/Dushanbe');
+
+        $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&view=branches')
+            ->assertOk()->assertJsonCount(2, 'data');
+
+        $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&sort=late_count')
+            ->assertOk()
+            ->assertJsonPath('data.0.user.id', $context['agent']->id);
+
+        $this->getJson('/api/attendance/matrix?date_from=2026-08-01&date_to=2026-09-01')
+            ->assertStatus(422)
+            ->assertJsonPath('details.errors.date_to.0', 'Диапазон не может превышать 31 день.');
+
+        Sanctum::actingAs($context['rop']);
+        $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&branch_id='.$context['otherAgent']->branch_id)
+            ->assertOk()->assertJsonCount(0, 'data')
+            ->assertJsonPath('meta.permissions.can_view_all_branches', false);
+
+        Sanctum::actingAs($context['agent']);
+        $this->getJson('/api/attendance/matrix')->assertStatus(403)->assertJsonPath('code', 'ATTENDANCE_TABLE_FORBIDDEN');
+    }
+
+    public function test_hr_comment_uses_optimistic_locking_and_day_details_include_event_types(): void
+    {
+        $context = $this->context();
+        $device = $this->device('ZAM230-WEB-DAY', $context['branch'], $context['group']);
+        AttendanceDailySummary::query()->create([
+            'user_id' => $context['agent']->id,
+            'work_date' => '2026-08-17',
+            'first_in_at' => '2026-08-17 04:07:00',
+            'last_out_at' => '2026-08-17 13:00:00',
+            'late_minutes' => 7,
+            'events_count' => 3,
+            'status' => 'late',
+        ]);
+        foreach ([
+            ['check_in', '2026-08-17 04:07:00'],
+            ['break_out', '2026-08-17 07:00:00'],
+            ['check_out', '2026-08-17 13:00:00'],
+        ] as [$type, $occurredAt]) {
+            AttendanceEvent::query()->create([
+                'user_id' => $context['agent']->id,
+                'device_id' => $device->id,
+                'device_user_id' => (string) $context['agent']->id,
+                'event_type' => $type,
+                'occurred_at' => $occurredAt,
+                'verification_method' => 'face',
+            ]);
+        }
+
+        Sanctum::actingAs($context['hr']);
+        $this->putJson('/api/attendance/users/'.$context['agent']->id.'/days/2026-08-17/comment', [
+            'comment' => '<b>Предупредил о визите к врачу.</b>',
+            'version' => 0,
+        ])->assertOk()->assertJsonPath('data.version', 1);
+
+        $this->putJson('/api/attendance/users/'.$context['agent']->id.'/days/2026-08-17/comment', [
+            'comment' => 'Устаревшая запись',
+            'version' => 0,
+        ])->assertStatus(409)->assertJsonPath('code', 'ATTENDANCE_COMMENT_VERSION_CONFLICT');
+
+        $this->getJson('/api/attendance/users/'.$context['agent']->id.'/days/2026-08-17')
+            ->assertOk()
+            ->assertJsonPath('data.events.1.event_type', 'break_out')
+            ->assertJsonPath('data.comment.comment', '<b>Предупредил о визите к врачу.</b>')
+            ->assertJsonPath('data.comment.version', 1);
+
+        Sanctum::actingAs($context['rop']);
+        $this->getJson('/api/attendance/users/'.$context['agent']->id.'/days/2026-08-17')
+            ->assertOk()->assertJsonPath('data.comment.version', 1);
+        $this->putJson('/api/attendance/users/'.$context['agent']->id.'/days/2026-08-17/comment', [
+            'comment' => 'Нельзя', 'version' => 1,
+        ])->assertStatus(403)->assertJsonPath('code', 'ATTENDANCE_COMMENT_FORBIDDEN');
+
+        Sanctum::actingAs($context['hr']);
+        $this->deleteJson('/api/attendance/users/'.$context['agent']->id.'/days/2026-08-17/comment', ['version' => 1])->assertOk();
+        $this->assertDatabaseMissing('attendance_daily_comments', ['user_id' => $context['agent']->id]);
+        $this->assertDatabaseHas('attendance_audit_logs', ['action' => 'attendance_comment.deleted']);
+    }
+
+    public function test_hr_can_view_devices_manage_mappings_and_group_unmapped_events(): void
+    {
+        $context = $this->context();
+        $device = $this->device('ZAM230-HR-SYNC', $context['branch'], $context['group']);
+        $this->postDevicePayload('/iclock/cdata?SN=ZAM230-HR-SYNC&table=ATTLOG', implode("\n", [
+            "777\t2026-08-17 09:00:00\t0\t15\t0",
+            "777\t2026-08-17 18:00:00\t1\t15\t0",
+        ]))->assertOk();
+
+        Sanctum::actingAs($context['hr']);
+        $this->getJson('/api/attendance/devices')->assertOk()->assertJsonPath('data.0.id', $device->id);
+        $this->postJson('/api/attendance/devices', ['name' => 'Forbidden', 'serial_number' => 'HR-NO'])
+            ->assertStatus(403)->assertJsonPath('code', 'ATTENDANCE_ADMIN_FORBIDDEN');
+        $this->getJson('/api/attendance/unmapped-events?grouped=true')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.device_user_id', '777')
+            ->assertJsonPath('data.0.events_count', 2)
+            ->assertJsonPath('data.0.verification_method', 'face');
+
+        $this->putJson('/api/attendance/device-users', [
+            'device_id' => $device->id,
+            'device_user_id' => '777',
+            'user_id' => $context['agent']->id,
+        ])->assertOk()->assertJsonPath('reprocessed.processed', 2);
+
+        $this->getJson('/api/attendance/device-users')
+            ->assertOk()
+            ->assertJsonPath('data.0.user.id', $context['agent']->id)
+            ->assertJsonPath('data.0.processed_events_count', 2);
     }
 
     public function test_daily_and_csv_export_apply_device_filter_and_rbac(): void
@@ -805,6 +954,7 @@ class AttendanceModuleFeatureTest extends TestCase
             'mop' => $make('mop', 'MOP A', $branchA, $groupA),
             'rop' => $make('rop', 'ROP A', $branchA, $groupA),
             'admin' => $make('admin', 'Admin', $branchA, $groupA),
+            'hr' => $make('hr', 'HR', $branchA, $groupA),
             'otherAgent' => $make('agent', 'Agent B', $branchB, $groupB),
         ];
     }

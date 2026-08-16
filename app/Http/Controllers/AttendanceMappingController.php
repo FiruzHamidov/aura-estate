@@ -24,13 +24,16 @@ final class AttendanceMappingController extends Controller
 
     public function index(Request $request)
     {
-        $this->access->assertCanAdminister($request->user());
+        $this->access->assertCanManageMappings($request->user());
         $validated = $request->validate([
             'device_id' => ['nullable', 'integer', 'exists:attendance_devices,id'],
             'user_id' => ['nullable', 'integer', 'exists:users,id'],
             'per_page' => ['nullable', 'integer', 'between:1,100'],
         ]);
-        $query = AttendanceDeviceUser::query()->with(['device', 'user.role']);
+        $query = AttendanceDeviceUser::query()->with(['device.branch', 'user.role', 'user.branch', 'mappedBy:id,name'])
+            ->addSelect(['processed_events_count' => AttendanceEvent::query()->selectRaw('COUNT(*)')
+                ->whereColumn('attendance_events.device_id', 'attendance_device_users.device_id')
+                ->whereColumn('attendance_events.device_user_id', 'attendance_device_users.device_user_id')]);
         foreach (['device_id', 'user_id'] as $field) {
             if (isset($validated[$field])) {
                 $query->where($field, $validated[$field]);
@@ -42,7 +45,7 @@ final class AttendanceMappingController extends Controller
 
     public function upsert(Request $request)
     {
-        $this->access->assertCanAdminister($request->user());
+        $this->access->assertCanManageMappings($request->user());
         $data = $request->validate([
             'device_id' => ['required', 'integer', 'exists:attendance_devices,id'],
             'device_user_id' => ['required', 'string', 'max:100'],

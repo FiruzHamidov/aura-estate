@@ -18,7 +18,7 @@ final class AttendanceDeviceController extends Controller
 
     public function index(Request $request)
     {
-        $this->access->assertCanAdminister($request->user());
+        $this->access->assertCanViewDevices($request->user());
         $validated = $request->validate([
             'branch_id' => ['nullable', 'integer', 'exists:branches,id'],
             'is_active' => ['nullable', 'boolean'],

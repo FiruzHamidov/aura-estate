@@ -25,9 +25,44 @@ final class AttendanceAccessService
 
     public function assertCanAdminister(User $user): void
     {
+        $this->assertCanViewModule($user);
         if (! in_array($this->role($user), config('attendance.administrator_roles', []), true)) {
             $this->deny('ATTENDANCE_ADMIN_FORBIDDEN', 'Нет права управлять терминалами посещаемости.');
         }
+    }
+
+    public function assertCanViewTable(User $user): void
+    {
+        $this->assertRoleIn($user, config('attendance.table_roles', []), 'ATTENDANCE_TABLE_FORBIDDEN', 'Нет права просматривать общую таблицу посещаемости.');
+    }
+
+    public function assertCanManageMappings(User $user): void
+    {
+        $this->assertRoleIn($user, config('attendance.mapping_roles', []), 'ATTENDANCE_MAPPING_FORBIDDEN', 'Нет права управлять сопоставлениями терминала.');
+    }
+
+    public function assertCanComment(User $user): void
+    {
+        $this->assertRoleIn($user, config('attendance.comment_roles', []), 'ATTENDANCE_COMMENT_FORBIDDEN', 'Нет права изменять HR-комментарий.');
+    }
+
+    public function assertCanViewDevices(User $user): void
+    {
+        $this->assertRoleIn($user, config('attendance.device_viewer_roles', []), 'ATTENDANCE_DEVICE_FORBIDDEN', 'Нет права просматривать терминалы посещаемости.');
+    }
+
+    public function permissions(User $user): array
+    {
+        $role = $this->role($user);
+
+        return [
+            'can_view_attendance_table' => in_array($role, config('attendance.table_roles', []), true),
+            'can_view_all_branches' => in_array($role, ['hr', 'admin', 'superadmin', 'owner'], true),
+            'can_comment_late_day' => in_array($role, config('attendance.comment_roles', []), true),
+            'can_manage_mappings' => in_array($role, config('attendance.mapping_roles', []), true),
+            'can_view_devices' => in_array($role, config('attendance.device_viewer_roles', []), true),
+            'can_manage_devices' => in_array($role, config('attendance.administrator_roles', []), true),
+        ];
     }
 
     public function visibleUsersQuery(User $viewer): Builder
@@ -69,5 +104,13 @@ final class AttendanceAccessService
             'details' => (object) [],
             'trace_id' => request()->attributes->get('trace_id'),
         ], $status));
+    }
+
+    private function assertRoleIn(User $user, array $roles, string $code, string $message): void
+    {
+        $this->assertCanViewModule($user);
+        if (! in_array($this->role($user), $roles, true)) {
+            $this->deny($code, $message);
+        }
     }
 }

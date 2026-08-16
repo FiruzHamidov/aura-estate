@@ -15,6 +15,10 @@ return [
         explode(',', (string) env('ATTENDANCE_ALLOWED_IPS', ''))
     ))),
     'administrator_roles' => ['admin', 'superadmin', 'owner'],
+    'table_roles' => ['rop', 'branch_director', 'hr', 'admin', 'superadmin', 'owner'],
+    'mapping_roles' => ['hr', 'admin', 'superadmin', 'owner'],
+    'comment_roles' => ['hr', 'admin', 'superadmin', 'owner'],
+    'device_viewer_roles' => ['hr', 'admin', 'superadmin', 'owner'],
     'default_schedule' => [
         '1' => ['start' => '09:00', 'end' => '18:00', 'grace_minutes' => 0],
         '2' => ['start' => '09:00', 'end' => '18:00', 'grace_minutes' => 0],
