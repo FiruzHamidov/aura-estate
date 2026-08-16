@@ -442,6 +442,12 @@ class AttendanceModuleFeatureTest extends TestCase
             ->assertOk()
             ->assertJsonPath('data.0.user.id', $context['agent']->id);
 
+        $this->getJson('/api/attendance/matrix?date_from=2026-08-01&date_to=2026-08-31&view=users&page=1&per_page=50')
+            ->assertOk()
+            ->assertJsonPath('meta.date_from', '2026-08-01')
+            ->assertJsonPath('meta.date_to', '2026-08-31')
+            ->assertJsonCount(31, 'data.0.days');
+
         $this->getJson('/api/attendance/matrix?date_from=2026-08-01&date_to=2026-09-01')
             ->assertStatus(422)
             ->assertJsonPath('details.errors.date_to.0', 'Диапазон не может превышать 31 день.');

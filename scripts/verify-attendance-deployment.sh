@@ -66,6 +66,18 @@ if [[ -n "$admin_token" ]]; then
         cat "$body_file" >&2
         exit 1
     fi
+
+    attendance_date="$(TZ=Asia/Dushanbe date +%F)"
+    status="$(curl -sS -o "$body_file" -w '%{http_code}' \
+        -H "Authorization: Bearer $admin_token" \
+        -H 'Accept: application/json' \
+        "$base_url/api/attendance/matrix?date_from=$attendance_date&date_to=$attendance_date&view=users&page=1&per_page=1")"
+    if [[ "$status" != "200" ]] || ! grep -Fq '"timezone":"Asia/Dushanbe"' "$body_file"; then
+        echo "Attendance matrix verification failed: HTTP $status" >&2
+        cat "$body_file" >&2
+        echo "Ensure all migrations are applied: php artisan migrate --force" >&2
+        exit 1
+    fi
 fi
 
 echo "Attendance deployment verification passed for $base_url and device $serial_number."
