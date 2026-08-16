@@ -22,11 +22,6 @@ headers_file="$(mktemp)"
 body_file="$(mktemp)"
 trap 'rm -f "$headers_file" "$body_file"' EXIT
 
-request_headers=()
-if [[ -n "$communication_key" ]]; then
-    request_headers+=(-H "X-Communication-Key: $communication_key")
-fi
-
 assert_plain_text() {
     if ! awk 'BEGIN { IGNORECASE=1 } /^Content-Type:[[:space:]]*text\/plain/ { found=1 } END { exit !found }' "$headers_file"; then
         echo "Expected text/plain response." >&2
@@ -44,9 +39,14 @@ if [[ "$status" != "403" ]] || ! grep -Fq 'ERROR: UNKNOWN DEVICE' "$body_file"; 
 fi
 assert_plain_text
 
-status="$(curl -sS -D "$headers_file" -o "$body_file" -w '%{http_code}' \
-    "${request_headers[@]}" \
-    "$base_url/iclock/cdata?SN=$serial_number&options=all")"
+if [[ -n "$communication_key" ]]; then
+    status="$(curl -sS -D "$headers_file" -o "$body_file" -w '%{http_code}' \
+        -H "X-Communication-Key: $communication_key" \
+        "$base_url/iclock/cdata?SN=$serial_number&options=all")"
+else
+    status="$(curl -sS -D "$headers_file" -o "$body_file" -w '%{http_code}' \
+        "$base_url/iclock/cdata?SN=$serial_number&options=all")"
+fi
 if [[ "$status" != "200" ]]; then
     echo "Device handshake failed: HTTP $status" >&2
     cat "$body_file" >&2

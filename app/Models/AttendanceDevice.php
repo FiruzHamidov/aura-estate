@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Casts\UtcDateTime;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -20,7 +21,7 @@ class AttendanceDevice extends Model
         'communication_key' => 'encrypted',
         'is_active' => 'boolean',
         'last_seen_at' => 'datetime',
-        'last_event_at' => 'datetime',
+        'last_event_at' => UtcDateTime::class,
         'offline_notified_at' => 'datetime',
     ];
 

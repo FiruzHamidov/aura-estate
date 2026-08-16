@@ -116,6 +116,40 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->assertSame('late', $summary->status);
         $this->assertSame(2, $summary->events_count);
         $this->assertSame([$device->id], $summary->device_ids);
+        $this->assertSame('2026-08-17 13:00:00', $device->fresh()->last_event_at->format('Y-m-d H:i:s'));
+    }
+
+    public function test_real_zam230_fixture_flows_from_device_api_to_daily_summary(): void
+    {
+        $context = $this->context();
+        $device = $this->device('WCF3254200047', $context['branch'], $context['group']);
+        AttendanceDeviceUser::create([
+            'device_id' => $device->id,
+            'device_user_id' => '1',
+            'user_id' => $context['agent']->id,
+            'is_active' => true,
+            'mapped_at' => now(),
+        ]);
+        $payload = file_get_contents(base_path('tests/Fixtures/zkteco/zam230_wcf3254200047_attlog.txt'));
+
+        $this->postDevicePayload('/iclock/cdata?SN=WCF3254200047&table=ATTLOG', $payload)
+            ->assertOk()
+            ->assertSeeText('OK: 1');
+
+        $raw = AttendanceRawEvent::query()->firstOrFail();
+        $this->assertSame('1', $raw->device_user_id);
+        $this->assertSame('2026-08-16 19:50:49', $raw->occurred_at_local->format('Y-m-d H:i:s'));
+        $this->assertSame('processed', $raw->processing_status);
+
+        $event = AttendanceEvent::query()->firstOrFail();
+        $this->assertSame($context['agent']->id, $event->user_id);
+        $this->assertSame('face', $event->verification_method);
+        $this->assertSame('2026-08-16 14:50:49', $event->occurred_at->format('Y-m-d H:i:s'));
+
+        $summary = AttendanceDailySummary::query()->firstOrFail();
+        $this->assertSame('2026-08-16', $summary->work_date->toDateString());
+        $this->assertSame('incomplete', $summary->status);
+        $this->assertSame('2026-08-16 14:50:49', $summary->first_in_at->format('Y-m-d H:i:s'));
     }
 
     public function test_database_queue_accepts_first_and_normalizes_in_worker(): void
@@ -202,6 +236,7 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->assertSame(545, $summary->worked_minutes);
         $this->assertSame(0, $summary->late_minutes);
         $this->assertSame('present', $summary->status);
+        $this->assertSame('2026-08-16 13:00:00', $device->fresh()->last_event_at->format('Y-m-d H:i:s'));
     }
 
     public function test_single_pass_is_incomplete_and_has_no_fake_work_duration(): void
@@ -268,8 +303,14 @@ class AttendanceModuleFeatureTest extends TestCase
 
         Sanctum::actingAs($context['agent']);
         $csv = $this->get('/api/attendance/export')->assertOk();
-        $this->assertStringContainsString('Agent A', $csv->streamedContent());
-        $this->assertStringNotContainsString('Agent B', $csv->streamedContent());
+        $content = $csv->streamedContent();
+        $this->assertStringStartsWith("\xEF\xBB\xBF", $content);
+        $this->assertStringContainsString('Agent A', $content);
+        $this->assertStringNotContainsString('Agent B', $content);
+
+        $context['agent']->update(['name' => '=HYPERLINK("https://example.invalid")']);
+        $safeContent = $this->get('/api/attendance/export')->assertOk()->streamedContent();
+        $this->assertStringContainsString("'=HYPERLINK", $safeContent);
     }
 
     public function test_only_administrators_can_manage_devices_and_changes_are_audited(): void

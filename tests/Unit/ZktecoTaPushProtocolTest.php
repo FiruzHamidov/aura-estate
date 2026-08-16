@@ -34,4 +34,22 @@ class ZktecoTaPushProtocolTest extends TestCase
         $this->assertSame(1, $result['rejected'][0]['line']);
         $this->assertSame(2, $result['rejected'][1]['line']);
     }
+
+    public function test_it_parses_real_zam230_firmware_fixture(): void
+    {
+        $payload = file_get_contents(
+            dirname(__DIR__).'/Fixtures/zkteco/zam230_wcf3254200047_attlog.txt'
+        );
+
+        $result = (new ZktecoTaPushProtocol)->parse($payload, 'Asia/Dushanbe');
+
+        $this->assertCount(1, $result['events']);
+        $this->assertSame([], $result['rejected']);
+        $this->assertSame('1', $result['events'][0]['device_user_id']);
+        $this->assertSame('2026-08-16 19:50:49', $result['events'][0]['occurred_at_local']->format('Y-m-d H:i:s'));
+        $this->assertSame('0', $result['events'][0]['attendance_status']);
+        $this->assertSame('15', $result['events'][0]['verify_mode']);
+        $this->assertSame('0', $result['events'][0]['work_code']);
+        $this->assertSame(['0', '0', '255', '0', '0'], $result['events'][0]['reserved']);
+    }
 }
