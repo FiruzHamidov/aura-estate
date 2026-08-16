@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\AttendanceDevice;
 use App\Models\Booking;
 use App\Models\ConversationMessage;
 use App\Models\DailyReport;
@@ -77,6 +78,36 @@ class NotificationService
             ->where('user_id', $user->id)
             ->whereNull('read_at')
             ->count();
+    }
+
+    public function notifyAttendanceDeviceOffline(AttendanceDevice $device): void
+    {
+        $administrators = User::query()
+            ->where('status', User::STATUS_ACTIVE)
+            ->whereHas('role', fn (Builder $roles) => $roles->whereIn(
+                'slug',
+                config('attendance.administrator_roles', [])
+            ))
+            ->get();
+
+        $this->notifyUsers(
+            $administrators,
+            NotificationType::ATTENDANCE_DEVICE_OFFLINE,
+            'Терминал посещаемости не в сети',
+            sprintf('Терминал «%s» (%s) не выходил на связь более %d минут.',
+                $device->name,
+                $device->serial_number,
+                (int) config('attendance.offline_threshold_minutes', 10)
+            ),
+            null,
+            null,
+            [
+                'action_url' => '/attendance/devices',
+                'action_type' => 'open_attendance_devices',
+                'dedupe_key' => 'attendance:device:offline:'.$device->id,
+                'data' => ['device_id' => $device->id, 'serial_number' => $device->serial_number],
+            ]
+        );
     }
 
     public function handleLeadCreated(Lead $lead, ?User $actor = null): void

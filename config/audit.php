@@ -21,6 +21,8 @@ return [
             'access_token',
             'refresh_token',
             'authorization',
+            'pushcommkey',
+            'communication_key',
             'remember_token',
             'phone',
             'owner_phone',

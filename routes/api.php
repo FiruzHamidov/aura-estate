@@ -3,6 +3,10 @@
 use App\Http\Controllers\AccountDeletionController;
 use App\Http\Controllers\AdminStoryController;
 use App\Http\Controllers\ApiRequestLogController;
+use App\Http\Controllers\AttendanceDeviceController;
+use App\Http\Controllers\AttendanceMappingController;
+use App\Http\Controllers\AttendanceReportController;
+use App\Http\Controllers\AttendanceScheduleController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\B24AuthController;
 use App\Http\Controllers\BookingController;
@@ -154,6 +158,23 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         Route::get('/users/{user}/history', [LocationTrackingController::class, 'history'])->whereNumber('user');
         Route::get('/admin/users/{user}/settings', [LocationTrackingController::class, 'settings'])->whereNumber('user');
         Route::patch('/admin/users/{user}/settings', [LocationTrackingController::class, 'updateSettings'])->whereNumber('user');
+    });
+
+    Route::prefix('attendance')->group(function () {
+        Route::get('/devices', [AttendanceDeviceController::class, 'index']);
+        Route::post('/devices', [AttendanceDeviceController::class, 'store']);
+        Route::patch('/devices/{device}', [AttendanceDeviceController::class, 'update']);
+        Route::get('/device-users', [AttendanceMappingController::class, 'index']);
+        Route::put('/device-users', [AttendanceMappingController::class, 'upsert']);
+        Route::get('/events', [AttendanceReportController::class, 'events']);
+        Route::get('/daily', [AttendanceReportController::class, 'daily']);
+        Route::get('/me', [AttendanceReportController::class, 'me']);
+        Route::get('/users/{user}/daily', [AttendanceReportController::class, 'userDaily'])->whereNumber('user');
+        Route::get('/unmapped-events', [AttendanceReportController::class, 'unmapped']);
+        Route::post('/events/reprocess', [AttendanceReportController::class, 'reprocess']);
+        Route::get('/export', [AttendanceReportController::class, 'export']);
+        Route::get('/users/{user}/schedule', [AttendanceScheduleController::class, 'show'])->whereNumber('user');
+        Route::put('/users/{user}/schedule', [AttendanceScheduleController::class, 'update'])->whereNumber('user');
     });
 
     Route::get('/mobile/clients/filters', [ClientController::class, 'mobileFilters']);

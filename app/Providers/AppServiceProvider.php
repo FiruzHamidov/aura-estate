@@ -2,11 +2,16 @@
 
 namespace App\Providers;
 
+use App\Contracts\AttendanceDeviceProtocol;
 use App\Models\Property;
 use App\Models\User;
 use App\Observers\PropertyObserver;
-use Illuminate\Support\ServiceProvider;
+use App\Services\Attendance\ZktecoTaPushProtocol;
+use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Database\Eloquent\Relations\Relation;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -15,7 +20,7 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        $this->app->bind(AttendanceDeviceProtocol::class, ZktecoTaPushProtocol::class);
     }
 
     /**
@@ -28,5 +33,12 @@ class AppServiceProvider extends ServiceProvider
         Relation::morphMap([
             'user' => User::class,
         ]);
+
+        RateLimiter::for('attendance-device', function (Request $request) {
+            $serial = (string) ($request->query('SN') ?? $request->query('sn') ?? 'unknown');
+
+            return Limit::perMinute((int) config('attendance.device_rate_limit_per_minute', 240))
+                ->by($serial.'|'.($request->ip() ?? 'unknown'));
+        });
     }
 }

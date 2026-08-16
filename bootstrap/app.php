@@ -16,6 +16,7 @@ use Illuminate\Foundation\Configuration\Middleware;
 use Illuminate\Http\Middleware\HandleCors;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Middleware\SubstituteBindings;
+use Illuminate\Support\Facades\Route;
 use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
@@ -25,6 +26,9 @@ return Application::configure(basePath: dirname(__DIR__))
         api: __DIR__.'/../routes/api.php',
         commands: __DIR__.'/../routes/console.php',
         health: '/up',
+        then: function (): void {
+            Route::middleware('api')->group(base_path('routes/attendance_device.php'));
+        },
     )
     ->withBroadcasting(__DIR__.'/../routes/channels.php', [
         'middleware' => ['api', 'auth:sanctum', 'active.user'],
@@ -74,6 +78,27 @@ return Application::configure(basePath: dirname(__DIR__))
             ], 401);
         });
 
+        $exceptions->render(function (\Throwable $e, Request $request) {
+            if (! $request->is('iclock/*')) {
+                return null;
+            }
+
+            $status = $e instanceof HttpExceptionInterface ? $e->getStatusCode() : 500;
+            if ($status < 400) {
+                $status = 500;
+            }
+            if ($status === 500) {
+                report($e);
+            }
+            $headers = $e instanceof HttpExceptionInterface ? $e->getHeaders() : [];
+
+            return response(
+                $status === 500 ? 'ERROR: SERVER' : 'ERROR: REQUEST FAILED',
+                $status,
+                [...$headers, 'Content-Type' => 'text/plain; charset=UTF-8']
+            );
+        });
+
         $exceptions->render(function (\Throwable $e, $request) {
             $status = $e instanceof HttpExceptionInterface ? $e->getStatusCode() : 500;
 
@@ -107,5 +132,9 @@ return Application::configure(basePath: dirname(__DIR__))
         $schedule->command('stories:expire')->everyFiveMinutes();
         $schedule->command('audit:prune-api-request-logs')->dailyAt('03:30');
         $schedule->command('locations:prune-history')->dailyAt('04:00');
+        $schedule->command('attendance:summarize')->dailyAt('00:05');
+        $schedule->command('attendance:reprocess-pending')->everyMinute()->withoutOverlapping();
+        $schedule->command('attendance:monitor-devices')->everyFiveMinutes()->withoutOverlapping();
+        $schedule->command('attendance:prune-raw')->dailyAt('04:15');
     })
     ->create();

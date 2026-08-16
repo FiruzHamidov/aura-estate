@@ -59,6 +59,7 @@ final class NotificationType
     public const MOTIVATION_AGENT_EVENING_DIGEST = 'motivation_agent_evening_digest';
     public const KPI_EARLY_RISK = 'kpi_early_risk';
     public const DAILY_REPORT_REMINDER = 'daily_report_reminder';
+    public const ATTENDANCE_DEVICE_OFFLINE = 'attendance_device_offline';
 
     public static function all(): array
     {
@@ -112,6 +113,7 @@ final class NotificationType
             self::MOTIVATION_AGENT_EVENING_DIGEST,
             self::KPI_EARLY_RISK,
             self::DAILY_REPORT_REMINDER,
+            self::ATTENDANCE_DEVICE_OFFLINE,
         ];
     }
 
@@ -124,6 +126,7 @@ final class NotificationType
             self::KPI_EARLY_RISK,
             self::CHAT_NEW_MESSAGE,
             self::CHAT_RESPONSE_OVERDUE => NotificationCategory::CRITICAL,
+            self::ATTENDANCE_DEVICE_OFFLINE => NotificationCategory::CRITICAL,
 
             self::MOTIVATION_MANAGER_LEAD_HOT,
             self::MOTIVATION_MANAGER_LEAD_NO_NEXT_STEP,
