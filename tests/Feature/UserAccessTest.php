@@ -768,13 +768,22 @@ class UserAccessTest extends TestCase
         ])->assertStatus(422);
     }
 
-    public function test_hr_can_manage_users_globally_but_cannot_assign_admin_or_superadmin_roles(): void
+    public function test_hr_can_create_and_manage_only_approved_employee_roles_and_edit_clients(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
         $branchB = Branch::create(['name' => 'Branch B']);
+        $groupB = BranchGroup::create([
+            'branch_id' => $branchB->id,
+            'name' => 'Sales B',
+            'contact_visibility_mode' => BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY,
+        ]);
 
         $hrRole = Role::create(['name' => 'HR', 'slug' => 'hr']);
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $directorRole = Role::create(['name' => 'Branch director', 'slug' => 'branch_director']);
+        $clientRole = Role::create(['name' => 'Client', 'slug' => 'client']);
         $externalAgentRole = Role::create(['name' => 'External Agent', 'slug' => 'external_agent']);
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
         $superadminRole = Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']);
@@ -795,6 +804,18 @@ class UserAccessTest extends TestCase
             'role_id' => $agentRole->id,
             'branch_id' => $branchB->id,
             'status' => 'active',
+        ]);
+        $client = User::create([
+            'name' => 'Client B', 'phone' => '900000160', 'password' => bcrypt('password'),
+            'role_id' => $clientRole->id, 'status' => 'active',
+        ]);
+        $admin = User::create([
+            'name' => 'Admin B', 'phone' => '900000161', 'password' => bcrypt('password'),
+            'role_id' => $adminRole->id, 'status' => 'active',
+        ]);
+        $superadmin = User::create([
+            'name' => 'Superadmin B', 'phone' => '900000162', 'password' => bcrypt('password'),
+            'role_id' => $superadminRole->id, 'status' => 'active',
         ]);
 
         Sanctum::actingAs($hr);
@@ -820,9 +841,18 @@ class UserAccessTest extends TestCase
             'phone' => '900000159',
             'role_id' => $externalAgentRole->id,
             'branch_id' => $branchB->id,
-        ])->assertCreated()
-            ->assertJsonPath('role.slug', 'external_agent')
-            ->assertJsonPath('branch_id', $branchB->id);
+        ])->assertStatus(422);
+
+        $this->postJson('/api/user', [
+            'name' => 'HR Created ROP', 'phone' => '900000163', 'role_id' => $ropRole->id, 'branch_id' => $branchB->id,
+        ])->assertCreated()->assertJsonPath('role.slug', 'rop');
+        $this->postJson('/api/user', [
+            'name' => 'HR Created MOP', 'phone' => '900000164', 'role_id' => $mopRole->id,
+            'branch_id' => $branchB->id, 'branch_group_id' => $groupB->id,
+        ])->assertCreated()->assertJsonPath('role.slug', 'mop');
+        $this->postJson('/api/user', [
+            'name' => 'HR Created Director', 'phone' => '900000165', 'role_id' => $directorRole->id, 'branch_id' => $branchB->id,
+        ])->assertCreated()->assertJsonPath('role.slug', 'branch_director');
 
         $this->postJson('/api/user', [
             'name' => 'Blocked Admin',
@@ -835,6 +865,22 @@ class UserAccessTest extends TestCase
             'phone' => '900000158',
             'role_id' => $superadminRole->id,
         ])->assertStatus(422);
+
+        $this->patchJson('/api/user/'.$agentB->id, ['name' => 'Agent Updated'])
+            ->assertOk()->assertJsonPath('name', 'Agent Updated');
+        $this->patchJson('/api/user/'.$client->id, ['name' => 'Client Updated', 'role_id' => $clientRole->id])
+            ->assertOk()->assertJsonPath('name', 'Client Updated');
+        $this->patchJson('/api/user/'.$client->id, ['role_id' => $agentRole->id])->assertStatus(422);
+
+        $this->patchJson('/api/user/'.$agentB->id, ['status' => 'inactive'])->assertStatus(422);
+        $this->deleteJson('/api/user/'.$agentB->id, ['distribute_to_agents' => true])
+            ->assertOk()->assertJsonPath('dismissed_user_id', $agentB->id);
+        $this->assertSame(User::STATUS_INACTIVE, $agentB->fresh()->status);
+
+        $this->patchJson('/api/user/'.$admin->id, ['name' => 'Blocked'])->assertStatus(403);
+        $this->patchJson('/api/user/'.$superadmin->id, ['name' => 'Blocked'])->assertStatus(403);
+        $this->deleteJson('/api/user/'.$admin->id, ['distribute_to_agents' => true])->assertStatus(403);
+        $this->deleteJson('/api/user/'.$client->id, ['distribute_to_agents' => true])->assertStatus(403);
     }
 
     public function test_branch_director_cannot_assign_admin_role(): void

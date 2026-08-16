@@ -8,6 +8,8 @@ use App\Models\AttendanceRawEvent;
 use App\Models\User;
 use App\Services\Attendance\AttendanceAccessService;
 use App\Services\Attendance\AttendanceIngestionService;
+use App\Services\Attendance\AttendanceTimesheetExporter;
+use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -17,6 +19,7 @@ final class AttendanceReportController extends Controller
     public function __construct(
         private readonly AttendanceAccessService $access,
         private readonly AttendanceIngestionService $ingestion,
+        private readonly AttendanceTimesheetExporter $timesheetExporter,
     ) {}
 
     public function events(Request $request)
@@ -110,12 +113,32 @@ final class AttendanceReportController extends Controller
         return response()->json(['data' => ['result' => $this->ingestion->reprocess($raw)]]);
     }
 
-    public function export(Request $request): StreamedResponse
+    public function export(Request $request)
     {
         $validated = $this->filters($request);
-        $visibleIds = $this->access->visibleUsersQuery($request->user())->pluck('users.id');
+        $visibleIds = $this->attendanceUsersQuery($request)->pluck('users.id');
         $query = AttendanceDailySummary::query()->with('user')->whereIn('user_id', $visibleIds);
         $this->applySummaryFilters($query, $validated);
+
+        if ($request->query('format') === 'xlsx') {
+            $timezone = (string) config('attendance.timezone', 'Asia/Dushanbe');
+            $from = CarbonImmutable::parse($validated['date_from'] ?? now($timezone)->startOfMonth()->toDateString(), $timezone)->startOfDay();
+            $to = CarbonImmutable::parse($validated['date_to'] ?? now($timezone)->endOfMonth()->toDateString(), $timezone)->endOfDay();
+            if ($from->diffInDays($to) > 30) {
+                abort(422, 'Диапазон табеля не может превышать 31 день.');
+            }
+            $usersQuery = $this->attendanceUsersQuery($request)->with(['role', 'branch', 'branchGroup']);
+            if (isset($validated['status']) || isset($validated['device_id']) || isset($validated['verification_method']) || ! empty($validated['has_comment'])) {
+                $usersQuery->whereIn('users.id', (clone $query)->select('user_id'));
+            }
+            $users = $usersQuery->orderBy('users.branch_id')->orderBy('users.name')->get();
+            $path = $this->timesheetExporter->build($users, $from, $to);
+            $filename = sprintf('Табель_%s_%s.xlsx', $from->format('Y-m-d'), $to->format('Y-m-d'));
+
+            return response()->download($path, $filename, [
+                'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            ])->deleteFileAfterSend(true);
+        }
 
         return response()->streamDownload(function () use ($query) {
             $stream = fopen('php://output', 'wb');
@@ -132,6 +155,26 @@ final class AttendanceReportController extends Controller
             });
             fclose($stream);
         }, 'attendance.csv', ['Content-Type' => 'text/csv; charset=UTF-8']);
+    }
+
+    private function attendanceUsersQuery(Request $request): Builder
+    {
+        $query = $this->access->visibleUsersQuery($request->user())
+            ->whereHas('role', fn (Builder $roles) => $roles->whereNotIn('slug', (array) config('attendance.excluded_table_user_roles', ['client'])));
+        foreach (['branch_id', 'branch_group_id'] as $field) {
+            if ($request->filled($field)) $query->where('users.'.$field, $request->integer($field));
+        }
+        if ($request->filled('user_id')) $query->whereKey($request->integer('user_id'));
+        if ($request->filled('role')) $query->whereHas('role', fn (Builder $roles) => $roles->where('slug', (string) $request->string('role')));
+        if ($request->filled('search')) {
+            $search = trim((string) $request->string('search'));
+            $query->where(function (Builder $users) use ($search) {
+                $users->where('users.name', 'like', '%'.$search.'%');
+                if (ctype_digit($search)) $users->orWhere('users.id', (int) $search);
+            });
+        }
+
+        return $query;
     }
 
     private function spreadsheetSafe(?string $value): ?string

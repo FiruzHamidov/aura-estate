@@ -16,8 +16,13 @@ return [
     ))),
     'administrator_roles' => ['admin', 'superadmin', 'owner'],
     'table_roles' => ['rop', 'branch_director', 'hr', 'admin', 'superadmin', 'owner'],
+    'excluded_table_user_roles' => ['client'],
     'mapping_roles' => ['hr', 'admin', 'superadmin', 'owner'],
     'comment_roles' => ['hr', 'admin', 'superadmin', 'owner'],
+    'schedule_roles' => ['hr', 'admin', 'superadmin', 'owner'],
+    'leave_roles' => ['hr', 'admin', 'superadmin', 'owner'],
+    'duty_roles' => ['hr', 'admin', 'superadmin', 'owner'],
+    'holiday_roles' => ['hr', 'admin', 'superadmin', 'owner'],
     'device_viewer_roles' => ['hr', 'admin', 'superadmin', 'owner'],
     'default_schedule' => [
         '1' => ['start' => '09:00', 'end' => '18:00', 'grace_minutes' => 0],

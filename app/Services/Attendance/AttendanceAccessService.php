@@ -46,6 +46,26 @@ final class AttendanceAccessService
         $this->assertRoleIn($user, config('attendance.comment_roles', []), 'ATTENDANCE_COMMENT_FORBIDDEN', 'Нет права изменять HR-комментарий.');
     }
 
+    public function assertCanManageSchedules(User $user): void
+    {
+        $this->assertRoleIn($user, config('attendance.schedule_roles', []), 'ATTENDANCE_SCHEDULE_FORBIDDEN', 'Нет права изменять рабочий график.');
+    }
+
+    public function assertCanManageLeaves(User $user): void
+    {
+        $this->assertRoleIn($user, config('attendance.leave_roles', []), 'ATTENDANCE_LEAVE_FORBIDDEN', 'Нет права назначать отпуска.');
+    }
+
+    public function assertCanManageDuties(User $user): void
+    {
+        $this->assertRoleIn($user, config('attendance.duty_roles', []), 'ATTENDANCE_DUTY_FORBIDDEN', 'Нет права назначать дежурных.');
+    }
+
+    public function assertCanManageHolidays(User $user): void
+    {
+        $this->assertRoleIn($user, config('attendance.holiday_roles', []), 'ATTENDANCE_HOLIDAY_FORBIDDEN', 'Нет права управлять праздничными днями.');
+    }
+
     public function assertCanViewDevices(User $user): void
     {
         $this->assertRoleIn($user, config('attendance.device_viewer_roles', []), 'ATTENDANCE_DEVICE_FORBIDDEN', 'Нет права просматривать терминалы посещаемости.');
@@ -60,6 +80,10 @@ final class AttendanceAccessService
             'can_view_all_branches' => in_array($role, ['hr', 'admin', 'superadmin', 'owner'], true),
             'can_comment_late_day' => in_array($role, config('attendance.comment_roles', []), true),
             'can_manage_mappings' => in_array($role, config('attendance.mapping_roles', []), true),
+            'can_manage_schedules' => in_array($role, config('attendance.schedule_roles', []), true),
+            'can_manage_leaves' => in_array($role, config('attendance.leave_roles', []), true),
+            'can_manage_duties' => in_array($role, config('attendance.duty_roles', []), true),
+            'can_manage_holidays' => in_array($role, config('attendance.holiday_roles', []), true),
             'can_view_devices' => in_array($role, config('attendance.device_viewer_roles', []), true),
             'can_manage_devices' => in_array($role, config('attendance.administrator_roles', []), true),
         ];

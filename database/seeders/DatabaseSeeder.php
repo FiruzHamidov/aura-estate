@@ -35,6 +35,7 @@ class DatabaseSeeder extends Seeder
             DemoNewBuildingSeeder::class,
             KpiModuleSeeder::class,
             MotivationRulesSeeder::class,
+            AttendanceHolidaySeeder::class,
         ]);
     }
 }

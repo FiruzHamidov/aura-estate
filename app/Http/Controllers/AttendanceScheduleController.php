@@ -19,7 +19,8 @@ final class AttendanceScheduleController extends Controller
 
     public function show(Request $request, User $user)
     {
-        $this->access->assertCanAdminister($request->user());
+        $this->access->assertCanManageSchedules($request->user());
+        $this->access->assertCanViewUser($request->user(), $user);
         $schedule = AttendanceWorkSchedule::query()->where('user_id', $user->id)->first();
 
         return response()->json(['data' => $schedule ?? [
@@ -33,8 +34,9 @@ final class AttendanceScheduleController extends Controller
 
     public function update(Request $request, User $user)
     {
-        $this->access->assertCanAdminister($request->user());
+        $this->access->assertCanManageSchedules($request->user());
         $this->participants->assertEligible($user);
+        $this->access->assertCanViewUser($request->user(), $user);
         $data = $request->validate([
             'timezone' => ['required', 'timezone'],
             'schedule' => ['required', 'array:1,2,3,4,5,6,7'],

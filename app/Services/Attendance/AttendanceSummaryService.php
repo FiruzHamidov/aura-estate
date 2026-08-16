@@ -4,6 +4,7 @@ namespace App\Services\Attendance;
 
 use App\Models\AttendanceDailySummary;
 use App\Models\AttendanceEvent;
+use App\Models\AttendanceLeave;
 use App\Models\AttendanceWorkSchedule;
 use App\Models\User;
 use Carbon\CarbonImmutable;
@@ -11,6 +12,8 @@ use Illuminate\Support\Collection;
 
 final class AttendanceSummaryService
 {
+    public function __construct(private readonly AttendanceHolidayCalendar $holidays) {}
+
     public function recompute(User $user, string $workDate): AttendanceDailySummary
     {
         $settings = $this->settings($user);
@@ -72,6 +75,13 @@ final class AttendanceSummaryService
 
     public function isWorkingDay(User $user, string $workDate): bool
     {
+        if ($this->holidays->isHoliday($workDate)) {
+            return false;
+        }
+        if (AttendanceLeave::query()->where('user_id', $user->id)
+            ->whereDate('date_from', '<=', $workDate)->whereDate('date_to', '>=', $workDate)->exists()) {
+            return false;
+        }
         $settings = $this->settings($user);
         $timezone = $this->timezone($settings);
         $day = CarbonImmutable::parse($workDate, $timezone);

@@ -21,6 +21,8 @@ class UserController extends Controller
 {
     private const REPORT_AGENT_ROLE_SLUGS = ['agent', 'intern', 'rop', 'mop'];
     private const PUBLIC_AGENT_ROLE_SLUGS = ['agent', 'mop'];
+    private const HR_EMPLOYEE_ROLE_SLUGS = ['agent', 'rop', 'mop', 'branch_director'];
+    private const HR_EDITABLE_ROLE_SLUGS = ['agent', 'rop', 'mop', 'branch_director', 'client'];
 
     private function authUser(): User
     {
@@ -225,11 +227,47 @@ class UserController extends Controller
         return match ($this->roleSlug($authUser)) {
             'superadmin', 'admin' => null,
             'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
-            'hr' => ['hr', 'marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client', 'reels_manager'],
+            'hr' => self::HR_EDITABLE_ROLE_SLUGS,
             'rop' => ['mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
             'branch_director' => ['mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
             default => [],
         };
+    }
+
+    private function authorizeHrCreationRole(User $authUser, ?Role $targetRole): void
+    {
+        if ($this->roleSlug($authUser) !== 'hr') {
+            return;
+        }
+
+        abort_unless($targetRole && in_array($targetRole->slug, self::HR_EMPLOYEE_ROLE_SLUGS, true), 422, 'HR can create only agents, ROP, MOP and branch directors.');
+    }
+
+    private function authorizeUserMutation(User $authUser, User $targetUser, string $operation): void
+    {
+        if ($this->roleSlug($authUser) !== 'hr') {
+            return;
+        }
+
+        $targetUser->loadMissing('role');
+        $allowedRoles = $operation === 'dismiss'
+            ? self::HR_EMPLOYEE_ROLE_SLUGS
+            : self::HR_EDITABLE_ROLE_SLUGS;
+
+        abort_unless(in_array($this->roleSlug($targetUser), $allowedRoles, true), 403, 'HR cannot modify this user.');
+    }
+
+    private function authorizeHrRoleTransition(User $authUser, User $targetUser, ?Role $targetRole): void
+    {
+        if ($this->roleSlug($authUser) !== 'hr' || ! $targetRole) {
+            return;
+        }
+
+        $targetUser->loadMissing('role');
+        $currentIsClient = $this->roleSlug($targetUser) === 'client';
+        $nextIsClient = $targetRole->slug === 'client';
+
+        abort_if($currentIsClient !== $nextIsClient, 422, 'HR cannot change a client into an employee or an employee into a client.');
     }
 
     private function resolveRequestedRole(Request $request, ?User $targetUser = null): ?Role
@@ -444,6 +482,7 @@ class UserController extends Controller
         ]);
 
         $targetRole = $this->resolveRequestedRole($request);
+        $this->authorizeHrCreationRole($authUser, $targetRole);
         $this->authorizeAssignedRole($authUser, $targetRole);
 
         $data = $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'birthday', 'description']);
@@ -502,6 +541,7 @@ class UserController extends Controller
     {
         $authUser = $this->authUser();
         $this->ensureUserIsVisible($authUser, $user);
+        $this->authorizeUserMutation($authUser, $user, 'update');
 
         $request->validate([
             'name' => 'sometimes|string',
@@ -521,6 +561,11 @@ class UserController extends Controller
 
         if ($request->filled('role_id')) {
             $this->authorizeAssignedRole($authUser, $targetRole);
+            $this->authorizeHrRoleTransition($authUser, $user, $targetRole);
+        }
+
+        if ($this->roleSlug($authUser) === 'hr' && $request->filled('status') && $request->input('status') !== $user->status) {
+            abort(422, 'Use the dismissal endpoint to deactivate an employee.');
         }
 
         $data = array_merge([
@@ -548,6 +593,10 @@ class UserController extends Controller
 
     public function updatePhoto(Request $request, User $user)
     {
+        $authUser = $this->authUser();
+        $this->ensureUserIsVisible($authUser, $user);
+        $this->authorizeUserMutation($authUser, $user, 'update');
+
         $request->validate([
             'photo' => 'required|image|max:2048',
         ]);
@@ -604,6 +653,7 @@ class UserController extends Controller
     {
         $authUser = $this->authUser();
         $this->ensureUserIsVisible($authUser, $user);
+        $this->authorizeUserMutation($authUser, $user, 'dismiss');
 
         // Валидация входных параметров
         $request->validate([

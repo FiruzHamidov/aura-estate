@@ -8,8 +8,10 @@ use App\Jobs\ProcessAttendanceRawEvent;
 use App\Models\AttendanceDailySummary;
 use App\Models\AttendanceDevice;
 use App\Models\AttendanceDeviceUser;
+use App\Models\AttendanceDuty;
 use App\Models\AttendanceEvent;
 use App\Models\AttendanceIngestRequest;
+use App\Models\AttendanceLeave;
 use App\Models\AttendanceRawEvent;
 use App\Models\AttendanceWorkSchedule;
 use App\Models\Branch;
@@ -18,6 +20,7 @@ use App\Models\Role;
 use App\Models\User;
 use App\Services\Attendance\AttendanceIngestionService;
 use Carbon\CarbonImmutable;
+use Database\Seeders\AttendanceHolidaySeeder;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Queue;
@@ -35,6 +38,9 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->createBaseSchema();
         (require database_path('migrations/2026_08_16_000001_create_attendance_tables.php'))->up();
         (require database_path('migrations/2026_08_16_000002_create_attendance_daily_comments_table.php'))->up();
+        (require database_path('migrations/2026_08_16_000003_create_attendance_leaves_table.php'))->up();
+        (require database_path('migrations/2026_08_16_000004_create_attendance_holidays_table.php'))->up();
+        (require database_path('migrations/2026_08_16_000005_create_attendance_duties_table.php'))->up();
         config([
             'attendance.timezone' => 'Asia/Dushanbe',
             'attendance.duplicate_window_seconds' => 10,
@@ -401,6 +407,16 @@ class AttendanceModuleFeatureTest extends TestCase
     {
         $context = $this->context();
         $device = $this->device('ZAM230-WEB-MATRIX', $context['branch'], $context['group']);
+        $clientRole = Role::query()->firstOrCreate(['slug' => 'client'], ['name' => 'Client']);
+        $client = User::query()->create([
+            'name' => 'Attendance Client',
+            'phone' => '992000008888',
+            'role_id' => $clientRole->id,
+            'branch_id' => $context['branch']->id,
+            'branch_group_id' => $context['group']->id,
+            'status' => User::STATUS_ACTIVE,
+            'auth_method' => 'password',
+        ]);
         AttendanceDailySummary::query()->create([
             'user_id' => $context['agent']->id,
             'work_date' => '2026-08-17',
@@ -415,6 +431,12 @@ class AttendanceModuleFeatureTest extends TestCase
             'user_id' => $context['otherAgent']->id,
             'work_date' => '2026-08-17',
             'status' => 'absent',
+        ]);
+        AttendanceDailySummary::query()->create([
+            'user_id' => $client->id,
+            'work_date' => '2026-08-17',
+            'late_minutes' => 15,
+            'status' => 'late',
         ]);
         AttendanceEvent::query()->create([
             'user_id' => $context['agent']->id,
@@ -433,7 +455,13 @@ class AttendanceModuleFeatureTest extends TestCase
             ->assertJsonPath('data.0.days.2026-08-17.status', 'late')
             ->assertJsonPath('data.0.days.2026-08-17.verification_methods.0', 'face')
             ->assertJsonPath('meta.permissions.can_manage_devices', true)
+            ->assertJsonPath('meta.summary.active_users', 6)
             ->assertJsonPath('meta.timezone', 'Asia/Dushanbe');
+
+        $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&role=client')
+            ->assertOk()
+            ->assertJsonCount(0, 'data')
+            ->assertJsonPath('meta.pagination.total', 0);
 
         $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&view=branches')
             ->assertOk()->assertJsonCount(2, 'data');
@@ -587,6 +615,53 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->assertStringContainsString("'=HYPERLINK", $safeContent);
     }
 
+    public function test_hr_timesheet_export_is_a_valid_excel_workbook_and_excludes_clients(): void
+    {
+        $context = $this->context();
+        $clientRole = Role::query()->firstOrCreate(['slug' => 'client'], ['name' => 'Client']);
+        $client = User::query()->create([
+            'name' => 'Export Client',
+            'phone' => '992000007777',
+            'role_id' => $clientRole->id,
+            'branch_id' => $context['branch']->id,
+            'branch_group_id' => $context['group']->id,
+            'status' => User::STATUS_ACTIVE,
+            'auth_method' => 'password',
+        ]);
+        foreach ([$context['agent'], $client] as $user) {
+            AttendanceDailySummary::query()->create([
+                'user_id' => $user->id,
+                'work_date' => '2026-08-17',
+                'first_in_at' => '2026-08-17 04:00:00',
+                'last_out_at' => '2026-08-17 13:00:00',
+                'worked_minutes' => 540,
+                'status' => 'present',
+            ]);
+        }
+
+        Sanctum::actingAs($context['admin']);
+        $response = $this->get('/api/attendance/export?format=xlsx&date_from=2026-08-17&date_to=2026-08-17')
+            ->assertOk()
+            ->assertHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+
+        $zip = new \ZipArchive;
+        $this->assertTrue($zip->open($response->baseResponse->getFile()->getPathname()) === true);
+        $this->assertNotFalse($zip->locateName('xl/workbook.xml'));
+        $this->assertNotFalse($zip->locateName('xl/worksheets/sheet1.xml'));
+        $workbook = $zip->getFromName('xl/workbook.xml');
+        $timesheet = $zip->getFromName('xl/worksheets/sheet1.xml');
+        $details = $zip->getFromName('xl/worksheets/sheet2.xml');
+        $zip->close();
+
+        $this->assertNotFalse(simplexml_load_string($workbook));
+        $this->assertNotFalse(simplexml_load_string($timesheet));
+        $this->assertStringContainsString('Табель', $workbook);
+        $this->assertStringContainsString('Agent A', $timesheet);
+        $this->assertStringContainsString('Явок', $timesheet);
+        $this->assertStringNotContainsString('Export Client', $timesheet);
+        $this->assertStringContainsString('04:00', $details);
+    }
+
     public function test_only_administrators_can_manage_devices_and_changes_are_audited(): void
     {
         $context = $this->context();
@@ -705,7 +780,7 @@ class AttendanceModuleFeatureTest extends TestCase
         }
     }
 
-    public function test_admin_can_configure_schedule_for_any_active_user(): void
+    public function test_hr_and_admin_can_configure_schedule_for_visible_active_users(): void
     {
         $context = $this->context();
         Sanctum::actingAs($context['admin']);
@@ -718,6 +793,19 @@ class AttendanceModuleFeatureTest extends TestCase
             'change_reason' => 'График пилотной группы',
         ])->assertOk()->assertJsonPath('data.user_id', $context['agent']->id);
         $this->assertDatabaseHas('attendance_audit_logs', ['action' => 'attendance_schedule.created']);
+
+        Sanctum::actingAs($context['hr']);
+        $this->getJson('/api/attendance/users/'.$context['agent']->id.'/schedule')
+            ->assertOk()
+            ->assertJsonPath('data.user_id', $context['agent']->id);
+        $this->putJson('/api/attendance/users/'.$context['agent']->id.'/schedule', [
+            'timezone' => 'Asia/Dushanbe',
+            'schedule' => $schedule,
+            'holidays' => ['2026-09-10'],
+            'change_reason' => 'График обновлён HR',
+        ])->assertOk()->assertJsonPath('data.holidays.0', '2026-09-10');
+
+        Sanctum::actingAs($context['admin']);
 
         $invalid = $schedule;
         $invalid['8'] = ['start' => '09:00', 'end' => '18:00'];
@@ -740,6 +828,173 @@ class AttendanceModuleFeatureTest extends TestCase
             'change_reason' => 'Неактивный пользователь',
         ])->assertStatus(422)
             ->assertJsonPath('details.errors.user_id.0', 'Учёт посещаемости доступен только активным пользователям.');
+    }
+
+    public function test_hr_can_manage_vacations_and_matrix_marks_leave_days(): void
+    {
+        $context = $this->context();
+        AttendanceDailySummary::query()->create([
+            'user_id' => $context['agent']->id,
+            'work_date' => '2026-08-17',
+            'status' => 'absent',
+        ]);
+
+        Sanctum::actingAs($context['hr']);
+        $created = $this->postJson('/api/attendance/users/'.$context['agent']->id.'/leaves', [
+            'date_from' => '2026-08-17',
+            'date_to' => '2026-08-21',
+            'note' => 'Ежегодный отпуск',
+        ])->assertCreated()
+            ->assertJsonPath('data.user_id', $context['agent']->id)
+            ->assertJsonPath('data.note', 'Ежегодный отпуск');
+
+        $this->assertDatabaseHas('attendance_audit_logs', ['action' => 'attendance_leave.created']);
+        $this->getJson('/api/attendance/users/'.$context['agent']->id.'/leaves')
+            ->assertOk()->assertJsonCount(1, 'data');
+        $this->postJson('/api/attendance/users/'.$context['agent']->id.'/leaves', [
+            'date_from' => '2026-08-20',
+            'date_to' => '2026-08-22',
+        ])->assertStatus(422);
+
+        $matrix = $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-23&view=users')
+            ->assertOk()
+            ->assertJsonPath('meta.permissions.can_manage_leaves', true)
+            ->json('data');
+        $agentRow = collect($matrix)->firstWhere('user.id', $context['agent']->id);
+        $this->assertFalse($agentRow['days']['2026-08-17']['is_working_day']);
+        $this->assertSame('2026-08-17', $agentRow['days']['2026-08-17']['leave']['date_from']);
+        $this->assertSame(0, $agentRow['totals']['absent']);
+
+        $leaveId = $created->json('data.id');
+        $this->deleteJson('/api/attendance/users/'.$context['agent']->id.'/leaves/'.$leaveId)->assertNoContent();
+        $this->assertDatabaseHas('attendance_audit_logs', ['action' => 'attendance_leave.deleted']);
+
+        Sanctum::actingAs($context['agent']);
+        $this->postJson('/api/attendance/users/'.$context['agent']->id.'/leaves', [
+            'date_from' => '2026-08-24',
+            'date_to' => '2026-08-25',
+        ])->assertStatus(403)->assertJsonPath('code', 'ATTENDANCE_LEAVE_FORBIDDEN');
+    }
+
+    public function test_hr_can_manage_duties_and_matrix_marks_duty_days(): void
+    {
+        $context = $this->context();
+        Sanctum::actingAs($context['hr']);
+
+        $created = $this->postJson('/api/attendance/users/'.$context['agent']->id.'/duties', [
+            'date_from' => '2026-08-22',
+            'date_to' => '2026-08-23',
+            'note' => 'Дежурный по офису',
+        ])->assertCreated()
+            ->assertJsonPath('data.user_id', $context['agent']->id)
+            ->assertJsonPath('data.note', 'Дежурный по офису');
+
+        $this->assertDatabaseHas('attendance_audit_logs', ['action' => 'attendance_duty.created']);
+        $this->getJson('/api/attendance/users/'.$context['agent']->id.'/duties')
+            ->assertOk()->assertJsonCount(1, 'data');
+        $this->postJson('/api/attendance/users/'.$context['agent']->id.'/duties', [
+            'date_from' => '2026-08-23',
+            'date_to' => '2026-08-24',
+        ])->assertStatus(422);
+
+        $matrix = $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-23&view=users')
+            ->assertOk()
+            ->assertJsonPath('meta.permissions.can_manage_duties', true)
+            ->json('data');
+        $agentRow = collect($matrix)->firstWhere('user.id', $context['agent']->id);
+        $this->assertSame('2026-08-22', $agentRow['days']['2026-08-22']['duty']['date_from']);
+
+        $this->getJson('/api/attendance/users/'.$context['agent']->id.'/days/2026-08-22')
+            ->assertOk()->assertJsonPath('data.duty.note', 'Дежурный по офису');
+
+        $dutyId = $created->json('data.id');
+        $this->deleteJson('/api/attendance/users/'.$context['agent']->id.'/duties/'.$dutyId)->assertNoContent();
+        $this->assertDatabaseHas('attendance_audit_logs', ['action' => 'attendance_duty.deleted']);
+
+        Sanctum::actingAs($context['agent']);
+        $this->postJson('/api/attendance/users/'.$context['agent']->id.'/duties', [
+            'date_from' => '2026-08-24',
+            'date_to' => '2026-08-24',
+        ])->assertStatus(403)->assertJsonPath('code', 'ATTENDANCE_DUTY_FORBIDDEN');
+    }
+
+    public function test_hr_can_manage_global_holidays_and_seeded_calendar_affects_attendance(): void
+    {
+        $context = $this->context();
+        $this->seed(AttendanceHolidaySeeder::class);
+        $this->assertDatabaseCount('attendance_holidays', 17);
+        $this->assertDatabaseHas('attendance_holidays', [
+            'holiday_date' => '2026-03-20',
+            'name' => 'Иди Рамазон',
+            'kind' => 'official',
+        ]);
+        $this->assertDatabaseHas('attendance_holidays', [
+            'holiday_date' => '2026-03-25',
+            'kind' => 'transfer',
+        ]);
+
+        Sanctum::actingAs($context['hr']);
+        $this->getJson('/api/attendance/holidays?year=2026')
+            ->assertOk()->assertJsonCount(17, 'data');
+        $created = $this->postJson('/api/attendance/holidays', [
+            'holiday_date' => '2026-08-17',
+            'name' => 'Корпоративный выходной',
+            'note' => 'Добавлено HR',
+        ])->assertCreated()
+            ->assertJsonPath('data.kind', 'custom')
+            ->assertJsonPath('data.name', 'Корпоративный выходной');
+
+        $holidayId = $created->json('data.id');
+        $this->putJson('/api/attendance/holidays/'.$holidayId, [
+            'holiday_date' => '2026-08-17',
+            'name' => 'Общий выходной компании',
+            'note' => 'Обновлено HR',
+        ])->assertOk()->assertJsonPath('data.name', 'Общий выходной компании');
+        $this->postJson('/api/attendance/holidays', [
+            'holiday_date' => '2026-08-17',
+            'name' => 'Дубликат',
+        ])->assertStatus(422);
+
+        $matrix = $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&view=users')
+            ->assertOk()->json('data');
+        $agentRow = collect($matrix)->firstWhere('user.id', $context['agent']->id);
+        $this->assertFalse($agentRow['days']['2026-08-17']['is_working_day']);
+        $this->assertSame('Общий выходной компании', $agentRow['days']['2026-08-17']['holiday']['name']);
+
+        Artisan::call('attendance:summarize', ['date' => '2026-08-17']);
+        $this->assertDatabaseMissing('attendance_daily_summaries', [
+            'user_id' => $context['agent']->id,
+            'work_date' => '2026-08-17',
+        ]);
+        $this->assertDatabaseHas('attendance_audit_logs', ['action' => 'attendance_holiday.created']);
+        $this->assertDatabaseHas('attendance_audit_logs', ['action' => 'attendance_holiday.updated']);
+
+        $this->deleteJson('/api/attendance/holidays/'.$holidayId)->assertNoContent();
+        $this->assertDatabaseHas('attendance_audit_logs', ['action' => 'attendance_holiday.deleted']);
+
+        Sanctum::actingAs($context['agent']);
+        $this->postJson('/api/attendance/holidays', [
+            'holiday_date' => '2026-08-18',
+            'name' => 'Нет доступа',
+        ])->assertStatus(403)->assertJsonPath('code', 'ATTENDANCE_HOLIDAY_FORBIDDEN');
+    }
+
+    public function test_summarize_command_skips_employee_vacation(): void
+    {
+        $context = $this->context();
+        AttendanceLeave::query()->create([
+            'user_id' => $context['agent']->id,
+            'date_from' => '2026-08-17',
+            'date_to' => '2026-08-21',
+            'created_by' => $context['hr']->id,
+        ]);
+
+        Artisan::call('attendance:summarize', ['date' => '2026-08-17']);
+
+        $this->assertDatabaseMissing('attendance_daily_summaries', [
+            'user_id' => $context['agent']->id,
+            'work_date' => '2026-08-17',
+        ]);
     }
 
     public function test_inactive_mapped_user_does_not_receive_new_attendance(): void

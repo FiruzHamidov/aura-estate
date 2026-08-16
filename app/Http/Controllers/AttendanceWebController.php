@@ -5,9 +5,13 @@ namespace App\Http\Controllers;
 use App\Models\AttendanceDailyComment;
 use App\Models\AttendanceDailySummary;
 use App\Models\AttendanceEvent;
+use App\Models\AttendanceDuty;
+use App\Models\AttendanceHoliday;
+use App\Models\AttendanceLeave;
 use App\Models\AttendanceWorkSchedule;
 use App\Models\User;
 use App\Services\Attendance\AttendanceAccessService;
+use App\Services\Attendance\AttendanceHolidayCalendar;
 use Carbon\CarbonImmutable;
 use Carbon\CarbonPeriod;
 use Illuminate\Database\Eloquent\Builder;
@@ -19,7 +23,10 @@ use Illuminate\Validation\ValidationException;
 
 final class AttendanceWebController extends Controller
 {
-    public function __construct(private readonly AttendanceAccessService $access) {}
+    public function __construct(
+        private readonly AttendanceAccessService $access,
+        private readonly AttendanceHolidayCalendar $holidays,
+    ) {}
 
     public function matrix(Request $request)
     {
@@ -31,7 +38,12 @@ final class AttendanceWebController extends Controller
         $dates = collect(CarbonPeriod::create($from->startOfDay(), $to->startOfDay()))
             ->map(fn ($date) => $date->toDateString());
 
-        $visibleQuery = $this->access->visibleUsersQuery($request->user())->select('users.*');
+        $visibleQuery = $this->access->visibleUsersQuery($request->user())
+            ->whereHas('role', function (Builder $roles) {
+                $excludedRoles = (array) config('attendance.excluded_table_user_roles', ['client']);
+                $roles->whereNotIn('slug', $excludedRoles);
+            })
+            ->select('users.*');
         $activeUsersCount = (clone $visibleQuery)->count('users.id');
         $this->applyUserFilters($visibleQuery, $filters, $from, $to);
 
@@ -82,6 +94,11 @@ final class AttendanceWebController extends Controller
         $user->loadMissing(['role', 'branch', 'branchGroup']);
         $summary = AttendanceDailySummary::query()->where('user_id', $user->id)->whereDate('work_date', $date)->first();
         $settings = AttendanceWorkSchedule::query()->where('user_id', $user->id)->first();
+        $leave = AttendanceLeave::query()->where('user_id', $user->id)
+            ->whereDate('date_from', '<=', $date)->whereDate('date_to', '>=', $date)->first();
+        $duty = AttendanceDuty::query()->where('user_id', $user->id)
+            ->whereDate('date_from', '<=', $date)->whereDate('date_to', '>=', $date)->first();
+        $holiday = $this->holidays->holiday($date);
         $schedule = ($settings?->schedule ?? config('attendance.default_schedule', []))[(string) $day->dayOfWeekIso] ?? null;
         $events = AttendanceEvent::query()
             ->with('device:id,name,serial_number')
@@ -98,7 +115,7 @@ final class AttendanceWebController extends Controller
                 'ends_at' => $schedule['end'] ?? null,
                 'label' => isset($schedule['start'], $schedule['end']) ? $schedule['start'].'–'.$schedule['end'] : null,
             ] : null,
-            'summary' => $this->dayPayload($summary, is_array($schedule), collect(), $comment),
+            'summary' => $this->dayPayload($summary, $leave === null && $holiday === null && is_array($schedule), collect(), $comment, $leave, $holiday, $duty),
             'events' => $events->map(fn (AttendanceEvent $event) => [
                 'id' => $event->id,
                 'occurred_at' => $event->occurred_at?->toISOString(),
@@ -108,6 +125,9 @@ final class AttendanceWebController extends Controller
                 'device' => $event->device ? $event->device->only(['id', 'name', 'serial_number']) : null,
             ])->values(),
             'comment' => $comment ? $this->commentPayload($comment) : null,
+            'leave' => $leave ? $this->leavePayload($leave) : null,
+            'duty' => $duty ? $this->dutyPayload($duty) : null,
+            'holiday' => $holiday ? $this->holidayPayload($holiday) : null,
         ]]);
     }
 
@@ -208,23 +228,33 @@ final class AttendanceWebController extends Controller
 
         return $users->map(function (User $user) use ($dates, $data) {
             $summaries = $data['summaries']->get($user->id, collect());
-            $late = $summaries->where('status', 'late');
+            $leaves = $data['leaves']->get($user->id, collect());
+            $countableSummaries = $summaries->reject(function ($summary) use ($leaves, $data) {
+                $date = $summary->work_date->toDateString();
+
+                return $this->leaveForDate($leaves, $date) !== null || $data['holidays']->has($date);
+            });
+            $late = $countableSummaries->where('status', 'late');
 
             return [
                 'user' => $this->userPayload($user),
                 'totals' => [
-                    'present' => $summaries->where('status', 'present')->count(),
+                    'present' => $countableSummaries->where('status', 'present')->count(),
                     'late' => $late->count(),
-                    'absent' => $summaries->where('status', 'absent')->count(),
-                    'incomplete' => $summaries->where('status', 'incomplete')->count(),
+                    'absent' => $countableSummaries->where('status', 'absent')->count(),
+                    'incomplete' => $countableSummaries->where('status', 'incomplete')->count(),
                     'average_late_minutes' => (int) round((float) ($late->avg('late_minutes') ?? 0)),
                 ],
                 'days' => $dates->mapWithKeys(function (string $date) use ($user, $data) {
                     $summary = $data['summaries']->get($user->id, collect())->get($date);
                     $comment = $data['comments']->get($user->id, collect())->get($date);
                     $methods = $data['methods']->get($user->id, collect())->get($date, collect());
+                    $leave = $this->leaveForDate($data['leaves']->get($user->id, collect()), $date);
+                    $duty = $this->dutyForDate($data['duties']->get($user->id, collect()), $date);
 
-                    return [$date => $this->dayPayload($summary, $this->isWorkingDay($data['schedules']->get($user->id), $date), $methods, $comment)];
+                    $holiday = $data['holidays']->get($date);
+
+                    return [$date => $this->dayPayload($summary, $leave === null && $this->isWorkingDay($data['schedules']->get($user->id), $date, $data['holidays']), $methods, $comment, $leave, $holiday, $duty)];
                 })->all(),
             ];
         });
@@ -240,7 +270,8 @@ final class AttendanceWebController extends Controller
             return [
                 'branch' => ['id' => $branch?->id ?? 0, 'name' => $branch?->name ?? 'Без филиала'],
                 'days' => $dates->mapWithKeys(function (string $date) use ($branchUsers, $data) {
-                    $scheduled = $branchUsers->filter(fn (User $user) => $this->isWorkingDay($data['schedules']->get($user->id), $date));
+                    $scheduled = $branchUsers->filter(fn (User $user) => $this->leaveForDate($data['leaves']->get($user->id, collect()), $date) === null
+                        && $this->isWorkingDay($data['schedules']->get($user->id), $date, $data['holidays']));
                     $summaries = $scheduled->map(fn (User $user) => $data['summaries']->get($user->id, collect())->get($date))->filter();
                     $checkedIn = $summaries->whereIn('status', ['present', 'late', 'incomplete'])->count();
                     $scheduledCount = $scheduled->count();
@@ -263,7 +294,7 @@ final class AttendanceWebController extends Controller
     {
         $ids = $users->pluck('id');
         if ($ids->isEmpty()) {
-            return ['summaries' => collect(), 'comments' => collect(), 'methods' => collect(), 'schedules' => collect()];
+            return ['summaries' => collect(), 'comments' => collect(), 'methods' => collect(), 'schedules' => collect(), 'leaves' => collect(), 'duties' => collect(), 'holidays' => $this->holidays->between($from->toDateString(), $to->toDateString())];
         }
         $summaries = AttendanceDailySummary::query()->whereIn('user_id', $ids)
             ->whereBetween('work_date', [$from->toDateString(), $to->toDateString()])->get()
@@ -277,11 +308,20 @@ final class AttendanceWebController extends Controller
             ->map(fn (Collection $rows) => $rows->groupBy(fn ($event) => $event->occurred_at->setTimezone($timezone)->toDateString())
                 ->map(fn (Collection $events) => $events->pluck('verification_method')->unique()->values()));
         $schedules = AttendanceWorkSchedule::query()->whereIn('user_id', $ids)->get()->keyBy('user_id');
+        $leaves = AttendanceLeave::query()->whereIn('user_id', $ids)
+            ->whereDate('date_from', '<=', $to->toDateString())
+            ->whereDate('date_to', '>=', $from->toDateString())
+            ->orderBy('date_from')->get()->groupBy('user_id');
+        $duties = AttendanceDuty::query()->whereIn('user_id', $ids)
+            ->whereDate('date_from', '<=', $to->toDateString())
+            ->whereDate('date_to', '>=', $from->toDateString())
+            ->orderBy('date_from')->get()->groupBy('user_id');
+        $holidays = $this->holidays->between($from->toDateString(), $to->toDateString());
 
-        return compact('summaries', 'comments', 'methods', 'schedules');
+        return compact('summaries', 'comments', 'methods', 'schedules', 'leaves', 'duties', 'holidays');
     }
 
-    private function dayPayload(?AttendanceDailySummary $summary, bool $workingDay, Collection $methods, ?AttendanceDailyComment $comment): array
+    private function dayPayload(?AttendanceDailySummary $summary, bool $workingDay, Collection $methods, ?AttendanceDailyComment $comment, ?AttendanceLeave $leave = null, ?AttendanceHoliday $holiday = null, ?AttendanceDuty $duty = null): array
     {
         return [
             'status' => $summary?->status,
@@ -294,11 +334,66 @@ final class AttendanceWebController extends Controller
             'verification_methods' => $methods->values(),
             'has_comment' => $comment !== null,
             'comment_preview' => $comment ? Str::limit($comment->comment, 120) : null,
+            'leave' => $leave ? $this->leavePayload($leave) : null,
+            'holiday' => $holiday ? $this->holidayPayload($holiday) : null,
+            'duty' => $duty ? $this->dutyPayload($duty) : null,
         ];
     }
 
-    private function isWorkingDay(?AttendanceWorkSchedule $settings, string $date): bool
+    private function leaveForDate(Collection $leaves, string $date): ?AttendanceLeave
     {
+        return $leaves->first(fn (AttendanceLeave $leave) => $leave->date_from->toDateString() <= $date
+            && $leave->date_to->toDateString() >= $date);
+    }
+
+    private function leavePayload(AttendanceLeave $leave): array
+    {
+        return [
+            'id' => $leave->id,
+            'user_id' => $leave->user_id,
+            'date_from' => $leave->date_from->toDateString(),
+            'date_to' => $leave->date_to->toDateString(),
+            'note' => $leave->note,
+            'created_by' => $leave->created_by,
+            'created_at' => $leave->created_at?->toISOString(),
+        ];
+    }
+
+    private function dutyForDate(Collection $duties, string $date): ?AttendanceDuty
+    {
+        return $duties->first(fn (AttendanceDuty $duty) => $duty->date_from->toDateString() <= $date
+            && $duty->date_to->toDateString() >= $date);
+    }
+
+    private function dutyPayload(AttendanceDuty $duty): array
+    {
+        return [
+            'id' => $duty->id,
+            'user_id' => $duty->user_id,
+            'date_from' => $duty->date_from->toDateString(),
+            'date_to' => $duty->date_to->toDateString(),
+            'note' => $duty->note,
+            'created_by' => $duty->created_by,
+            'created_at' => $duty->created_at?->toISOString(),
+        ];
+    }
+
+    private function holidayPayload(AttendanceHoliday $holiday): array
+    {
+        return [
+            'id' => $holiday->id,
+            'holiday_date' => $holiday->holiday_date->toDateString(),
+            'name' => $holiday->name,
+            'kind' => $holiday->kind,
+            'note' => $holiday->note,
+        ];
+    }
+
+    private function isWorkingDay(?AttendanceWorkSchedule $settings, string $date, ?Collection $globalHolidays = null): bool
+    {
+        if ($globalHolidays?->has($date) || ($globalHolidays === null && $this->holidays->isHoliday($date))) {
+            return false;
+        }
         $day = CarbonImmutable::parse($date, $settings?->timezone ?: config('attendance.timezone'));
         if ($settings && in_array($date, $settings->holidays ?? [], true)) {
             return false;
@@ -314,6 +409,17 @@ final class AttendanceWebController extends Controller
         $todayRows = AttendanceDailySummary::query()->whereIn('user_id', clone $visibleIds)->whereDate('work_date', $today);
         $periodRows = AttendanceDailySummary::query()->whereIn('user_id', clone $visibleIds)
             ->whereBetween('work_date', [$from->toDateString(), $to->toDateString()]);
+        foreach ([$todayRows, $periodRows] as $rows) {
+            $rows->whereNotExists(function ($query) {
+                $query->selectRaw('1')->from('attendance_leaves')
+                    ->whereColumn('attendance_leaves.user_id', 'attendance_daily_summaries.user_id')
+                    ->whereColumn('attendance_leaves.date_from', '<=', 'attendance_daily_summaries.work_date')
+                    ->whereColumn('attendance_leaves.date_to', '>=', 'attendance_daily_summaries.work_date');
+            })->whereNotExists(function ($query) {
+                $query->selectRaw('1')->from('attendance_holidays')
+                    ->whereColumn('attendance_holidays.holiday_date', 'attendance_daily_summaries.work_date');
+            });
+        }
 
         return [
             'active_users' => $activeUsers,

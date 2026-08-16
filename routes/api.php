@@ -5,6 +5,9 @@ use App\Http\Controllers\AdminStoryController;
 use App\Http\Controllers\ApiRequestLogController;
 use App\Http\Controllers\AttendanceCommentController;
 use App\Http\Controllers\AttendanceDeviceController;
+use App\Http\Controllers\AttendanceDutyController;
+use App\Http\Controllers\AttendanceHolidayController;
+use App\Http\Controllers\AttendanceLeaveController;
 use App\Http\Controllers\AttendanceMappingController;
 use App\Http\Controllers\AttendanceReportController;
 use App\Http\Controllers\AttendanceScheduleController;
@@ -184,6 +187,18 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         Route::get('/export', [AttendanceReportController::class, 'export']);
         Route::get('/users/{user}/schedule', [AttendanceScheduleController::class, 'show'])->whereNumber('user');
         Route::put('/users/{user}/schedule', [AttendanceScheduleController::class, 'update'])->whereNumber('user');
+        Route::get('/users/{user}/leaves', [AttendanceLeaveController::class, 'index'])->whereNumber('user');
+        Route::post('/users/{user}/leaves', [AttendanceLeaveController::class, 'store'])->whereNumber('user');
+        Route::delete('/users/{user}/leaves/{leave}', [AttendanceLeaveController::class, 'destroy'])
+            ->whereNumber('user')->whereNumber('leave');
+        Route::get('/users/{user}/duties', [AttendanceDutyController::class, 'index'])->whereNumber('user');
+        Route::post('/users/{user}/duties', [AttendanceDutyController::class, 'store'])->whereNumber('user');
+        Route::delete('/users/{user}/duties/{duty}', [AttendanceDutyController::class, 'destroy'])
+            ->whereNumber('user')->whereNumber('duty');
+        Route::get('/holidays', [AttendanceHolidayController::class, 'index']);
+        Route::post('/holidays', [AttendanceHolidayController::class, 'store']);
+        Route::put('/holidays/{holiday}', [AttendanceHolidayController::class, 'update'])->whereNumber('holiday');
+        Route::delete('/holidays/{holiday}', [AttendanceHolidayController::class, 'destroy'])->whereNumber('holiday');
     });
 
     Route::get('/mobile/clients/filters', [ClientController::class, 'mobileFilters']);
