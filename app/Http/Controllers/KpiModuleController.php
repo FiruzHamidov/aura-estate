@@ -541,9 +541,14 @@ class KpiModuleController extends Controller
             'week' => 'nullable|integer|min:1|max:53',
             'date_from' => 'nullable|date',
             'date_to' => 'nullable|date|after_or_equal:date_from',
+            'all_period' => 'nullable|boolean',
         ]));
 
-        if (! empty($validated['date_from']) && ! empty($validated['date_to'])) {
+        $allPeriod = (bool) ($validated['all_period'] ?? false);
+        if ($allPeriod) {
+            $start = $this->service->earliestScopedUserDate($this->authUser(), $validated);
+            $end = Carbon::now('Asia/Dushanbe')->endOfDay();
+        } elseif (! empty($validated['date_from']) && ! empty($validated['date_to'])) {
             $start = Carbon::parse($validated['date_from'], 'Asia/Dushanbe')->startOfDay();
             $end = Carbon::parse($validated['date_to'], 'Asia/Dushanbe')->endOfDay();
         } else {
@@ -554,7 +559,7 @@ class KpiModuleController extends Controller
         }
 
         if ($this->wantsV2($request)) {
-            return response()->json($this->service->periodRowsV2($this->authUser(), 'week', $start, $end, $validated));
+            return response()->json($this->service->periodRowsV2($this->authUser(), $allPeriod ? 'range' : 'week', $start, $end, $validated));
         }
 
         return response()->json(['data' => $this->service->periodRows($this->authUser(), 'week', $start, $end, $validated), 'meta' => ['year' => (int) $validated['year'], 'week' => (int) $validated['week']]]);

@@ -2028,6 +2028,51 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertSame(2, (int) data_get($row, 'metrics.calls.final_value'));
     }
 
+    public function test_weekly_v2_all_period_uses_full_scoped_history_without_weekly_missing_dates(): void
+    {
+        $this->createDailyKpiSystemTables();
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900002071', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900002072', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent->forceFill(['created_at' => '2026-01-01 00:00:00', 'updated_at' => '2026-01-01 00:00:00'])->save();
+        Sanctum::actingAs($admin);
+
+        $callType = CrmTaskType::create(['code' => 'CALL', 'name' => 'Call', 'group' => 'kpi', 'is_kpi' => true, 'is_active' => true]);
+        CrmTask::create([
+            'task_type_id' => $callType->id,
+            'assignee_id' => $agent->id,
+            'creator_id' => $admin->id,
+            'title' => 'Historical call',
+            'status' => 'done',
+            'completed_at' => '2026-05-12 08:00:00',
+        ]);
+        \DB::table('properties')->insert([
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+            'sale_user_id' => $agent->id,
+            'moderation_status' => 'sold',
+            'sold_at' => '2026-05-13 09:00:00',
+            'created_at' => '2026-05-01 10:00:00',
+            'updated_at' => '2026-05-13 09:00:00',
+        ]);
+
+        $currentWeek = $this->getJson('/api/kpi/weekly?v=2&agent_id='.$agent->id)->assertOk();
+        $this->assertSame(0, (int) data_get($currentWeek->json('data.0'), 'metrics.calls.final_value'));
+
+        $allPeriod = $this->getJson('/api/kpi/weekly?v=2&all_period=1&agent_id='.$agent->id)->assertOk();
+        $row = (array) $allPeriod->json('data.0');
+
+        $allPeriod->assertJsonPath('meta.period_type', 'range')
+            ->assertJsonPath('meta.period_key', 'all')
+            ->assertJsonPath('meta.date_from', '2026-01-01');
+        $this->assertSame(1, (int) data_get($row, 'metrics.calls.final_value'));
+        $this->assertSame(1, (int) data_get($row, 'metrics.sales.final_value'));
+        $this->assertArrayNotHasKey('missing_report_dates', $row);
+    }
+
     public function test_monthly_v2_ads_calls_use_completed_crm_tasks_without_manual_reports(): void
     {
         $this->createDailyKpiSystemTables();

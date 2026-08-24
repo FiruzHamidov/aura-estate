@@ -996,11 +996,22 @@ class KpiModuleService
         return $this->buildScopedPeriodV2Response($authUser, $from, $to, $filters, 'day', false, false);
     }
 
+    public function earliestScopedUserDate(User $authUser, array $filters): Carbon
+    {
+        $earliest = $this->weeklyUsersScopeQuery($authUser, $filters)->min('users.created_at');
+
+        return $earliest
+            ? Carbon::parse((string) $earliest, 'UTC')->setTimezone(self::TZ)->startOfDay()
+            : Carbon::now(self::TZ)->startOfDay();
+    }
+
     public function periodRowsV2(User $authUser, string $periodType, Carbon $from, Carbon $to, array $filters): array
     {
-        $periodKey = $periodType === 'week'
-            ? $from->format('o-\WW')
-            : $from->format('Y-m');
+        $periodKey = match ($periodType) {
+            'week' => $from->format('o-\WW'),
+            'range' => 'all',
+            default => $from->format('Y-m'),
+        };
 
         $withBreakdown = (bool) ($filters['include_breakdown'] ?? false);
 
@@ -1025,7 +1036,7 @@ class KpiModuleService
         string $periodKey,
         bool $withBreakdown
     ): array {
-        if (in_array($periodType, ['week', 'month'], true)) {
+        if (in_array($periodType, ['week', 'month', 'range'], true)) {
             return $this->buildScopedPeriodV2Response(
                 $authUser,
                 $from,
@@ -1070,7 +1081,7 @@ class KpiModuleService
                 }
 
                 $daysInPeriod = max(1, $from->diffInDays($to) + 1);
-                $metrics = $this->buildMetricsForRows($rows, $autoByDate, $sourceErrors, $mapping, $targetMap, $periodType, $daysInPeriod);
+                $metrics = $this->buildMetricsForRows($rows, $autoByDate, $sourceErrors, $mapping, $targetMap, $periodType, $daysInPeriod, [], $from);
                 if (
                     $periodType === 'day'
                     && $user
@@ -1238,7 +1249,7 @@ class KpiModuleService
                 ]);
             }
 
-            $metrics = $this->buildMetricsForRows($rows, $autoByDate, $sourceErrors, $mapping, $targetMap, $periodType, $daysInPeriod, $metricPlanSourceMap);
+            $metrics = $this->buildMetricsForRows($rows, $autoByDate, $sourceErrors, $mapping, $targetMap, $periodType, $daysInPeriod, $metricPlanSourceMap, $from);
             $score = $this->kpiScoreFromMetrics($metrics, $weightMap);
             $kpiValue = $score['kpi_value'];
             $kpiPercent = $score['kpi_percent'];
@@ -1273,11 +1284,16 @@ class KpiModuleService
                 'period_key' => match ($periodType) {
                     'day' => $from->toDateString(),
                     'week' => $from->format('o-\WW'),
+                    'range' => 'all',
                     default => $from->format('Y-m'),
                 },
                 'week' => $periodType === 'week' ? (int) $from->isoWeek() : null,
                 'month' => $periodType === 'month' ? (int) $from->month : null,
-                'year' => $periodType === 'week' ? (int) $from->isoWeekYear() : (int) $from->year,
+                'year' => match ($periodType) {
+                    'week' => (int) $from->isoWeekYear(),
+                    'month', 'day' => (int) $from->year,
+                    default => null,
+                },
                 'employee_id' => (int) $user->id,
                 'employee_name' => (string) $user->name,
                 'role' => (string) ($user->role?->slug ?? ''),
@@ -1344,7 +1360,7 @@ class KpiModuleService
                 ->count()
             : 0;
 
-        if ($periodType === 'month') {
+        if (in_array($periodType, ['month', 'range'], true)) {
             $data = $data->sortByDesc(fn (array $row) => (float) ($row['average_kpi_percent'] ?? 0))->values();
         }
 
@@ -1381,7 +1397,11 @@ class KpiModuleService
             'meta' => [
                 'version' => '2',
                 'period_type' => $periodType,
-                'period_key' => $periodType === 'day' ? $from->toDateString() : null,
+                'period_key' => match ($periodType) {
+                    'day' => $from->toDateString(),
+                    'range' => 'all',
+                    default => null,
+                },
                 'date_from' => $from->toDateString(),
                 'date_to' => $to->toDateString(),
                 'locked' => $this->isPeriodLocked($periodType, $from, $filters),
@@ -1584,6 +1604,10 @@ class KpiModuleService
 
     private function preloadLockedScopes(string $periodType, Carbon $periodStart): array
     {
+        if ($periodType === 'range') {
+            return [];
+        }
+
         $periodKey = $periodType === 'month' ? $periodStart->format('Y-m') : $periodStart->toDateString();
         return KpiPeriodLock::query()->where('period_type', $periodType)->where('period_key', $periodKey)->get()
             ->mapWithKeys(fn (KpiPeriodLock $lock) => [(string) $lock->branch_id.'|'.(string) $lock->branch_group_id => true])->all();
@@ -1597,14 +1621,15 @@ class KpiModuleService
         array $targetMap,
         string $periodType,
         ?int $daysInPeriodOverride = null,
-        array $metricPlanSourceMap = []
+        array $metricPlanSourceMap = [],
+        ?Carbon $targetReferenceDate = null
     ): array {
         $metrics = [];
         $daysInPeriod = max(1, $daysInPeriodOverride ?? $rows->count());
         $from = $rows->isNotEmpty()
             ? $rows->min(fn (DailyReport $row) => $row->report_date)?->copy()
             : null;
-        $daysInMonth = $from ? max(1, $from->daysInMonth) : $daysInPeriod;
+        $daysInMonth = max(1, ($targetReferenceDate ?? $from)?->daysInMonth ?? $daysInPeriod);
 
         foreach ($mapping as $metricKey => $cfg) {
             $column = $this->resolveMetricSourceColumn((string) ($cfg['source_column'] ?? ''));
@@ -1612,7 +1637,7 @@ class KpiModuleService
             $monthlyTarget = (float) ($targetMap[$metricKey] ?? 0);
             $target = match ($periodType) {
                 'month' => $monthlyTarget,
-                'week' => ($monthlyTarget / $daysInMonth) * $daysInPeriod,
+                'week', 'range' => ($monthlyTarget / $daysInMonth) * $daysInPeriod,
                 default => $metricKey === 'sales'
                     ? $monthlyTarget
                     : ($monthlyTarget / $daysInMonth),
@@ -1988,6 +2013,10 @@ class KpiModuleService
 
     private function isPeriodLocked(string $periodType, Carbon $periodStart, array $filters): bool
     {
+        if ($periodType === 'range') {
+            return false;
+        }
+
         $periodKey = match ($periodType) {
             'day' => $periodStart->toDateString(),
             'week' => $periodStart->toDateString(),
