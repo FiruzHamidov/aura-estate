@@ -1800,8 +1800,12 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertFalse((bool) ($rowNoReport['submitted_daily_report'] ?? true));
         $this->assertSame(1, (int) data_get($rowNoReport, 'metrics.objects.final_value'));
         $this->assertSame(1, (int) data_get($rowNoReport, 'metrics.shows.final_value'));
-        $this->assertSame(0, (int) data_get($rowNoReport, 'metrics.ads.final_value'));
-        $this->assertSame(0, (int) data_get($rowNoReport, 'metrics.calls.final_value'));
+        $this->assertSame('mixed', (string) data_get($rowNoReport, 'metrics.ads.source'));
+        $this->assertSame('mixed', (string) data_get($rowNoReport, 'metrics.calls.source'));
+        $this->assertSame(1, (int) data_get($rowNoReport, 'metrics.ads.fact_value'));
+        $this->assertSame(1, (int) data_get($rowNoReport, 'metrics.calls.fact_value'));
+        $this->assertSame(1, (int) data_get($rowNoReport, 'metrics.ads.final_value'));
+        $this->assertSame(1, (int) data_get($rowNoReport, 'metrics.calls.final_value'));
         $this->assertSame(0, (int) data_get($rowNoReport, 'metrics.sales.final_value'));
 
         DailyReport::create(['user_id' => $agent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-16', 'deals_count' => 2, 'submitted_at' => now()]);
@@ -1810,7 +1814,7 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertTrue((bool) ($rowWithReport['submitted_daily_report'] ?? false));
         $this->assertSame('manual', (string) data_get($rowWithReport, 'metrics.sales.source'));
         $this->assertSame(2, (int) data_get($rowWithReport, 'metrics.sales.final_value'));
-        $this->assertSame('manual', (string) data_get($rowWithReport, 'metrics.calls.source'));
+        $this->assertSame('mixed', (string) data_get($rowWithReport, 'metrics.calls.source'));
     }
 
     public function test_daily_v2_plan_fallback_target_zero_and_status_calculation(): void
@@ -1930,6 +1934,24 @@ class KpiModuleApiFeatureTest extends TestCase
                 'created_at' => '2026-05-16 10:00:00',
                 'updated_at' => '2026-05-16 10:00:00',
             ],
+            [
+                'created_by' => $agent->id,
+                'agent_id' => $agent->id,
+                'sale_user_id' => $agent->id,
+                'moderation_status' => 'sold_by_owner',
+                'sold_at' => '2026-05-16 13:00:00',
+                'created_at' => '2026-05-15 10:00:00',
+                'updated_at' => '2026-05-16 13:00:00',
+            ],
+            [
+                'created_by' => $agent->id,
+                'agent_id' => $agent->id,
+                'sale_user_id' => $agent->id,
+                'moderation_status' => 'rented',
+                'sold_at' => '2026-05-16 14:00:00',
+                'created_at' => '2026-05-15 10:00:00',
+                'updated_at' => '2026-05-16 14:00:00',
+            ],
         ]);
 
         $response = $this->getJson('/api/kpi/daily?v=2&date=2026-05-16&agent_id='.$agent->id)->assertOk();
@@ -1973,7 +1995,7 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertSame(3, (int) data_get($row, 'metrics.sales.final_value'));
     }
 
-    public function test_weekly_v2_ads_calls_come_from_manual_daily_reports_or_zero(): void
+    public function test_weekly_v2_ads_calls_prefer_completed_crm_task_facts(): void
     {
         $this->createDailyKpiSystemTables();
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
@@ -1984,18 +2006,29 @@ class KpiModuleApiFeatureTest extends TestCase
         $agent = User::create(['name' => 'Agent', 'phone' => '900002042', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
         Sanctum::actingAs($admin);
 
+        $callType = CrmTaskType::create(['code' => 'CALL', 'name' => 'Call', 'group' => 'kpi', 'is_kpi' => true, 'is_active' => true]);
+        $adType = CrmTaskType::create(['code' => 'AD_CREATE', 'name' => 'Ad', 'group' => 'kpi', 'is_kpi' => true, 'is_active' => true]);
+        foreach (['2026-05-12 08:00:00', '2026-05-13 08:00:00'] as $completedAt) {
+            CrmTask::create(['task_type_id' => $callType->id, 'assignee_id' => $agent->id, 'creator_id' => $admin->id, 'title' => 'Call', 'status' => 'done', 'completed_at' => $completedAt]);
+        }
+        CrmTask::create(['task_type_id' => $adType->id, 'assignee_id' => $agent->id, 'creator_id' => $admin->id, 'title' => 'Ad', 'status' => 'done', 'completed_at' => '2026-05-12 09:00:00']);
+
         DailyReport::create(['user_id' => $agent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-12', 'ad_count' => 10, 'calls_count' => 5, 'submitted_at' => now()]);
         DailyReport::create(['user_id' => $agent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-13', 'ad_count' => 0, 'calls_count' => 0, 'submitted_at' => now()]);
 
         $response = $this->getJson('/api/kpi/weekly?year=2026&week=20&v=2&agent_id='.$agent->id)->assertOk();
         $row = (array) collect((array) $response->json('data'))->firstWhere('employee_id', $agent->id);
-        $this->assertSame('manual', (string) data_get($row, 'metrics.ads.source'));
-        $this->assertSame('manual', (string) data_get($row, 'metrics.calls.source'));
-        $this->assertSame(10, (int) data_get($row, 'metrics.ads.final_value'));
-        $this->assertSame(5, (int) data_get($row, 'metrics.calls.final_value'));
+        $this->assertSame('mixed', (string) data_get($row, 'metrics.ads.source'));
+        $this->assertSame('mixed', (string) data_get($row, 'metrics.calls.source'));
+        $this->assertSame(1, (int) data_get($row, 'metrics.ads.fact_value'));
+        $this->assertSame(2, (int) data_get($row, 'metrics.calls.fact_value'));
+        $this->assertSame(10, (int) data_get($row, 'metrics.ads.manual_value'));
+        $this->assertSame(5, (int) data_get($row, 'metrics.calls.manual_value'));
+        $this->assertSame(1, (int) data_get($row, 'metrics.ads.final_value'));
+        $this->assertSame(2, (int) data_get($row, 'metrics.calls.final_value'));
     }
 
-    public function test_monthly_v2_ads_calls_are_zero_when_no_manual_reports(): void
+    public function test_monthly_v2_ads_calls_use_completed_crm_tasks_without_manual_reports(): void
     {
         $this->createDailyKpiSystemTables();
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
@@ -2006,10 +2039,46 @@ class KpiModuleApiFeatureTest extends TestCase
         $agent = User::create(['name' => 'Agent', 'phone' => '900002052', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
         Sanctum::actingAs($admin);
 
+        $callType = CrmTaskType::create(['code' => 'CALL', 'name' => 'Call', 'group' => 'kpi', 'is_kpi' => true, 'is_active' => true]);
+        $adType = CrmTaskType::create(['code' => 'AD_PUBLICATION', 'name' => 'Ad', 'group' => 'kpi', 'is_kpi' => true, 'is_active' => true]);
+        CrmTask::create(['task_type_id' => $callType->id, 'assignee_id' => $agent->id, 'creator_id' => $admin->id, 'title' => 'Call', 'status' => 'done', 'completed_at' => '2026-05-12 08:00:00']);
+        CrmTask::create(['task_type_id' => $adType->id, 'assignee_id' => $agent->id, 'creator_id' => $admin->id, 'title' => 'Ad', 'status' => 'done', 'completed_at' => '2026-05-13 09:00:00']);
+
         $response = $this->getJson('/api/kpi/monthly?year=2026&month=5&v=2&agent_id='.$agent->id)->assertOk();
         $row = (array) collect((array) $response->json('data'))->firstWhere('employee_id', $agent->id);
-        $this->assertSame(0, (int) data_get($row, 'metrics.ads.final_value'));
-        $this->assertSame(0, (int) data_get($row, 'metrics.calls.final_value'));
+        $this->assertSame(1, (int) data_get($row, 'metrics.ads.final_value'));
+        $this->assertSame(1, (int) data_get($row, 'metrics.calls.final_value'));
+    }
+
+    public function test_daily_v2_ads_calls_fall_back_to_manual_values_without_crm_facts(): void
+    {
+        $this->createDailyKpiSystemTables();
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900002061', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900002062', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+
+        DailyReport::create([
+            'user_id' => $agent->id,
+            'role_slug' => 'agent',
+            'report_date' => '2026-05-16',
+            'ad_count' => 4,
+            'calls_count' => 7,
+            'submitted_at' => now(),
+        ]);
+
+        $response = $this->getJson('/api/kpi/daily?v=2&date=2026-05-16&agent_id='.$agent->id)->assertOk();
+        $row = (array) $response->json('data.0');
+
+        $this->assertSame('mixed', (string) data_get($row, 'metrics.ads.source'));
+        $this->assertSame('mixed', (string) data_get($row, 'metrics.calls.source'));
+        $this->assertSame(0, (int) data_get($row, 'metrics.ads.fact_value'));
+        $this->assertSame(0, (int) data_get($row, 'metrics.calls.fact_value'));
+        $this->assertSame(4, (int) data_get($row, 'metrics.ads.final_value'));
+        $this->assertSame(7, (int) data_get($row, 'metrics.calls.final_value'));
     }
 
     public function test_monthly_v2_formula_caps_metric_contribution_and_returns_breakdown_fields(): void

@@ -1419,7 +1419,7 @@ class KpiModuleService
 
         $soldProperties = DB::table('properties')
             ->select($select)
-            ->whereIn('moderation_status', ['sold', 'sold_by_owner', 'rented'])
+            ->where('moderation_status', 'sold')
             ->whereBetween('sold_at', [
                 $from->copy()->startOfDay()->setTimezone('UTC')->toDateTimeString(),
                 $to->copy()->endOfDay()->setTimezone('UTC')->toDateTimeString(),
@@ -1432,7 +1432,7 @@ class KpiModuleService
 
         $targetUsers = array_fill_keys($userIds, true);
         $result = [];
-        $creditsByProperty = $this->salesAttributionService->creditsByProperty($soldProperties, ['sold', 'sold_by_owner', 'rented']);
+        $creditsByProperty = $this->salesAttributionService->creditsByProperty($soldProperties, ['sold']);
 
         foreach ($soldProperties as $property) {
             $soldAt = $property->sold_at ? Carbon::parse((string) $property->sold_at, 'UTC')->setTimezone(self::TZ) : null;
@@ -1656,8 +1656,12 @@ class KpiModuleService
                 $manualResult = 0.0;
                 $source = 'system';
             } elseif ($sourceType === 'mixed') {
-                // Mixed rule: manual override has priority, fallback to system value.
-                $finalValue = $manualValue > 0 ? $manualValue : $factValue;
+                // CRM facts can be configured as canonical while preserving the
+                // manual report as a fallback for periods without system facts.
+                $mixedStrategy = (string) ($cfg['mixed_strategy'] ?? 'manual_priority');
+                $finalValue = $mixedStrategy === 'system_priority'
+                    ? ($factValue > 0 ? $factValue : $manualValue)
+                    : ($manualValue > 0 ? $manualValue : $factValue);
                 $manualResult = $manualValue;
                 $source = 'mixed';
             } else {

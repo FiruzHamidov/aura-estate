@@ -358,7 +358,7 @@ class DailyReportService
 
         $soldProperties = DB::table('properties')
             ->select($select)
-            ->whereIn('moderation_status', ['sold', 'sold_by_owner', 'rented'])
+            ->where('moderation_status', 'sold')
             ->whereBetween('sold_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
             ->get();
 
@@ -366,7 +366,7 @@ class DailyReportService
             return ['sales_count' => 0.0, 'property_ids' => []];
         }
 
-        $creditsByProperty = $this->salesAttributionService->creditsByProperty($soldProperties, ['sold', 'sold_by_owner', 'rented']);
+        $creditsByProperty = $this->salesAttributionService->creditsByProperty($soldProperties, ['sold']);
 
         $credit = 0.0;
         $propertyIds = [];

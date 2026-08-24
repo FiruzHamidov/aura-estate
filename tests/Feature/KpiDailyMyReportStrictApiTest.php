@@ -319,7 +319,7 @@ class KpiDailyMyReportStrictApiTest extends TestCase
             'created_by' => $other->id,
             'agent_id' => $other->id,
             'sale_user_id' => $agent->id,
-            'moderation_status' => 'sold_by_owner',
+            'moderation_status' => 'sold',
             'sold_at' => '2026-07-06 12:00:00',
             'created_at' => '2026-07-01 10:00:00',
             'updated_at' => '2026-07-06 12:00:00',
@@ -329,9 +329,18 @@ class KpiDailyMyReportStrictApiTest extends TestCase
             'agent_id' => $other->id,
             'sale_user_id' => $agent->id,
             'moderation_status' => 'rented',
-            'sold_at' => '2026-07-06 20:00:00',
+            'sold_at' => '2026-07-06 13:00:00',
             'created_at' => '2026-07-01 10:00:00',
-            'updated_at' => '2026-07-06 20:00:00',
+            'updated_at' => '2026-07-06 13:00:00',
+        ]);
+        \DB::table('properties')->insert([
+            'created_by' => $other->id,
+            'agent_id' => $other->id,
+            'sale_user_id' => $agent->id,
+            'moderation_status' => 'sold_by_owner',
+            'sold_at' => '2026-07-06 14:00:00',
+            'created_at' => '2026-07-01 10:00:00',
+            'updated_at' => '2026-07-06 14:00:00',
         ]);
 
         $this->getJson('/api/kpi/daily/my-report?date=2026-07-06')
