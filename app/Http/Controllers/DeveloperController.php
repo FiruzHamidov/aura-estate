@@ -133,14 +133,9 @@ class DeveloperController extends Controller
     /**
      * DELETE /developers/{developer}
      */
-    public function destroy(Developer $developer)
+    public function destroy(Developer $developer, \App\Services\ReferenceCatalogService $catalogs)
     {
-        // опционально удалять файл логотипа
-        if ($developer->logo_path && Storage::disk('public')->exists($developer->logo_path)) {
-            Storage::disk('public')->delete($developer->logo_path);
-        }
-
-        $developer->delete();
+        $catalogs->deleteUnused('developers', $developer->id);
 
         return response()->noContent();
     }

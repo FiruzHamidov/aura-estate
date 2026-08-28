@@ -64,9 +64,9 @@ class LocationController extends Controller
         return response()->json($location);
     }
 
-    public function destroy(Location $location)
+    public function destroy(Location $location, \App\Services\ReferenceCatalogService $catalogs)
     {
-        $location->delete();
+        $catalogs->deleteUnused('locations', $location->id);
         return response()->json(['message' => 'Удалено']);
     }
 

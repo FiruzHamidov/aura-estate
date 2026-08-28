@@ -130,7 +130,10 @@ class BranchGroupController extends Controller
             'per_page' => 'nullable|integer|min:1|max:100',
         ]);
 
-        $query = $this->visibleQuery($authUser);
+        // Attendance and HR user creation only need group labels, not CRM counts/settings.
+        $query = in_array($this->roleSlug($authUser), ['accountant', 'hr'], true)
+            ? BranchGroup::query()->select(['id', 'name', 'branch_id'])
+            : $this->visibleQuery($authUser);
 
         if (!empty($validated['search'])) {
             $query->where('name', 'like', '%' . trim($validated['search']) . '%');
@@ -207,7 +210,12 @@ class BranchGroupController extends Controller
 
     public function show(BranchGroup $branchGroup)
     {
-        $this->ensureVisible($this->authUser(), $branchGroup);
+        $authUser = $this->authUser();
+        if ($this->roleSlug($authUser) === 'hr') {
+            return response()->json($branchGroup->only(['id', 'name', 'branch_id']));
+        }
+
+        $this->ensureVisible($authUser, $branchGroup);
 
         return response()->json(
             $branchGroup->load('branch')->loadCount(['users', 'clients'])

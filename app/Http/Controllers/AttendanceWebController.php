@@ -41,10 +41,6 @@ final class AttendanceWebController extends Controller
             ->map(fn ($date) => $date->toDateString());
 
         $visibleQuery = $this->access->visibleUsersQuery($request->user())
-            ->whereHas('role', function (Builder $roles) {
-                $excludedRoles = (array) config('attendance.excluded_table_user_roles', ['client']);
-                $roles->whereNotIn('slug', $excludedRoles);
-            })
             ->select('users.*');
         $activeUsersCount = (clone $visibleQuery)->count('users.id');
         $this->applyUserFilters($visibleQuery, $filters, $from, $to);

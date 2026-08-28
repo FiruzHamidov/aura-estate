@@ -67,12 +67,9 @@ class ConstructionStageController extends Controller
     }
 
     // DELETE /construction-stages/{id}   (требует auth)
-    public function destroy(ConstructionStage $construction_stage)
+    public function destroy(ConstructionStage $construction_stage, \App\Services\ReferenceCatalogService $catalogs)
     {
-        // при желании: запретить удаление, если есть связанные new_buildings
-        // if ($construction_stage->newBuildings()->exists()) abort(409, 'Есть связанные новостройки');
-
-        $construction_stage->delete();
+        $catalogs->deleteUnused('construction-stages', $construction_stage->id);
         return response()->noContent();
     }
 }

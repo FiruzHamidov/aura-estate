@@ -23,6 +23,7 @@ class UserController extends Controller
     private const PUBLIC_AGENT_ROLE_SLUGS = ['agent', 'mop'];
     private const HR_EMPLOYEE_ROLE_SLUGS = ['agent', 'rop', 'mop', 'branch_director'];
     private const HR_EDITABLE_ROLE_SLUGS = ['agent', 'rop', 'mop', 'branch_director', 'client'];
+    private const HR_CREATABLE_ROLE_SLUGS = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop'];
 
     private function authUser(): User
     {
@@ -227,7 +228,7 @@ class UserController extends Controller
         return match ($this->roleSlug($authUser)) {
             'superadmin', 'admin' => null,
             'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
-            'hr' => self::HR_EDITABLE_ROLE_SLUGS,
+            'hr' => [...self::HR_CREATABLE_ROLE_SLUGS, 'client'],
             'rop' => ['mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
             'branch_director' => ['mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
             default => [],
@@ -240,7 +241,7 @@ class UserController extends Controller
             return;
         }
 
-        abort_unless($targetRole && in_array($targetRole->slug, self::HR_EMPLOYEE_ROLE_SLUGS, true), 422, 'HR can create only agents, ROP, MOP and branch directors.');
+        abort_unless($targetRole && in_array($targetRole->slug, self::HR_CREATABLE_ROLE_SLUGS, true), 422, 'HR может создавать сотрудников только до уровня РОП включительно.');
     }
 
     private function authorizeUserMutation(User $authUser, User $targetUser, string $operation): void

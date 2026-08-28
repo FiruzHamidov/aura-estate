@@ -66,10 +66,9 @@ class FeatureController extends Controller
     }
 
     // DELETE /features/{id}   (auth)
-    public function destroy(Feature $feature)
+    public function destroy(Feature $feature, \App\Services\ReferenceCatalogService $catalogs)
     {
-        // if ($feature->newBuildings()->exists()) abort(409, 'Есть связанные новостройки');
-        $feature->delete();
+        $catalogs->deleteUnused('features', $feature->id);
         return response()->noContent();
     }
 }

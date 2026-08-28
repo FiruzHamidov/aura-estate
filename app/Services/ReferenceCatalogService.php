@@ -12,13 +12,19 @@ use Illuminate\Support\Facades\Storage;
 
 class ReferenceCatalogService
 {
-    public function assertCanManage(User $user): void
+    private const NEW_BUILDING_CATALOGS = ['developers', 'construction-stages', 'materials', 'features', 'locations'];
+
+    public function assertCanManage(User $user, ?string $catalog = null): void
     {
         $user->loadMissing('role');
 
-        if (! in_array($user->role?->slug, ['admin', 'superadmin'], true)) {
-            $this->deny('REFERENCE_CATALOG_FORBIDDEN', 'Недостаточно прав для управления справочниками.');
+        if (in_array($user->role?->slug, ['admin', 'superadmin'], true)
+            || (in_array($user->role?->slug, ['agent', 'mop'], true)
+                && in_array($catalog, self::NEW_BUILDING_CATALOGS, true))) {
+            return;
         }
+
+        $this->deny('REFERENCE_CATALOG_FORBIDDEN', 'Недостаточно прав для управления справочниками.');
     }
 
     public function usage(string $catalog, int $sourceId): array
@@ -50,7 +56,7 @@ class ReferenceCatalogService
         ?string $ipAddress,
         ?string $userAgent,
     ): array {
-        $this->assertCanManage($actor);
+        $this->assertCanManage($actor, $catalog);
         if ($sourceId === $replacementId) {
             $this->deny('REFERENCE_REPLACEMENT_SAME_AS_SOURCE', 'Нельзя заменить запись самой собой.', 422);
         }
@@ -148,9 +154,9 @@ class ReferenceCatalogService
         return $result;
     }
 
-    public function deleteUnused(User $actor, string $catalog, int $sourceId): array
+    // Callers enforce their route permissions; all deletion paths share this safety check.
+    public function deleteUnused(string $catalog, int $sourceId): array
     {
-        $this->assertCanManage($actor);
         $definition = $this->definition($catalog);
         $cleanupPath = null;
 

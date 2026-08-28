@@ -77,7 +77,7 @@ final class AttendanceAccessService
 
         return [
             'can_view_attendance_table' => in_array($role, config('attendance.table_roles', []), true),
-            'can_view_all_branches' => in_array($role, ['hr', 'admin', 'superadmin', 'owner'], true),
+            'can_view_all_branches' => in_array($role, config('attendance.all_branch_viewer_roles', []), true),
             'can_comment_late_day' => in_array($role, config('attendance.comment_roles', []), true),
             'can_manage_mappings' => in_array($role, config('attendance.mapping_roles', []), true),
             'can_manage_schedules' => in_array($role, config('attendance.schedule_roles', []), true),
@@ -92,7 +92,15 @@ final class AttendanceAccessService
     public function visibleUsersQuery(User $viewer): Builder
     {
         $this->assertCanViewModule($viewer);
-        $query = $this->participants->query()->with(['role', 'branch', 'branchGroup']);
+        // Apply the same employee scope to the table, totals, reports and day details.
+        $excludedRoles = array_unique(['client', ...(array) config('attendance.excluded_table_user_roles', [])]);
+        $query = $this->participants->query()
+            ->whereHas('role', fn (Builder $roles) => $roles->whereNotIn('slug', $excludedRoles))
+            ->with(['role', 'branch', 'branchGroup']);
+
+        if (in_array($this->role($viewer), config('attendance.all_branch_viewer_roles', []), true)) {
+            return $query;
+        }
 
         return match ($this->role($viewer)) {
             'agent', 'intern' => $query->whereKey($viewer->id),
@@ -108,7 +116,6 @@ final class AttendanceAccessService
             'rop', 'branch_director' => $viewer->branch_id === null
                 ? $query->whereKey($viewer->id)
                 : $query->where('branch_id', $viewer->branch_id),
-            'hr', 'admin', 'superadmin', 'owner' => $query,
             default => $query->whereKey($viewer->id),
         };
     }

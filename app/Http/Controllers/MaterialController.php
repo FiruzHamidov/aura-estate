@@ -64,10 +64,9 @@ class MaterialController extends Controller
     }
 
     // DELETE /materials/{id}   (auth)
-    public function destroy(Material $material)
+    public function destroy(Material $material, \App\Services\ReferenceCatalogService $catalogs)
     {
-        // if ($material->newBuildings()->exists()) abort(409, 'Есть связанные новостройки');
-        $material->delete();
+        $catalogs->deleteUnused('materials', $material->id);
         return response()->noContent();
     }
 }

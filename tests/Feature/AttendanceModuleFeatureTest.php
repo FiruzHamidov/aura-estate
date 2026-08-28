@@ -11,6 +11,7 @@ use App\Models\AttendanceDeviceUser;
 use App\Models\AttendanceDuty;
 use App\Models\AttendanceEvent;
 use App\Models\AttendanceIngestRequest;
+use App\Models\AttendanceHoliday;
 use App\Models\AttendanceLeave;
 use App\Models\AttendanceRawEvent;
 use App\Models\AttendanceWorkSchedule;
@@ -368,6 +369,109 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->getJson('/api/attendance/daily')->assertOk()->assertJsonCount(2, 'data');
     }
 
+    public function test_accountant_can_read_attendance_across_branches_and_export_without_write_permissions(): void
+    {
+        $context = $this->context();
+        $accountant = $this->accountant($context['branch']);
+        foreach ([$context['agent'], $context['otherAgent']] as $employee) {
+            AttendanceDailySummary::create(['user_id' => $employee->id, 'work_date' => '2026-08-17', 'status' => 'present']);
+        }
+        Sanctum::actingAs($accountant);
+
+        $matrix = $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&view=users')
+            ->assertOk()
+            ->assertJsonPath('meta.permissions.can_view_attendance_table', true)
+            ->assertJsonPath('meta.permissions.can_view_all_branches', true);
+        $ids = collect($matrix->json('data'))->pluck('user.id')->all();
+        $this->assertContains($context['agent']->id, $ids);
+        $this->assertContains($context['otherAgent']->id, $ids);
+        foreach ($matrix->json('meta.permissions') as $permission => $value) {
+            if (! in_array($permission, ['can_view_attendance_table', 'can_view_all_branches'], true)) {
+                $this->assertFalse($value, $permission);
+            }
+        }
+
+        $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&view=branches')
+            ->assertOk()->assertJsonCount(2, 'data');
+        $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&branch_id='.$context['otherAgent']->branch_id)
+            ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.user.id', $context['otherAgent']->id);
+        $this->getJson('/api/attendance/users/'.$context['otherAgent']->id.'/days/2026-08-17')
+            ->assertOk()->assertJsonPath('data.user.id', $context['otherAgent']->id);
+        $this->getJson('/api/attendance/users/'.$context['otherAgent']->id.'/daily')->assertOk();
+        $this->getJson('/api/attendance/daily')->assertOk()->assertJsonCount(2, 'data');
+        $this->getJson('/api/attendance/events')->assertOk();
+        $csv = $this->get('/api/attendance/export?date_from=2026-08-17&date_to=2026-08-17')->assertOk()->streamedContent();
+        $this->assertStringContainsString('Agent A', $csv);
+        $this->assertStringContainsString('Agent B', $csv);
+        $this->get('/api/attendance/export?format=xlsx&date_from=2026-08-17&date_to=2026-08-17')
+            ->assertOk()->assertHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+
+        $this->getJson('/api/roles')->assertOk();
+        $groups = $this->getJson('/api/branch-groups')->assertOk()->assertJsonCount(2, 'data')->json('data');
+        $this->assertEqualsCanonicalizing(['id', 'name', 'branch_id'], array_keys($groups[0]));
+        $this->getJson('/api/branch-groups?branch_id='.$context['otherAgent']->branch_id)
+            ->assertOk()->assertJsonCount(1, 'data');
+
+        $accountant->update(['status' => User::STATUS_INACTIVE]);
+        $this->getJson('/api/attendance/matrix')->assertForbidden();
+    }
+
+    public function test_accountant_cannot_mutate_attendance_or_access_administrative_apis(): void
+    {
+        $context = $this->context();
+        $device = $this->device('ACCOUNTANT-READONLY', $context['branch'], $context['group']);
+        $mapping = $this->map($device, $context['agent']);
+        $leave = AttendanceLeave::create([
+            'user_id' => $context['agent']->id, 'date_from' => '2026-08-17', 'date_to' => '2026-08-17',
+            'created_by' => $context['hr']->id,
+        ]);
+        $duty = AttendanceDuty::create([
+            'user_id' => $context['agent']->id, 'date_from' => '2026-08-18', 'date_to' => '2026-08-18',
+            'created_by' => $context['hr']->id,
+        ]);
+        $holiday = AttendanceHoliday::create(['holiday_date' => '2026-08-19', 'name' => 'Holiday', 'created_by' => $context['hr']->id]);
+        Sanctum::actingAs($this->accountant($context['branch']));
+        $userPath = '/api/attendance/users/'.$context['agent']->id;
+        $requests = [
+            ['POST', '/api/attendance/devices', 'ATTENDANCE_ADMIN_FORBIDDEN'],
+            ['PATCH', '/api/attendance/devices/'.$device->id, 'ATTENDANCE_ADMIN_FORBIDDEN'],
+            ['PUT', '/api/attendance/device-users', 'ATTENDANCE_MAPPING_FORBIDDEN'],
+            ['DELETE', '/api/attendance/device-users/'.$mapping->id, 'ATTENDANCE_MAPPING_FORBIDDEN'],
+            ['POST', '/api/attendance/events/reprocess', 'ATTENDANCE_ADMIN_FORBIDDEN'],
+            ['PUT', $userPath.'/days/2026-08-17/comment', 'ATTENDANCE_COMMENT_FORBIDDEN'],
+            ['DELETE', $userPath.'/days/2026-08-17/comment', 'ATTENDANCE_COMMENT_FORBIDDEN'],
+            ['PUT', $userPath.'/schedule', 'ATTENDANCE_SCHEDULE_FORBIDDEN'],
+            ['PUT', '/api/attendance/schedule', 'ATTENDANCE_SCHEDULE_FORBIDDEN'],
+            ['POST', $userPath.'/leaves', 'ATTENDANCE_LEAVE_FORBIDDEN'],
+            ['DELETE', $userPath.'/leaves/'.$leave->id, 'ATTENDANCE_LEAVE_FORBIDDEN'],
+            ['POST', $userPath.'/duties', 'ATTENDANCE_DUTY_FORBIDDEN'],
+            ['DELETE', $userPath.'/duties/'.$duty->id, 'ATTENDANCE_DUTY_FORBIDDEN'],
+            ['POST', '/api/attendance/holidays', 'ATTENDANCE_HOLIDAY_FORBIDDEN'],
+            ['PUT', '/api/attendance/holidays/'.$holiday->id, 'ATTENDANCE_HOLIDAY_FORBIDDEN'],
+            ['DELETE', '/api/attendance/holidays/'.$holiday->id, 'ATTENDANCE_HOLIDAY_FORBIDDEN'],
+            ['GET', '/api/attendance/device-users', 'ATTENDANCE_MAPPING_FORBIDDEN'],
+            ['GET', '/api/attendance/unmapped-events', 'ATTENDANCE_MAPPING_FORBIDDEN'],
+            ['GET', '/api/attendance/devices', 'ATTENDANCE_DEVICE_FORBIDDEN'],
+        ];
+        foreach ($requests as [$method, $path, $code]) {
+            $this->json($method, $path)->assertForbidden()->assertJsonPath('code', $code);
+        }
+        foreach ([
+            ['POST', '/api/roles'], ['PUT', '/api/roles/'.$context['agent']->role_id],
+            ['DELETE', '/api/roles/'.$context['agent']->role_id], ['POST', '/api/branch-groups'],
+            ['PUT', '/api/branch-groups/'.$context['group']->id], ['DELETE', '/api/branch-groups/'.$context['group']->id],
+            ['POST', '/api/properties'], ['GET', '/api/my-properties'], ['GET', '/api/user'],
+        ] as [$method, $path]) {
+            $this->json($method, $path)->assertForbidden();
+        }
+        $this->assertDatabaseCount('attendance_audit_logs', 0);
+        $this->assertDatabaseCount('attendance_daily_comments', 0);
+        $this->assertDatabaseHas('attendance_device_users', ['id' => $mapping->id]);
+        $this->assertDatabaseHas('attendance_leaves', ['id' => $leave->id]);
+        $this->assertDatabaseHas('attendance_duties', ['id' => $duty->id]);
+        $this->assertDatabaseHas('attendance_holidays', ['id' => $holiday->id, 'name' => 'Holiday']);
+    }
+
     public function test_any_active_role_can_participate_and_view_own_attendance(): void
     {
         $context = $this->context();
@@ -457,6 +561,7 @@ class AttendanceModuleFeatureTest extends TestCase
             ->assertJsonPath('data.0.days.2026-08-17.verification_methods.0', 'face')
             ->assertJsonPath('meta.permissions.can_manage_devices', true)
             ->assertJsonPath('meta.summary.active_users', 6)
+            ->assertJsonPath('meta.summary.average_late_minutes', 7)
             ->assertJsonPath('meta.timezone', 'Asia/Dushanbe');
 
         $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&role=client')
@@ -614,6 +719,78 @@ class AttendanceModuleFeatureTest extends TestCase
         $context['agent']->update(['name' => '=HYPERLINK("https://example.invalid")']);
         $safeContent = $this->get('/api/attendance/export')->assertOk()->streamedContent();
         $this->assertStringContainsString("'=HYPERLINK", $safeContent);
+    }
+
+    public function test_clients_are_excluded_from_attendance_reports_statistics_and_direct_details(): void
+    {
+        $context = $this->context();
+        $device = $this->device('ZAM230-NO-CLIENTS', $context['branch'], $context['group']);
+        $clientRole = Role::query()->firstOrCreate(['slug' => 'client'], ['name' => 'Client']);
+        $client = User::query()->create([
+            'name' => 'Excluded Attendance Client',
+            'phone' => '992000007778',
+            'role_id' => $clientRole->id,
+            'branch_id' => $context['branch']->id,
+            'branch_group_id' => $context['group']->id,
+            'status' => User::STATUS_ACTIVE,
+            'auth_method' => 'password',
+        ]);
+        foreach ([$context['agent'], $client] as $user) {
+            AttendanceDailySummary::query()->create([
+                'user_id' => $user->id,
+                'work_date' => '2026-08-17',
+                'late_minutes' => $user->id === $client->id ? 100 : 7,
+                'status' => 'late',
+            ]);
+            AttendanceEvent::query()->create([
+                'user_id' => $user->id,
+                'device_id' => $device->id,
+                'device_user_id' => (string) $user->id,
+                'event_type' => 'check_in',
+                'occurred_at' => '2026-08-17 04:07:00',
+                'verification_method' => 'face',
+            ]);
+        }
+
+        // Clients remain excluded even if an older config cache has no exclusions.
+        config(['attendance.excluded_table_user_roles' => []]);
+        CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-08-17 12:00:00', 'Asia/Dushanbe'));
+        try {
+            foreach ([$context['admin'], $context['hr'], $context['rop'], $this->accountant($context['branch'])] as $viewer) {
+                Sanctum::actingAs($viewer);
+                $range = 'date_from=2026-08-17&date_to=2026-08-17';
+                $matrix = $this->getJson('/api/attendance/matrix?'.$range)->assertOk()
+                    ->assertJsonPath('meta.summary.late_today', 1)
+                    ->assertJsonPath('meta.summary.checked_in_today', 1)
+                    ->assertJsonPath('meta.summary.average_late_minutes', 7);
+                $this->assertNotContains($client->id, array_column(array_column($matrix->json('data'), 'user'), 'id'));
+                $this->getJson('/api/attendance/matrix?'.$range.'&role=client')->assertOk()
+                    ->assertJsonCount(0, 'data')->assertJsonPath('meta.pagination.total', 0);
+                $branches = $this->getJson('/api/attendance/matrix?'.$range.'&view=branches')->assertOk();
+                $lateCount = collect($branches->json('data'))->sum(fn ($row) => $row['days']['2026-08-17']['late_count']);
+                $this->assertSame(1, $lateCount);
+                foreach (['daily', 'events'] as $report) {
+                    $this->getJson('/api/attendance/'.$report.'?'.$range)->assertOk()
+                        ->assertJsonCount(1, 'data')->assertJsonPath('data.0.user_id', $context['agent']->id);
+                    $this->getJson('/api/attendance/'.$report.'?'.$range.'&user_id='.$client->id)
+                        ->assertOk()->assertJsonCount(0, 'data');
+                }
+                foreach (['daily', 'days/2026-08-17'] as $detail) {
+                    $this->getJson('/api/attendance/users/'.$client->id.'/'.$detail)
+                        ->assertForbidden()->assertJsonPath('code', 'ATTENDANCE_FORBIDDEN_SCOPE');
+                }
+                foreach (['schedule', 'leaves', 'duties'] as $detail) {
+                    $this->getJson('/api/attendance/users/'.$client->id.'/'.$detail)->assertForbidden();
+                }
+                $csv = $this->get('/api/attendance/export?'.$range)->assertOk()->streamedContent();
+                $this->assertStringContainsString($context['agent']->name, $csv);
+                $this->assertStringNotContainsString($client->name, $csv);
+            }
+        } finally {
+            CarbonImmutable::setTestNow();
+        }
+        $this->assertDatabaseHas('users', ['id' => $client->id]);
+        $this->assertDatabaseHas('attendance_daily_summaries', ['user_id' => $client->id]);
     }
 
     public function test_hr_timesheet_export_is_a_valid_excel_workbook_and_excludes_clients(): void
@@ -1271,6 +1448,16 @@ class AttendanceModuleFeatureTest extends TestCase
             'user_id' => $user->id,
             'is_active' => true,
             'mapped_at' => now(),
+        ]);
+    }
+
+    private function accountant(Branch $branch): User
+    {
+        $role = Role::firstOrCreate(['slug' => 'accountant'], ['name' => 'Бухгалтер']);
+
+        return User::create([
+            'name' => 'Accountant', 'phone' => '992900000999', 'role_id' => $role->id,
+            'branch_id' => $branch->id, 'status' => User::STATUS_ACTIVE, 'auth_method' => 'password',
         ]);
     }
 

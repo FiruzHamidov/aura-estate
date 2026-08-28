@@ -11,7 +11,7 @@ class ReferenceCatalogController extends Controller
 
     public function usage(Request $request, string $catalog, int $item)
     {
-        $this->catalogs->assertCanManage($request->user());
+        $this->catalogs->assertCanManage($request->user(), $catalog);
 
         return response()->json([
             'data' => $this->catalogs->usage($catalog, $item),
@@ -20,7 +20,7 @@ class ReferenceCatalogController extends Controller
 
     public function merge(Request $request, string $catalog, int $item)
     {
-        $this->catalogs->assertCanManage($request->user());
+        $this->catalogs->assertCanManage($request->user(), $catalog);
         $data = $request->validate([
             'replacement_id' => ['required', 'integer', 'min:1'],
             'expected_usage_count' => ['required', 'integer', 'min:0'],
@@ -41,9 +41,10 @@ class ReferenceCatalogController extends Controller
 
     public function destroy(Request $request, string $catalog, int $item)
     {
+        $this->catalogs->assertCanManage($request->user(), $catalog);
+
         return response()->json([
             'data' => $this->catalogs->deleteUnused(
-                $request->user(),
                 $catalog,
                 $item,
             ),

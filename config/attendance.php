@@ -15,7 +15,8 @@ return [
         explode(',', (string) env('ATTENDANCE_ALLOWED_IPS', ''))
     ))),
     'administrator_roles' => ['admin', 'superadmin', 'owner'],
-    'table_roles' => ['rop', 'branch_director', 'hr', 'admin', 'superadmin', 'owner'],
+    'table_roles' => ['rop', 'branch_director', 'hr', 'accountant', 'admin', 'superadmin', 'owner'],
+    'all_branch_viewer_roles' => ['hr', 'accountant', 'admin', 'superadmin', 'owner'],
     'excluded_table_user_roles' => ['client'],
     'mapping_roles' => ['hr', 'admin', 'superadmin', 'owner'],
     'comment_roles' => ['hr', 'admin', 'superadmin', 'owner'],

@@ -852,7 +852,7 @@ class UserAccessTest extends TestCase
         ])->assertCreated()->assertJsonPath('role.slug', 'mop');
         $this->postJson('/api/user', [
             'name' => 'HR Created Director', 'phone' => '900000165', 'role_id' => $directorRole->id, 'branch_id' => $branchB->id,
-        ])->assertCreated()->assertJsonPath('role.slug', 'branch_director');
+        ])->assertStatus(422);
 
         $this->postJson('/api/user', [
             'name' => 'Blocked Admin',
@@ -881,6 +881,58 @@ class UserAccessTest extends TestCase
         $this->patchJson('/api/user/'.$superadmin->id, ['name' => 'Blocked'])->assertStatus(403);
         $this->deleteJson('/api/user/'.$admin->id, ['distribute_to_agents' => true])->assertStatus(403);
         $this->deleteJson('/api/user/'.$client->id, ['distribute_to_agents' => true])->assertStatus(403);
+    }
+
+    public function test_hr_creation_role_ceiling_is_enforced_for_every_role_and_cannot_be_bypassed(): void
+    {
+        $branch = Branch::create(['name' => 'HR Branch']);
+        $otherBranch = Branch::create(['name' => 'Hiring Branch']);
+        $group = BranchGroup::create(['name' => 'Hiring Group', 'branch_id' => $otherBranch->id]);
+        $hrRole = Role::create(['name' => 'HR', 'slug' => 'hr']);
+        $hr = User::create([
+            'name' => 'HR', 'phone' => '900009000', 'role_id' => $hrRole->id,
+            'branch_id' => $branch->id, 'status' => 'active',
+        ]);
+        Sanctum::actingAs($hr);
+        $allowed = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop'];
+        $denied = ['branch_director', 'admin', 'superadmin', 'owner', 'marketing', 'hr', 'accountant', 'client', 'external_agent', 'custom_role'];
+        $roles = [];
+        $createdAgent = null;
+        foreach (array_merge($allowed, $denied) as $index => $slug) {
+            $role = Role::firstOrCreate(['slug' => $slug], ['name' => $slug]);
+            $roles[$slug] = $role;
+            $phone = '900009'.str_pad((string) ($index + 1), 3, '0', STR_PAD_LEFT);
+            $response = $this->postJson('/api/user', [
+                'name' => 'New '.$slug, 'phone' => $phone, 'role_id' => $role->id,
+                'branch_id' => $otherBranch->id, 'branch_group_id' => $group->id,
+            ]);
+            if (in_array($slug, $allowed, true)) {
+                $response->assertCreated()->assertJsonPath('role.slug', $slug)->assertJsonPath('branch_id', $otherBranch->id);
+                if ($slug === 'agent') $createdAgent = $response->json('id');
+            } else {
+                $response->assertStatus(422);
+                $this->assertDatabaseMissing('users', ['phone' => $phone]);
+            }
+        }
+        $this->assertNotNull($createdAgent);
+        foreach (['branch_director', 'admin', 'superadmin', 'owner', 'marketing', 'hr', 'accountant', 'custom_role'] as $slug) {
+            $this->patchJson('/api/user/'.$createdAgent, ['role_id' => $roles[$slug]->id])->assertStatus(422);
+        }
+        $this->assertDatabaseHas('users', ['id' => $createdAgent, 'role_id' => $roles['agent']->id]);
+
+        $this->getJson('/api/roles')->assertOk();
+        $this->postJson('/api/roles', ['name' => 'Extra role', 'slug' => 'extra_role'])->assertForbidden();
+        $this->patchJson('/api/roles/'.$roles['admin']->id, ['slug' => 'agent'])->assertForbidden();
+        $this->deleteJson('/api/roles/'.$roles['admin']->id)->assertForbidden();
+        $this->assertDatabaseHas('roles', ['id' => $roles['admin']->id, 'slug' => 'admin']);
+
+        $this->getJson('/api/branch-groups?branch_id='.$otherBranch->id)
+            ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $group->id);
+        $this->getJson('/api/branch-groups/'.$group->id)->assertOk()->assertExactJson([
+            'id' => $group->id, 'name' => 'Hiring Group', 'branch_id' => $otherBranch->id,
+        ]);
+        $this->postJson('/api/branch-groups', ['name' => 'Not allowed', 'branch_id' => $otherBranch->id])->assertForbidden();
+        $this->patchJson('/api/branch-groups/'.$group->id, ['name' => 'Not allowed'])->assertForbidden();
     }
 
     public function test_branch_director_cannot_assign_admin_role(): void

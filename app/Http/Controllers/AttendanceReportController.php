@@ -159,8 +159,7 @@ final class AttendanceReportController extends Controller
 
     private function attendanceUsersQuery(Request $request): Builder
     {
-        $query = $this->access->visibleUsersQuery($request->user())
-            ->whereHas('role', fn (Builder $roles) => $roles->whereNotIn('slug', (array) config('attendance.excluded_table_user_roles', ['client'])));
+        $query = $this->access->visibleUsersQuery($request->user());
         foreach (['branch_id', 'branch_group_id'] as $field) {
             if ($request->filled($field)) $query->where('users.'.$field, $request->integer($field));
         }
