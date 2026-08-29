@@ -38,4 +38,24 @@ class ProductionDeployContractTest extends TestCase
         $this->assertGreaterThan($maintenanceEnds, $postSwitchCheck);
         $this->assertLessThan($queueVerification, $postSwitchCheck);
     }
+
+    public function test_deploy_rotates_recovery_backups_and_removes_stale_builds(): void
+    {
+        $this->assertStringContainsString('prune_backend_artifacts()', $this->deploy);
+        $this->assertStringContainsString('if (( kept < 2 ))', $this->deploy);
+        $this->assertStringContainsString("-name 'backend-*'", $this->deploy);
+        $this->assertStringContainsString('find "$build_root"', $this->deploy);
+
+        $preflightPrune = strpos($this->deploy, "prune_backend_artifacts\navailable_kb=");
+        $diskGate = strpos($this->deploy, 'available_kb=$(df -Pk /var/www');
+        $deployedState = strpos($this->deploy, 'backend.current');
+        $postDeployPrune = strrpos($this->deploy, 'prune_backend_artifacts');
+
+        $this->assertIsInt($preflightPrune);
+        $this->assertIsInt($diskGate);
+        $this->assertIsInt($deployedState);
+        $this->assertIsInt($postDeployPrune);
+        $this->assertLessThan($diskGate, $preflightPrune);
+        $this->assertGreaterThan($deployedState, $postDeployPrune);
+    }
 }

@@ -6,7 +6,7 @@ Required repository Actions secrets: `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`
 
 ## Deployment sequence
 
-1. Verify `/var/www/aura-estate` is on `main`, source files are clean, history can fast-forward, and at least 3 GiB of disk space remains. Existing generated `storage` and `bootstrap/cache` files are preserved.
+1. Verify `/var/www/aura-estate` is on `main`, source files are clean, history can fast-forward, prune stale deploy artifacts, and confirm at least 3 GiB of disk space remains. Existing generated `storage` and `bootstrap/cache` files are preserved.
 2. Save the previous commit, source archive, protected `.env` copy and a full MySQL dump under `/var/backups/aura-deploy/`. A failed database backup stops the deployment.
 3. Prepare Composer production dependencies and Vite assets in `/var/lib/aura-deploy/backend-builds/`, before entering maintenance mode.
 4. Enter maintenance mode, fast-forward the source checkout, retain previous dependencies/assets in the backup, then install prepared dependencies/assets.
@@ -21,6 +21,6 @@ Use Actions → Deploy production → Run workflow → `main` to retry. The inst
 
 Failures attempt to leave maintenance mode and report the backup path. Database and source rollback are **not automatic**: an administrator must check migration compatibility before restoring source, dependencies or the database. Never restore a database blindly over new user writes. Prefer a forward fix when possible.
 
-Backups and build directories are deliberately retained for review. Monitor disk space and manually remove only old, validated artifacts; do not remove the current backup while a deployment is running. Backup directories contain sensitive environment and database data and must remain root-only. Rotate keys independently of application deploys.
+The two newest recovery backups are retained; older validated backups are removed automatically before the disk-space gate and after a successful deploy. A failed staging directory remains available for diagnosis until the next deploy preflight; successful staging directories are removed immediately. Backup directories contain sensitive environment and database data and remain root-only. Rotate keys independently of application deploys.
 
 The deploy backup contains the database, protected environment, source and replaced runtime artifacts. It does **not** copy `storage/app`: production media must have a separate, verified filesystem/object-storage snapshot and restore procedure before a residential release. Do not try to archive the production media into `/var/backups/aura-deploy` without a capacity plan.
