@@ -18,6 +18,7 @@ class ExternalPropertyRequestFeatureTest extends TestCase
 {
     protected Role $externalRole;
     protected Role $agentRole;
+    protected Role $mopRole;
 
     protected function setUp(): void
     {
@@ -237,6 +238,7 @@ class ExternalPropertyRequestFeatureTest extends TestCase
 
         $this->externalRole = Role::create(['name' => 'External', 'slug' => 'external_agent']);
         $this->agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $this->mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
         \Illuminate\Support\Facades\DB::table('branches')->insert([
             [
                 'id' => 1,
@@ -504,7 +506,52 @@ class ExternalPropertyRequestFeatureTest extends TestCase
 
         $this->patchJson("/api/external-agent-requests/{$request->id}/assign", [
             'assigned_agent_id' => $externalAgent->id,
-        ])->assertStatus(422);
+        ])->assertForbidden();
+    }
+
+    public function test_agents_and_mops_can_accept_scoped_requests_and_convert_them(): void
+    {
+        $type = PropertyType::create(['name' => 'Квартира', 'slug' => 'apartment']);
+        $status = PropertyStatus::create(['name' => 'Вторичка', 'slug' => 'secondary']);
+
+        foreach ([
+            [$this->agentRole, '930000033', '930000034'],
+            [$this->mopRole, '930000035', '930000036'],
+        ] as [$internalRole, $externalPhone, $internalPhone]) {
+            $externalAgent = $this->user($this->externalRole, $externalPhone, branchId: 1, branchGroupId: 1);
+            $internalUser = $this->user($internalRole, $internalPhone, branchId: 1, branchGroupId: 1);
+            $externalRequest = ExternalPropertyRequest::create([
+                'external_agent_id' => $externalAgent->id,
+                'branch_id' => 1,
+                'branch_group_id' => 1,
+                'status' => ExternalPropertyRequest::STATUS_SUBMITTED,
+                'offer_type' => 'sale',
+                'type_id' => $type->id,
+                'price' => 85000,
+                'currency' => 'USD',
+                'owner_phone' => $externalPhone,
+            ]);
+
+            Sanctum::actingAs($internalUser);
+
+            $otherInternalUser = $this->user($this->agentRole, (string) ((int) $internalPhone + 100), branchId: 1, branchGroupId: 1);
+            $this->patchJson("/api/external-agent-requests/{$externalRequest->id}/assign", [
+                'assigned_agent_id' => $otherInternalUser->id,
+            ])->assertForbidden();
+
+            $this->patchJson("/api/external-agent-requests/{$externalRequest->id}/assign", [
+                'assigned_agent_id' => $internalUser->id,
+            ])->assertOk()
+                ->assertJsonPath('assigned_agent_id', $internalUser->id)
+                ->assertJsonPath('status', ExternalPropertyRequest::STATUS_ASSIGNED);
+
+            $this->postJson("/api/external-agent-requests/{$externalRequest->id}/convert", [
+                'status_id' => $status->id,
+            ])->assertCreated()
+                ->assertJsonPath('data.agent_id', $internalUser->id)
+                ->assertJsonPath('data.external_agent_id', $externalAgent->id)
+                ->assertJsonPath('data.source_type', ExternalPropertyRequest::SOURCE_TYPE);
+        }
     }
 
     public function test_external_agent_cannot_create_property_directly(): void

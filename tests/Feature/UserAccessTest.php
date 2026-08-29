@@ -2021,6 +2021,78 @@ class UserAccessTest extends TestCase
             ->assertJsonMissing(['id' => $otherBranch->id]);
     }
 
+    public function test_agents_and_mops_create_external_agents_only_in_their_scope(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+        $groupA = BranchGroup::create(['branch_id' => $branchA->id, 'name' => 'Group A']);
+        $groupB = BranchGroup::create(['branch_id' => $branchB->id, 'name' => 'Group B']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $externalRole = Role::create(['name' => 'External agent', 'slug' => 'external_agent']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+
+        $agent = User::create([
+            'name' => 'Agent A', 'phone' => '900000205', 'role_id' => $agentRole->id,
+            'branch_id' => $branchA->id, 'branch_group_id' => $groupA->id, 'status' => 'active',
+        ]);
+        $mop = User::create([
+            'name' => 'MOP A', 'phone' => '900000206', 'role_id' => $mopRole->id,
+            'branch_id' => $branchA->id, 'branch_group_id' => $groupA->id, 'status' => 'active',
+        ]);
+        $rop = User::create([
+            'name' => 'ROP A', 'phone' => '900000207', 'role_id' => $ropRole->id,
+            'branch_id' => $branchA->id, 'status' => 'active',
+        ]);
+        $foreignExternal = User::create([
+            'name' => 'Foreign external', 'phone' => '900000208', 'role_id' => $externalRole->id,
+            'branch_id' => $branchB->id, 'branch_group_id' => $groupB->id, 'status' => 'active',
+        ]);
+
+        Sanctum::actingAs($agent);
+        $agentCreatedId = $this->postJson('/api/external-agents', [
+            'name' => 'Agent partner',
+            'phone' => '900000209',
+            'auth_method' => 'sms',
+            'branch_id' => $branchB->id,
+            'branch_group_id' => $groupB->id,
+        ])->assertCreated()
+            ->assertJsonPath('role.slug', 'external_agent')
+            ->assertJsonPath('branch_id', $branchA->id)
+            ->assertJsonPath('branch_group_id', $groupA->id)
+            ->json('id');
+
+        $this->getJson('/api/external-agents')
+            ->assertOk()
+            ->assertJsonFragment(['id' => $agentCreatedId])
+            ->assertJsonMissing(['id' => $foreignExternal->id]);
+
+        Sanctum::actingAs($mop);
+        $mopCreatedId = $this->postJson('/api/external-agents', [
+            'name' => 'MOP partner',
+            'phone' => '900000210',
+            'auth_method' => 'password',
+            'password' => 'secret123',
+            'branch_id' => $branchB->id,
+            'branch_group_id' => $groupB->id,
+        ])->assertCreated()
+            ->assertJsonPath('branch_id', $branchA->id)
+            ->assertJsonPath('branch_group_id', $groupA->id)
+            ->json('id');
+
+        $this->getJson('/api/external-agents')
+            ->assertOk()
+            ->assertJsonFragment(['id' => $agentCreatedId])
+            ->assertJsonFragment(['id' => $mopCreatedId])
+            ->assertJsonMissing(['id' => $foreignExternal->id]);
+
+        Sanctum::actingAs($rop);
+        $this->getJson('/api/external-agents')->assertForbidden();
+        $this->postJson('/api/external-agents', [
+            'name' => 'Blocked partner', 'phone' => '900000211',
+        ])->assertForbidden();
+    }
+
     public function test_mop_user_index_returns_only_active_users_from_own_branch(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);

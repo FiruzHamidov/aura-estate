@@ -41,6 +41,7 @@ use App\Http\Controllers\DeveloperController;
 use App\Http\Controllers\DeveloperUnitController;
 use App\Http\Controllers\DeveloperUnitPhotoController;
 use App\Http\Controllers\DocumentTypeController;
+use App\Http\Controllers\ExternalAgentController;
 use App\Http\Controllers\ExternalPropertyRequestController;
 use App\Http\Controllers\FavoriteController;
 use App\Http\Controllers\FeatureController;
@@ -209,6 +210,9 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     });
 
     Route::get('/mobile/clients/filters', [ClientController::class, 'mobileFilters']);
+
+    Route::get('/external-agents', [ExternalAgentController::class, 'index']);
+    Route::post('/external-agents', [ExternalAgentController::class, 'store'])->middleware('throttle:30,60');
 
     Route::prefix('external/property-requests')->group(function () {
         Route::get('/', [ExternalPropertyRequestController::class, 'myIndex']);
