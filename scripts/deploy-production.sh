@@ -9,14 +9,27 @@ remote=git@github.com:FiruzHamidov/aura-estate.git
 for command in git php composer curl flock tar gzip mysqldump; do command -v "$command" >/dev/null; done
 test -d "$repo/.git"
 test "$(git -C "$repo" branch --show-current)" = main
+
+check_public_api() {
+  curl --fail --silent --show-error --max-time 20 https://backend.aura.tj/up >/dev/null
+  curl --fail --silent --show-error --max-time 20 \
+    'https://backend.aura.tj/api/new-buildings?per_page=1' | php -r '
+      $payload = json_decode(stream_get_contents(STDIN), true, 512, JSON_THROW_ON_ERROR);
+      if (!isset($payload["data"]) || !is_array($payload["data"])) {
+          fwrite(STDERR, "Residential catalog returned an invalid payload.\n");
+          exit(1);
+      }
+    '
+}
+
 # Existing generated runtime files and their permissions are not application changes.
 git -C "$repo" diff --quiet HEAD -- . ':(exclude)storage/**' ':(exclude)bootstrap/cache/**' || {
   echo 'Uncommitted application changes on the server; deployment stopped.' >&2; exit 1;
 }
 if [[ ${1:-} == --check ]]; then
   git ls-remote --exit-code "$remote" refs/heads/main >/dev/null
-  curl --fail --silent --show-error --max-time 15 https://backend.aura.tj/up >/dev/null
-  echo 'Backend SSH, repository access, tools and health: OK'
+  check_public_api
+  echo 'Backend SSH, repository access, tools, health and residential catalog: OK'
   exit 0
 fi
 
@@ -88,8 +101,7 @@ php artisan queue:restart
 systemctl reload php8.2-fpm
 php artisan up
 maintenance=0
-curl --fail --silent --show-error --retry 5 --retry-delay 3 --retry-all-errors --max-time 20 \
-  https://backend.aura.tj/up >/dev/null
+check_public_api
 for attempt in {1..10}; do
   if supervisorctl status aura-estate-queue:aura-estate-queue_00 | grep -q RUNNING; then break; fi
   sleep 2

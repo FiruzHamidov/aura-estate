@@ -49,16 +49,6 @@
 - Response:
   - `200`: JSON/resource response (точная форма зависит от ресурса/сериализации)
 
-## 5) `POST /api/b24/token`
-
-- Назначение: Операция контроллера `App\Http\Controllers\B24AuthController@issue`
-- Auth: no
-- Controller: `App\Http\Controllers\B24AuthController@issue`
-- Payload:
-  - Не найден явный `request->validate([...])` в методе
-- Response:
-  - `200`: `['token'=>$jwt,'exp'=>$payload['exp']]`
-
 ## 6) `GET /api/bookings`
 
 - Назначение: Операция контроллера `App\Http\Controllers\BookingController@index`
@@ -94,7 +84,6 @@
   - `deal_id`: `nullable|integer`
   - `contact_id`: `nullable|integer`
   - `place`: `nullable|string`
-  - `sync_to_b24`: `sometimes|boolean`
 - Response:
   - `200`: JSON/resource response (точная форма зависит от ресурса/сериализации)
 
@@ -2248,7 +2237,8 @@
   - `utm`: `['nullable`
   - `context`: `['nullable`
 - Response:
-  - `503`: `[ 'message' => 'Bitrix24 не настроен', ], 503`
+  - `201`: заявка принята во внутреннюю CRM Aura, возвращён receipt
+  - `200`: идемпотентный повтор ранее принятой заявки
 
 ## 196) `GET /api/leads`
 
@@ -3764,7 +3754,7 @@
   - `property_ids.*`: `integer|exists:properties`
   - `channel`: `['nullable`
 - Response:
-  - `201`: `[ 'selection' => $selection, 'bitrix' => [ 'error' => 'DEAL_NOT_FOUND_OR_NO_ACCESS', 'debug' => $exists, ], ], 201`
+  - `201`: созданная внутренняя подборка Aura
 
 ## 342) `GET /api/selections/public/{hash}`
 
@@ -3813,7 +3803,6 @@
   - `deal_id`: `nullable|integer`
   - `contact_id`: `nullable|integer`
   - `place`: `nullable|string`
-  - `sync_to_b24`: `sometimes|boolean`
 - Response:
   - `200`: JSON/resource response (точная форма зависит от ресурса/сериализации)
 

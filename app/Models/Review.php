@@ -22,11 +22,13 @@ class Review extends Model
         'text',
         'status',
         'published_at',
+        'version', 'moderated_by', 'moderated_at', 'moderation_reason',
     ];
 
     protected $casts = [
         'rating' => 'integer',
         'published_at' => 'datetime',
+        'version' => 'integer', 'moderated_at' => 'datetime',
     ];
 
     public function scopeApproved($query)
@@ -42,5 +44,10 @@ class Review extends Model
     public function authorUser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'author_user_id');
+    }
+
+    public function complaints(): \Illuminate\Database\Eloquent\Relations\HasMany
+    {
+        return $this->hasMany(ReviewComplaint::class);
     }
 }

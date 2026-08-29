@@ -110,6 +110,25 @@ class NotificationService
         );
     }
 
+    public function handlePublicLeadCreated(Lead $lead): void
+    {
+        $this->notifyUsers(
+            $this->recipients->publicLeadSubscribers($lead),
+            NotificationType::LEAD_NEW,
+            'Новая заявка с сайта',
+            'Заявка поступила во внутреннюю CRM Aura.',
+            $lead,
+            null,
+            [
+                'channels' => [NotificationChannel::IN_APP],
+                'action_url' => '/profile/crm/leads?leadId='.$lead->id.'&mode=view',
+                'action_type' => 'open_lead',
+                'dedupe_key' => 'lead:new:'.$lead->id,
+                'data' => ['lead_id' => $lead->id],
+            ]
+        );
+    }
+
     public function handleLeadCreated(Lead $lead, ?User $actor = null): void
     {
         $this->notifyUsers(

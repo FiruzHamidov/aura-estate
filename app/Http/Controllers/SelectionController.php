@@ -2,15 +2,14 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Selection;
+use App\Services\NotificationService;
 use Illuminate\Http\Request;
-use Illuminate\Support\Str;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\URL;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
-use App\Services\Bitrix24Client;
-use App\Services\NotificationService;
-use App\Models\Selection;
 
 class SelectionController extends Controller
 {
@@ -22,8 +21,8 @@ class SelectionController extends Controller
     public function index(Request $request)
     {
         $q = Selection::query()
-            ->when($request->filled('deal_id'), fn($qq) => $qq->where('deal_id', $request->integer('deal_id')))
-            ->when($request->filled('status'), fn($qq) => $qq->where('status', $request->string('status')));
+            ->when($request->filled('deal_id'), fn ($qq) => $qq->where('deal_id', $request->integer('deal_id')))
+            ->when($request->filled('status'), fn ($qq) => $qq->where('status', $request->string('status')));
 
         // Если используете Sanctum и роли — можно ограничить по created_by
         if (Auth::check()) {
@@ -33,75 +32,40 @@ class SelectionController extends Controller
         return $q->latest()->paginate((int) $request->input('per_page', 20));
     }
 
-    // Создание подборки + (опционально) лог в Bitrix
-    public function store(Request $request, Bitrix24Client $b24)
+    // Создание подборки во внутренней CRM Aura
+    public function store(Request $request)
     {
         $validated = $request->validate([
-            'title'        => 'nullable|string|max:255',
+            'title' => 'nullable|string|max:255',
             'property_ids' => 'required|array|min:1',
             'property_ids.*' => 'integer|exists:properties,id',
-            'channel'      => ['nullable', Rule::in(['whatsapp','telegram','sms','email'])],
-            'note'         => 'nullable|string',
-            'deal_id'      => 'nullable|integer',
-            'contact_id'   => 'nullable|integer',
-            'expires_at'   => 'nullable|date',
-            'sync_to_b24'  => 'sometimes|boolean', // флаг: писать комментарий в таймлайн B24
+            'channel' => ['nullable', Rule::in(['whatsapp', 'telegram', 'sms', 'email'])],
+            'note' => 'nullable|string',
+            'deal_id' => 'nullable|integer',
+            'contact_id' => 'nullable|integer',
+            'expires_at' => 'nullable|date',
         ]);
 
         // Генерация уникального hash и URL (подставьте свой домен/роут)
         $hash = Str::lower(Str::random(32));
-        $url  = 'https://aura.tj/s/'.$hash;
+        $url = 'https://aura.tj/s/'.$hash;
 
-        $selection = new Selection();
-        $selection->created_by     = Auth::id();
-        $selection->deal_id        = $validated['deal_id'] ?? null;
-        $selection->contact_id     = $validated['contact_id'] ?? null;
-        $selection->title          = $validated['title'] ?? null;
-        $selection->property_ids   = $validated['property_ids'];
-        $selection->channel        = $validated['channel'] ?? null;
-        $selection->note           = $validated['note'] ?? null;
+        $selection = new Selection;
+        $selection->created_by = Auth::id();
+        $selection->deal_id = $validated['deal_id'] ?? null;
+        $selection->contact_id = $validated['contact_id'] ?? null;
+        $selection->title = $validated['title'] ?? null;
+        $selection->property_ids = $validated['property_ids'];
+        $selection->channel = $validated['channel'] ?? null;
+        $selection->note = $validated['note'] ?? null;
         $selection->selection_hash = $hash;
-        $selection->selection_url  = $url;
-        $selection->expires_at     = isset($validated['expires_at']) ? Carbon::parse($validated['expires_at']) : null;
-        $selection->status         = 'draft';
+        $selection->selection_url = $url;
+        $selection->expires_at = isset($validated['expires_at']) ? Carbon::parse($validated['expires_at']) : null;
+        $selection->status = 'draft';
         $selection->save();
-
-        // Если требуется — отправим событие в таймлайн сделки (B24)
-        $b24res = null;
-        if ($request->boolean('sync_to_b24') && !empty($selection->deal_id)) {
-            try {
-                $comment = "Создана подборка (".count($selection->property_ids)."):\n".$selection->selection_url;
-                // Проверим, что сделка видна Bitrix-ом
-                $exists = $b24->dealGet((int)$selection->deal_id);
-                if (isset($exists['error']) || empty($exists['result'])) {
-                    return response()->json([
-                        'selection' => $selection,
-                        'bitrix' => [
-                            'error' => 'DEAL_NOT_FOUND_OR_NO_ACCESS',
-                            'debug' => $exists,
-                        ],
-                    ], 201);
-                }
-
-                $b24res = $b24->timelineCommentAdd([
-                    'ENTITY_TYPE' => 'deal',
-                    'ENTITY_ID'   => (int) $selection->deal_id,
-                    'COMMENT'     => $comment,
-                ]);
-
-                if (empty($b24res['error'])) {
-                    $selection->status = 'sent';
-                    $selection->sent_at = now();
-                    $selection->save();
-                }
-            } catch (\Throwable $e) {
-                $b24res = ['error' => $e->getMessage()];
-            }
-        }
 
         return response()->json([
             'selection' => $selection,
-            'bitrix'    => $b24res,
         ], 201);
     }
 
@@ -112,60 +76,47 @@ class SelectionController extends Controller
         if (Auth::check() && $sel->created_by && $sel->created_by !== Auth::id()) {
             abort(403);
         }
+
         return $sel;
     }
 
     // Трекинг событий лендинга подборки (viewed/opened/requested_showing)
-    public function event($id, Request $request, Bitrix24Client $b24)
+    public function publicEvent(string $hash, Request $request)
     {
         $validated = $request->validate([
-            'type' => ['required', Rule::in(['viewed','opened','requested_showing'])],
-            'payload' => 'nullable|array',
+            'type' => ['required', Rule::in(['viewed', 'opened', 'requested_showing'])],
+            'payload' => 'nullable|array:property_id',
+            'payload.property_id' => 'required_unless:type,viewed|integer',
         ]);
 
-        $sel = Selection::findOrFail($id);
-
-        // простая логика обновления статусов
-        if ($validated['type'] === 'viewed' && !$sel->viewed_at) {
-            $sel->viewed_at = now();
-            $sel->status = 'viewed';
-        }
-
-        // можно накапливать в meta последние события
-        $meta = $sel->meta ? (array)$sel->meta : [];
-        $meta['events'][] = [
-            'type' => $validated['type'],
-            'payload' => $validated['payload'] ?? null,
-            'ts' => now()->toIso8601String(),
-        ];
-        $sel->meta = $meta;
-        $sel->save();
-
-        $this->notifications->handleSelectionEvent($sel, $validated['type'], $validated['payload'] ?? null);
-
-        // при необходимости — отправим отметку в таймлайн сделки
-        if (!empty($sel->deal_id)) {
-            try {
-                $text = match ($validated['type']) {
-                    'viewed' => 'Клиент посмотрел подборку',
-                    'opened' => 'Клиент открыл объект из подборки',
-                    'requested_showing' => 'Клиент запросил показ из подборки',
-                    default => 'Событие по подборке',
-                };
-
-                $b24->timelineCommentAdd([
-                    'fields' => [
-                        'ENTITY_TYPE' => 'deal',
-                        'ENTITY_ID'   => (int) $sel->deal_id,
-                        'COMMENT'     => $text . ' (ID подб.: '.$sel->id.')',
-                    ],
-                ]);
-            } catch (\Throwable $e) {
-                // глушим, не критично
+        return DB::transaction(function () use ($hash, $validated) {
+            $sel = Selection::where('selection_hash', $hash)->lockForUpdate()->firstOrFail();
+            abort_if($sel->expires_at && now()->greaterThan($sel->expires_at), 410, 'Selection expired');
+            if (isset($validated['payload']['property_id'])) {
+                abort_unless(in_array((int) $validated['payload']['property_id'], array_map('intval', $sel->property_ids), true), 422, 'Объект не входит в подборку.');
             }
-        }
 
-        return response()->json(['ok' => true]);
+            // простая логика обновления статусов
+            if ($validated['type'] === 'viewed' && ! $sel->viewed_at) {
+                $sel->viewed_at = now();
+                $sel->status = 'viewed';
+            }
+
+            // можно накапливать в meta последние события
+            $meta = $sel->meta ? (array) $sel->meta : [];
+            $meta['events'][] = [
+                'type' => $validated['type'],
+                'payload' => $validated['payload'] ?? null,
+                'ts' => now()->toIso8601String(),
+            ];
+            $meta['events'] = array_slice($meta['events'], -100);
+            $sel->meta = $meta;
+            $sel->save();
+
+            $this->notifications->handleSelectionEvent($sel, $validated['type'], $validated['payload'] ?? null);
+
+            return response()->json(['ok' => true]);
+        });
     }
 
     // Публичный просмотр по hash (если нужен публичный JSON — опционально)
@@ -177,12 +128,13 @@ class SelectionController extends Controller
         if ($sel->expires_at && now()->greaterThan($sel->expires_at)) {
             abort(410, 'Selection expired');
         }
+
         return [
-            'id'        => $sel->id,
-            'title'        => $sel->title,
+            'id' => $sel->id,
+            'title' => $sel->title,
             'property_ids' => $sel->property_ids,
-            'note'         => $sel->note,
-            'status'       => $sel->status,
+            'note' => $sel->note,
+            'status' => $sel->status,
         ];
     }
 }

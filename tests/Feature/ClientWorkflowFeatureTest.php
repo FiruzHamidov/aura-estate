@@ -102,6 +102,10 @@ class ClientWorkflowFeatureTest extends TestCase
             $table->timestamps();
         });
 
+        foreach (['2026_04_28_120000_create_client_sources_table.php', '2026_04_28_120100_add_source_to_clients_table.php'] as $migration) {
+            (require database_path('migrations/'.$migration))->up();
+        }
+
         Schema::create('client_collaborators', function (Blueprint $table) {
             $table->id();
             $table->unsignedBigInteger('client_id');

@@ -3,8 +3,10 @@
 namespace App\Http\Middleware;
 
 use App\Models\ApiRequestLog;
+use App\Support\ResidentialDiagnostics;
 use Closure;
 use Illuminate\Auth\AuthenticationException;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
@@ -36,8 +38,7 @@ class LogApiRequest
         ?int $statusCode,
         ?Throwable $e = null,
         ?Response $response = null
-    ): void
-    {
+    ): void {
         if (! $this->shouldLog($request)) {
             return;
         }
@@ -45,6 +46,7 @@ class LogApiRequest
         try {
             $user = $request->user();
             $route = $request->route();
+            $technicalOnly = ResidentialDiagnostics::applies($request);
 
             ApiRequestLog::create([
                 'trace_id' => $request->attributes->get('trace_id'),
@@ -59,10 +61,10 @@ class LogApiRequest
                 'ip_address' => $request->ip(),
                 'user_agent' => $request->userAgent(),
                 'client_locale' => $request->attributes->get('client_locale'),
-                'request_query' => $this->sanitizeArray($request->query()),
-                'request_body' => $this->requestBody($request),
+                'request_query' => $technicalOnly ? null : $this->sanitizeArray($request->query()),
+                'request_body' => $technicalOnly ? null : $this->requestBody($request),
                 'error_code' => $this->errorCode($e, $statusCode, $response),
-                'error_message' => $this->errorMessage($e, $statusCode, $response),
+                'error_message' => $technicalOnly ? null : $this->errorMessage($e, $statusCode, $response),
                 'created_at' => now(),
             ]);
         } catch (Throwable $logError) {
@@ -70,7 +72,7 @@ class LogApiRequest
                 'trace_id' => $request->attributes->get('trace_id'),
                 'method' => $request->method(),
                 'path' => $request->path(),
-                'error' => $logError->getMessage(),
+                'error_type' => $logError::class,
             ]);
         }
     }
@@ -188,6 +190,9 @@ class LogApiRequest
 
     private function statusFromThrowable(Throwable $e): int
     {
+        if ($e instanceof HttpResponseException) {
+            return $e->getResponse()->getStatusCode();
+        }
         if ($e instanceof AuthenticationException) {
             return 401;
         }

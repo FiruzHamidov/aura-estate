@@ -18,6 +18,18 @@ class ReferenceCatalogController extends Controller
         ]);
     }
 
+    public function replacements(Request $request, string $catalog, int $item)
+    {
+        $this->catalogs->assertCanManage($request->user(), $catalog);
+        $input = $request->validate([
+            'search' => ['sometimes', 'nullable', 'string', 'max:255'],
+            'page' => ['sometimes', 'integer', 'min:1'],
+            'per_page' => ['sometimes', 'integer', 'between:1,100'],
+        ]);
+
+        return response()->json($this->catalogs->replacements($catalog, $item, $input['search'] ?? '', $input['per_page'] ?? 50));
+    }
+
     public function merge(Request $request, string $catalog, int $item)
     {
         $this->catalogs->assertCanManage($request->user(), $catalog);

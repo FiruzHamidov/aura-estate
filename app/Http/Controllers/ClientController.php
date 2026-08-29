@@ -407,6 +407,9 @@ class ClientController extends Controller
             'property_type_ids' => 'sometimes|array',
             'property_type_ids.*' => ['integer', 'distinct', Rule::exists('property_types', 'id')],
             'wants_mortgage' => 'nullable|boolean',
+            'has_cash_on_hand' => 'nullable|boolean',
+            'cash_on_hand_amount_from' => 'nullable|numeric|min:0',
+            'cash_on_hand_amount_to' => 'nullable|numeric|min:0',
             'budget_total_from' => 'nullable|numeric|min:0',
             'budget_total_to' => 'nullable|numeric|min:0',
             'budget_cash_from' => 'nullable|numeric|min:0',
@@ -500,6 +503,9 @@ class ClientController extends Controller
             || !empty($effectiveRepairTypeIds)
             || !empty($validated['property_type_ids'])
             || (array_key_exists('wants_mortgage', $validated) && $validated['wants_mortgage'] !== null)
+            || (array_key_exists('has_cash_on_hand', $validated) && $validated['has_cash_on_hand'] !== null)
+            || (array_key_exists('cash_on_hand_amount_from', $validated) && $validated['cash_on_hand_amount_from'] !== null)
+            || (array_key_exists('cash_on_hand_amount_to', $validated) && $validated['cash_on_hand_amount_to'] !== null)
             || (array_key_exists('budget_total_from', $validated) && $validated['budget_total_from'] !== null)
             || (array_key_exists('budget_total_to', $validated) && $validated['budget_total_to'] !== null)
             || (array_key_exists('budget_cash_from', $validated) && $validated['budget_cash_from'] !== null)
@@ -528,13 +534,13 @@ class ClientController extends Controller
                     $builder->where(function ($needBuilder) use ($propertyTypeIds, $hasPropertyTypePivotTable) {
                         $needBuilder->whereHas(
                             'propertyType',
-                            fn ($propertyTypeBuilder) => $propertyTypeBuilder->whereIn('id', $propertyTypeIds)
+                            fn ($propertyTypeBuilder) => $propertyTypeBuilder->whereIn('property_types.id', $propertyTypeIds)
                         );
 
                         if ($hasPropertyTypePivotTable) {
                             $needBuilder->orWhereHas(
                                 'propertyTypes',
-                                fn ($propertyTypesBuilder) => $propertyTypesBuilder->whereIn('id', $propertyTypeIds)
+                                fn ($propertyTypesBuilder) => $propertyTypesBuilder->whereIn('property_types.id', $propertyTypeIds)
                             );
                         }
                     });
@@ -542,6 +548,18 @@ class ClientController extends Controller
 
                 if (array_key_exists('wants_mortgage', $validated) && $validated['wants_mortgage'] !== null) {
                     $builder->where('wants_mortgage', $request->boolean('wants_mortgage'));
+                }
+
+                if (array_key_exists('has_cash_on_hand', $validated) && $validated['has_cash_on_hand'] !== null) {
+                    $builder->where('has_cash_on_hand', $request->boolean('has_cash_on_hand'));
+                }
+
+                if (array_key_exists('cash_on_hand_amount_from', $validated) && $validated['cash_on_hand_amount_from'] !== null) {
+                    $builder->where('cash_on_hand_amount', '>=', $validated['cash_on_hand_amount_from']);
+                }
+
+                if (array_key_exists('cash_on_hand_amount_to', $validated) && $validated['cash_on_hand_amount_to'] !== null) {
+                    $builder->where('cash_on_hand_amount', '<=', $validated['cash_on_hand_amount_to']);
                 }
 
                 if (array_key_exists('budget_total_from', $validated) && $validated['budget_total_from'] !== null) {
@@ -656,7 +674,6 @@ class ClientController extends Controller
             'contact_kind' => ['nullable', Rule::in(Client::contactKinds())],
             'status' => ['nullable', Rule::in(['active', 'inactive'])],
             'status_id' => 'nullable|integer|exists:client_need_statuses,id',
-            'bitrix_contact_id' => 'nullable|integer',
             'meta' => 'nullable|array',
             'context_type' => ['nullable', Rule::in(ClientAttachService::contextTypes())],
             'context_id' => 'nullable|integer',
@@ -678,7 +695,6 @@ class ClientController extends Controller
             'contact_kind',
             'status',
             'status_id',
-            'bitrix_contact_id',
             'meta',
         ]);
 
@@ -815,7 +831,6 @@ class ClientController extends Controller
             'contact_kind' => ['sometimes', 'nullable', Rule::in(Client::contactKinds())],
             'status' => ['sometimes', Rule::in(['active', 'inactive'])],
             'status_id' => 'sometimes|nullable|integer|exists:client_need_statuses,id',
-            'bitrix_contact_id' => 'sometimes|nullable|integer',
             'meta' => 'sometimes|nullable|array',
         ]);
 
@@ -834,7 +849,6 @@ class ClientController extends Controller
             'contact_kind',
             'status',
             'status_id',
-            'bitrix_contact_id',
             'meta',
         ]);
 

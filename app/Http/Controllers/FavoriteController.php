@@ -16,6 +16,7 @@ class FavoriteController extends Controller
     public function index()
     {
         $favorites = Favorite::where('user_id', auth()->id())
+            ->where('entity_type', 'property')
             ->with('property.photos', 'property.type') // Загрузка property и его photos
             ->get();
 

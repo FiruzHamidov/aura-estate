@@ -4,41 +4,37 @@ namespace App\Http\Controllers;
 
 use App\Models\NewBuilding;
 use App\Models\NewBuildingBlock;
-use App\Http\Requests\StoreNewBuildingBlockRequest;
-use App\Http\Requests\UpdateNewBuildingBlockRequest;
+use App\Services\Residential\StructureWriter;
+use Illuminate\Http\Request;
 
 class NewBuildingBlockController extends Controller
 {
-    // GET /new-buildings/{new_building}/blocks
-    public function index(NewBuilding $new_building)
+    public function __construct(private readonly StructureWriter $writer) {}
+
+    public function index(NewBuilding $new_building, Request $request)
     {
-        return $new_building->blocks()->orderBy('name')->get();
+        return $new_building->blocks()->when(! $request->is('api/admin/*'), fn ($q) => $q->whereNull('archived_at'))->orderBy('sort_order')->orderBy('name')->get();
     }
 
-    // POST /new-buildings/{new_building}/blocks
-    public function store(StoreNewBuildingBlockRequest $request, NewBuilding $new_building)
+    public function store(Request $request, NewBuilding $new_building)
     {
-        $block = $new_building->blocks()->create($request->validated());
-        return response()->json($block, 201);
+        return response()->json($this->writer->save($request->user(), $new_building, 'blocks', $request->all()), 201);
     }
 
-    // GET /new-buildings/{new_building}/blocks/{block}
     public function show(NewBuilding $new_building, NewBuildingBlock $block)
     {
-        return $block;
+        return $new_building->blocks()->findOrFail($block->id);
     }
 
-    // PUT/PATCH /new-buildings/{new_building}/blocks/{block}
-    public function update(UpdateNewBuildingBlockRequest $request, NewBuilding $new_building, NewBuildingBlock $block)
+    public function update(Request $request, NewBuilding $new_building, NewBuildingBlock $block)
     {
-        $block->update($request->validated());
-        return $block->refresh();
+        return $this->writer->save($request->user(), $new_building, 'blocks', $request->all(), $block->id);
     }
 
-    // DELETE /new-buildings/{new_building}/blocks/{block}
-    public function destroy(NewBuilding $new_building, NewBuildingBlock $block)
+    public function destroy(Request $request, NewBuilding $new_building, NewBuildingBlock $block)
     {
-        $block->delete();
+        $this->writer->remove($request->user(), $new_building, 'blocks', $block->id, $request->all());
+
         return response()->noContent();
     }
 }

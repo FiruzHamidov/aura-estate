@@ -11,7 +11,7 @@ Required repository Actions secrets: `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`
 3. Prepare Composer production dependencies and Vite assets in `/var/lib/aura-deploy/backend-builds/`, before entering maintenance mode.
 4. Enter maintenance mode, fast-forward the source checkout, retain previous dependencies/assets in the backup, then install prepared dependencies/assets.
 5. Rebuild generated manifests, run `php artisan migrate --force`, and rebuild configuration, route and view caches.
-6. Signal Aura queue workers to restart, gracefully reload PHP 8.2 FPM, leave maintenance mode, and check `/up` and the Aura Supervisor worker.
+6. Signal Aura queue workers to restart, gracefully reload PHP 8.2 FPM, leave maintenance mode, and check `/up`, the public `/api/new-buildings` JSON contract and the Aura Supervisor worker.
 
 The source directory, `.env`, persistent `storage`, public storage link, existing scheduler and Supervisor configuration remain in place. Other applications are not deployed. Both Aura repositories use one server lock to prevent overlapping builds/migrations. Superseded commits are skipped.
 
@@ -22,3 +22,5 @@ Use Actions → Deploy production → Run workflow → `main` to retry. The inst
 Failures attempt to leave maintenance mode and report the backup path. Database and source rollback are **not automatic**: an administrator must check migration compatibility before restoring source, dependencies or the database. Never restore a database blindly over new user writes. Prefer a forward fix when possible.
 
 Backups and build directories are deliberately retained for review. Monitor disk space and manually remove only old, validated artifacts; do not remove the current backup while a deployment is running. Backup directories contain sensitive environment and database data and must remain root-only. Rotate keys independently of application deploys.
+
+The deploy backup contains the database, protected environment, source and replaced runtime artifacts. It does **not** copy `storage/app`: production media must have a separate, verified filesystem/object-storage snapshot and restore procedure before a residential release. Do not try to archive the production media into `/var/backups/aura-deploy` without a capacity plan.

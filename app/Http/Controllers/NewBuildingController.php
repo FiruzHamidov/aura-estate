@@ -2,166 +2,136 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\NewBuilding;
 use App\Models\Feature;
-use App\Http\Requests\StoreNewBuildingRequest;
-use App\Http\Requests\UpdateNewBuildingRequest;
+use App\Models\NewBuilding;
+use App\Services\Residential\InventoryFilters;
+use App\Services\Residential\InventoryQuery;
+use App\Services\Residential\InventoryWriter;
+use App\Services\Residential\PublicInventory;
+use App\Services\Residential\ResidentialAccess;
 use Illuminate\Http\Request;
 
 class NewBuildingController extends Controller
 {
-    public function index(Request $req)
+    public function __construct(private readonly InventoryQuery $inventory, private readonly PublicInventory $public, private readonly InventoryWriter $writer, private readonly ResidentialAccess $access) {}
+
+    public function index(Request $request)
     {
-        $q = NewBuilding::query()
-            ->with(['developer', 'previewUnits', 'stage','location'])
-            ->when($req->developer_id, fn($qq) => $qq->where('developer_id', $req->developer_id))
-            ->when($req->stage_id, fn($qq) => $qq->where('construction_stage_id', $req->stage_id))
-            ->when($req->material_id, fn($qq) => $qq->where('material_id', $req->material_id))
-            ->when($req->search, fn($qq) => $qq->where('title','like','%'.$req->search.'%'))
-            // optional filters for ceiling height
-            ->when($req->filled('ceiling_height_min'), fn($qq) => $qq->where('ceiling_height', '>=', (float)$req->ceiling_height_min))
-            ->when($req->filled('ceiling_height_max'), fn($qq) => $qq->where('ceiling_height', '<=', (float)$req->ceiling_height_max));
-
-        return $q->paginate($req->get('per_page', 15));
-    }
-
-    public function store(StoreNewBuildingRequest $request)
-    {
-        $data = $request->validated();
-        $features = $data['features'] ?? [];
-        unset($data['features']);
-
-        $nb = NewBuilding::create($data);
-        if ($features) {
-            $nb->features()->sync($features);
-        }
-
-        // ensure ceiling_height is returned as float|null (not string)
-        if (!is_null($nb->ceiling_height)) {
-            $nb->ceiling_height = (float)$nb->ceiling_height;
-        }
-
-        return response()->json($nb->load(['developer','stage','material','features']), 201);
-    }
-
-    public function show(NewBuilding $new_building)
-    {
-        // грузим связи
-        $new_building->load(['developer','stage','material','features','blocks','units.photos','photos', 'location']);
-
-        // приводим ceiling_height к числу
-        if (!is_null($new_building->ceiling_height)) {
-            $new_building->ceiling_height = (float)$new_building->ceiling_height;
-        }
-
-        // считаем агрегаты по доступным и одобренным юнитам
-        $unitsQ = $new_building->units()
-            ->where('is_available', true)
-            ->where('moderation_status', 'available');
-
-        $stats = $unitsQ->selectRaw('
-        MIN(total_price)   as min_total_price,
-        MAX(total_price)   as max_total_price,
-        MIN(price_per_sqm) as min_ppsqm,
-        MAX(price_per_sqm) as max_ppsqm
-    ')->first();
-
-        // Хелперы форматирования
-        $fmt = fn($v) => is_null($v) ? null : number_format((float)$v, 0, '.', ' ');
-        $range = function ($min, $max, string $suffix) use ($fmt) {
-            if (is_null($min) || is_null($max)) return null;               // нет данных
-            if ((float)$min === (float)$max) return $fmt($min).$suffix;    // одно значение
-            return $fmt($min).' – '.$fmt($max).$suffix;                    // вилка
+        $filters = (new InventoryFilters)->validate($request->all(), true);
+        $base = $this->inventory->buildings($filters);
+        $query = $this->inventory->withAggregates(clone $base, $filters)->with(['developer', 'stage', 'location', 'coverPhoto']);
+        match ($filters['sort'] ?? 'newest') {
+            'price_asc', 'price_desc' => $query->orderByRaw('min_total_price IS NULL')->orderBy('min_total_price', $filters['sort'] === 'price_asc' ? 'asc' : 'desc'),
+            'completion' => $this->inventory->sortBuildingsByCompletion($query),
+            default => $query->orderByRaw('COALESCE(published_at, created_at) DESC'),
         };
+        $page = $query->orderBy('new_buildings.id')->paginate($filters['per_page'] ?? 15, total: fn () => (clone $base)->count())->withQueryString();
+        $rooms = $this->inventory->roomsSummary($page->getCollection()->pluck('id')->all(), $filters);
+        $page->setCollection($page->getCollection()->map(fn ($building) => $this->public->building($building) + ['rooms_summary' => $rooms->get($building->id, collect())->values()]));
+        $count = $this->inventory->filterUnits(\App\Models\DeveloperUnit::query()->available()
+            ->whereIn('new_building_id', $this->inventory->buildingFilters($filters)->select('new_buildings.id')), $filters)->count();
 
-        $totalPriceRange   = $range($stats->min_total_price ?? null, $stats->max_total_price ?? null, ' c.');
-        $pricePerSqmRange  = $range($stats->min_ppsqm ?? null, $stats->max_ppsqm ?? null, ' c./м²');
-
-        $roomsStats = $new_building->units()
-            ->where('is_available', true)
-            ->where('moderation_status', 'available')
-            ->selectRaw('
-        block_id,
-        bedrooms,
-        MIN(area)        as min_area,
-        MIN(total_price) as min_total_price,
-        MAX(total_price) as max_total_price,
-        COUNT(*)         as offers_count
-    ')
-            ->groupBy('block_id', 'bedrooms')
-            ->orderBy('block_id')
-            ->orderBy('bedrooms')
-            ->get()
-            ->groupBy('block_id') // 👈 ключевая часть
-            ->map(function ($blockRows) {
-                return $blockRows->map(function ($row) {
-                    return [
-                        'rooms' => (int) $row->bedrooms,
-                        'area_from' => $row->min_area ? (float) $row->min_area : null,
-                        'price' => $row->min_total_price && $row->max_total_price
-                            ? number_format($row->min_total_price, 0, '.', ' ')
-                            .' – '.
-                            number_format($row->max_total_price, 0, '.', ' ')
-                            .' c.'
-                            : null,
-                        'count' => (int) $row->offers_count,
-                    ];
-                })->values();
-            });
-
-        // Можно вернуть как мета-блок рядом с данными объекта
-        return response()->json([
-            'data' => $new_building,
-            'stats' => [
-                'total_price' => [
-                    'min'       => $stats->min_total_price ? (float)$stats->min_total_price : null,
-                    'max'       => $stats->max_total_price ? (float)$stats->max_total_price : null,
-                    'formatted' => $totalPriceRange, // например: "473 860 c. – 1 148 240 c."
-                ],
-                'price_per_sqm' => [
-                    'min'       => $stats->min_ppsqm ? (float)$stats->min_ppsqm : null,
-                    'max'       => $stats->max_ppsqm ? (float)$stats->max_ppsqm : null,
-                    'formatted' => $pricePerSqmRange, // например: "8 170 c. – 9 260 c./м²"
-                ],
-            ],
-            'rooms_summary' => $roomsStats,
-        ]);
+        return response()->json($page->toArray() + ['meta' => ['total_complexes' => $page->total(), 'total_available_units' => $count, 'as_of' => now()->toIso8601String()]]);
     }
 
-    public function update(UpdateNewBuildingRequest $request, NewBuilding $new_building)
+    public function map(Request $request)
     {
-        $data = $request->validated();
-        $features = $data['features'] ?? null;
-        unset($data['features']);
-        \Log::info('NB update validated', $data);
-        $new_building->update($data);
-        if (!is_null($features)) {
-            $new_building->features()->sync($features);
-        }
+        $filters = (new InventoryFilters)->validate($request->all(), true);
+        $base = $this->inventory->buildings($filters);
+        $withoutCoordinates = (clone $base)->where(fn ($q) => $q->whereNull('latitude')->orWhereNull('longitude'))->count();
+        $markers = $this->inventory->withAggregates((clone $base)->whereNotNull('latitude')->whereNotNull('longitude'), $filters)->orderBy('id')->limit(2001)->get();
 
-        // ensure ceiling_height is numeric in response
-        if (!is_null($new_building->ceiling_height)) {
-            $new_building->ceiling_height = (float)$new_building->ceiling_height;
-        }
-
-        return $new_building->load(['developer','stage','material','features']);
+        return response()->json(['data' => $markers->take(2000)->map(fn ($building) => $building->only(['id', 'title', 'address', 'latitude', 'longitude']) + $this->public->aggregates($building)),
+            'meta' => ['without_coordinates' => $withoutCoordinates, 'truncated' => $markers->count() > 2000, 'total_complexes' => $base->count(), 'as_of' => now()->toIso8601String()]]);
     }
 
-    public function destroy(NewBuilding $new_building)
+    public function show(Request $request, NewBuilding $new_building)
     {
-        $new_building->delete();
+        $request->validate(['inventory' => 'sometimes|in:paginated,legacy']);
+        $building = $this->inventory->withAggregates(NewBuilding::query()->published())->with(['developer', 'stage', 'material', 'features', 'photos', 'location', 'responsibleAgent', 'coverPhoto', 'blocks' => fn ($q) => $q->whereNull('archived_at')->orderBy('sort_order')])->findOrFail($new_building->id);
+        // New clients opt into a bounded preview; legacy clients retain the complete public array.
+        $legacyInventory = $request->input('inventory') !== 'paginated';
+        $units = $this->inventory->sortUnits($this->inventory->units($building->id), [])->with(['block', 'entrance', 'coverPhoto'])
+            ->when(! $legacyInventory, fn ($q) => $q->limit(20))
+            ->when($legacyInventory, fn ($q) => $q->with(['photos', 'layout']))->get();
+        $data = $this->public->building($building, true) + ['units' => $units->map(fn ($u) => $this->public->unit($u, $legacyInventory)), 'units_has_more' => $building->available_count > $units->count()];
+
+        return response()->json(['data' => $data, 'stats' => $this->public->legacyStats($building),
+            'rooms_summary' => $this->inventory->roomsSummary([$building->id])->get($building->id, collect())->groupBy('block_id'),
+            'meta' => ['as_of' => now()->toIso8601String()]]);
+    }
+
+    public function adminIndex(Request $request)
+    {
+        abort_unless($this->access->canCreate($request->user()), 403);
+        $filters = $request->validate(['page' => 'integer|min:1', 'per_page' => 'integer|between:1,100', 'search' => 'nullable|string|max:255',
+            'developer_id' => 'nullable|integer|exists:developers,id', 'stage_id' => 'nullable|integer|exists:construction_stages,id']);
+        $page = $this->access->visible($request->user())->with(['developer', 'stage', 'location'])
+            ->when($filters['search'] ?? null, fn ($q, $term) => $q->where('title', 'like', '%'.$term.'%'))
+            ->when($filters['developer_id'] ?? null, fn ($q, $id) => $q->where('developer_id', $id))
+            ->when($filters['stage_id'] ?? null, fn ($q, $id) => $q->where('construction_stage_id', $id))
+            ->orderByDesc('id')->paginate($filters['per_page'] ?? 20);
+        $page->getCollection()->each(fn ($building) => $building->setAttribute('capabilities', $this->access->capabilities($request->user(), $building)));
+
+        return $page;
+    }
+
+    public function adminShow(Request $request, NewBuilding $new_building)
+    {
+        $this->access->ensureManage($request->user(), $new_building);
+
+        return response()->json(['data' => $new_building->load(['developer', 'stage', 'material', 'features', 'blocks', 'location', 'responsibleAgent']),
+            'capabilities' => $this->access->capabilities($request->user(), $new_building)]);
+    }
+
+    public function consultants(Request $request, NewBuilding $new_building)
+    {
+        $this->access->ensureManage($request->user(), $new_building);
+        $input = $request->validate(['branch_id' => 'nullable|integer|min:1', 'search' => 'nullable|string|max:100', 'page' => 'integer|min:1', 'per_page' => 'integer|between:1,100']);
+        $branch = $request->has('branch_id') ? ($input['branch_id'] ?? null) : $new_building->branch_id;
+        abort_if(! $this->access->global($request->user()) && (int) $branch !== (int) $new_building->branch_id, 403);
+        $query = \App\Models\User::query()->where('status', 'active')->whereNull('deleted_at')->whereNull('deletion_requested_at')
+            ->where('branch_id', $branch)->whereHas('role', fn ($q) => $q->whereIn('slug', [...ResidentialAccess::GLOBAL_ROLES, ...ResidentialAccess::BRANCH_ROLES, ...ResidentialAccess::AUTHOR_ROLES]))
+            ->when($input['search'] ?? null, fn ($q, $search) => $q->where('name', 'like', '%'.$search.'%'));
+        if (! $this->access->canPublish($request->user(), $new_building)) $query->whereIn('id', array_filter([$request->user()->id, $new_building->responsible_agent_id]));
+        return $query->orderBy('name')->orderBy('id')->paginate($input['per_page'] ?? 100, ['id', 'name', 'branch_id']);
+    }
+
+    public function store(Request $request)
+    {
+        return response()->json($this->writer->building($request->user(), $request->all())->load(['developer', 'stage', 'material', 'features']), 201);
+    }
+
+    public function update(Request $request, NewBuilding $new_building)
+    {
+        return $this->writer->building($request->user(), $request->all(), $new_building)->load(['developer', 'stage', 'material', 'features']);
+    }
+
+    public function destroy(Request $request, NewBuilding $new_building)
+    {
+        $this->access->ensurePublish($request->user(), $new_building);
+        $this->writer->building($request->user(), ['version' => $request->input('version'), 'publication_status' => 'archived', 'change_reason' => $request->input('change_reason', 'Архивирование ЖК')], $new_building);
+
         return response()->noContent();
     }
 
-    public function attachFeature(NewBuilding $new_building, Feature $feature)
+    public function attachFeature(Request $request, NewBuilding $new_building, Feature $feature)
     {
-        $new_building->features()->syncWithoutDetaching([$feature->id]);
-        return response()->json(['ok' => true]);
+        return $this->changeFeatures($request, $new_building, $feature, true);
     }
 
-    public function detachFeature(NewBuilding $new_building, Feature $feature)
+    public function detachFeature(Request $request, NewBuilding $new_building, Feature $feature)
     {
-        $new_building->features()->detach($feature->id);
+        return $this->changeFeatures($request, $new_building, $feature, false);
+    }
+
+    private function changeFeatures(Request $request, NewBuilding $building, Feature $feature, bool $attach)
+    {
+        $this->access->ensureManage($request->user(), $building);
+        $ids = $building->features()->pluck('features.id')->all();
+        $ids = $attach ? array_unique([...$ids, $feature->id]) : array_diff($ids, [$feature->id]);
+        $this->writer->building($request->user(), ['version' => $request->input('version'), 'features' => array_values($ids)], $building);
+
         return response()->json(['ok' => true]);
     }
 }

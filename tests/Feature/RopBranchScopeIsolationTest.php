@@ -52,21 +52,14 @@ class RopBranchScopeIsolationTest extends TestCase
             $table->string('phone')->unique();
             $table->unsignedBigInteger('role_id');
             $table->unsignedBigInteger('branch_id')->nullable();
-            $table->unsignedBigInteger('branch_group_id')->nullable();
             $table->string('status')->default('active');
             $table->string('auth_method')->default('password');
             $table->rememberToken()->nullable();
             $table->timestamps();
         });
 
-        Schema::create('clients', function (Blueprint $table) {
-            $table->id();
-            $table->unsignedBigInteger('branch_id')->nullable();
-            $table->unsignedBigInteger('branch_group_id')->nullable();
-            $table->unsignedBigInteger('created_by')->nullable();
-            $table->unsignedBigInteger('responsible_agent_id')->nullable();
-            $table->timestamps();
-        });
+        (require database_path('migrations/2026_03_07_100000_create_clients_table.php'))->up();
+        (require database_path('migrations/2026_03_09_120100_add_branch_group_id_to_users_and_clients.php'))->up();
 
         Schema::create('daily_reports', function (Blueprint $table) {
             $table->id();
@@ -98,6 +91,8 @@ class RopBranchScopeIsolationTest extends TestCase
             $table->timestamp('deposit_received_at')->nullable();
             $table->timestamps();
         });
+
+        (require database_path('migrations/2025_11_12_144557_create_property_logs_table.php'))->up();
 
         Schema::create('personal_access_tokens', function (Blueprint $table) {
             $table->id();
@@ -170,14 +165,27 @@ class RopBranchScopeIsolationTest extends TestCase
         $this->getJson('/api/daily-reports')->assertOk()->assertJsonCount(4, 'data');
     }
 
-    public function test_mop_and_agent_models_continue_to_work(): void
+    public function test_mop_and_agent_daily_report_lists_are_self_scoped(): void
     {
         [$branchA, $branchB, $users] = $this->seedContext();
 
         Sanctum::actingAs($users['mopA']);
         $this->getJson('/api/daily-reports')
             ->assertOk()
-            ->assertJsonCount(2, 'data');
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.user_id', $users['mopA']->id);
+
+        // A same-group filter does not grant access to another employee's report.
+        $this->getJson('/api/daily-reports?user_id='.$users['agentA']->id)
+            ->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/daily-reports?user_id='.$users['agentB']->id)
+            ->assertForbidden()->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+
+        $report = DailyReport::query()->where('user_id', $users['agentA']->id)->firstOrFail();
+        $before = $report->getAttributes();
+        $this->patchJson('/api/daily-reports/'.$report->id, ['comment' => 'Forbidden edit'])
+            ->assertForbidden()->assertJsonPath('code', 'DAILY_REPORT_EDIT_FORBIDDEN');
+        $this->assertSame($before, $report->fresh()->getAttributes());
 
         Sanctum::actingAs($users['agentA']);
         $this->getJson('/api/daily-reports')

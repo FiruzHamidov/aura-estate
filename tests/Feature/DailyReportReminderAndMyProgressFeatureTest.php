@@ -124,13 +124,14 @@ class DailyReportReminderAndMyProgressFeatureTest extends TestCase
             'role_slug' => 'agent',
             'report_date' => '2026-05-05',
             'calls_count' => 29,
-            'shows_count' => 2,
+            'shows_count' => 99,
             'deals_count' => 0,
             'ad_count' => 4,
             'submitted_at' => now(),
         ]);
 
         Carbon::setTestNow(Carbon::create(2026, 5, 6, 12, 0, 0, 'Asia/Dushanbe'));
+        \Tests\Support\DailyProgressBookings::seed($agent, '2026-05-05');
         Sanctum::actingAs($agent);
 
         $this->getJson('/api/me/reminders/daily-report')
@@ -158,10 +159,11 @@ class DailyReportReminderAndMyProgressFeatureTest extends TestCase
             ->assertOk()
             ->assertJsonPath('date', '2026-05-05')
             ->assertJsonPath('submitted_daily_report', true)
-            ->assertJsonPath('metrics.call.fact', 29)
-            ->assertJsonPath('metrics.show.fact', 2)
-            ->assertJsonPath('metrics.deal.fact', 0)
-            ->assertJsonPath('metrics.advertisement.fact', 4);
+            ->assertJsonPath('metrics.calls.fact', 29)
+            ->assertJsonPath('metrics.shows.fact', 2)
+            ->assertJsonPath('metrics.sales.fact', 0)
+            ->assertJsonPath('metrics.ads.fact', 4)
+            ->assertJsonPath('metrics.objects.fact', 0);
 
         Carbon::setTestNow();
     }

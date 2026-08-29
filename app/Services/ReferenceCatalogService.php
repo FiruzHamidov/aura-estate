@@ -19,7 +19,7 @@ class ReferenceCatalogService
         $user->loadMissing('role');
 
         if (in_array($user->role?->slug, ['admin', 'superadmin'], true)
-            || (in_array($user->role?->slug, ['agent', 'mop'], true)
+            || (in_array($user->role?->slug, ['owner', 'agent', 'mop'], true)
                 && in_array($catalog, self::NEW_BUILDING_CATALOGS, true))) {
             return;
         }
@@ -317,7 +317,37 @@ class ReferenceCatalogService
             ->update([$reference['column'] => $replacementId]);
     }
 
+    public function replacements(string $catalog, int $sourceId, string $search = '', int $perPage = 50)
+    {
+        $definition = $this->definition($catalog);
+        $source = $this->item($definition, $sourceId);
+        $query = $this->replacementQuery($definition, $sourceId);
+        if ($this->isProtected($definition, $source)) {
+            $query->whereRaw('1 = 0');
+        }
+        $search = trim($search);
+        if ($search !== '') {
+            $columns = $definition['label_columns'];
+            if (Schema::hasColumn($definition['table'], 'slug')) {
+                $columns[] = 'slug';
+            }
+            $query->where(function ($text) use ($columns, $search) {
+                foreach ($columns as $column) {
+                    $text->orWhere($column, 'like', '%'.$search.'%');
+                }
+            });
+        }
+
+        return $query->paginate($perPage)->through(fn (object $item) => $this->serializeItem($definition, $item));
+    }
+
     private function replacementOptions(array $definition, int $sourceId): array
+    {
+        return $this->replacementQuery($definition, $sourceId)->limit(500)->get()
+            ->map(fn (object $item) => $this->serializeItem($definition, $item))->all();
+    }
+
+    private function replacementQuery(array $definition, int $sourceId)
     {
         $columns = collect(['id', ...$definition['label_columns']])
             ->filter(fn (string $column) => Schema::hasColumn($definition['table'], $column))
@@ -335,10 +365,7 @@ class ReferenceCatalogService
             ->select(array_values(array_unique($columns)))
             ->where('id', '!=', $sourceId)
             ->orderBy($definition['label_columns'][0])
-            ->limit(500)
-            ->get()
-            ->map(fn (object $item) => $this->serializeItem($definition, $item))
-            ->all();
+            ->orderBy('id');
     }
 
     private function serializeItem(array $definition, object $item): array

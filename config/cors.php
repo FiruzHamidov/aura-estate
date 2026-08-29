@@ -7,8 +7,6 @@ return [
     'allowed_methods' => ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
 
     'allowed_origins' => [
-        'https://*.bitrix24.ru',
-        'https://*.bitrix24.kz',
         'https://*.aura.tj',
         'https://aura.tj',
         'https://manora.tj',

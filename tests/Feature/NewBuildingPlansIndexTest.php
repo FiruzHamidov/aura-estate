@@ -13,79 +13,8 @@ class NewBuildingPlansIndexTest extends TestCase
     {
         parent::setUp();
 
-        Schema::dropAllTables();
+        \Tests\Support\ResidentialSchema::create();
 
-        Schema::create('developers', function (Blueprint $table) {
-            $table->id();
-            $table->string('name');
-            $table->string('phone')->nullable();
-            $table->unsignedInteger('under_construction_count')->default(0);
-            $table->unsignedInteger('built_count')->default(0);
-            $table->year('founded_year')->nullable();
-            $table->unsignedInteger('total_projects')->default(0);
-            $table->string('logo_path')->nullable();
-            $table->string('moderation_status')->default('pending');
-            $table->string('website')->nullable();
-            $table->string('facebook')->nullable();
-            $table->string('instagram')->nullable();
-            $table->string('telegram')->nullable();
-            $table->timestamps();
-        });
-
-        Schema::create('construction_stages', function (Blueprint $table) {
-            $table->id();
-            $table->string('name');
-            $table->string('slug')->unique();
-            $table->unsignedInteger('sort_order')->default(0);
-            $table->boolean('is_active')->default(true);
-            $table->timestamps();
-        });
-
-        Schema::create('materials', function (Blueprint $table) {
-            $table->id();
-            $table->string('name');
-            $table->string('slug')->unique();
-            $table->timestamps();
-        });
-
-        Schema::create('new_buildings', function (Blueprint $table) {
-            $table->id();
-            $table->string('title');
-            $table->text('description')->nullable();
-            $table->foreignId('developer_id')->nullable();
-            $table->foreignId('construction_stage_id')->nullable();
-            $table->foreignId('material_id')->nullable();
-            $table->string('address')->nullable();
-            $table->decimal('latitude', 10, 8)->nullable();
-            $table->decimal('longitude', 11, 8)->nullable();
-            $table->decimal('ceiling_height', 4, 2)->nullable();
-            $table->string('moderation_status')->default('pending');
-            $table->timestamps();
-        });
-
-        Schema::create('developer_units', function (Blueprint $table) {
-            $table->id();
-            $table->foreignId('new_building_id');
-            $table->string('name');
-            $table->unsignedTinyInteger('bedrooms')->default(0);
-            $table->unsignedTinyInteger('bathrooms')->default(0);
-            $table->decimal('area', 10, 2);
-            $table->integer('floor')->nullable();
-            $table->decimal('price_per_sqm', 15, 2)->nullable();
-            $table->decimal('total_price', 15, 2)->nullable();
-            $table->boolean('is_available')->default(true);
-            $table->string('moderation_status')->default('pending');
-            $table->timestamps();
-        });
-
-        Schema::create('developer_unit_photos', function (Blueprint $table) {
-            $table->id();
-            $table->foreignId('unit_id');
-            $table->string('path');
-            $table->boolean('is_cover')->default(false);
-            $table->unsignedInteger('sort_order')->default(0);
-            $table->timestamps();
-        });
     }
 
     public function test_it_returns_paginated_public_new_building_plans_in_stable_format(): void

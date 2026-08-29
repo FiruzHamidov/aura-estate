@@ -5,7 +5,6 @@ namespace App\Http\Controllers;
 use App\Models\Booking;
 use App\Models\Client;
 use App\Models\User;
-use App\Services\Bitrix24Client;
 use App\Services\Crm\AuditLogger;
 use App\Services\NotificationService;
 use App\Support\ClientAccess;
@@ -457,7 +456,6 @@ class BookingController extends Controller
             'deal_id' => 'nullable|integer',
             'contact_id' => 'nullable|integer',
             'place' => 'nullable|string',
-            'sync_to_b24' => 'sometimes|boolean',
         ]);
 
         $client = $this->resolveClient($validated['client_id']);
@@ -486,53 +484,8 @@ class BookingController extends Controller
         $this->transformBookingForResponse($booking);
         $this->notifications->handleBookingCreated($booking, $authUser);
 
-        $bitrixResult = null;
-        if ($request->boolean('sync_to_b24')) {
-            try {
-                /** @var Bitrix24Client $b24 */
-                $b24 = app(Bitrix24Client::class); // throws if not bound
-
-                $subject = 'Показ объекта';
-                if ($booking->relationLoaded('property') && $booking->property) {
-                    $subject .= ': ' . $booking->property->title;
-                }
-
-                $description = collect([
-                    'Объект ID: ' . $booking->property_id,
-                    $booking->note ? 'Заметка: ' . $booking->note : null,
-                    $booking->client_name ? 'Клиент: ' . $booking->client_name : null,
-                    $booking->client_phone ? 'Телефон: ' . $booking->client_phone : null,
-                    ($validated['place'] ?? null) ? 'Место: ' . $validated['place'] : null,
-                ])->filter()->implode("\n");
-
-                // Bitrix обычно ожидает строки ISO; используем UTC ISO строки
-                $fields = [
-                    'TYPE_ID' => 2,
-                    'SUBJECT' => $subject,
-                    'DESCRIPTION' => $description,
-                    'START_TIME' => $startCarbon->toIso8601String(),
-                    'END_TIME' => $endCarbon->toIso8601String(),
-                    'OWNER_TYPE_ID' => 2, // Deal
-                    'OWNER_ID' => Arr::get($validated, 'deal_id'),
-                    'COMMUNICATIONS' => array_values(array_filter([
-                        Arr::get($validated, 'contact_id') ? ['ENTITY_ID' => (int) $validated['contact_id'], 'ENTITY_TYPE_ID' => 3] : null, // 3 = Contact
-                    ])),
-                    'LOCATION' => $validated['place'] ?? null,
-                    'RESPONSIBLE_ID' => $validated['agent_id'] ?? null,
-                ];
-
-                // Remove nulls and empty strings
-                $fields = array_filter($fields, fn($v) => $v !== null && $v !== '');
-
-                $bitrixResult = $b24->activityAdd(['fields' => $fields]);
-            } catch (\Throwable $e) {
-                $bitrixResult = ['error' => $e->getMessage()];
-            }
-        }
-
         return response()->json([
             'booking' => $booking,
-            'bitrix' => $bitrixResult,
         ], 201);
     }
 
@@ -662,9 +615,11 @@ class BookingController extends Controller
             // DB driver
             $driver = DB::getPdo()->getAttribute(\PDO::ATTR_DRIVER_NAME);
 
-            $minutesExpr = in_array($driver, ['pgsql', 'postgres', 'postgresql'], true)
-                ? "SUM(FLOOR(EXTRACT(EPOCH FROM (COALESCE(end_time, start_time) - start_time)) / 60)) as total_minutes"
-                : "SUM(TIMESTAMPDIFF(MINUTE, start_time, COALESCE(end_time, start_time))) as total_minutes";
+            $minutesExpr = match ($driver) {
+                'sqlite' => "SUM(CAST((strftime('%s', COALESCE(end_time, start_time)) - strftime('%s', start_time)) / 60 AS INTEGER)) as total_minutes",
+                'pgsql', 'postgres', 'postgresql' => 'SUM(FLOOR(EXTRACT(EPOCH FROM (COALESCE(end_time, start_time) - start_time)) / 60)) as total_minutes',
+                default => 'SUM(TIMESTAMPDIFF(MINUTE, start_time, COALESCE(end_time, start_time))) as total_minutes',
+            };
 
             $rows = $q->select([
                 'agent_id',

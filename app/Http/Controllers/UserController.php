@@ -62,7 +62,7 @@ class UserController extends Controller
         return in_array($roleSlug, ['mop'], true);
     }
 
-    private function visibleUsersQuery(User $authUser, bool $includeUnassigned = false)
+    private function visibleUsersQuery(User $authUser, bool $includeUnassigned = false, bool $includeClients = true)
     {
         $roleSlug = $this->roleSlug($authUser);
 
@@ -70,6 +70,17 @@ class UserController extends Controller
 
         if ($this->isPrivilegedRole($roleSlug)) {
             return $query;
+        }
+
+        // Clients do not belong to branches. This does not expand employee access.
+        if ($roleSlug === 'branch_director' && $includeClients) {
+            return $query->where(function (Builder $scope) use ($authUser, $includeUnassigned) {
+                $scope->whereHas('role', fn (Builder $roles) => $roles->where('slug', 'client'));
+                if (! empty($authUser->branch_id)) {
+                    $scope->orWhere('branch_id', $authUser->branch_id);
+                    if ($includeUnassigned) $scope->orWhereNull('branch_id');
+                }
+            });
         }
 
         if ($roleSlug === 'mop') {
@@ -214,9 +225,9 @@ class UserController extends Controller
         ];
     }
 
-    private function ensureUserIsVisible(User $authUser, User $targetUser): void
+    private function ensureUserIsVisible(User $authUser, User $targetUser, bool $includeClients = true): void
     {
-        $allowed = $this->visibleUsersQuery($authUser)
+        $allowed = $this->visibleUsersQuery($authUser, false, $includeClients)
             ->whereKey($targetUser->id)
             ->exists();
 
@@ -304,6 +315,13 @@ class UserController extends Controller
     private function normalizeBranchIdForMutation(array $data, User $authUser, ?Role $targetRole): array
     {
         $roleSlug = $targetRole?->slug;
+
+        if ($roleSlug === 'client') {
+            $data['branch_id'] = null;
+            $data['branch_group_id'] = null;
+
+            return $data;
+        }
 
         if (! $roleSlug) {
             return $data;
@@ -549,7 +567,7 @@ class UserController extends Controller
             'description' => 'nullable|string',
             'birthday' => 'nullable|date',
             'phone' => 'sometimes|string|unique:users,phone,'.$user->id,
-            'email' => 'sometimes|email|unique:users,email,'.$user->id,
+            'email' => 'sometimes|nullable|email|unique:users,email,'.$user->id,
             'role_id' => 'sometimes|exists:roles,id',
             'branch_id' => 'sometimes|nullable|exists:branches,id',
             'branch_group_id' => 'sometimes|nullable|integer|exists:branch_groups,id',
@@ -653,7 +671,8 @@ class UserController extends Controller
     public function destroy(Request $request, User $user)
     {
         $authUser = $this->authUser();
-        $this->ensureUserIsVisible($authUser, $user);
+        // Permission to edit branchless clients does not grant dismissal rights.
+        $this->ensureUserIsVisible($authUser, $user, false);
         $this->authorizeUserMutation($authUser, $user, 'dismiss');
 
         // Валидация входных параметров

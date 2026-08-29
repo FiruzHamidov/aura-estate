@@ -2,34 +2,19 @@
 
 namespace App\Http\Requests;
 
+use App\Services\Residential\InventoryRules;
 use Illuminate\Foundation\Http\FormRequest;
 
+/** Compatibility wrapper; permissions and cross-record invariants are enforced by InventoryWriter. */
 class StoreNewBuildingRequest extends FormRequest
 {
-    public function authorize(): bool { return true; }
+    public function authorize(): bool
+    {
+        return true;
+    }
 
     public function rules(): array
     {
-        return [
-            'title' => ['sometimes','required','string','max:255'],
-            'description' => ['sometimes','nullable','string'],
-            'developer_id' => ['sometimes','nullable','exists:developers,id'],
-            'construction_stage_id' => ['sometimes','nullable','exists:construction_stages,id'],
-            'material_id' => ['sometimes','nullable','exists:materials,id'],
-            'location_id' => ['sometimes','nullable','exists:locations,id'],
-            'installment_available' => ['sometimes','boolean'],
-            'heating' => ['sometimes','boolean'],
-            'has_terrace' => ['sometimes','boolean'],
-            'floors_range' => ['sometimes','nullable','string','max:32'],
-            'completion_at' => ['sometimes','nullable','date'],
-            'address' => ['sometimes','nullable','string','max:255'],
-            'latitude' => ['sometimes','nullable','numeric','between:-90,90'],
-            'longitude' => ['sometimes','nullable','numeric','between:-180,180'],
-            'moderation_status' => ['sometimes','nullable','in:pending,approved,rejected,draft,deleted'],
-            'ceiling_height' => ['nullable','numeric','min:0','max:10'],
-            'features' => ['sometimes','array'],
-            'features.*' => ['integer','exists:features,id'],
-            'district' => ['sometimes','nullable','string','max:255'],
-        ];
+        return InventoryRules::building(false);
     }
 }

@@ -12,11 +12,19 @@ class ConstructionStageController extends Controller
     // GET /construction-stages  (публично)
     public function index(Request $request)
     {
+        $input = $request->validate([
+            'page' => ['sometimes', 'integer', 'min:1'],
+            'per_page' => ['sometimes', 'integer', 'between:1,100'],
+            'search' => ['sometimes', 'nullable', 'string', 'max:255'],
+        ]);
+        $search = trim($input['search'] ?? '');
         $q = ConstructionStage::query()
-            ->when($request->filled('active'), fn($qq) => $qq->where('is_active', $request->boolean('active')))
+            ->when($request->filled('active'), fn ($qq) => $qq->where('is_active', $request->boolean('active')))
+            ->when($search !== '', fn ($query) => $query->where(fn ($text) => $text
+                ->where('name', 'like', '%'.$search.'%')->orWhere('slug', 'like', '%'.$search.'%')))
             ->orderBy('sort_order')->orderBy('id');
 
-        return $q->paginate($request->get('per_page', 50));
+        return $q->paginate($input['per_page'] ?? 50);
     }
 
     // GET /construction-stages/{id}  (публично)
@@ -29,10 +37,10 @@ class ConstructionStageController extends Controller
     public function store(Request $request)
     {
         $data = $request->validate([
-            'name'       => ['required','string','max:255'],
-            'slug'       => ['nullable','string','max:255','unique:construction_stages,slug'],
-            'sort_order' => ['nullable','integer','min:0'],
-            'is_active'  => ['nullable','boolean'],
+            'name' => ['required', 'string', 'max:255'],
+            'slug' => ['nullable', 'string', 'max:255', 'unique:construction_stages,slug'],
+            'sort_order' => ['nullable', 'integer', 'min:0'],
+            'is_active' => ['nullable', 'boolean'],
         ]);
 
         $data['slug'] = $data['slug'] ?? Str::slug($data['name']);
@@ -42,6 +50,7 @@ class ConstructionStageController extends Controller
         }
 
         $stage = ConstructionStage::create($data);
+
         return response()->json($stage, 201);
     }
 
@@ -49,13 +58,13 @@ class ConstructionStageController extends Controller
     public function update(Request $request, ConstructionStage $construction_stage)
     {
         $data = $request->validate([
-            'name'       => ['sometimes','string','max:255'],
-            'slug'       => ['sometimes','string','max:255', Rule::unique('construction_stages','slug')->ignore($construction_stage->id)],
-            'sort_order' => ['sometimes','integer','min:0'],
-            'is_active'  => ['sometimes','boolean'],
+            'name' => ['sometimes', 'string', 'max:255'],
+            'slug' => ['sometimes', 'string', 'max:255', Rule::unique('construction_stages', 'slug')->ignore($construction_stage->id)],
+            'sort_order' => ['sometimes', 'integer', 'min:0'],
+            'is_active' => ['sometimes', 'boolean'],
         ]);
 
-        if (isset($data['name']) && !isset($data['slug'])) {
+        if (isset($data['name']) && ! isset($data['slug'])) {
             $candidate = Str::slug($data['name']);
             if ($candidate && $candidate !== $construction_stage->slug) {
                 $data['slug'] = $candidate;
@@ -63,6 +72,7 @@ class ConstructionStageController extends Controller
         }
 
         $construction_stage->update($data);
+
         return $construction_stage;
     }
 
@@ -70,6 +80,7 @@ class ConstructionStageController extends Controller
     public function destroy(ConstructionStage $construction_stage, \App\Services\ReferenceCatalogService $catalogs)
     {
         $catalogs->deleteUnused('construction-stages', $construction_stage->id);
+
         return response()->noContent();
     }
 }

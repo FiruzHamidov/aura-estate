@@ -147,7 +147,7 @@ class KpiDailyReminderAndProgressTest extends TestCase
             [
                 'role_slug' => 'agent',
                 'calls_count' => 29,
-                'shows_count' => 2,
+                'shows_count' => 99,
                 'deals_count' => 0,
                 'ad_count' => 4,
                 'submitted_at' => null,
@@ -156,14 +156,16 @@ class KpiDailyReminderAndProgressTest extends TestCase
             ]
         );
 
+        \Tests\Support\DailyProgressBookings::seed($agent, '2026-05-05');
         $this->getJson('/api/kpi/daily/my-progress?date=2026-05-05')
             ->assertOk()
             ->assertJsonPath('date', '2026-05-05')
             ->assertJsonPath('submitted_daily_report', false)
-            ->assertJsonPath('metrics.call.fact', 29)
-            ->assertJsonPath('metrics.show.fact', 2)
-            ->assertJsonPath('metrics.deal.fact', 0)
-            ->assertJsonPath('metrics.advertisement.fact', 4);
+            ->assertJsonPath('metrics.calls.fact', 29)
+            ->assertJsonPath('metrics.shows.fact', 2)
+            ->assertJsonPath('metrics.sales.fact', 0)
+            ->assertJsonPath('metrics.ads.fact', 4)
+            ->assertJsonPath('metrics.objects.fact', 0);
     }
 
     public function test_dispatch_daily_report_reminder_is_idempotent_for_same_day(): void

@@ -13,6 +13,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class ClientIntegrationTest extends TestCase
@@ -114,12 +115,7 @@ class ClientIntegrationTest extends TestCase
             $table->timestamps();
         });
 
-        Schema::create('leads', function (Blueprint $table) {
-            $table->id();
-            $table->unsignedBigInteger('client_id')->nullable();
-            $table->softDeletes();
-            $table->timestamps();
-        });
+        (require database_path('migrations/2026_03_07_120000_create_leads_table.php'))->up();
 
         Schema::create('property_types', function (Blueprint $table) {
             $table->id();
@@ -239,13 +235,7 @@ class ClientIntegrationTest extends TestCase
             $table->timestamps();
         });
 
-        Schema::create('crm_deals', function (Blueprint $table) {
-            $table->id();
-            $table->unsignedBigInteger('client_id')->nullable();
-            $table->unsignedBigInteger('responsible_agent_id')->nullable();
-            $table->unsignedBigInteger('primary_property_id')->nullable();
-            $table->timestamps();
-        });
+        (require database_path('migrations/2026_03_07_121000_create_crm_deal_pipelines_table.php'))->up();
 
         Schema::create('crm_audit_logs', function (Blueprint $table) {
             $table->id();
@@ -259,6 +249,11 @@ class ClientIntegrationTest extends TestCase
             $table->text('message')->nullable();
             $table->timestamps();
         });
+
+        // Observers remain enabled: fixtures need the same internal CRM structure as real writes.
+        foreach (['2026_03_10_120000_extend_crm_for_operator_manager.php', '2026_05_11_120000_add_deposit_user_id_and_sale_user_id_to_properties_table.php'] as $migration) {
+            (require database_path('migrations/'.$migration))->up();
+        }
 
         Schema::create('property_agent_sales', function (Blueprint $table) {
             $table->id();
@@ -336,9 +331,20 @@ class ClientIntegrationTest extends TestCase
         $this->assertSame(Client::CONTACT_KIND_BUYER, $client->contact_kind);
     }
 
-    public function test_property_store_links_owner_client_and_snapshots(): void
+    public static function ownerContactKinds(): array
+    {
+        return [
+            'buyer also becomes seller' => [Client::CONTACT_KIND_BUYER, Client::CONTACT_KIND_BOTH],
+            'seller remains seller' => [Client::CONTACT_KIND_SELLER, Client::CONTACT_KIND_SELLER],
+            'both remains both' => [Client::CONTACT_KIND_BOTH, Client::CONTACT_KIND_BOTH],
+        ];
+    }
+
+    #[DataProvider('ownerContactKinds')]
+    public function test_property_store_links_owner_client_and_snapshots(string $initialKind, string $expectedKind): void
     {
         [$agent, $client] = $this->seedClientContext(withProperty: false);
+        $client->update(['contact_kind' => $initialKind]);
         $typeId = DB::table('property_types')->insertGetId([
             'name' => 'Apartment',
             'created_at' => now(),
@@ -368,7 +374,14 @@ class ClientIntegrationTest extends TestCase
         $response->assertJsonPath('owner_phone', $client->phone);
 
         $client->refresh();
-        $this->assertSame(Client::CONTACT_KIND_SELLER, $client->contact_kind);
+        $this->assertSame($expectedKind, $client->contact_kind);
+        $this->assertDatabaseCount('clients', 1);
+        $this->assertDatabaseHas('properties', [
+            'id' => $response->json('id'),
+            'owner_client_id' => $client->id,
+            'owner_name' => $client->full_name,
+            'owner_phone' => $client->phone,
+        ]);
     }
 
     public function test_save_deal_links_buyer_client_and_snapshots(): void
@@ -452,7 +465,7 @@ class ClientIntegrationTest extends TestCase
             'owner_client_id' => $client->id,
         ])->assertOk()->json('id');
 
-        $this->postJson('/api/properties/'.$propertyId.'/deal', [
+        $response = $this->postJson('/api/properties/'.$propertyId.'/deal', [
             'moderation_status' => 'sold',
             'buyer_client_id' => $client->id,
             'actual_sale_price' => 140000,
@@ -460,7 +473,8 @@ class ClientIntegrationTest extends TestCase
             'company_commission_amount' => 4000,
             'company_commission_currency' => 'USD',
             'agents' => [],
-        ])->assertOk();
+        ]);
+        $this->assertSame(200, $response->status(), $response->getContent());
 
         $client->refresh();
         $this->assertSame(Client::CONTACT_KIND_BOTH, $client->contact_kind);
@@ -523,11 +537,30 @@ class ClientIntegrationTest extends TestCase
         $response->assertJsonPath('business_clients', 2);
     }
 
-    public function test_manager_efficiency_returns_unique_clients_count_with_filters(): void
+    public static function clientReportPeriods(): array
+    {
+        return [
+            'March clients counted once despite multiple links' => ['2026-03-01', '2026-03-31', 4],
+            'February client' => ['2026-02-01', '2026-02-28', 1],
+            'empty April' => ['2026-04-01', '2026-04-30', 0],
+            'single creation day' => ['2026-03-10', '2026-03-10', 1],
+            'inclusive range' => ['2026-03-11', '2026-03-13', 2],
+            'show without a new client' => ['2026-03-14', '2026-03-14', 0],
+        ];
+    }
+
+    #[DataProvider('clientReportPeriods')]
+    public function test_manager_efficiency_returns_unique_clients_count_with_filters(string $from, string $to, int $expected): void
     {
         [$agent, $assignedClient] = $this->seedClientContext(withProperty: false);
+        $assignedClient->forceFill([
+            'created_at' => '2026-03-10 09:00:00',
+            'updated_at' => '2026-03-10 09:00:00',
+        ])->save();
 
-        $property = Property::create([
+        // Historical fixture timestamps are guarded by the real models; do not
+        // silently replace them with today's date through mass assignment.
+        $property = Property::forceCreate([
             'title' => 'March property',
             'type_id' => 1,
             'status_id' => 1,
@@ -545,7 +578,7 @@ class ClientIntegrationTest extends TestCase
             'updated_at' => '2026-03-10 09:00:00',
         ]);
 
-        $soldClient = Client::create([
+        $soldClient = Client::forceCreate([
             'full_name' => 'Sold Client',
             'phone' => '+992 90 555 3002',
             'phone_normalized' => '992905553002',
@@ -559,7 +592,7 @@ class ClientIntegrationTest extends TestCase
             'updated_at' => '2026-03-11 09:00:00',
         ]);
 
-        Property::create([
+        Property::forceCreate([
             'title' => 'Sold in March',
             'type_id' => 1,
             'status_id' => 1,
@@ -576,7 +609,7 @@ class ClientIntegrationTest extends TestCase
             'sold_at' => '2026-03-12 10:00:00',
         ]);
 
-        $showClient = Client::create([
+        $showClient = Client::forceCreate([
             'full_name' => 'Show Client',
             'phone' => '+992 90 555 3003',
             'phone_normalized' => '992905553003',
@@ -618,7 +651,7 @@ class ClientIntegrationTest extends TestCase
             'updated_at' => '2026-03-14 09:00:00',
         ]);
 
-        $dealClient = Client::create([
+        $dealClient = Client::forceCreate([
             'full_name' => 'Deal Client',
             'phone' => '+992 90 555 3004',
             'phone_normalized' => '992905553004',
@@ -633,6 +666,8 @@ class ClientIntegrationTest extends TestCase
         ]);
 
         DB::table('crm_deals')->insert([
+            'pipeline_id' => DB::table('crm_deal_pipelines')->where('slug', 'default_sales')->value('id'),
+            'stage_id' => DB::table('crm_deal_stages')->where('slug', 'new')->where('is_default', true)->value('id'),
             'client_id' => $dealClient->id,
             'responsible_agent_id' => $agent->id,
             'primary_property_id' => $property->id,
@@ -640,7 +675,7 @@ class ClientIntegrationTest extends TestCase
             'updated_at' => '2026-03-15 09:00:00',
         ]);
 
-        $outsideClient = Client::create([
+        $outsideClient = Client::forceCreate([
             'full_name' => 'Outside Period Client',
             'phone' => '+992 90 555 3999',
             'phone_normalized' => '992905553999',
@@ -654,7 +689,7 @@ class ClientIntegrationTest extends TestCase
             'updated_at' => '2026-02-10 09:00:00',
         ]);
 
-        Property::create([
+        Property::forceCreate([
             'title' => 'Outside property',
             'type_id' => 1,
             'status_id' => 1,
@@ -672,20 +707,26 @@ class ClientIntegrationTest extends TestCase
 
         Sanctum::actingAs($agent);
 
-        DB::table('clients')
-            ->where('id', $outsideClient->id)
-            ->update(['created_at' => '2000-01-01 00:00:00']);
-
-        $from = Carbon::now()->startOfMonth()->toDateString();
-        $to = Carbon::now()->endOfMonth()->toDateString();
         $response = $this->getJson('/api/reports/properties/manager-efficiency?agent_id='.$agent->id.'&date_from='.$from.'&date_to='.$to.'&branch_id='.$agent->branch_id);
 
         $response->assertOk();
-        $response->assertJsonPath('0.agent_id', $agent->id);
-        $response->assertJsonPath('0.unique_clients_count', 0);
+        if ($expected === 0) {
+            $response->assertJsonCount(0);
+        } else {
+            $response->assertJsonCount(1);
+            $response->assertJsonPath('0.agent_id', $agent->id);
+            $response->assertJsonPath('0.unique_clients_count', $expected);
+        }
+        $this->assertDatabaseCount('clients', 5);
     }
 
-    public function test_manager_efficiency_attributes_closed_deals_to_sale_agent(): void
+    public static function explicitPrimarySellers(): array
+    {
+        return ['explicit seller' => [true], 'legacy agent fallback' => [false]];
+    }
+
+    #[DataProvider('explicitPrimarySellers')]
+    public function test_manager_efficiency_uses_primary_seller_not_participant_membership(bool $explicitSeller): void
     {
         [$creator] = $this->seedClientContext(withProperty: false);
 
@@ -698,7 +739,7 @@ class ClientIntegrationTest extends TestCase
             'status' => 'active',
         ]);
 
-        $property = Property::create([
+        $property = Property::forceCreate([
             'title' => 'Sold by another agent',
             'type_id' => 1,
             'status_id' => 1,
@@ -707,6 +748,7 @@ class ClientIntegrationTest extends TestCase
             'offer_type' => 'sale',
             'created_by' => $creator->id,
             'agent_id' => $creator->id,
+            'sale_user_id' => $explicitSeller ? $seller->id : null,
             'listing_type' => 'regular',
             'moderation_status' => 'sold',
             'created_at' => '2026-03-01 09:00:00',
@@ -728,11 +770,13 @@ class ClientIntegrationTest extends TestCase
 
         $rowsById = collect($response->json())->keyBy('agent_id');
 
-        $this->assertSame(1.0, (float) ($rowsById[$seller->id]['sold'] ?? 0));
-        $this->assertSame(0.0, (float) ($rowsById[$creator->id]['sold'] ?? 0));
+        $this->assertSame($explicitSeller ? 1.0 : 0.0, (float) ($rowsById[$seller->id]['sold'] ?? 0));
+        $this->assertSame($explicitSeller ? 0.0 : 1.0, (float) ($rowsById[$creator->id]['sold'] ?? 0));
+        $this->assertSame(1.0, (float) $rowsById->sum('sold'));
+        $this->assertDatabaseHas('property_agent_sales', ['property_id' => $property->id, 'agent_id' => $seller->id]);
     }
 
-    public function test_manager_efficiency_splits_credit_across_all_sale_participants_including_partner(): void
+    public function test_manager_efficiency_credits_only_primary_seller_despite_partner(): void
     {
         [$seller] = $this->seedClientContext(withProperty: false);
 
@@ -745,7 +789,7 @@ class ClientIntegrationTest extends TestCase
             'status' => 'active',
         ]);
 
-        $property = Property::create([
+        $property = Property::forceCreate([
             'title' => 'Partner participates in shared sale credit',
             'type_id' => 1,
             'status_id' => 1,
@@ -786,11 +830,13 @@ class ClientIntegrationTest extends TestCase
 
         $rowsById = collect($response->json())->keyBy('agent_id');
 
-        $this->assertSame(0.5, (float) ($rowsById[$seller->id]['sold'] ?? 0));
-        $this->assertSame(0.5, (float) ($rowsById[$partner->id]['sold'] ?? 0));
+        $this->assertSame(1.0, (float) ($rowsById[$seller->id]['sold'] ?? 0));
+        $this->assertSame(0.0, (float) ($rowsById[$partner->id]['sold'] ?? 0));
+        $this->assertSame(1.0, (float) $rowsById->sum('sold'));
+        $this->assertDatabaseCount('property_agent_sales', 2);
     }
 
-    public function test_manager_efficiency_splits_rented_credit_across_three_participants(): void
+    public function test_manager_efficiency_credits_rental_once_despite_three_participants(): void
     {
         [$seller] = $this->seedClientContext(withProperty: false);
 
@@ -812,7 +858,7 @@ class ClientIntegrationTest extends TestCase
             'status' => 'active',
         ]);
 
-        $property = Property::create([
+        $property = Property::forceCreate([
             'title' => 'Rented shared deal',
             'type_id' => 1,
             'status_id' => 1,
@@ -859,16 +905,18 @@ class ClientIntegrationTest extends TestCase
         $response->assertOk();
 
         $rowsById = collect($response->json())->keyBy('agent_id');
-        $this->assertEqualsWithDelta(0.3333, (float) ($rowsById[$seller->id]['rented'] ?? 0), 0.0001);
-        $this->assertEqualsWithDelta(0.3333, (float) ($rowsById[$assistantA->id]['rented'] ?? 0), 0.0001);
-        $this->assertEqualsWithDelta(0.3333, (float) ($rowsById[$assistantB->id]['rented'] ?? 0), 0.0001);
+        $this->assertSame(1.0, (float) ($rowsById[$seller->id]['rented'] ?? 0));
+        $this->assertSame(0.0, (float) ($rowsById[$assistantA->id]['rented'] ?? 0));
+        $this->assertSame(0.0, (float) ($rowsById[$assistantB->id]['rented'] ?? 0));
+        $this->assertSame(1.0, (float) $rowsById->sum('rented'));
+        $this->assertDatabaseCount('property_agent_sales', 3);
     }
 
     public function test_manager_efficiency_unique_clients_count_uses_date_from_date_to_even_if_from_to_conflict(): void
     {
         [$agent] = $this->seedClientContext(withProperty: false);
 
-        Property::create([
+        Property::forceCreate([
             'title' => 'May property',
             'type_id' => 1,
             'status_id' => 1,
@@ -883,7 +931,7 @@ class ClientIntegrationTest extends TestCase
             'updated_at' => '2026-05-10 09:00:00',
         ]);
 
-        Client::create([
+        Client::forceCreate([
             'full_name' => 'May Client 1',
             'phone' => '+992 90 555 3111',
             'phone_normalized' => '992905553111',
@@ -897,7 +945,7 @@ class ClientIntegrationTest extends TestCase
             'updated_at' => '2026-05-12 09:00:00',
         ]);
 
-        Client::create([
+        Client::forceCreate([
             'full_name' => 'May Client 2',
             'phone' => '+992 90 555 3222',
             'phone_normalized' => '992905553222',
@@ -911,6 +959,9 @@ class ClientIntegrationTest extends TestCase
             'updated_at' => '2026-05-18 09:00:00',
         ]);
 
+        $this->assertDatabaseHas('properties', ['title' => 'May property', 'created_at' => '2026-05-10 09:00:00']);
+        $this->assertDatabaseHas('clients', ['full_name' => 'May Client 1', 'created_at' => '2026-05-12 09:00:00']);
+        $this->assertDatabaseHas('clients', ['full_name' => 'May Client 2', 'created_at' => '2026-05-18 09:00:00']);
         Sanctum::actingAs($agent);
 
         $response = $this->getJson(
@@ -985,7 +1036,7 @@ class ClientIntegrationTest extends TestCase
         $response->assertJsonPath('sold_by_owner_count', 0);
     }
 
-    public function test_agent_earnings_report_splits_shared_sale_credit_and_amount_equally(): void
+    public function test_agent_earnings_report_counts_primary_sale_once_without_partner_credit(): void
     {
         [$seller] = $this->seedClientContext(withProperty: false);
 
@@ -998,7 +1049,7 @@ class ClientIntegrationTest extends TestCase
             'status' => 'active',
         ]);
 
-        $property = Property::create([
+        $property = Property::forceCreate([
             'title' => 'Shared earnings deal',
             'type_id' => 1,
             'status_id' => 1,
@@ -1037,18 +1088,31 @@ class ClientIntegrationTest extends TestCase
         $response = $this->getJson('/api/reports/agent/earnings?agent_id='.$seller->id.'&date_from=2026-03-01&date_to=2026-03-31&branch_id='.$seller->branch_id);
         $response->assertOk();
 
-        $response->assertJsonPath('sum_price', 100000);
-        $response->assertJsonPath('closed_count', 0.5);
-        $response->assertJsonPath('deals_count', 0.5);
-        $response->assertJsonPath('sold_count', 0.5);
+        $response->assertJsonPath('sum_price', 200000);
+        $response->assertJsonPath('total_amount', 200000);
+        $response->assertJsonPath('closed_count', 1);
+        $response->assertJsonPath('deals_count', 1);
+        $response->assertJsonPath('sold_count', 1);
         $response->assertJsonPath('rented_count', 0);
+
+        Sanctum::actingAs($partner);
+        $partnerResponse = $this->getJson('/api/reports/agent/earnings?agent_id='.$partner->id.'&date_from=2026-03-01&date_to=2026-03-31&branch_id='.$partner->branch_id);
+        $partnerResponse->assertOk()
+            ->assertJsonPath('sum_price', 0)
+            ->assertJsonPath('total_amount', 0)
+            ->assertJsonPath('closed_count', 0)
+            ->assertJsonPath('deals_count', 0)
+            ->assertJsonPath('sold_count', 0)
+            ->assertJsonPath('earnings', 0);
+        $this->assertSame(200000.0, (float) $response->json('sum_price') + (float) $partnerResponse->json('sum_price'));
+        $this->assertDatabaseCount('property_agent_sales', 2);
     }
 
     public function test_agent_properties_report_returns_contracts_object_and_period_aware_statuses(): void
     {
         [$agent] = $this->seedClientContext(withProperty: false);
 
-        Property::create([
+        Property::forceCreate([
             'title' => 'Approved March',
             'type_id' => 1,
             'status_id' => 1,
@@ -1064,7 +1128,7 @@ class ClientIntegrationTest extends TestCase
             'updated_at' => '2026-03-05 09:00:00',
         ]);
 
-        Property::create([
+        Property::forceCreate([
             'title' => 'Sold by sold_at in March',
             'type_id' => 1,
             'status_id' => 1,
@@ -1081,7 +1145,7 @@ class ClientIntegrationTest extends TestCase
             'sold_at' => '2026-03-20 09:00:00',
         ]);
 
-        Property::create([
+        Property::forceCreate([
             'title' => 'Deleted March',
             'type_id' => 1,
             'status_id' => 1,
@@ -1097,7 +1161,7 @@ class ClientIntegrationTest extends TestCase
             'updated_at' => '2026-03-08 09:00:00',
         ]);
 
-        Property::create([
+        Property::forceCreate([
             'title' => 'Sold outside sold_at period',
             'type_id' => 1,
             'status_id' => 1,
@@ -1188,6 +1252,39 @@ class ClientIntegrationTest extends TestCase
         $superadminRows = collect($superadmin->json());
         $this->assertSame(1, $superadminRows->count());
         $this->assertSame($ctx['users']['agentB']->id, (int) $superadminRows->first()['agent_id']);
+    }
+
+    public static function bookingDurationCases(): array
+    {
+        return [
+            'zero' => ['2026-03-10 10:00:00', '2026-03-10 10:00:00', 0],
+            'partial minute' => ['2026-03-10 10:00:00', '2026-03-10 10:00:59', 0],
+            'exact minute' => ['2026-03-10 10:00:00', '2026-03-10 10:01:00', 1],
+            'truncate partial minute' => ['2026-03-10 10:00:00', '2026-03-10 10:01:59', 1],
+            'different seconds' => ['2026-03-10 10:00:59', '2026-03-10 10:01:58', 0],
+            'cross midnight' => ['2026-03-10 23:50:00', '2026-03-11 00:20:59', 30],
+            'more than a day' => ['2026-03-10 10:00:00', '2026-03-11 11:01:00', 1501],
+        ];
+    }
+
+    #[DataProvider('bookingDurationCases')]
+    public function test_agents_report_sums_whole_minutes_per_booking(string $start, string $end, int $minutes): void
+    {
+        [$agent, $client, $property] = $this->seedClientContext();
+        Sanctum::actingAs($agent);
+        // Two rows distinguish truncating each duration from rounding their sum.
+        foreach (range(1, 2) as $_) {
+            DB::table('bookings')->insert([
+                'property_id' => $property->id, 'agent_id' => $agent->id, 'crm_client_id' => $client->id,
+                'start_time' => $start, 'end_time' => $end, 'status' => 'confirmed',
+            ]);
+        }
+        $this->getJson('/api/bookings/agents-report')->assertOk()->assertJsonCount(1)
+            ->assertJsonPath('0.agent_id', $agent->id)
+            ->assertJsonPath('0.shows_count', 2)
+            ->assertJsonPath('0.total_minutes', $minutes * 2)
+            ->assertJsonPath('0.unique_clients', 1)
+            ->assertJsonPath('0.unique_properties', 1);
     }
 
     public function test_manager_efficiency_enforces_branch_filter_for_branch_director_and_rop_with_fallback(): void
@@ -1369,7 +1466,7 @@ class ClientIntegrationTest extends TestCase
             'status' => 'active',
         ]);
 
-        $propertyA = Property::create([
+        $propertyA = Property::forceCreate([
             'title' => 'Branch A Property',
             'type_id' => 1,
             'status_id' => 1,
@@ -1383,7 +1480,7 @@ class ClientIntegrationTest extends TestCase
             'created_at' => '2026-03-10 10:00:00',
             'updated_at' => '2026-03-10 10:00:00',
         ]);
-        $propertyB = Property::create([
+        $propertyB = Property::forceCreate([
             'title' => 'Branch B Property',
             'type_id' => 1,
             'status_id' => 1,
@@ -1397,6 +1494,9 @@ class ClientIntegrationTest extends TestCase
             'created_at' => '2026-03-11 10:00:00',
             'updated_at' => '2026-03-11 10:00:00',
         ]);
+
+        $this->assertDatabaseHas('properties', ['id' => $propertyA->id, 'created_at' => '2026-03-10 10:00:00']);
+        $this->assertDatabaseHas('properties', ['id' => $propertyB->id, 'created_at' => '2026-03-11 10:00:00']);
 
         DB::table('bookings')->insert([
             [

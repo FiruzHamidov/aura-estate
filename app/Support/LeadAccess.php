@@ -21,7 +21,7 @@ class LeadAccess
 
     public function isPrivilegedRole(?string $roleSlug): bool
     {
-        return in_array($roleSlug, ['superadmin', 'admin', 'marketing'], true);
+        return in_array($roleSlug, ['superadmin', 'admin', 'owner', 'marketing'], true);
     }
 
     public function isBranchWideLeadRole(?string $roleSlug): bool
@@ -31,7 +31,7 @@ class LeadAccess
 
     public function isBranchScopedRole(?string $roleSlug): bool
     {
-        return in_array($roleSlug, ['branch_director', 'rop', 'agent', 'manager', 'operator'], true);
+        return in_array($roleSlug, ['branch_director', 'rop', 'agent', 'mop', 'manager', 'operator'], true);
     }
 
     public function visibleQuery(User $authUser): Builder
@@ -90,7 +90,7 @@ class LeadAccess
         $data['created_by'] = $authUser->id;
 
         if (
-            in_array($roleSlug, ['agent', 'manager', 'operator'], true)
+            in_array($roleSlug, ['agent', 'mop', 'manager', 'operator'], true)
             && empty($data['responsible_agent_id'])
         ) {
             $data['responsible_agent_id'] = $authUser->id;

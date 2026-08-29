@@ -40,6 +40,15 @@ class NotificationRecipientResolver
             ->values();
     }
 
+    public function publicLeadSubscribers(Lead $lead): Collection
+    {
+        // An unassigned intake goes to global CRM operators, never every branch manager.
+        $users = $this->usersByRole(['admin', 'superadmin', 'owner']);
+        if ($lead->branch_id) $users = $users->merge($this->usersByRole(['manager', 'rop', 'branch_director'], $lead->branch_id));
+        if ($lead->responsibleAgent && $lead->responsibleAgent->status === User::STATUS_ACTIVE) $users->push($lead->responsibleAgent);
+        return $users->filter(fn (User $user) => ! $user->isDeletedAccount())->unique('id')->values();
+    }
+
     public function dealStakeholders(Deal $deal): Collection
     {
         $deal->loadMissing('creator.role', 'responsibleAgent.role');

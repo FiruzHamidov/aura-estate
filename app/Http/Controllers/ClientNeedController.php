@@ -13,6 +13,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class ClientNeedController extends Controller
 {
@@ -58,6 +59,8 @@ class ClientNeedController extends Controller
             'budget_to' => 'nullable|numeric|min:0',
             'budget_total' => 'nullable|numeric|min:0',
             'budget_cash' => 'nullable|numeric|min:0',
+            'has_cash_on_hand' => 'nullable|boolean',
+            'cash_on_hand_amount' => 'nullable|numeric|gt:0',
             'budget_mortgage' => 'nullable|numeric|min:0',
             'currency' => 'nullable|in:TJS,USD',
             'location_id' => 'nullable|exists:locations,id',
@@ -101,6 +104,39 @@ class ClientNeedController extends Controller
         }
 
         return $validated;
+    }
+
+    private function normalizeCashOnHand(array $data, ?ClientNeed $clientNeed = null): array
+    {
+        if (!array_key_exists('has_cash_on_hand', $data) && !array_key_exists('cash_on_hand_amount', $data)) {
+            return $data;
+        }
+
+        $hasCashOnHand = array_key_exists('has_cash_on_hand', $data)
+            ? filter_var($data['has_cash_on_hand'], FILTER_VALIDATE_BOOL)
+            : (bool) $clientNeed?->has_cash_on_hand;
+
+        $data['has_cash_on_hand'] = $hasCashOnHand;
+
+        if (!$hasCashOnHand) {
+            $data['cash_on_hand_amount'] = null;
+
+            return $data;
+        }
+
+        $amount = array_key_exists('cash_on_hand_amount', $data)
+            ? $data['cash_on_hand_amount']
+            : $clientNeed?->cash_on_hand_amount;
+
+        if ($amount === null || (float) $amount <= 0) {
+            throw ValidationException::withMessages([
+                'cash_on_hand_amount' => 'Укажите сумму денег на руках больше нуля.',
+            ]);
+        }
+
+        $data['cash_on_hand_amount'] = $amount;
+
+        return $data;
     }
 
     private function normalizeFinance(array $data, ?ClientNeed $clientNeed = null): array
@@ -302,6 +338,7 @@ class ClientNeedController extends Controller
         $validated = $this->validatePayload($request);
         $validated = $this->normalizePropertyTypes($validated);
         $validated = $this->normalizeRepairTypes($validated);
+        $validated = $this->normalizeCashOnHand($validated);
         $validated = $this->normalizeFinance($validated);
         $validated['status_id'] ??= ClientNeedStatus::defaultId();
         $validated = $this->clientAccess->normalizeNeedMutationData($validated, $authUser, $client);
@@ -339,6 +376,7 @@ class ClientNeedController extends Controller
         $validated = $this->validatePayload($request, $clientNeed);
         $validated = $this->normalizePropertyTypes($validated, $clientNeed);
         $validated = $this->normalizeRepairTypes($validated);
+        $validated = $this->normalizeCashOnHand($validated, $clientNeed);
         $validated = $this->normalizeFinance($validated, $clientNeed);
         $validated = $this->clientAccess->normalizeNeedMutationData($validated, $authUser, $clientNeed->client);
         $this->clientAccess->validateNeedMutationTargets($authUser, $clientNeed->client, $validated, 'client_needs.update');

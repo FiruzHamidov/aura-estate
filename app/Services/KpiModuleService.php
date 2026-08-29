@@ -962,13 +962,14 @@ class KpiModuleService
                 $writePayload['sales_count'] = (float) Arr::get($row, 'sales', Arr::get($row, 'deal', 0));
             }
 
-            $report = DailyReport::query()->updateOrCreate(
-                [
-                    'user_id' => $employeeId,
-                    'report_date' => $date,
-                ],
-                $writePayload
-            );
+            // Date casts may persist a midnight timestamp (notably on SQLite).
+            // Match the calendar day so a retry updates the same report.
+            $report = DailyReport::query()
+                ->whereDate('report_date', $date)
+                ->updateOrCreate(
+                    ['user_id' => $employeeId],
+                    array_merge($writePayload, ['report_date' => $date])
+                );
 
             $saved[] = [
                 'date' => $report->report_date->toDateString(),

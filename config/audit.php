@@ -21,6 +21,7 @@ return [
             'access_token',
             'refresh_token',
             'authorization',
+            'signature',
             'pushcommkey',
             'communication_key',
             'remember_token',

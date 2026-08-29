@@ -13,7 +13,6 @@ use App\Http\Controllers\AttendanceReportController;
 use App\Http\Controllers\AttendanceScheduleController;
 use App\Http\Controllers\AttendanceWebController;
 use App\Http\Controllers\AuthController;
-use App\Http\Controllers\B24AuthController;
 use App\Http\Controllers\BookingController;
 use App\Http\Controllers\BranchController;
 use App\Http\Controllers\BranchGroupController;
@@ -142,6 +141,9 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         Route::get('/{catalog}/{item}/usage', [ReferenceCatalogController::class, 'usage'])
             ->where('catalog', '[a-z0-9-]+')
             ->whereNumber('item');
+        Route::get('/{catalog}/{item}/replacements', [ReferenceCatalogController::class, 'replacements'])
+            ->where('catalog', '[a-z0-9-]+')
+            ->whereNumber('item');
         Route::post('/{catalog}/{item}/merge', [ReferenceCatalogController::class, 'merge'])
             ->where('catalog', '[a-z0-9-]+')
             ->whereNumber('item');
@@ -244,16 +246,33 @@ Route::scopeBindings()->group(function () {
     Route::apiResource('tags', TagController::class)->only(['index', 'show']);
 
     Route::get('new-buildings/plans', [NewBuildingPlanController::class, 'index']);
+    Route::get('new-buildings/map', [NewBuildingController::class, 'map']);
+    Route::get('residential-sitemap', \App\Http\Controllers\ResidentialSitemapController::class);
+    Route::get('new-buildings/{new_building}/unit-facets', [DeveloperUnitController::class, 'facets']);
+    Route::get('new-buildings/{new_building}/availability-grid', [DeveloperUnitController::class, 'grid']);
+    Route::get('residential-media/{kind}/{record}/{variant}', [\App\Http\Controllers\ResidentialMediaController::class, 'show'])->whereIn('kind', ['building-photos', 'unit-photos', 'layouts', 'floor-plans'])->whereNumber('record')->whereIn('variant', ['preview', 'original', 'w320', 'w640', 'w960', 'w1600'])->name('residential.media');
+    Route::post('favorites/resolve', [\App\Http\Controllers\TypedFavoriteController::class, 'resolve'])->middleware('throttle:60,1');
+    Route::get('new-buildings/{new_building}/entrances', [\App\Http\Controllers\ResidentialStructureController::class, 'entrances']);
+    Route::get('new-buildings/{new_building}/similar', [\App\Http\Controllers\ResidentialSimilarController::class, 'buildings']);
+    Route::get('new-buildings/{new_building}/reviews', [\App\Http\Controllers\ResidentialReviewController::class, 'index']);
+    Route::get('payment-programs', [\App\Http\Controllers\PaymentProgramController::class, 'index']);
+    Route::get('new-buildings/{new_building}/content', [\App\Http\Controllers\ResidentialContentController::class, 'index']);
+    Route::get('new-buildings/{new_building}/payment-programs', [\App\Http\Controllers\PaymentProgramController::class, 'index']);
+    Route::post('payment-programs/{program}/quote', [\App\Http\Controllers\PaymentProgramController::class, 'quote'])->whereNumber('program')->middleware('throttle:60,1');
+    Route::get('new-buildings/{new_building}/units/{unit}/similar', [\App\Http\Controllers\ResidentialSimilarController::class, 'units'])->whereNumber('unit');
+    Route::get('new-buildings/{new_building}/masterplan', [\App\Http\Controllers\ResidentialPlanController::class, 'masterplan']);
+    Route::get('new-buildings/{new_building}/units/{unit}/floor-plan', [\App\Http\Controllers\ResidentialPlanController::class, 'floor']);
     Route::apiResource('new-buildings', NewBuildingController::class)->only(['index', 'show']);
 
     // blocks (полностью вложенные; публично index/show)
-    Route::apiResource('new-buildings.blocks', NewBuildingBlockController::class)->only(['index', 'show']);
+    Route::apiResource('new-buildings.blocks', NewBuildingBlockController::class)->only(['index', 'show'])->middleware(\App\Http\Middleware\ResidentialResourceAccess::class);
 
     // units (полностью вложенные; публично index/show)
     Route::apiResource('new-buildings.units', DeveloperUnitController::class)->only(['index', 'show']);
 
     // ФОТО новостройки (полностью вложенные; публично index)
-    Route::get('new-buildings/{new_building}/photos', [NewBuildingPhotoController::class, 'index']);
+    Route::get('new-buildings/{new_building}/photos', [NewBuildingPhotoController::class, 'index'])->middleware(\App\Http\Middleware\ResidentialResourceAccess::class);
+    Route::get('new-buildings/{new_building}/units/{unit}/photos', [DeveloperUnitPhotoController::class, 'index'])->middleware(\App\Http\Middleware\ResidentialResourceAccess::class);
 });
 
 // история чата (публично)
@@ -383,6 +402,33 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
 
     // Избранное
     Route::get('/favorites', [FavoriteController::class, 'index']);
+    Route::get('/favorites/items', [\App\Http\Controllers\TypedFavoriteController::class, 'index']);
+    Route::get('/favorites/keys', [\App\Http\Controllers\TypedFavoriteController::class, 'keys']);
+    Route::get('new-buildings/{new_building}/reviews/mine', [\App\Http\Controllers\ResidentialReviewController::class, 'mine']);
+    Route::post('new-buildings/{new_building}/reviews', [\App\Http\Controllers\ResidentialReviewController::class, 'store'])->middleware('throttle:10,1');
+    Route::patch('new-buildings/{new_building}/reviews/{review}', [\App\Http\Controllers\ResidentialReviewController::class, 'update'])->whereNumber('review')->middleware('throttle:10,1');
+    Route::post('new-buildings/{new_building}/reviews/{review}/complaints', [\App\Http\Controllers\ResidentialReviewController::class, 'complain'])->whereNumber('review')->middleware('throttle:10,1');
+    Route::get('admin/new-buildings/{new_building}/reviews', [\App\Http\Controllers\ResidentialReviewController::class, 'adminIndex']);
+    Route::get('admin/payment-programs', [\App\Http\Controllers\PaymentProgramController::class, 'adminIndex']);
+    Route::get('admin/new-buildings/{new_building}/imports', [\App\Http\Controllers\ResidentialImportController::class, 'index']);
+    Route::post('admin/new-buildings/{new_building}/imports/preview', [\App\Http\Controllers\ResidentialImportController::class, 'preview'])->middleware('throttle:10,1');
+    Route::get('admin/new-buildings/{new_building}/imports/{batch}', [\App\Http\Controllers\ResidentialImportController::class, 'show'])->whereNumber('batch');
+    Route::post('admin/new-buildings/{new_building}/imports/{batch}/apply', [\App\Http\Controllers\ResidentialImportController::class, 'apply'])->whereNumber('batch')->middleware('throttle:10,1');
+    Route::get('admin/new-buildings/{new_building}/content', [\App\Http\Controllers\ResidentialContentController::class, 'adminIndex']);
+    Route::post('admin/new-buildings/{new_building}/content/{kind}', [\App\Http\Controllers\ResidentialContentController::class, 'store'])->whereIn('kind', ['nearby-places', 'videos']);
+    Route::patch('admin/new-buildings/{new_building}/content/{kind}/{record}', [\App\Http\Controllers\ResidentialContentController::class, 'update'])->whereIn('kind', ['nearby-places', 'videos'])->whereNumber('record');
+    Route::delete('admin/new-buildings/{new_building}/content/{kind}/{record}', [\App\Http\Controllers\ResidentialContentController::class, 'destroy'])->whereIn('kind', ['nearby-places', 'videos'])->whereNumber('record');
+    Route::post('admin/payment-programs', [\App\Http\Controllers\PaymentProgramController::class, 'store']);
+    Route::patch('admin/payment-programs/{program}', [\App\Http\Controllers\PaymentProgramController::class, 'update'])->whereNumber('program');
+    Route::get('admin/new-buildings/{new_building}/payment-programs', [\App\Http\Controllers\PaymentProgramController::class, 'adminIndex']);
+    Route::post('admin/new-buildings/{new_building}/payment-programs', [\App\Http\Controllers\PaymentProgramController::class, 'store']);
+    Route::patch('admin/new-buildings/{new_building}/payment-programs/{program}', [\App\Http\Controllers\PaymentProgramController::class, 'updateForBuilding'])->whereNumber('program');
+    Route::patch('admin/new-buildings/{new_building}/reviews/{review}/moderation', [\App\Http\Controllers\ResidentialReviewController::class, 'moderate'])->whereNumber('review');
+    Route::get('admin/new-buildings/{new_building}/review-complaints', [\App\Http\Controllers\ResidentialReviewController::class, 'complaints']);
+    Route::patch('admin/new-buildings/{new_building}/review-complaints/{complaint}', [\App\Http\Controllers\ResidentialReviewController::class, 'resolve'])->whereNumber('complaint');
+    Route::put('/favorites/items/{type}/{id}', [\App\Http\Controllers\TypedFavoriteController::class, 'store'])->whereIn('type', ['property', 'new_building', 'developer_unit'])->whereNumber('id');
+    Route::delete('/favorites/items/{type}/{id}', [\App\Http\Controllers\TypedFavoriteController::class, 'destroy'])->whereIn('type', ['property', 'new_building', 'developer_unit'])->whereNumber('id');
+    Route::post('/favorites/merge', [\App\Http\Controllers\TypedFavoriteController::class, 'merge'])->middleware('throttle:30,1');
     Route::post('/favorites', [FavoriteController::class, 'store']);
     Route::delete('/favorites/{property_id}', [FavoriteController::class, 'destroy']);
 
@@ -505,30 +551,47 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
 
         // Новостройки (админ) + полностью ВЛОЖЕННЫЕ blocks/units c CRUD
         Route::apiResource('new-buildings', NewBuildingController::class)->except(['index', 'show']);
+        Route::get('admin/new-buildings', [NewBuildingController::class, 'adminIndex']);
+        Route::get('admin/new-buildings/{new_building}', [NewBuildingController::class, 'adminShow']);
+        Route::get('admin/new-buildings/{new_building}/consultants', [NewBuildingController::class, 'consultants']);
+        Route::get('admin/new-buildings/{new_building}/units', [DeveloperUnitController::class, 'adminIndex']);
+        Route::get('admin/new-buildings/{new_building}/units/{unit}', [DeveloperUnitController::class, 'adminShow']);
+        Route::get('admin/new-buildings/{new_building}/{kind}', [\App\Http\Controllers\ResidentialStructureController::class, 'index'])->whereIn('kind', ['entrances', 'layouts', 'floor-plans']);
+        Route::get('admin/new-buildings/{new_building}/{kind}/{record}/usage', [\App\Http\Controllers\ResidentialStructureController::class, 'usage'])->whereIn('kind', ['entrances', 'layouts', 'floor-plans']);
+        Route::post('admin/new-buildings/{new_building}/{kind}', [\App\Http\Controllers\ResidentialStructureController::class, 'store'])->whereIn('kind', ['entrances', 'layouts', 'floor-plans']);
+        Route::patch('admin/new-buildings/{new_building}/{kind}/{record}', [\App\Http\Controllers\ResidentialStructureController::class, 'update'])->whereIn('kind', ['entrances', 'layouts', 'floor-plans']);
+        Route::delete('admin/new-buildings/{new_building}/{kind}/{record}', [\App\Http\Controllers\ResidentialStructureController::class, 'destroy'])->whereIn('kind', ['entrances', 'layouts', 'floor-plans']);
+        Route::post('admin/new-buildings/{new_building}/{kind}/{record}/image', [\App\Http\Controllers\ResidentialStructureController::class, 'image'])->whereIn('kind', ['layouts', 'floor-plans']);
+        Route::patch('admin/new-buildings/{new_building}/masterplan/{photo}/regions', [\App\Http\Controllers\ResidentialPlanController::class, 'regions'])->whereNumber('photo');
 
-        Route::scopeBindings()->group(function () {
+        Route::scopeBindings()->middleware(\App\Http\Middleware\ResidentialResourceAccess::class)->group(function () {
             Route::apiResource('new-buildings.blocks', NewBuildingBlockController::class)->except(['index', 'show']);
             Route::apiResource('new-buildings.units', DeveloperUnitController::class)->except(['index', 'show']);
 
             // ФОТО новостройки — полностью вложенные
             Route::post('new-buildings/{new_building}/photos', [NewBuildingPhotoController::class, 'store']);
+            Route::patch('new-buildings/{new_building}/photos/{photo}', [NewBuildingPhotoController::class, 'update']);
             Route::delete('new-buildings/{new_building}/photos/{photo}', [NewBuildingPhotoController::class, 'destroy']);
             Route::post('new-buildings/{new_building}/photos/{photo}/cover', [NewBuildingPhotoController::class, 'setCover']);
             Route::put('new-buildings/{new_building}/photos/reorder', [NewBuildingPhotoController::class, 'reorder']);
 
             // ФОТО юнита — полностью вложенные
-            Route::get('new-buildings/{new_building}/units/{unit}/photos', [DeveloperUnitPhotoController::class, 'index']);
+            Route::get('admin/new-buildings/{new_building}/photos', [NewBuildingPhotoController::class, 'index']);
+            Route::get('admin/new-buildings/{new_building}/blocks', [NewBuildingBlockController::class, 'index']);
+            Route::get('admin/new-buildings/{new_building}/blocks/{block}', [NewBuildingBlockController::class, 'show']);
+            Route::get('admin/new-buildings/{new_building}/units/{unit}/photos', [DeveloperUnitPhotoController::class, 'index']);
             Route::post('new-buildings/{new_building}/units/{unit}/photos', [DeveloperUnitPhotoController::class, 'store']);
+            Route::patch('new-buildings/{new_building}/units/{unit}/photos/{photo}', [DeveloperUnitPhotoController::class, 'update']);
             Route::delete('new-buildings/{new_building}/units/{unit}/photos/{photo}', [DeveloperUnitPhotoController::class, 'destroy']);
             Route::put('new-buildings/{new_building}/units/{unit}/photos/reorder', [DeveloperUnitPhotoController::class, 'reorder']);
             Route::post('new-buildings/{new_building}/units/{unit}/photos/{photo}/cover', [DeveloperUnitPhotoController::class, 'setCover']);
 
-            // Фичи (как было)
-            Route::post('new-buildings/{new_building}/features/{feature}', [NewBuildingController::class, 'attachFeature']);
+            // A new relation selects a global catalog item, not an already attached feature.
+            Route::post('new-buildings/{new_building}/features/{feature}', [NewBuildingController::class, 'attachFeature'])->withoutScopedBindings();
             Route::delete('new-buildings/{new_building}/features/{feature}', [NewBuildingController::class, 'detachFeature']);
         });
 
-        // Bitrix selections (auth зона для админки/лички)
+        // Подборки внутренней CRM Aura.
         Route::get('/selections', [SelectionController::class, 'index']);
         Route::post('/selections', [SelectionController::class, 'store']);
         Route::get('/selections/{id}', [SelectionController::class, 'show']);
@@ -545,10 +608,4 @@ Route::middleware(['api'])->group(function () {
 // --- Публичная подборка по hash ---
 Route::get('/selections/public/{hash}', [SelectionController::class, 'publicShow']);
 
-// --- Bitrix24 ---
-Route::post('/b24/token', [B24AuthController::class, 'issue']);
-Route::middleware('b24.jwt')->group(function () {
-    Route::post('/selections', [SelectionController::class, 'store']);
-    Route::post('/showings', [BookingController::class, 'store']);
-    Route::post('/selections/{id}/events', [SelectionController::class, 'event']);
-});
+Route::post('/selections/public/{hash}/events', [SelectionController::class, 'publicEvent'])->middleware('throttle:30,1');

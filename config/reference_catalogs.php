@@ -67,7 +67,7 @@ return [
         'references' => [
             ['key' => 'properties', 'label' => 'Объекты недвижимости', 'table' => 'properties', 'column' => 'location_id'],
             ['key' => 'client_needs', 'label' => 'Потребности клиентов', 'table' => 'client_needs', 'column' => 'location_id'],
-            ['key' => 'new_buildings', 'label' => 'Новостройки', 'table' => 'new_buildings', 'column' => 'location_id'],
+            ['key' => 'new_buildings', 'label' => 'Жилые комплексы', 'table' => 'new_buildings', 'column' => 'location_id'],
             ['key' => 'external_property_requests', 'label' => 'Заявки внешних агентов', 'table' => 'external_property_requests', 'column' => 'location_id'],
         ],
     ],
@@ -117,7 +117,7 @@ return [
         'cleanup_file' => ['disk' => 'public', 'column' => 'logo_path'],
         'references' => [
             ['key' => 'properties', 'label' => 'Объекты недвижимости', 'table' => 'properties', 'column' => 'developer_id'],
-            ['key' => 'new_buildings', 'label' => 'Новостройки', 'table' => 'new_buildings', 'column' => 'developer_id'],
+            ['key' => 'new_buildings', 'label' => 'Жилые комплексы', 'table' => 'new_buildings', 'column' => 'developer_id'],
         ],
     ],
     'features' => [
@@ -125,7 +125,7 @@ return [
         'label_columns' => ['name'],
         'references' => [
             ['key' => 'properties', 'label' => 'Объекты недвижимости', 'table' => 'feature_property', 'column' => 'feature_id', 'entity_column' => 'property_id', 'pivot' => true],
-            ['key' => 'new_buildings', 'label' => 'Новостройки', 'table' => 'feature_new_building', 'column' => 'feature_id', 'entity_column' => 'new_building_id', 'pivot' => true],
+            ['key' => 'new_buildings', 'label' => 'Жилые комплексы', 'table' => 'feature_new_building', 'column' => 'feature_id', 'entity_column' => 'new_building_id', 'pivot' => true],
         ],
     ],
     'tags' => [
@@ -139,14 +139,15 @@ return [
         'table' => 'materials',
         'label_columns' => ['name'],
         'references' => [
-            ['key' => 'new_buildings', 'label' => 'Новостройки', 'table' => 'new_buildings', 'column' => 'material_id'],
+            ['key' => 'new_buildings', 'label' => 'Жилые комплексы', 'table' => 'new_buildings', 'column' => 'material_id'],
         ],
     ],
     'construction-stages' => [
         'table' => 'construction_stages',
         'label_columns' => ['name'],
         'references' => [
-            ['key' => 'new_buildings', 'label' => 'Новостройки', 'table' => 'new_buildings', 'column' => 'construction_stage_id'],
+            ['key' => 'new_buildings', 'label' => 'Жилые комплексы', 'table' => 'new_buildings', 'column' => 'construction_stage_id'],
+            ['key' => 'new_building_blocks', 'label' => 'Корпуса', 'table' => 'new_building_blocks', 'column' => 'construction_stage_id'],
         ],
     ],
     'client-types' => [

@@ -19,6 +19,10 @@ class ApiRequestLogFeatureTest extends TestCase
     {
         parent::setUp();
 
+        $this->assertTrue(app()->environment('testing'));
+        $this->assertSame('sqlite', config('database.default'));
+        $this->assertSame(':memory:', config('database.connections.sqlite.database'));
+
         $this->withoutMiddleware(EnsureDailyReportSubmitted::class);
         config()->set('audit.api_requests.enabled', true);
         config()->set('audit.api_requests.retention_days', 90);
@@ -199,6 +203,53 @@ class ApiRequestLogFeatureTest extends TestCase
 
         $this->assertDatabaseMissing('api_request_logs', ['trace_id' => 'trace-old']);
         $this->assertDatabaseHas('api_request_logs', ['trace_id' => 'trace-fresh']);
+    }
+
+    public function test_residential_and_lead_diagnostics_do_not_store_payloads_or_exception_text(): void
+    {
+        foreach (['api/lead-requests', 'api/chat', 'api/new-buildings/1/reviews', 'api/admin/new-buildings/1/imports/preview', 'api/payment-programs/1/calculate'] as $path) {
+            $request = \Illuminate\Http\Request::create('/'.$path.'?search=private-contact', 'POST', ['text' => 'private-contact', 'phone' => '+992000000099']);
+            $failure = new \RuntimeException('SQL values contain private-contact');
+            try {
+                app(\App\Http\Middleware\LogApiRequest::class)->handle($request, fn () => throw $failure);
+                $this->fail('The business exception must propagate.');
+            } catch (\RuntimeException $caught) {
+                $this->assertSame($failure, $caught);
+            }
+            $log = ApiRequestLog::query()->where('path', $path)->firstOrFail();
+            $this->assertNull($log->request_body);
+            $this->assertNull($log->request_query);
+            $this->assertNull($log->error_message);
+            $this->assertSame(500, $log->status_code);
+            $this->assertSame('INTERNAL_ERROR', $log->error_code);
+            $this->assertGreaterThanOrEqual(0, $log->duration_ms);
+        }
+    }
+
+    public function test_intended_http_response_errors_keep_their_status_in_diagnostics(): void
+    {
+        $request = \Illuminate\Http\Request::create('/api/admin/new-buildings/1', 'PATCH');
+        try {
+            app(\App\Http\Middleware\LogApiRequest::class)->handle($request, fn () => throw new \Illuminate\Http\Exceptions\HttpResponseException(response()->json(['message' => 'Denied'], 403)));
+        } catch (\Illuminate\Http\Exceptions\HttpResponseException) {
+            // The normal exception handler still owns the response.
+        }
+        $this->assertDatabaseHas('api_request_logs', ['path' => 'api/admin/new-buildings/1', 'status_code' => 403, 'error_code' => 'FORBIDDEN', 'error_message' => null]);
+    }
+
+    public function test_reported_residential_exceptions_do_not_fall_through_to_raw_application_logs(): void
+    {
+        \Illuminate\Support\Facades\Log::spy();
+        $request = \Illuminate\Http\Request::create('/api/lead-requests?phone=private', 'POST');
+        $request->attributes->set('trace_id', 'qa-safe-trace');
+        $this->app->instance('request', $request);
+        report(new \RuntimeException('SQL bindings contain private-contact'));
+        \Illuminate\Support\Facades\Log::shouldHaveReceived('error')->once()->with('Residential request failed.', [
+            'exception_type' => \RuntimeException::class,
+            'route' => 'residential-or-lead',
+            'trace_id' => 'qa-safe-trace',
+        ]);
+        \Illuminate\Support\Facades\Log::shouldNotHaveReceived('log');
     }
 
     private function createUser(string $roleSlug): User

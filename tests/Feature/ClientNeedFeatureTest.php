@@ -115,6 +115,11 @@ class ClientNeedFeatureTest extends TestCase
             $table->timestamps();
         });
 
+        (require database_path('migrations/2026_03_10_130000_create_client_collaborators_table.php'))->up();
+        (require database_path('migrations/2026_03_07_120100_create_crm_audit_logs_table.php'))->up();
+        (require database_path('migrations/2025_06_23_004211_create_property_types_table.php'))->up();
+        (require database_path('migrations/2025_06_23_004353_create_locations_table.php'))->up();
+
         Schema::create('client_needs', function (Blueprint $table) {
             $table->id();
             $table->unsignedBigInteger('client_id');
@@ -126,7 +131,6 @@ class ClientNeedFeatureTest extends TestCase
             $table->unsignedBigInteger('location_id')->nullable();
             $table->string('district')->nullable();
             $table->unsignedBigInteger('property_type_id')->nullable();
-            $table->unsignedBigInteger('repair_type_id')->nullable();
             $table->unsignedInteger('rooms_from')->nullable();
             $table->unsignedInteger('rooms_to')->nullable();
             $table->decimal('area_from', 10, 2)->nullable();
@@ -139,6 +143,10 @@ class ClientNeedFeatureTest extends TestCase
             $table->softDeletes();
             $table->timestamps();
         });
+
+        foreach (['2026_04_03_120000_add_client_need_property_types_table.php', '2026_04_04_130000_add_finance_and_repair_fields_to_client_needs_table.php', '2026_08_29_020000_add_cash_on_hand_to_client_needs_table.php'] as $migration) {
+            (require database_path('migrations/'.$migration))->up();
+        }
 
         Schema::create('client_need_repair_type', function (Blueprint $table) {
             $table->id();
@@ -267,6 +275,39 @@ class ClientNeedFeatureTest extends TestCase
             ->assertOk()
             ->assertJsonPath('status.slug', 'waiting')
             ->assertJsonPath('closed_at', null);
+    }
+
+    public function test_cash_on_hand_requires_a_positive_amount_and_is_cleared_when_disabled(): void
+    {
+        [$agent, $client] = $this->seedClientContext();
+        Sanctum::actingAs($agent);
+
+        $this->postJson('/api/clients/'.$client->id.'/needs', [
+            'type_id' => 1,
+            'status_id' => 1,
+            'has_cash_on_hand' => true,
+        ])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['cash_on_hand_amount'], 'details.errors');
+
+        $created = $this->postJson('/api/clients/'.$client->id.'/needs', [
+            'type_id' => 1,
+            'status_id' => 1,
+            'has_cash_on_hand' => true,
+            'cash_on_hand_amount' => 125000,
+        ]);
+
+        $created->assertCreated()
+            ->assertJsonPath('has_cash_on_hand', true)
+            ->assertJsonPath('cash_on_hand_amount', '125000.00');
+
+        $this->patchJson('/api/client-needs/'.$created->json('id'), [
+            'has_cash_on_hand' => false,
+            'cash_on_hand_amount' => 125000,
+        ])
+            ->assertOk()
+            ->assertJsonPath('has_cash_on_hand', false)
+            ->assertJsonPath('cash_on_hand_amount', null);
     }
 
     public function test_agent_cannot_access_foreign_client_need_in_own_only_mode(): void

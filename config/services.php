@@ -42,6 +42,5 @@ return [
         'auth_ttl_seconds' => (int) env('TELEGRAM_AUTH_TTL_SECONDS', 300),
     ],
 
-    'bitrix24' => ['base' => env('BITRIX24_BASE')],
 
 ];

@@ -10,7 +10,9 @@ use Illuminate\Support\Facades\DB;
 class NewBuildingPlanController extends Controller
 {
     private const DEFAULT_PER_PAGE = 20;
+
     private const MAX_PER_PAGE = 100;
+
     private const CURRENCY = 'TJS';
 
     public function index(Request $request): JsonResponse
@@ -51,17 +53,16 @@ class NewBuildingPlanController extends Controller
         ];
 
         $paginator = DeveloperUnit::query()
+            ->with('coverPhoto')
             ->join('new_buildings', 'new_buildings.id', '=', 'developer_units.new_building_id')
             ->leftJoinSub($coverPhotoSubquery, 'unit_cover_photos', function ($join) {
                 $join->on('unit_cover_photos.unit_id', '=', 'developer_units.id');
             })
-            ->where('new_buildings.moderation_status', 'approved')
-            ->where('developer_units.is_available', true)
-            ->whereIn('developer_units.moderation_status', ['approved', 'available'])
+            ->available()
             ->when(isset($validated['developer_id']), fn ($query) => $query->where('new_buildings.developer_id', $validated['developer_id']))
             ->when(isset($validated['stage_id']), fn ($query) => $query->where('new_buildings.construction_stage_id', $validated['stage_id']))
             ->when(isset($validated['material_id']), fn ($query) => $query->where('new_buildings.material_id', $validated['material_id']))
-            ->when(!empty($validated['search']), function ($query) use ($validated) {
+            ->when(! empty($validated['search']), function ($query) use ($validated) {
                 $search = trim($validated['search']);
 
                 $query->where(function ($subQuery) use ($search) {
@@ -80,6 +81,7 @@ class NewBuildingPlanController extends Controller
                 'developer_units.new_building_id',
                 'developer_units.name',
                 'developer_units.bedrooms',
+                'developer_units.rooms',
                 'developer_units.area',
                 'developer_units.total_price',
                 'developer_units.created_at',
@@ -99,11 +101,12 @@ class NewBuildingPlanController extends Controller
                 'building_address' => $plan->address,
                 'building_latitude' => is_null($plan->latitude) ? null : (float) $plan->latitude,
                 'building_longitude' => is_null($plan->longitude) ? null : (float) $plan->longitude,
-                'rooms' => is_null($plan->bedrooms) ? null : (int) $plan->bedrooms,
+                'rooms' => \App\Services\Residential\InventoryStatus::rooms($plan->getAttributes()),
                 'area' => is_null($plan->area) ? null : (float) $plan->area,
                 'price' => is_null($plan->total_price) ? null : (float) $plan->total_price,
                 'currency' => self::CURRENCY,
                 'cover_photo' => $plan->cover_photo,
+                'cover_url' => $plan->coverPhoto ? app(\App\Services\Residential\MediaAssets::class)->url($plan->coverPhoto) : null,
             ])->values(),
             'current_page' => $paginator->currentPage(),
             'per_page' => $paginator->perPage(),

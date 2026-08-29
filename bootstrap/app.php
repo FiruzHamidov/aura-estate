@@ -1,6 +1,5 @@
 <?php
 
-use App\Http\Middleware\B24Jwt;
 use App\Http\Middleware\DetectClientLocale;
 use App\Http\Middleware\EnforceRopBranchScope;
 use App\Http\Middleware\EnsureDailyReportSubmitted;
@@ -44,7 +43,6 @@ return Application::configure(basePath: dirname(__DIR__))
         ]);
 
         $middleware->alias([
-            'b24.jwt' => B24Jwt::class,
             'active.user' => EnsureUserIsActive::class,
             'daily.report' => EnsureDailyReportSubmitted::class,
             'non.client' => EnsureUserIsNotClient::class,
@@ -57,6 +55,20 @@ return Application::configure(basePath: dirname(__DIR__))
         });
     })
     ->withExceptions(function (Exceptions $exceptions) {
+        $exceptions->report(function (\Throwable $exception) {
+            if (! app()->bound('request') || ! \App\Support\ResidentialDiagnostics::applies(request())) {
+                return null;
+            }
+            // Database exceptions can include SQL bindings (contacts, review
+            // text). Do not pass the throwable/message/stack to a log handler.
+            \Illuminate\Support\Facades\Log::error('Residential request failed.', [
+                'exception_type' => $exception::class,
+                'route' => request()->route()?->uri() ?? 'residential-or-lead',
+                'trace_id' => request()->attributes->get('trace_id'),
+            ]);
+            return false;
+        });
+
         $exceptions->render(function (ValidationException $e, $request) {
             $isKpi = str_starts_with((string) $request->path(), 'api/kpi')
                 || str_starts_with((string) $request->path(), 'api/daily-reports');
@@ -99,6 +111,11 @@ return Application::configure(basePath: dirname(__DIR__))
             );
         });
 
+        $exceptions->render(function (\Illuminate\Http\Exceptions\HttpResponseException $e) {
+            // Preserve intentional JSON responses (e.g. RBAC 403) instead of converting them to 500.
+            return $e->getResponse();
+        });
+
         $exceptions->render(function (\Throwable $e, $request) {
             $status = $e instanceof HttpExceptionInterface ? $e->getStatusCode() : 500;
 
@@ -127,7 +144,6 @@ return Application::configure(basePath: dirname(__DIR__))
         });
     })
     ->withSchedule(function (Schedule $schedule) {
-        $schedule->command('b24:sync:properties')->everyTenMinutes();
         $schedule->command('notifications:dispatch-reminders')->everyFiveMinutes();
         $schedule->command('stories:expire')->everyFiveMinutes();
         $schedule->command('audit:prune-api-request-logs')->dailyAt('03:30');

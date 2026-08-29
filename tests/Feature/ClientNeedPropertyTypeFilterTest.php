@@ -153,6 +153,8 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             $table->decimal('budget_to', 15, 2)->nullable();
             $table->decimal('budget_total', 15, 2)->nullable();
             $table->decimal('budget_cash', 15, 2)->nullable();
+            $table->boolean('has_cash_on_hand')->default(false);
+            $table->decimal('cash_on_hand_amount', 15, 2)->nullable();
             $table->decimal('budget_mortgage', 15, 2)->nullable();
             $table->string('currency', 3)->default('TJS');
             $table->unsignedBigInteger('location_id')->nullable();
@@ -180,6 +182,8 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             $table->timestamps();
             $table->unique(['client_need_id', 'property_type_id']);
         });
+
+        (require database_path('migrations/2026_04_28_130000_add_client_need_repair_types_table.php'))->up();
 
         Schema::create('crm_audit_logs', function (Blueprint $table) {
             $table->id();
@@ -352,13 +356,26 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
 
         Sanctum::actingAs($agent);
 
-        $this->getJson('/api/clients?contact_kind=buyer&property_type_ids[]='.$houseTypeId.'&per_page=15')
-            ->assertOk()
-            ->assertJsonPath('total', 2)
-            ->assertJsonCount(2, 'data')
-            ->assertJsonFragment(['id' => $legacyHouseClient->id])
-            ->assertJsonFragment(['id' => $pivotHouseClient->id])
-            ->assertJsonMissing(['id' => $apartmentClient->id]);
+        $this->assertClientIds($this->getJson('/api/clients?contact_kind=buyer&property_type_ids[]='.$houseTypeId.'&per_page=15'), [$legacyHouseClient->id, $pivotHouseClient->id]);
+    }
+
+    public function test_property_type_filter_uses_related_type_id_not_pivot_row_id(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $house = DB::table('property_types')->insertGetId(['name' => 'House', 'slug' => 'house']);
+        $apartment = DB::table('property_types')->insertGetId(['name' => 'Apartment', 'slug' => 'apartment']);
+        $client = $this->createClient($branch, $agent, 'House via pivot only');
+        $need = DB::table('client_needs')->insertGetId([
+            'client_id' => $client->id, 'type_id' => 1, 'status_id' => 1,
+            'created_by' => $agent->id, 'responsible_agent_id' => $agent->id,
+        ]);
+        // A coincident ID in the pivot must not be interpreted as a property type.
+        DB::table('client_need_property_type')->insert([
+            'id' => $apartment, 'client_need_id' => $need, 'property_type_id' => $house,
+        ]);
+        Sanctum::actingAs($agent);
+        $this->assertClientIds($this->getJson('/api/clients?property_type_ids[]='.$house), [$client->id]);
+        $this->assertClientIds($this->getJson('/api/clients?property_type_ids[]='.$apartment), []);
     }
 
     public function test_clients_index_filters_by_multiple_property_type_ids(): void
@@ -408,13 +425,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
 
         Sanctum::actingAs($agent);
 
-        $this->getJson('/api/clients?property_type_ids[]='.$houseTypeId.'&property_type_ids[]='.$apartmentTypeId)
-            ->assertOk()
-            ->assertJsonPath('total', 2)
-            ->assertJsonCount(2, 'data')
-            ->assertJsonFragment(['id' => $houseClient->id])
-            ->assertJsonFragment(['id' => $apartmentClient->id])
-            ->assertJsonMissing(['id' => $landClient->id]);
+        $this->assertClientIds($this->getJson('/api/clients?property_type_ids[]='.$houseTypeId.'&property_type_ids[]='.$apartmentTypeId), [$houseClient->id, $apartmentClient->id]);
     }
 
     public function test_clients_index_filters_by_single_repair_type_id_in_array_param(): void
@@ -449,11 +460,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
 
         Sanctum::actingAs($agent);
 
-        $this->getJson('/api/clients?repair_type_ids[]=1')
-            ->assertOk()
-            ->assertJsonPath('total', 1)
-            ->assertJsonFragment(['id' => $matchClient->id])
-            ->assertJsonMissing(['id' => $otherClient->id]);
+        $this->assertClientIds($this->getJson('/api/clients?repair_type_ids[]=1'), [$matchClient->id]);
     }
 
     public function test_clients_index_filters_by_multiple_repair_type_ids(): void
@@ -499,12 +506,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
 
         Sanctum::actingAs($agent);
 
-        $this->getJson('/api/clients?repair_type_ids=1,2')
-            ->assertOk()
-            ->assertJsonPath('total', 2)
-            ->assertJsonFragment(['id' => $firstClient->id])
-            ->assertJsonFragment(['id' => $secondClient->id])
-            ->assertJsonMissing(['id' => $thirdClient->id]);
+        $this->assertClientIds($this->getJson('/api/clients?repair_type_ids=1,2'), [$firstClient->id, $secondClient->id]);
     }
 
     public function test_clients_index_ignores_empty_repair_type_ids_parameter(): void
@@ -538,11 +540,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
 
         Sanctum::actingAs($agent);
 
-        $this->getJson('/api/clients?repair_type_ids=')
-            ->assertOk()
-            ->assertJsonPath('total', 2)
-            ->assertJsonFragment(['id' => $firstClient->id])
-            ->assertJsonFragment(['id' => $secondClient->id]);
+        $this->assertClientIds($this->getJson('/api/clients?repair_type_ids='), [$firstClient->id, $secondClient->id]);
     }
 
     public function test_clients_index_keeps_backward_compatibility_for_repair_type_id_and_prioritizes_repair_type_ids(): void
@@ -577,17 +575,63 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
 
         Sanctum::actingAs($agent);
 
-        $this->getJson('/api/clients?repair_type_id=1')
-            ->assertOk()
-            ->assertJsonPath('total', 1)
-            ->assertJsonFragment(['id' => $legacyClient->id])
-            ->assertJsonMissing(['id' => $priorityClient->id]);
+        $this->assertClientIds($this->getJson('/api/clients?repair_type_id=1'), [$legacyClient->id]);
 
-        $this->getJson('/api/clients?repair_type_id=1&repair_type_ids[]=2')
-            ->assertOk()
-            ->assertJsonPath('total', 1)
-            ->assertJsonFragment(['id' => $priorityClient->id])
-            ->assertJsonMissing(['id' => $legacyClient->id]);
+        $this->assertClientIds($this->getJson('/api/clients?repair_type_id=1&repair_type_ids[]=2'), [$priorityClient->id]);
+    }
+
+    public function test_clients_index_filters_by_cash_on_hand_and_amount_range(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+
+        $smallCashClient = $this->createClient($branch, $agent, 'Small ready cash');
+        $largeCashClient = $this->createClient($branch, $agent, 'Large ready cash');
+        $noCashClient = $this->createClient($branch, $agent, 'No ready cash');
+
+        DB::table('client_needs')->insert([
+            [
+                'client_id' => $smallCashClient->id,
+                'type_id' => 1,
+                'status_id' => 1,
+                'has_cash_on_hand' => true,
+                'cash_on_hand_amount' => 100000,
+                'created_by' => $agent->id,
+                'responsible_agent_id' => $agent->id,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'client_id' => $largeCashClient->id,
+                'type_id' => 1,
+                'status_id' => 1,
+                'has_cash_on_hand' => true,
+                'cash_on_hand_amount' => 300000,
+                'created_by' => $agent->id,
+                'responsible_agent_id' => $agent->id,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+            [
+                'client_id' => $noCashClient->id,
+                'type_id' => 1,
+                'status_id' => 1,
+                'has_cash_on_hand' => false,
+                'cash_on_hand_amount' => null,
+                'created_by' => $agent->id,
+                'responsible_agent_id' => $agent->id,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ],
+        ]);
+
+        Sanctum::actingAs($agent);
+
+        $this->assertClientIds($this->getJson('/api/clients?has_cash_on_hand=1'), [$smallCashClient->id, $largeCashClient->id]);
+        $this->assertClientIds($this->getJson('/api/clients?has_cash_on_hand=0'), [$noCashClient->id]);
+        $this->assertClientIds(
+            $this->getJson('/api/clients?cash_on_hand_amount_from=150000&cash_on_hand_amount_to=350000'),
+            [$largeCashClient->id]
+        );
     }
 
     public function test_client_store_accepts_valid_source_id(): void
@@ -614,7 +658,8 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             'full_name' => 'Invalid Source',
             'source_id' => 999,
         ])->assertStatus(422)
-            ->assertJsonValidationErrors(['source_id']);
+            ->assertJsonPath('code', 'VALIDATION_ERROR')
+            ->assertJsonValidationErrors(['source_id'], 'details.errors');
     }
 
     public function test_client_store_rejects_inactive_source_id(): void
@@ -626,7 +671,8 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             'full_name' => 'Inactive Source',
             'source_id' => 3,
         ])->assertStatus(422)
-            ->assertJsonValidationErrors(['source_id']);
+            ->assertJsonPath('code', 'VALIDATION_ERROR')
+            ->assertJsonValidationErrors(['source_id'], 'details.errors');
     }
 
     public function test_clients_index_filters_by_source_id_and_source_ids_with_priority(): void
@@ -641,27 +687,15 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
 
         Sanctum::actingAs($agent);
 
-        $this->getJson('/api/clients?source_id=1')
-            ->assertOk()
-            ->assertJsonPath('total', 1)
-            ->assertJsonFragment(['id' => $phoneClient->id])
-            ->assertJsonMissing(['id' => $instaClient->id]);
+        $this->assertClientIds($this->getJson('/api/clients?source_id=1'), [$phoneClient->id]);
 
-        $this->getJson('/api/clients?source_ids[]=1&source_ids[]=2')
-            ->assertOk()
-            ->assertJsonPath('total', 2)
-            ->assertJsonFragment(['id' => $phoneClient->id])
-            ->assertJsonFragment(['id' => $instaClient->id]);
+        $this->assertClientIds($this->getJson('/api/clients?source_ids[]=1&source_ids[]=2'), [$phoneClient->id, $instaClient->id]);
 
         $this->getJson('/api/clients?source_ids=')
             ->assertOk()
             ->assertJsonPath('total', 2);
 
-        $this->getJson('/api/clients?source_id=1&source_ids[]=2')
-            ->assertOk()
-            ->assertJsonPath('total', 1)
-            ->assertJsonFragment(['id' => $instaClient->id])
-            ->assertJsonMissing(['id' => $phoneClient->id]);
+        $this->assertClientIds($this->getJson('/api/clients?source_id=1&source_ids[]=2'), [$instaClient->id]);
     }
 
     public function test_client_sources_endpoint_returns_only_active_sources_sorted(): void
@@ -674,6 +708,13 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             ->assertJsonPath('1.id', 2)
             ->assertJsonPath('1.code', 'instagram')
             ->assertJsonMissing(['id' => 3]);
+    }
+
+    private function assertClientIds(\Illuminate\Testing\TestResponse $response, array $expectedIds): void
+    {
+        $response->assertOk()->assertJsonPath('total', count($expectedIds))->assertJsonCount(count($expectedIds), 'data');
+        // Compare only client IDs, never IDs of nested branch/source/type records.
+        $this->assertEqualsCanonicalizing($expectedIds, array_column($response->json('data'), 'id'));
     }
 
     private function prepareAgentContext(): array

@@ -11,10 +11,15 @@ class Client extends Model
     use HasFactory, SoftDeletes;
 
     public const CONTACT_KIND_BUYER = 'buyer';
+
     public const CONTACT_KIND_SELLER = 'seller';
+
     public const CONTACT_KIND_BOTH = 'both';
+
     public const COLLABORATOR_ROLE_OWNER = 'owner';
+
     public const COLLABORATOR_ROLE_COLLABORATOR = 'collaborator';
+
     public const COLLABORATOR_ROLE_VIEWER = 'viewer';
 
     protected $fillable = [
@@ -34,7 +39,6 @@ class Client extends Model
         'source_comment',
         'contact_kind',
         'status',
-        'bitrix_contact_id',
         'meta',
     ];
 

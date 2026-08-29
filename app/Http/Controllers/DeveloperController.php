@@ -4,8 +4,8 @@ namespace App\Http\Controllers;
 
 use App\Models\Developer;
 use Illuminate\Http\Request;
-use Illuminate\Validation\Rule;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
 
 class DeveloperController extends Controller
 {
@@ -15,6 +15,11 @@ class DeveloperController extends Controller
      */
     public function index(Request $request)
     {
+        $request->validate([
+            'page' => ['sometimes', 'integer', 'min:1'],
+            'per_page' => ['sometimes', 'integer', 'between:1,100'],
+            'search' => ['sometimes', 'nullable', 'string', 'max:255'],
+        ]);
         $q = Developer::query()
             ->when($request->filled('search'), function ($qq) use ($request) {
                 $s = trim($request->string('search'));
@@ -29,11 +34,15 @@ class DeveloperController extends Controller
             });
 
         $sort = $request->get('sort', 'created_at');
-        $dir  = $request->get('dir', 'desc');
-        if (! in_array($sort, ['name', 'created_at'])) $sort = 'created_at';
-        if (! in_array(strtolower($dir), ['asc', 'desc'])) $dir = 'desc';
+        $dir = $request->get('dir', 'desc');
+        if (! in_array($sort, ['name', 'created_at'])) {
+            $sort = 'created_at';
+        }
+        if (! in_array(strtolower($dir), ['asc', 'desc'])) {
+            $dir = 'desc';
+        }
 
-        $q->orderBy($sort, $dir);
+        $q->orderBy($sort, $dir)->orderBy('id', $dir);
 
         $perPage = (int) $request->get('per_page', 15);
 
@@ -49,20 +58,20 @@ class DeveloperController extends Controller
         $nowYear = (int) date('Y');
 
         $data = $request->validate([
-            'name'                     => ['required', 'string', 'max:255'],
-            'phone'                    => ['nullable', 'string', 'max:50'],
+            'name' => ['required', 'string', 'max:255'],
+            'phone' => ['nullable', 'string', 'max:50'],
             'under_construction_count' => ['nullable', 'integer', 'min:0'],
-            'built_count'              => ['nullable', 'integer', 'min:0'],
-            'founded_year'             => ['nullable', 'integer', 'min:1800', "max:{$nowYear}"],
-            'total_projects'           => ['nullable', 'integer', 'min:0'],
-            'moderation_status'        => ['nullable', Rule::in(['pending','approved','rejected','draft','deleted'])],
-            'website'                  => ['nullable', 'string', 'max:255'],
-            'facebook'                 => ['nullable', 'string', 'max:255'],
-            'instagram'                => ['nullable', 'string', 'max:255'],
-            'telegram'                 => ['nullable', 'string', 'max:255'],
+            'built_count' => ['nullable', 'integer', 'min:0'],
+            'founded_year' => ['nullable', 'integer', 'min:1800', "max:{$nowYear}"],
+            'total_projects' => ['nullable', 'integer', 'min:0'],
+            'moderation_status' => ['nullable', Rule::in(['pending', 'approved', 'rejected', 'draft', 'deleted'])],
+            'website' => ['nullable', 'string', 'max:255'],
+            'facebook' => ['nullable', 'string', 'max:255'],
+            'instagram' => ['nullable', 'string', 'max:255'],
+            'telegram' => ['nullable', 'string', 'max:255'],
             // логотип как строковый путь, но можно принять файл:
-            'logo_path'                => ['nullable', 'string', 'max:255'],
-            'logo'                     => ['nullable', 'file', 'mimes:jpg,jpeg,png,webp,svg', 'max:5120'],
+            'logo_path' => ['nullable', 'string', 'max:255'],
+            'logo' => ['nullable', 'file', 'mimes:jpg,jpeg,png,webp,svg', 'max:5120'],
             'description' => ['nullable', 'string'],
         ]);
 
@@ -74,9 +83,9 @@ class DeveloperController extends Controller
 
         // дефолты счётчиков
         $data['under_construction_count'] = $data['under_construction_count'] ?? 0;
-        $data['built_count']              = $data['built_count'] ?? 0;
-        $data['total_projects']           = $data['total_projects'] ?? 0;
-        $data['moderation_status']        = $data['moderation_status'] ?? 'pending';
+        $data['built_count'] = $data['built_count'] ?? 0;
+        $data['total_projects'] = $data['total_projects'] ?? 0;
+        $data['moderation_status'] = $data['moderation_status'] ?? 'pending';
 
         $dev = Developer::create($data);
 
@@ -100,19 +109,19 @@ class DeveloperController extends Controller
         $nowYear = (int) date('Y');
 
         $data = $request->validate([
-            'name'                     => ['sometimes', 'required', 'string', 'max:255'],
-            'phone'                    => ['nullable', 'string', 'max:50'],
+            'name' => ['sometimes', 'required', 'string', 'max:255'],
+            'phone' => ['nullable', 'string', 'max:50'],
             'under_construction_count' => ['nullable', 'integer', 'min:0'],
-            'built_count'              => ['nullable', 'integer', 'min:0'],
-            'founded_year'             => ['nullable', 'integer', 'min:1800', "max:{$nowYear}"],
-            'total_projects'           => ['nullable', 'integer', 'min:0'],
-            'moderation_status'        => ['nullable', Rule::in(['pending','approved','rejected','draft','deleted'])],
-            'website'                  => ['nullable', 'string', 'max:255'],
-            'facebook'                 => ['nullable', 'string', 'max:255'],
-            'instagram'                => ['nullable', 'string', 'max:255'],
-            'telegram'                 => ['nullable', 'string', 'max:255'],
-            'logo_path'                => ['nullable', 'string', 'max:255'],
-            'logo'                     => ['nullable', 'file', 'mimes:jpg,jpeg,png,webp,svg', 'max:5120'],
+            'built_count' => ['nullable', 'integer', 'min:0'],
+            'founded_year' => ['nullable', 'integer', 'min:1800', "max:{$nowYear}"],
+            'total_projects' => ['nullable', 'integer', 'min:0'],
+            'moderation_status' => ['nullable', Rule::in(['pending', 'approved', 'rejected', 'draft', 'deleted'])],
+            'website' => ['nullable', 'string', 'max:255'],
+            'facebook' => ['nullable', 'string', 'max:255'],
+            'instagram' => ['nullable', 'string', 'max:255'],
+            'telegram' => ['nullable', 'string', 'max:255'],
+            'logo_path' => ['nullable', 'string', 'max:255'],
+            'logo' => ['nullable', 'file', 'mimes:jpg,jpeg,png,webp,svg', 'max:5120'],
             'description' => ['nullable', 'string'],
         ]);
 

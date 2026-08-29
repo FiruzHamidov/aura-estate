@@ -1230,7 +1230,8 @@ class PropertyConstructionFieldsTest extends TestCase
         $response = $this->getJson('/api/properties?construction_status=test');
 
         $response->assertStatus(422);
-        $response->assertJsonValidationErrors(['construction_status']);
+        $response->assertJsonPath('code', 'VALIDATION_ERROR')
+            ->assertJsonValidationErrors(['construction_status'], 'details.errors');
     }
 
     public function test_public_property_count_includes_only_approved_properties(): void

@@ -32,6 +32,13 @@ return [
 
     'disks' => [
 
+        'residential' => [
+            'driver' => 'local',
+            'root' => env('RESIDENTIAL_MEDIA_ROOT', storage_path('app/residential-private')),
+            'visibility' => 'private',
+            'throw' => true,
+        ],
+
         'local' => [
             'driver' => 'local',
             'root' => storage_path('app/private'),

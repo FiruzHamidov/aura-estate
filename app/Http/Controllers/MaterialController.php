@@ -12,13 +12,18 @@ class MaterialController extends Controller
     // GET /materials  (публично)
     public function index(Request $request)
     {
+        $input = $request->validate([
+            'page' => ['sometimes', 'integer', 'min:1'],
+            'per_page' => ['sometimes', 'integer', 'between:1,100'],
+            'search' => ['sometimes', 'nullable', 'string', 'max:255'],
+        ]);
+        $search = trim($input['search'] ?? '');
         $q = Material::query()
-            ->when($request->filled('search'), fn($qq) =>
-            $qq->where('name', 'like', '%'.$request->get('search').'%')
-            )
-            ->orderBy('name');
+            ->when($search !== '', fn ($query) => $query->where(fn ($text) => $text
+                ->where('name', 'like', '%'.$search.'%')->orWhere('slug', 'like', '%'.$search.'%')))
+            ->orderBy('name')->orderBy('id');
 
-        return $q->paginate($request->get('per_page', 50));
+        return $q->paginate($input['per_page'] ?? 50);
     }
 
     // GET /materials/{id}  (публично)
@@ -31,8 +36,8 @@ class MaterialController extends Controller
     public function store(Request $request)
     {
         $data = $request->validate([
-            'name' => ['required','string','max:255'],
-            'slug' => ['nullable','string','max:255','unique:materials,slug'],
+            'name' => ['required', 'string', 'max:255'],
+            'slug' => ['nullable', 'string', 'max:255', 'unique:materials,slug'],
         ]);
 
         $data['slug'] = $data['slug'] ?? Str::slug($data['name']);
@@ -41,6 +46,7 @@ class MaterialController extends Controller
         }
 
         $m = Material::create($data);
+
         return response()->json($m, 201);
     }
 
@@ -48,11 +54,11 @@ class MaterialController extends Controller
     public function update(Request $request, Material $material)
     {
         $data = $request->validate([
-            'name' => ['sometimes','string','max:255'],
-            'slug' => ['sometimes','string','max:255', Rule::unique('materials','slug')->ignore($material->id)],
+            'name' => ['sometimes', 'string', 'max:255'],
+            'slug' => ['sometimes', 'string', 'max:255', Rule::unique('materials', 'slug')->ignore($material->id)],
         ]);
 
-        if (isset($data['name']) && !isset($data['slug'])) {
+        if (isset($data['name']) && ! isset($data['slug'])) {
             $candidate = Str::slug($data['name']);
             if ($candidate && $candidate !== $material->slug) {
                 $data['slug'] = $candidate;
@@ -60,6 +66,7 @@ class MaterialController extends Controller
         }
 
         $material->update($data);
+
         return $material;
     }
 
@@ -67,6 +74,7 @@ class MaterialController extends Controller
     public function destroy(Material $material, \App\Services\ReferenceCatalogService $catalogs)
     {
         $catalogs->deleteUnused('materials', $material->id);
+
         return response()->noContent();
     }
 }

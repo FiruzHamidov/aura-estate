@@ -16,6 +16,7 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class KpiModuleApiFeatureTest extends TestCase
@@ -155,6 +156,8 @@ class KpiModuleApiFeatureTest extends TestCase
 
     public function test_post_kpi_daily_v2_upserts_rows_and_get_v2_returns_saved_values(): void
     {
+        $this->useMigratedDailyReportsTable();
+        $this->createDailyKpiSystemTables();
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
         $branch = Branch::create(['name' => 'Main']);
@@ -162,6 +165,25 @@ class KpiModuleApiFeatureTest extends TestCase
 
         $admin = User::create(['name' => 'Admin', 'phone' => '900000101', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
         $agent = User::create(['name' => 'Agent', 'phone' => '900000102', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
+        // Two real sales; other dates, agents and non-sale statuses do not count.
+        foreach ([
+            [],
+            ['sold_at' => '2026-05-05 13:00:00'],
+            ['sold_at' => '2026-05-06 12:00:00'],
+            ['sale_user_id' => $admin->id],
+            ['moderation_status' => 'approved'],
+        ] as $overrides) {
+            \DB::table('properties')->insert(array_merge([
+                'created_by' => $agent->id,
+                'agent_id' => $agent->id,
+                'sale_user_id' => $agent->id,
+                'moderation_status' => 'sold',
+                'sold_at' => '2026-05-05 12:00:00',
+                'created_at' => '2026-05-04 10:00:00',
+                'updated_at' => '2026-05-04 10:00:00',
+            ], $overrides));
+        }
 
         Sanctum::actingAs($admin);
 
@@ -200,7 +222,7 @@ class KpiModuleApiFeatureTest extends TestCase
             'deals_count' => 7,
         ]);
 
-        $response = $this->getJson('/api/kpi/daily?date=2026-05-05&v=2')
+        $response = $this->getJson('/api/kpi/daily?date=2026-05-05&v=2&agent_id='.$agent->id)
             ->assertOk();
 
         $metrics = $response->json('data.0.metrics');
@@ -211,15 +233,64 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertSame(0, (int) $metrics['shows']['final_value']);
         $this->assertSame(1, (int) $metrics['ads']['final_value']);
         $this->assertSame(2, (int) $metrics['calls']['final_value']);
-        $this->assertSame(7, (int) $metrics['sales']['final_value']);
+        $this->assertSame('system', $metrics['sales']['source']);
+        $this->assertSame(2, (int) $metrics['sales']['fact_value']);
+        $this->assertSame(0, (int) $metrics['sales']['manual_value']);
+        $this->assertSame(2, (int) $metrics['sales']['final_value']);
 
         $response->assertJsonPath('data.0.objects_raw', 0)
             ->assertJsonPath('data.0.shows_raw', 0)
             ->assertJsonPath('data.0.ads_raw', 1)
             ->assertJsonPath('data.0.calls_raw', 2)
-            ->assertJsonPath('data.0.sales_raw', 7)
+            ->assertJsonPath('data.0.sales_raw', 2)
             ->assertJsonPath('data.0.objects_display', '0.00')
-            ->assertJsonPath('data.0.sales_display', '7.00');
+            ->assertJsonPath('data.0.sales_display', '2.00');
+
+        $payload['rows'][0]['call'] = 9;
+        $payload['rows'][0]['deal'] = 99;
+        $this->postJson('/api/kpi/daily?v=2', $payload)->assertCreated();
+        $this->assertSame(1, DailyReport::query()->count(), DailyReport::query()->get()->toJson());
+        $this->assertDatabaseHas('daily_reports', ['user_id' => $agent->id, 'calls_count' => 9, 'deals_count' => 99]);
+        $this->getJson('/api/kpi/daily?date=2026-05-05&v=2&agent_id='.$agent->id)
+            ->assertOk()
+            ->assertJsonPath('data.0.metrics.calls.final_value', 9)
+            ->assertJsonPath('data.0.metrics.sales.final_value', 2)
+            ->assertJsonPath('data.0.metrics.sales.manual_value', 0);
+    }
+
+    public static function storedReportDates(): array
+    {
+        return ['date' => ['2026-05-05'], 'cast midnight' => ['2026-05-05 00:00:00']];
+    }
+
+    #[DataProvider('storedReportDates')]
+    public function test_daily_v2_retry_preserves_other_users_and_dates(string $storedDate): void
+    {
+        $this->useMigratedDailyReportsTable();
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900000111', 'role_id' => $adminRole->id, 'branch_id' => $branch->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900000112', 'role_id' => $agentRole->id, 'branch_id' => $branch->id]);
+        $reportId = \DB::table('daily_reports')->insertGetId([
+            'user_id' => $agent->id, 'role_slug' => 'agent', 'report_date' => $storedDate, 'calls_count' => 1,
+        ]);
+        \DB::table('daily_reports')->insert([
+            ['user_id' => $agent->id, 'role_slug' => 'agent', 'report_date' => '2026-05-06', 'calls_count' => 80],
+            ['user_id' => $admin->id, 'role_slug' => 'admin', 'report_date' => $storedDate, 'calls_count' => 90],
+        ]);
+        $othersBefore = \DB::table('daily_reports')->where('id', '!=', $reportId)->orderBy('id')->get()->toJson();
+
+        Sanctum::actingAs($admin);
+        foreach ([41, 42, 42] as $calls) {
+            $this->postJson('/api/kpi/daily?v=2', ['rows' => [[
+                'date' => '2026-05-05', 'role' => 'agent', 'employee_id' => $agent->id, 'calls' => $calls,
+            ]]])->assertCreated()->assertJsonPath('data.0.calls', $calls);
+            $this->assertDatabaseCount('daily_reports', 3);
+            $this->assertDatabaseHas('daily_reports', ['id' => $reportId, 'user_id' => $agent->id, 'calls_count' => $calls]);
+            $this->assertSame('2026-05-05', DailyReport::findOrFail($reportId)->report_date->toDateString());
+            $this->assertSame($othersBefore, \DB::table('daily_reports')->where('id', '!=', $reportId)->orderBy('id')->get()->toJson());
+        }
     }
 
     public function test_weekly_v2_returns_all_scope_employees_with_daily_report_stats_and_zero_kpi_rows(): void
@@ -1512,8 +1583,21 @@ class KpiModuleApiFeatureTest extends TestCase
             ->assertJsonPath('code', 'KPI_FORBIDDEN_ROLE_ACTION');
     }
 
-    public function test_monthly_v2_uses_personal_plan_and_exposes_plan_source_per_metric(): void
+    public static function planMonths(): array
     {
+        return [
+            '31 days' => [2026, 5, 31],
+            '30 days' => [2026, 6, 30],
+            '28 days' => [2026, 2, 28],
+            'leap February' => [2028, 2, 29],
+        ];
+    }
+
+    #[DataProvider('planMonths')]
+    public function test_monthly_v2_uses_personal_plan_and_exposes_plan_source_per_metric(int $year, int $month, int $days): void
+    {
+        (require database_path('migrations/2026_05_09_162458_add_plan_period_to_kpi_plans.php'))->up();
+        $date = sprintf('%04d-%02d-01', $year, $month);
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
         $branch = Branch::create(['name' => 'Main']);
@@ -1521,44 +1605,49 @@ class KpiModuleApiFeatureTest extends TestCase
         $admin = User::create(['name' => 'Admin', 'phone' => '900001901', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
         $agent = User::create(['name' => 'Agent', 'phone' => '900001902', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
 
-        KpiPlan::query()->create([
-            'role_slug' => 'agent',
-            'branch_id' => $branch->id,
-            'branch_group_id' => $group->id,
-            'metric_key' => 'calls',
-            'daily_plan' => 10,
-            'weight' => 1,
-            'effective_from' => '2026-05-01',
-            'effective_to' => null,
-        ]);
-        KpiPlan::query()->create([
-            'role_slug' => 'agent',
-            'user_id' => $agent->id,
-            'branch_id' => $branch->id,
-            'branch_group_id' => $group->id,
-            'metric_key' => 'calls',
-            'daily_plan' => 25,
-            'weight' => 1,
-            'effective_from' => '2026-05-01',
-            'effective_to' => null,
-        ]);
-
         Sanctum::actingAs($admin);
+        $this->putJson('/api/kpi/plans/common', [
+            'role' => 'agent',
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'effective_from' => $date,
+            'items' => [['metric_key' => 'calls', 'monthly_plan' => 10, 'weight' => 1]],
+        ])->assertOk();
 
-        $response = $this->getJson('/api/kpi/monthly?year=2026&month=5&role=agent&v=2&debug_plan_trace=1')
+        $url = '/api/kpi/monthly?year='.$year.'&month='.$month.'&agent_id='.$agent->id.'&v=2&debug_plan_trace=1';
+        $this->getJson($url)->assertOk()
+            ->assertJsonPath('data.0.metrics.calls.plan_source', 'common')
+            ->assertJsonPath('data.0.metrics.calls.target_value', 10);
+
+        $this->putJson('/api/kpi/plans/'.$agent->id, [
+            'effective_from' => $date,
+            'items' => [['metric_key' => 'calls', 'monthly_plan' => 25, 'weight' => 1]],
+        ])->assertOk()
+            ->assertJsonPath('data.0.monthly_plan', 25)
+            ->assertJsonPath('data.0.plan_period', 'month');
+        $this->assertDatabaseHas('kpi_plans', [
+            'user_id' => $agent->id, 'metric_key' => 'calls', 'daily_plan' => 25, 'plan_period' => 'month',
+        ]);
+
+        $response = $this->getJson($url)
             ->assertOk();
 
         $row = collect((array) $response->json('data'))
             ->firstWhere('employee_id', $agent->id);
         $this->assertNotNull($row);
         $this->assertSame('personal', (string) ($row['metrics']['calls']['plan_source'] ?? ''));
-        $this->assertSame(775, (int) ($row['metrics']['calls']['target_value'] ?? 0));
+        $this->assertSame(25, (int) ($row['metrics']['calls']['target_value'] ?? 0));
 
         $samples = collect((array) $response->json('meta.debug.plan_source_samples'));
         $sample = $samples->first(fn (array $s) => (int) ($s['employee_id'] ?? 0) === $agent->id && (string) ($s['metric'] ?? '') === 'calls');
         $this->assertNotNull($sample);
         $this->assertSame('personal', (string) ($sample['plan_source'] ?? ''));
         $this->assertSame(25, (int) ($sample['plan_daily_value'] ?? 0));
+
+        $this->getJson('/api/kpi/daily?v=2&date='.$date.'&agent_id='.$agent->id)
+            ->assertOk()
+            ->assertJsonPath('data.0.metrics.calls.plan_source', 'personal')
+            ->assertJsonPath('data.0.metrics.calls.target_value', round(25 / $days, 4));
     }
 
     public function test_weekly_v2_role_filter_applies_before_pagination_for_admin(): void
@@ -1812,9 +1901,27 @@ class KpiModuleApiFeatureTest extends TestCase
         $withReport = $this->getJson('/api/kpi/daily?v=2&date=2026-05-16&agent_id='.$agent->id)->assertOk();
         $rowWithReport = (array) $withReport->json('data.0');
         $this->assertTrue((bool) ($rowWithReport['submitted_daily_report'] ?? false));
-        $this->assertSame('manual', (string) data_get($rowWithReport, 'metrics.sales.source'));
-        $this->assertSame(2, (int) data_get($rowWithReport, 'metrics.sales.final_value'));
+        $this->assertSame('system', (string) data_get($rowWithReport, 'metrics.sales.source'));
+        $this->assertSame(0, (int) data_get($rowWithReport, 'metrics.sales.final_value'));
+        $this->assertSame(0, (int) data_get($rowWithReport, 'metrics.sales.manual_value'));
         $this->assertSame('mixed', (string) data_get($rowWithReport, 'metrics.calls.source'));
+
+        \DB::table('properties')->insert([
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+            'sale_user_id' => $agent->id,
+            'moderation_status' => 'sold',
+            'sold_at' => '2026-05-16 12:00:00',
+            'created_at' => '2026-05-15 10:00:00',
+            'updated_at' => '2026-05-16 12:00:00',
+        ]);
+        $this->getJson('/api/kpi/daily?v=2&date=2026-05-16&agent_id='.$agent->id)
+            ->assertOk()
+            ->assertJsonPath('data.0.metrics.sales.source', 'system')
+            ->assertJsonPath('data.0.metrics.sales.fact_value', 1)
+            ->assertJsonPath('data.0.metrics.sales.final_value', 1)
+            ->assertJsonPath('data.0.metrics.sales.manual_value', 0);
+        $this->assertDatabaseHas('daily_reports', ['user_id' => $agent->id, 'deals_count' => 2]);
     }
 
     public function test_daily_v2_plan_fallback_target_zero_and_status_calculation(): void
@@ -1961,7 +2068,13 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertSame(1, (int) data_get($row, 'metrics.sales.final_value'));
     }
 
-    public function test_daily_v2_supports_mixed_source_with_manual_override_rule(): void
+    public static function salesMappingSources(): array
+    {
+        return ['system' => ['system'], 'legacy manual' => ['manual'], 'legacy mixed' => ['mixed']];
+    }
+
+    #[DataProvider('salesMappingSources')]
+    public function test_daily_v2_keeps_sales_system_only_despite_mapping_override(string $source): void
     {
         $this->createDailyKpiSystemTables();
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
@@ -1973,7 +2086,7 @@ class KpiModuleApiFeatureTest extends TestCase
         Sanctum::actingAs($admin);
 
         $mapping = (array) config('kpi.v2.metric_mapping', []);
-        $mapping['sales']['source_type'] = 'mixed';
+        $mapping['sales']['source_type'] = $source;
         Config::set('kpi.v2.metric_mapping', $mapping);
 
         \DB::table('properties')->insert([
@@ -1989,10 +2102,11 @@ class KpiModuleApiFeatureTest extends TestCase
 
         $response = $this->getJson('/api/kpi/daily?v=2&date=2026-05-16&agent_id='.$agent->id)->assertOk();
         $row = (array) $response->json('data.0');
-        $this->assertSame('mixed', (string) data_get($row, 'metrics.sales.source'));
+        $this->assertSame('system', (string) data_get($row, 'metrics.sales.source'));
         $this->assertSame(1, (int) data_get($row, 'metrics.sales.fact_value'));
-        $this->assertSame(3, (int) data_get($row, 'metrics.sales.manual_value'));
-        $this->assertSame(3, (int) data_get($row, 'metrics.sales.final_value'));
+        $this->assertSame(0, (int) data_get($row, 'metrics.sales.manual_value'));
+        $this->assertSame(1, (int) data_get($row, 'metrics.sales.final_value'));
+        $this->assertDatabaseHas('daily_reports', ['user_id' => $agent->id, 'deals_count' => 3]);
     }
 
     public function test_weekly_v2_ads_calls_prefer_completed_crm_task_facts(): void
@@ -2267,6 +2381,18 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertLessThan(80.0, (float) data_get($row, 'kpi_percent'));
         $this->assertNotSame('done', (string) data_get($row, 'status'));
         $this->assertTrue((bool) data_get($row, 'kpi_trace.hard_gate.triggered'));
+    }
+
+    private function useMigratedDailyReportsTable(): void
+    {
+        Schema::drop('daily_reports');
+        foreach ([
+            '2026_04_27_110000_create_daily_reports_table.php',
+            '2026_05_01_210000_add_kpi_manual_fields_to_daily_reports_table.php',
+            '2026_05_05_123000_extend_daily_reports_for_sales_and_finalize.php',
+        ] as $migration) {
+            (require database_path('migrations/'.$migration))->up();
+        }
     }
 
     private function createDailyKpiSystemTables(): void

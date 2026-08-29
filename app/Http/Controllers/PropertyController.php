@@ -21,7 +21,6 @@ use Illuminate\Validation\Rule;
 use Intervention\Image\Drivers\Gd\Driver;
 use Intervention\Image\Encoders\JpegEncoder;
 use Intervention\Image\ImageManager;
-use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
 class PropertyController extends Controller
 {
@@ -642,6 +641,7 @@ class PropertyController extends Controller
                 ->find($property->getKey());
         }
 
+        $attachments = [];
         foreach (['owner_client_id', 'buyer_client_id'] as $field) {
             if (empty($data[$field])) {
                 continue;
@@ -662,19 +662,28 @@ class PropertyController extends Controller
                     'context_type' => ClientAttachService::CONTEXT_CLIENT,
                 ]);
 
-            try {
-                $this->clientAccess->ensureVisible($authUser, $client);
-            } catch (HttpExceptionInterface $exception) {
-                if (
-                    $exception->getStatusCode() !== 403
-                    || ! $this->clientAttachService->canAttachClient($authUser, $client, $attachContext)
-                ) {
-                    throw $exception;
-                }
+            if ($this->clientAccess->visibleQuery($authUser)->whereKey($client->id)->exists()) {
+                continue;
+            }
 
+            // Initial attachment may grant shared access; replacing an assigned
+            // contact still requires visibility of the replacement.
+            if (
+                ! empty($currentProperty?->{$field})
+                || ! $this->clientAttachService->canAttachClient($authUser, $client, $attachContext)
+            ) {
+                $this->clientAccess->ensureVisible($authUser, $client);
+            }
+
+            $attachments[] = [$client, $attachContext];
+        }
+
+        // Validate both relations before granting access to either contact.
+        DB::transaction(function () use ($authUser, $attachments): void {
+            foreach ($attachments as [$client, $attachContext]) {
                 $this->clientAttachService->attach($authUser, $client, $attachContext);
             }
-        }
+        });
     }
 
     // ==== Список (как у тебя), но на общих методах ====

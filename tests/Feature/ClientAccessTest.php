@@ -18,6 +18,7 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class ClientAccessTest extends TestCase
@@ -126,6 +127,11 @@ class ClientAccessTest extends TestCase
             $table->unique(['created_by', 'phone_normalized'], 'clients_unique_phone_per_creator');
             $table->unique(['created_by', 'email_normalized'], 'clients_unique_email_per_creator');
         });
+
+        // Exercise current client writes against the real source columns and FK.
+        foreach (['2026_04_28_120000_create_client_sources_table.php', '2026_04_28_120100_add_source_to_clients_table.php'] as $migration) {
+            (require database_path('migrations/'.$migration))->up();
+        }
 
         Schema::create('client_collaborators', function (Blueprint $table) {
             $table->id();
@@ -1162,7 +1168,16 @@ class ClientAccessTest extends TestCase
             ->assertJsonPath('owner_client_id', $hiddenSeller->id);
     }
 
-    public function test_agent_cannot_reassign_property_to_hidden_client(): void
+    public static function propertyContactFields(): array
+    {
+        return [
+            'owner' => ['owner_client_id'],
+            'buyer' => ['buyer_client_id'],
+        ];
+    }
+
+    #[DataProvider('propertyContactFields')]
+    public function test_agent_cannot_reassign_property_to_hidden_client(string $field): void
     {
         Setting::create([
             'key' => ClientAccess::VISIBILITY_SETTING_KEY,
@@ -1184,10 +1199,11 @@ class ClientAccessTest extends TestCase
         $propertyType = PropertyType::create(['name' => 'Apartment']);
         $propertyStatus = PropertyStatus::create(['name' => 'Available']);
         $property = $this->createProperty($propertyType, $propertyStatus, $agentA, [
-            'owner_client_id' => $visibleSeller->id,
+            $field => $visibleSeller->id,
             'owner_name' => $visibleSeller->full_name,
             'owner_phone' => $visibleSeller->phone,
         ]);
+        $before = $property->fresh()->getAttributes();
 
         Sanctum::actingAs($agentA);
 
@@ -1198,8 +1214,12 @@ class ClientAccessTest extends TestCase
             'price' => 260000,
             'currency' => 'TJS',
             'offer_type' => 'sale',
-            'owner_client_id' => $hiddenSeller->id,
-        ])->assertForbidden();
+            $field => $hiddenSeller->id,
+        ])->assertForbidden()->assertJsonPath('code', 'RBAC_SCOPE_VIOLATION');
+
+        $this->assertSame($before, $property->fresh()->getAttributes());
+        $this->assertDatabaseCount('client_collaborators', 0);
+        $this->assertDatabaseCount('crm_audit_logs', 0);
     }
 
     public function test_agent_can_create_property_with_attachable_hidden_client(): void
@@ -1225,7 +1245,7 @@ class ClientAccessTest extends TestCase
 
         Sanctum::actingAs($agentA);
 
-        $this->postJson('/api/properties', [
+        $response = $this->postJson('/api/properties', [
             'title' => 'New property with attached hidden seller',
             'type_id' => $propertyType->id,
             'status_id' => $propertyStatus->id,
@@ -1233,8 +1253,9 @@ class ClientAccessTest extends TestCase
             'currency' => 'TJS',
             'offer_type' => 'sale',
             'owner_client_id' => $hiddenSeller->id,
-        ])
-            ->assertOk()
+        ]);
+        $this->assertSame(200, $response->status(), $response->getContent());
+        $response
             ->assertJsonPath('owner_client_id', $hiddenSeller->id)
             ->assertJsonPath('owner_name', $hiddenSeller->full_name);
 
@@ -1243,6 +1264,117 @@ class ClientAccessTest extends TestCase
             'user_id' => $agentA->id,
             'role' => Client::COLLABORATOR_ROLE_VIEWER,
         ]);
+    }
+
+    public static function initialPropertyAttachments(): iterable
+    {
+        foreach (['create', 'update'] as $operation) {
+            foreach (['owner_client_id', 'buyer_client_id'] as $field) {
+                foreach ([true, false] as $sameBranch) {
+                    yield $operation.' '.$field.' '.($sameBranch ? 'same branch' : 'foreign branch') => [
+                        $operation, $field, $sameBranch,
+                    ];
+                }
+            }
+        }
+    }
+
+    #[DataProvider('initialPropertyAttachments')]
+    public function test_initial_property_attachment_preserves_branch_scope(string $operation, string $field, bool $sameBranch): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $clientBranch = $sameBranch ? $branch : Branch::create(['name' => 'Branch B']);
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = $this->createUser($role, $branch, 'Agent A');
+        $colleague = $this->createUser($role, $clientBranch, 'Agent B');
+        $client = $this->createClient($clientBranch, $colleague, $colleague, 'Existing seller', 1, Client::CONTACT_KIND_SELLER);
+        $type = PropertyType::create(['name' => 'Apartment']);
+        $status = PropertyStatus::create(['name' => 'Available']);
+        $property = $operation === 'update' ? $this->createProperty($type, $status, $agent) : null;
+        $before = $property?->fresh()->getAttributes();
+        $clientBefore = $client->fresh()->getAttributes();
+
+        Sanctum::actingAs($agent);
+        $this->getJson('/api/clients/'.$client->id)->assertForbidden();
+
+        $payload = [
+            'title' => 'Initial contact attachment',
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 260000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            $field => $client->id,
+        ];
+        $response = $property
+            ? $this->putJson('/api/properties/'.$property->id, $payload)
+            : $this->postJson('/api/properties', $payload);
+
+        if (! $sameBranch) {
+            $response->assertForbidden()->assertJsonPath('code', 'RBAC_SCOPE_VIOLATION');
+            $this->assertDatabaseCount('properties', $property ? 1 : 0);
+            $this->assertSame($before, $property?->fresh()->getAttributes());
+            $this->assertSame($clientBefore, $client->fresh()->getAttributes());
+            $this->assertDatabaseCount('client_collaborators', 0);
+            $this->assertDatabaseCount('crm_audit_logs', 0);
+            $this->getJson('/api/clients/'.$client->id)->assertForbidden();
+
+            return;
+        }
+
+        $response->assertOk()->assertJsonPath($field, $client->id);
+        $nameField = $field === 'owner_client_id' ? 'owner_name' : 'buyer_full_name';
+        $phoneField = $field === 'owner_client_id' ? 'owner_phone' : 'buyer_phone';
+        $response->assertJsonPath($nameField, $client->full_name)->assertJsonPath($phoneField, $client->phone);
+        $this->assertDatabaseCount('clients', 1);
+        $this->assertDatabaseHas('client_collaborators', [
+            'client_id' => $client->id,
+            'user_id' => $agent->id,
+            'role' => Client::COLLABORATOR_ROLE_VIEWER,
+        ]);
+        $this->assertDatabaseHas('crm_audit_logs', [
+            'auditable_id' => $client->id,
+            'actor_id' => $agent->id,
+            'event' => 'attached_existing_client',
+        ]);
+        $this->assertSame($colleague->id, $client->fresh()->responsible_agent_id);
+        $this->getJson('/api/clients/'.$client->id)->assertOk();
+    }
+
+    public function test_denied_second_contact_does_not_grant_access_to_first_contact(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $foreignBranch = Branch::create(['name' => 'Branch B']);
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = $this->createUser($role, $branch, 'Agent A');
+        $colleague = $this->createUser($role, $branch, 'Agent B');
+        $foreignAgent = $this->createUser($role, $foreignBranch, 'Agent C');
+        $owner = $this->createClient($branch, $colleague, $colleague, 'Hidden owner', 1, Client::CONTACT_KIND_SELLER);
+        $buyer = $this->createClient($foreignBranch, $foreignAgent, $foreignAgent, 'Foreign buyer');
+        $type = PropertyType::create(['name' => 'Apartment']);
+        $status = PropertyStatus::create(['name' => 'Available']);
+        $ownerBefore = $owner->fresh()->getAttributes();
+        $buyerBefore = $buyer->fresh()->getAttributes();
+
+        Sanctum::actingAs($agent);
+        $this->postJson('/api/properties', [
+            'title' => 'Rejected attachment',
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 260000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'owner_client_id' => $owner->id,
+            'buyer_client_id' => $buyer->id,
+        ])->assertForbidden()->assertJsonPath('code', 'RBAC_SCOPE_VIOLATION');
+
+        $this->assertDatabaseCount('properties', 0);
+        $this->assertDatabaseCount('client_collaborators', 0);
+        $this->assertDatabaseCount('crm_audit_logs', 0);
+        $this->assertSame($ownerBefore, $owner->fresh()->getAttributes());
+        $this->assertSame($buyerBefore, $buyer->fresh()->getAttributes());
+        $this->getJson('/api/clients/'.$owner->id)->assertForbidden();
+        $this->getJson('/api/clients/'.$buyer->id)->assertForbidden();
     }
 
     public function test_mop_can_create_property_in_own_branch_group(): void

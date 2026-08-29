@@ -152,7 +152,6 @@ val retrofit = Retrofit.Builder()
 | `GET` | `/api/stories/{story}` | App\Http\Controllers\StoryController@show |
 | `GET` | `/api/user/agents` | App\Http\Controllers\UserController@agents |
 | `POST` | `/api/agents/{agent}/reviews` | App\Http\Controllers\ReviewController@store |
-| `POST` | `/api/b24/token` | App\Http\Controllers\B24AuthController@issue |
 | `POST` | `/api/chat` | App\Http\Controllers\ChatController@handle |
 | `POST` | `/api/lead-requests` | App\Http\Controllers\LeadRequestController@store |
 | `POST` | `/api/login` | App\Http\Controllers\AuthController@login |
