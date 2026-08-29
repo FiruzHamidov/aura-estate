@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\SendFirebasePushNotification;
 use App\Models\Branch;
 use App\Models\Client;
 use App\Models\ClientType;
@@ -17,6 +18,7 @@ use App\Support\Notifications\NotificationType;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
@@ -168,6 +170,18 @@ class NotificationFeatureTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('push_subscriptions', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('user_id');
+            $table->text('token');
+            $table->string('token_hash', 64)->unique();
+            $table->string('platform', 32)->default('web');
+            $table->string('device_name')->nullable();
+            $table->text('user_agent')->nullable();
+            $table->timestamp('last_used_at')->nullable();
+            $table->timestamps();
+        });
+
         DB::table('client_types')->insert([
             'id' => 1,
             'name' => 'Физлицо',
@@ -305,6 +319,42 @@ class NotificationFeatureTest extends TestCase
         $this->assertSame('/s/public%2Fhash', $method->invoke($service, '/selections/71', $selection));
     }
 
+    public function test_authenticated_user_can_register_refresh_and_remove_a_push_subscription(): void
+    {
+        $branch = Branch::create(['name' => 'Central']);
+        $managerRole = Role::create(['name' => 'Manager', 'slug' => 'manager']);
+        $firstUser = $this->createUser($managerRole, $branch, 'First user');
+        $secondUser = $this->createUser($managerRole, $branch, 'Second user');
+        $token = 'firebase-registration-token';
+
+        Sanctum::actingAs($firstUser);
+        $this->putJson('/api/push-subscriptions', [
+            'token' => $token,
+            'platform' => 'web',
+            'device_name' => 'Chrome on macOS',
+        ])->assertCreated()->assertJsonPath('registered', true);
+
+        $this->assertDatabaseHas('push_subscriptions', [
+            'user_id' => $firstUser->id,
+            'token_hash' => hash('sha256', $token),
+        ]);
+
+        Sanctum::actingAs($secondUser);
+        $this->putJson('/api/push-subscriptions', ['token' => $token])
+            ->assertOk();
+
+        $this->assertDatabaseCount('push_subscriptions', 1);
+        $this->assertDatabaseHas('push_subscriptions', [
+            'user_id' => $secondUser->id,
+            'token_hash' => hash('sha256', $token),
+        ]);
+
+        $this->deleteJson('/api/push-subscriptions', ['token' => $token])
+            ->assertOk()
+            ->assertJsonPath('registered', false);
+        $this->assertDatabaseCount('push_subscriptions', 0);
+    }
+
     public function test_overdue_lead_without_a_manager_is_skipped_without_an_info_log(): void
     {
         $branch = Branch::create(['name' => 'Central']);
@@ -332,6 +382,7 @@ class NotificationFeatureTest extends TestCase
 
     public function test_overdue_lead_with_an_active_branch_manager_is_not_skipped(): void
     {
+        Queue::fake();
         $branch = Branch::create(['name' => 'Central']);
         $managerRole = Role::create(['name' => 'Manager', 'slug' => 'manager']);
         $manager = $this->createUser($managerRole, $branch, 'Manager');
@@ -351,6 +402,7 @@ class NotificationFeatureTest extends TestCase
             'subject_type' => $lead->getMorphClass(),
             'subject_id' => $lead->id,
         ]);
+        Queue::assertPushed(SendFirebasePushNotification::class);
     }
 
     private function createUser(Role $role, Branch $branch, string $name): User

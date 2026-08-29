@@ -71,6 +71,7 @@ use App\Http\Controllers\PropertyStatusController;
 use App\Http\Controllers\PropertyTypeController;
 use App\Http\Controllers\PublicRealtorController;
 use App\Http\Controllers\PublicTeamController;
+use App\Http\Controllers\PushSubscriptionController;
 use App\Http\Controllers\ReelController;
 use App\Http\Controllers\ReferenceCatalogController;
 use App\Http\Controllers\RepairTypeController;
@@ -379,6 +380,8 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::get('/notifications/unread-count', [NotificationController::class, 'unreadCount']);
     Route::patch('/notifications/read-all', [NotificationController::class, 'markAllRead']);
     Route::patch('/notifications/{notification}/read', [NotificationController::class, 'markRead']);
+    Route::put('/push-subscriptions', [PushSubscriptionController::class, 'store']);
+    Route::delete('/push-subscriptions', [PushSubscriptionController::class, 'destroy']);
     Route::get('/audit/api-requests', [ApiRequestLogController::class, 'index']);
     Route::get('/audit/api-requests/{apiRequestLog}', [ApiRequestLogController::class, 'show'])->whereNumber('apiRequestLog');
     Route::get('/my/stories', [StoryController::class, 'myStories']);

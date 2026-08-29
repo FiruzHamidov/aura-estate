@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Jobs\SendFirebasePushNotification;
 use App\Models\AttendanceDevice;
 use App\Models\Booking;
 use App\Models\Conversation;
@@ -1050,6 +1051,10 @@ class NotificationService
 
         if (in_array(NotificationChannel::TELEGRAM, $channels, true)) {
             $this->deliverTelegramNotification($notification, $recipient);
+        }
+
+        if (in_array(NotificationChannel::PUSH, $channels, true)) {
+            SendFirebasePushNotification::dispatch($notification->id)->afterCommit();
         }
 
         return $notification;

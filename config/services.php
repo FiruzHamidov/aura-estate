@@ -42,5 +42,9 @@ return [
         'auth_ttl_seconds' => (int) env('TELEGRAM_AUTH_TTL_SECONDS', 300),
     ],
 
+    'firebase' => [
+        'credentials' => env('FIREBASE_CREDENTIALS', storage_path('app/private/firebase-service-account.json')),
+    ],
+
 
 ];
