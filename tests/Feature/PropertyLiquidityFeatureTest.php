@@ -39,6 +39,51 @@ class PropertyLiquidityFeatureTest extends TestCase
         $response->assertJsonMissingPath('data.score');
     }
 
+    public function test_calculator_supports_every_production_property_type(): void
+    {
+        $profiles = [
+            'secondary' => ['rooms' => 2, 'total_area' => 70, 'is_from_developer' => false],
+            'new-buildings' => ['rooms' => 2, 'total_area' => 70, 'is_from_developer' => true],
+            'houses' => ['rooms' => 4, 'total_area' => 180, 'is_from_developer' => false],
+            'commercial' => ['rooms' => null, 'total_area' => 120, 'is_from_developer' => false],
+            'parking' => ['rooms' => null, 'total_area' => 18, 'is_from_developer' => false],
+            'industrial_base' => ['rooms' => null, 'total_area' => 900, 'is_from_developer' => false],
+        ];
+
+        foreach ($profiles as $slug => $profile) {
+            $typeId = DB::table('property_types')->insertGetId([
+                'name' => $slug,
+                'slug' => $slug,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
+
+            for ($index = 0; $index < 3; $index++) {
+                DB::table('properties')->insert($this->propertyRow($profile + [
+                    'title' => "{$slug} comparable {$index}",
+                    'type_id' => $typeId,
+                    'price' => 100_000 + $index * 1_000,
+                    'created_at' => now()->subDays(20 + $index),
+                    'listed_at' => now()->subDays(20 + $index),
+                ]));
+            }
+
+            $targetId = DB::table('properties')->insertGetId($this->propertyRow($profile + [
+                'title' => "{$slug} target",
+                'type_id' => $typeId,
+                'price' => 90_000,
+                'created_at' => now()->subDays(10),
+                'listed_at' => now()->subDays(10),
+            ]));
+
+            $snapshot = app(PropertyLiquidityCalculator::class)
+                ->calculate(Property::query()->findOrFail($targetId));
+
+            $this->assertNotNull($snapshot, "The {$slug} production type should be calculated");
+            $this->assertSame($typeId, $snapshot->property->type_id);
+        }
+    }
+
     public function test_above_market_position_is_hidden_from_client_but_visible_to_internal_owner(): void
     {
         $property = $this->createTarget(130_000, 1);

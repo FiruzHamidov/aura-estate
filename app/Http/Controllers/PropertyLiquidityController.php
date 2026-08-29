@@ -62,7 +62,7 @@ class PropertyLiquidityController extends Controller
 
         $purpose = $validated['purpose'] ?? 'portfolio';
         $query = $this->scopedActiveQuery($user)
-            ->with(['photos', 'agent:id,name,branch_id,branch_group_id', 'creator:id,name,branch_id,branch_group_id', 'latestLiquiditySnapshot'])
+            ->with(['photos', 'type:id,name,slug', 'agent:id,name,branch_id,branch_group_id', 'creator:id,name,branch_id,branch_group_id', 'latestLiquiditySnapshot'])
             ->whereHas('latestLiquiditySnapshot');
 
         if ($purpose === 'social') {
@@ -218,6 +218,11 @@ class PropertyLiquidityController extends Controller
             'discount_price' => $property->discount_price !== null ? (float) $property->discount_price : null,
             'currency' => $property->currency,
             'district' => $property->district,
+            'type' => $property->type ? [
+                'id' => $property->type->id,
+                'name' => $property->type->name,
+                'slug' => $property->type->slug,
+            ] : null,
             'rooms' => $property->rooms,
             'total_area' => $property->total_area !== null ? (float) $property->total_area : null,
             'photos' => $property->photos->map(fn ($photo) => ['id' => $photo->id, 'url' => $photo->file_path ? asset('storage/'.ltrim($photo->file_path, '/')) : null]),

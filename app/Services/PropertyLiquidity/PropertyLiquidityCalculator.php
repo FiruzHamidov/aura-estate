@@ -11,6 +11,15 @@ use Illuminate\Support\Collection;
 
 class PropertyLiquidityCalculator
 {
+    private const APARTMENT_TYPE_SLUGS = [
+        'apartment', 'secondary', 'new-buildings', 'room',
+    ];
+
+    private const RESIDENTIAL_TYPE_SLUGS = [
+        'apartment', 'secondary', 'new-buildings', 'room',
+        'house', 'houses', 'cottage',
+    ];
+
     public function __construct(private readonly PropertyMarketDays $marketDays) {}
 
     public function calculate(Property $property): ?PropertyLiquiditySnapshot
@@ -58,7 +67,7 @@ class PropertyLiquidityCalculator
         $priceScore = $this->priceScore($priceDelta);
         $districtMarket = $this->districtMarketScore($property, $strictActive, $strictSold);
         [$demandScore, $matchingNeeds] = $this->demandScore($property, max(1, $strictActive->count()));
-        $apartmentFit = $this->apartmentFitScore($property);
+        $propertyFit = $this->propertyFitScore($property);
         $interest = $this->interest($property, $strictActive);
 
         $weights = config('property-liquidity.weights');
@@ -66,7 +75,7 @@ class PropertyLiquidityCalculator
             $districtMarket['score'] * (float) $weights['district_market']
             + $priceScore * (float) $weights['price']
             + $demandScore * (float) $weights['demand']
-            + $apartmentFit * (float) $weights['apartment_fit']
+            + $propertyFit * (float) $weights['apartment_fit']
         );
         $score = $this->clamp($score);
 
@@ -82,10 +91,10 @@ class PropertyLiquidityCalculator
             $sold->count(),
             $priceScore,
             $demandScore,
-            $apartmentFit
+            $propertyFit
         );
         [$promotionPriority, $promotionEligibility] = $this->promotion($property, $score, $confidenceScore, $pricePosition, $interest);
-        [$factors, $recommendations] = $this->explanation($priceDelta, $matchingNeeds, $apartmentFit, $interest);
+        [$factors, $recommendations] = $this->explanation($priceDelta, $matchingNeeds, $propertyFit, $interest);
         $now = now();
         $modelVersion = (string) config('property-liquidity.model_version');
 
@@ -100,7 +109,7 @@ class PropertyLiquidityCalculator
             'district_market_score' => $districtMarket['score'],
             'price_score' => $priceScore,
             'demand_score' => $demandScore,
-            'apartment_fit_score' => $apartmentFit,
+            'apartment_fit_score' => $propertyFit,
             'interest_score' => $interest['score'],
             'price_position' => $pricePosition,
             'price_delta_pct' => $priceDelta,
@@ -155,7 +164,7 @@ class PropertyLiquidityCalculator
         $state = 'not_calculated';
 
         if ($property->floor !== null && $property->total_floors !== null && (int) $property->floor > (int) $property->total_floors) {
-            return ['status' => 'data_error', 'reasons' => ['Этаж квартиры не может быть выше этажности дома.']];
+            return ['status' => 'data_error', 'reasons' => ['Этаж объекта не может быть выше этажности здания.']];
         }
 
         foreach ([
@@ -164,18 +173,21 @@ class PropertyLiquidityCalculator
             'price' => 'Не указана цена.',
             'currency' => 'Не указана валюта.',
             'total_area' => 'Не указана общая площадь.',
-            'rooms' => 'Не указано количество комнат.',
         ] as $field => $message) {
             if ($property->{$field} === null || $property->{$field} === '' || (in_array($field, ['price', 'total_area'], true) && (float) $property->{$field} <= 0)) {
                 $reasons[] = $message;
             }
         }
 
-        if ($property->offer_type !== 'sale') {
-            $reasons[] = 'MVP рассчитывает только квартиры на продажу.';
+        if (! $property->type) {
+            $reasons[] = 'Не указан тип объекта.';
         }
-        if ($property->type?->slug !== 'apartment') {
-            $reasons[] = 'MVP рассчитывает только квартиры.';
+        if ($this->usesRooms($property) && ($property->rooms === null || $property->rooms === '')) {
+            $reasons[] = 'Не указано количество комнат.';
+        }
+
+        if ($property->offer_type !== 'sale') {
+            $reasons[] = 'Расчет доступен только для объектов на продажу.';
         }
         if ($property->moderation_status !== Property::PUBLIC_MODERATION_STATUS || $property->sold_at !== null) {
             $reasons[] = 'Расчет доступен только для активного опубликованного объекта.';
@@ -193,10 +205,17 @@ class PropertyLiquidityCalculator
             ->where('type_id', $property->type_id)
             ->where('location_id', $property->location_id)
             ->where('currency', $property->currency)
-            ->where('rooms', $property->rooms)
             ->whereBetween('total_area', [$area * (1 - $areaTolerance), $area * (1 + $areaTolerance)])
-            ->where('is_from_developer', (bool) $property->is_from_developer)
             ->where('created_at', '>=', now()->subMonths((int) config('property-liquidity.lookback_months', 12)));
+
+        if ($this->usesRooms($property)) {
+            $query->where('rooms', $property->rooms);
+        }
+        // The legacy generic apartment type stores primary/secondary market in a flag.
+        // Current production types already split those markets into separate type IDs.
+        if ($property->type?->slug === 'apartment') {
+            $query->where('is_from_developer', (bool) $property->is_from_developer);
+        }
 
         if ($districtOnly) {
             if ($property->district_id !== null) {
@@ -320,16 +339,17 @@ class PropertyLiquidityCalculator
                 $query->whereNull('budget_to')->orWhere('budget_to', '>=', $price * 0.90);
             })
             ->where(function (Builder $query) use ($property) {
-                $query->whereNull('rooms_from')->orWhere('rooms_from', '<=', $property->rooms);
-            })
-            ->where(function (Builder $query) use ($property) {
-                $query->whereNull('rooms_to')->orWhere('rooms_to', '>=', $property->rooms);
-            })
-            ->where(function (Builder $query) use ($property) {
                 $query->whereNull('area_from')->orWhere('area_from', '<=', $property->total_area);
             })
             ->where(function (Builder $query) use ($property) {
                 $query->whereNull('area_to')->orWhere('area_to', '>=', $property->total_area);
+            })
+            ->when($this->usesRooms($property), function (Builder $query) use ($property) {
+                $query->where(function (Builder $rooms) use ($property) {
+                    $rooms->whereNull('rooms_from')->orWhere('rooms_from', '<=', $property->rooms);
+                })->where(function (Builder $rooms) use ($property) {
+                    $rooms->whereNull('rooms_to')->orWhere('rooms_to', '>=', $property->rooms);
+                });
             })
             ->get(['client_id', 'updated_at'])
             ->unique('client_id');
@@ -344,17 +364,23 @@ class PropertyLiquidityCalculator
         return [$this->clamp((int) round(20 + $ratio * 40)), $needs->count()];
     }
 
-    private function apartmentFitScore(Property $property): int
+    private function propertyFitScore(Property $property): int
     {
+        if ($property->type?->slug === 'parking') {
+            return 50;
+        }
+
         $score = 100;
-        if ($property->floor !== null && (int) $property->floor === 1) {
-            $score -= 10;
-        }
-        if ($property->floor !== null && $property->total_floors !== null && (int) $property->floor === (int) $property->total_floors) {
-            $score -= 7;
-        }
-        if ($property->floor !== null && (int) $property->floor > 5 && ! $property->features?->contains('slug', 'elevator')) {
-            $score -= 15;
+        if ($this->isApartmentType($property)) {
+            if ($property->floor !== null && (int) $property->floor === 1) {
+                $score -= 10;
+            }
+            if ($property->floor !== null && $property->total_floors !== null && (int) $property->floor === (int) $property->total_floors) {
+                $score -= 7;
+            }
+            if ($property->floor !== null && (int) $property->floor > 5 && ! $property->features?->contains('slug', 'elevator')) {
+                $score -= 15;
+            }
         }
         if (! $property->condition && ! $property->repair_type_id) {
             $score -= 8;
@@ -362,7 +388,7 @@ class PropertyLiquidityCalculator
         if (! $property->has_parking) {
             $score -= 5;
         }
-        if (! $property->is_mortgage_available) {
+        if ($this->isResidentialType($property) && ! $property->is_mortgage_available) {
             $score -= 5;
         }
 
@@ -397,7 +423,14 @@ class PropertyLiquidityCalculator
 
     private function confidence(Property $property, int $soldCount, int $activeCount, bool $fallback): array
     {
-        $required = ['location_id', 'district', 'price', 'currency', 'total_area', 'rooms', 'floor', 'total_floors'];
+        $required = ['location_id', 'district', 'price', 'currency', 'total_area'];
+        if ($this->usesRooms($property)) {
+            $required[] = 'rooms';
+        }
+        if ($this->isApartmentType($property)) {
+            $required[] = 'floor';
+            $required[] = 'total_floors';
+        }
         $complete = collect($required)->filter(fn (string $field) => $property->{$field} !== null && $property->{$field} !== '')->count();
         $completeness = 100 * $complete / count($required);
         $sample = min(100, ($soldCount / 50 * 70) + ($activeCount / 30 * 30));
@@ -469,7 +502,7 @@ class PropertyLiquidityCalculator
             $factors[] = ['code' => 'active_demand', 'impact' => 'positive', 'text' => "Подходящих активных потребностей: {$matchingNeeds}"];
         }
         if ($fit < 70) {
-            $factors[] = ['code' => 'apartment_fit', 'impact' => 'negative', 'text' => 'Характеристики квартиры менее востребованы в этом сегменте'];
+            $factors[] = ['code' => 'apartment_fit', 'impact' => 'negative', 'text' => 'Характеристики объекта менее востребованы в этом сегменте'];
         }
         if (! $interest['insufficient_exposure'] && (int) $interest['percentile_in_district'] < 35) {
             $factors[] = ['code' => 'low_engagement', 'impact' => 'negative', 'text' => 'Темп просмотров ниже большинства аналогов'];
@@ -510,6 +543,21 @@ class PropertyLiquidityCalculator
             'liquidity_calculated_at' => now(),
             'liquidity_model_version' => (string) config('property-liquidity.model_version'),
         ]);
+    }
+
+    private function isApartmentType(Property $property): bool
+    {
+        return in_array($property->type?->slug, self::APARTMENT_TYPE_SLUGS, true);
+    }
+
+    private function isResidentialType(Property $property): bool
+    {
+        return in_array($property->type?->slug, self::RESIDENTIAL_TYPE_SLUGS, true);
+    }
+
+    private function usesRooms(Property $property): bool
+    {
+        return $this->isResidentialType($property);
     }
 
     private function clamp(int $value): int

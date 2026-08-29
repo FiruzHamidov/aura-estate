@@ -12,7 +12,7 @@ class RecalculatePropertyLiquidityCommand extends Command
 {
     protected $signature = 'properties:recalculate-liquidity {--property=} {--sync}';
 
-    protected $description = 'Recalculate liquidity for one property or all active sale apartments';
+    protected $description = 'Recalculate liquidity for one property or all active sale properties';
 
     public function handle(PropertyLiquidityCalculator $calculator): int
     {
@@ -24,20 +24,24 @@ class RecalculatePropertyLiquidityCommand extends Command
                 ->where('moderation_status', Property::PUBLIC_MODERATION_STATUS)
                 ->whereNull('sold_at'));
 
-        $count = 0;
-        $query->select('properties.*')->orderBy('id')->chunkById(100, function ($properties) use ($calculator, &$count): void {
+        $processed = 0;
+        $calculated = 0;
+        $skipped = 0;
+        $query->select('properties.*')->orderBy('id')->chunkById(100, function ($properties) use ($calculator, &$processed, &$calculated, &$skipped): void {
             foreach ($properties as $property) {
                 if ($this->option('sync')) {
-                    $calculator->calculate($property);
+                    $calculator->calculate($property) ? $calculated++ : $skipped++;
                 } else {
                     RecalculatePropertyLiquidity::dispatch($property->id);
                 }
-                $count++;
+                $processed++;
             }
         });
 
         $this->snapshotViews();
-        $this->info($this->option('sync') ? "Calculated: {$count}" : "Queued: {$count}");
+        $this->info($this->option('sync')
+            ? "Processed: {$processed}; calculated: {$calculated}; skipped: {$skipped}"
+            : "Queued: {$processed}");
 
         return self::SUCCESS;
     }

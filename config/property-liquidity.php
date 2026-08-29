@@ -1,7 +1,7 @@
 <?php
 
 return [
-    'model_version' => 'liquidity-rules-v1',
+    'model_version' => 'liquidity-rules-v2',
     'lookback_months' => 12,
     'demand_freshness_days' => 90,
     'minimum_sold_for_prediction' => 15,
