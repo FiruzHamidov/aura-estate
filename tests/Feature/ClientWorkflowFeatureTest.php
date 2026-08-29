@@ -418,6 +418,47 @@ class ClientWorkflowFeatureTest extends TestCase
             ->assertJsonPath('note', 'Updated note');
     }
 
+    public function test_booking_can_be_created_for_client_without_phone(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $group = $this->createBranchGroup($branch, 'Group A');
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = $this->createUser($agentRole, $branch, 'Agent A', $group);
+        $client = Client::create([
+            'full_name' => 'Client Without Phone',
+            'phone' => null,
+            'phone_normalized' => null,
+            'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
+            'created_by' => $agent->id,
+            'responsible_agent_id' => $agent->id,
+            'client_type_id' => ClientType::query()->value('id'),
+            'contact_kind' => Client::CONTACT_KIND_BUYER,
+            'status' => 'active',
+        ]);
+        $propertyId = $this->createProperty();
+
+        Sanctum::actingAs($agent);
+
+        $this->postJson('/api/bookings', [
+            'property_id' => $propertyId,
+            'agent_id' => $agent->id,
+            'client_id' => $client->id,
+            'start_time' => '2026-08-28T11:20:00+05:00',
+            'end_time' => '2026-08-28T12:00:00+05:00',
+            'note' => 'Client left a deposit.',
+        ])
+            ->assertCreated()
+            ->assertJsonPath('booking.crm_client_id', $client->id)
+            ->assertJsonPath('booking.client_phone', null);
+
+        $this->assertDatabaseHas('bookings', [
+            'agent_id' => $agent->id,
+            'crm_client_id' => $client->id,
+            'client_phone' => null,
+        ]);
+    }
+
     public function test_client_show_with_activities_include_returns_audit_entries(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);
