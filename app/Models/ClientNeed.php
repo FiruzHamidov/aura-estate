@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 class ClientNeed extends Model
@@ -30,6 +31,7 @@ class ClientNeed extends Model
         'currency',
         'location_id',
         'district',
+        'district_id',
         'property_type_id',
         'repair_type_id',
         'rooms_from',
@@ -58,6 +60,22 @@ class ClientNeed extends Model
         'wants_mortgage' => 'boolean',
         'meta' => 'array',
     ];
+
+    protected static function booted(): void
+    {
+        static::saving(function (ClientNeed $need): void {
+            if (
+                Schema::hasTable('districts')
+                && Schema::hasColumn('client_needs', 'district_id')
+                && ($need->isDirty('district') || $need->isDirty('location_id'))
+            ) {
+                $need->district_id = DB::table('districts')
+                    ->where('location_id', $need->location_id)
+                    ->whereRaw('LOWER(TRIM(name)) = ?', [mb_strtolower(trim((string) $need->district))])
+                    ->value('id');
+            }
+        });
+    }
 
     public function client()
     {
@@ -130,7 +148,7 @@ class ClientNeed extends Model
         static $hasPropertyTypePivotTable;
         $hasPropertyTypePivotTable ??= Schema::hasTable('client_need_property_type');
 
-        if (!$hasPropertyTypePivotTable) {
+        if (! $hasPropertyTypePivotTable) {
             return $this->property_type_id ? [(int) $this->property_type_id] : [];
         }
 
@@ -166,7 +184,7 @@ class ClientNeed extends Model
         static $hasRepairTypePivotTable;
         $hasRepairTypePivotTable ??= Schema::hasTable('client_need_repair_type');
 
-        if (!$hasRepairTypePivotTable) {
+        if (! $hasRepairTypePivotTable) {
             return $this->repair_type_id ? [(int) $this->repair_type_id] : [];
         }
 

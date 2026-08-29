@@ -63,6 +63,7 @@ use App\Http\Controllers\NewBuildingPlanController;
 use App\Http\Controllers\NotificationController;
 use App\Http\Controllers\ParkingTypeController;
 use App\Http\Controllers\PropertyController;
+use App\Http\Controllers\PropertyLiquidityController;
 use App\Http\Controllers\PropertyPhotoController;
 use App\Http\Controllers\PropertyReportController;
 use App\Http\Controllers\PropertyStatusController;
@@ -99,9 +100,10 @@ Route::get('/properties', [PropertyController::class, 'index']);
 Route::get('/properties/count', [PropertyController::class, 'count']);
 Route::get('/properties/map', [PropertyController::class, 'map']);
 Route::get('/properties/search', [PropertyController::class, 'search']);
-Route::get('/properties/{property}', [PropertyController::class, 'show']);
-Route::get('/properties/{property}/similar', [PropertyController::class, 'similar']);
-Route::post('/properties/{property}/view', [PropertyController::class, 'trackView'])->middleware('throttle:30,1');
+Route::get('/properties/{property}', [PropertyController::class, 'show'])->whereNumber('property');
+Route::get('/properties/{property}/similar', [PropertyController::class, 'similar'])->whereNumber('property');
+Route::get('/properties/{property}/liquidity', [PropertyLiquidityController::class, 'show'])->whereNumber('property');
+Route::post('/properties/{property}/view', [PropertyController::class, 'trackView'])->whereNumber('property')->middleware('throttle:30,1');
 Route::get('/properties/{property}/reels', [ReelController::class, 'propertyIndex']);
 Route::get('/reels', [ReelController::class, 'index']);
 Route::get('/reels/{id}', [ReelController::class, 'show'])->whereNumber('id');
@@ -436,6 +438,12 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::get('/bookings/{id}', [BookingController::class, 'show'])->whereNumber('id');
     Route::middleware('non.client')->group(function () {
         Route::get('/my-properties', [PropertyController::class, 'myProperties']);
+        Route::get('/properties/liquidity-feed', [PropertyLiquidityController::class, 'feed']);
+        Route::get('/reports/properties/liquidity', [PropertyLiquidityController::class, 'report']);
+        Route::get('/properties/{property}/liquidity/history', [PropertyLiquidityController::class, 'history'])->whereNumber('property');
+        Route::post('/admin/properties/{property}/liquidity/recalculate', [PropertyLiquidityController::class, 'recalculate'])->whereNumber('property');
+        Route::patch('/marketing/property-promotions/{property}', [PropertyLiquidityController::class, 'updatePromotion'])->whereNumber('property');
+        Route::patch('/properties/{property}/liquidity/business-priority', [PropertyLiquidityController::class, 'updateBusinessPriority'])->whereNumber('property');
 
         // Properties CRUD + photos
         Route::post('/properties', [PropertyController::class, 'store']);

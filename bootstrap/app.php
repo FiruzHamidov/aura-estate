@@ -66,6 +66,7 @@ return Application::configure(basePath: dirname(__DIR__))
                 'route' => request()->route()?->uri() ?? 'residential-or-lead',
                 'trace_id' => request()->attributes->get('trace_id'),
             ]);
+
             return false;
         });
 
@@ -152,5 +153,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $schedule->command('attendance:reprocess-pending')->everyMinute()->withoutOverlapping();
         $schedule->command('attendance:monitor-devices')->everyFiveMinutes()->withoutOverlapping();
         $schedule->command('attendance:prune-raw')->dailyAt('04:15');
+        $schedule->command('properties:refresh-liquidity-market')->dailyAt('02:00')->withoutOverlapping();
+        $schedule->command('properties:recalculate-liquidity')->dailyAt('02:30')->withoutOverlapping();
     })
     ->create();

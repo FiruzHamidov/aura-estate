@@ -84,14 +84,36 @@ class Property extends Model
     protected $appends = [
         'branch_group_id',
         'listing_updated_at',
+        'public_price_badge',
     ];
 
     protected $casts = [
         'listing_updated_at' => 'datetime',
+        'listed_at' => 'datetime',
+        'liquidity_calculated_at' => 'datetime',
+        'liquidity_score' => 'integer',
+        'liquidity_confidence' => 'integer',
+        'price_delta_pct' => 'decimal:2',
+        'promotion_priority_score' => 'integer',
+        'liquidity_business_priority' => 'boolean',
+        'liquidity_business_priority_at' => 'datetime',
     ];
 
     protected $hidden = [
         'effective_price',
+        'liquidity_score',
+        'liquidity_category',
+        'liquidity_confidence',
+        'price_position',
+        'price_delta_pct',
+        'promotion_priority_score',
+        'promotion_eligibility',
+        'liquidity_business_priority',
+        'liquidity_business_priority_comment',
+        'liquidity_business_priority_by',
+        'liquidity_business_priority_at',
+        'liquidity_calculated_at',
+        'liquidity_model_version',
     ];
 
     protected $fillable = [
@@ -135,6 +157,7 @@ class Property extends Model
         'branch_id',
         'branch_group_id',
         'district',
+        'district_id',
         'address',
         'owner_phone',
         'listing_type',
@@ -172,6 +195,20 @@ class Property extends Model
         'company_expected_income',
         'company_expected_income_currency',
         'planned_contract_signed_at',
+        'listed_at',
+        'liquidity_score',
+        'liquidity_category',
+        'liquidity_confidence',
+        'price_position',
+        'price_delta_pct',
+        'promotion_priority_score',
+        'promotion_eligibility',
+        'liquidity_business_priority',
+        'liquidity_business_priority_comment',
+        'liquidity_business_priority_by',
+        'liquidity_business_priority_at',
+        'liquidity_calculated_at',
+        'liquidity_model_version',
     ];
 
     protected static function booted(): void
@@ -182,6 +219,14 @@ class Property extends Model
                 && empty($property->getAttributes()['listing_updated_at'])
             ) {
                 $property->setAttribute('listing_updated_at', $property->created_at ?? now());
+            }
+
+            if (
+                Schema::hasColumn($property->getTable(), 'listed_at')
+                && empty($property->getAttributes()['listed_at'])
+                && $property->moderation_status === self::PUBLIC_MODERATION_STATUS
+            ) {
+                $property->setAttribute('listed_at', $property->created_at ?? now());
             }
         });
     }
@@ -240,6 +285,54 @@ class Property extends Model
     public function location()
     {
         return $this->belongsTo(Location::class);
+    }
+
+    public function districtRelation()
+    {
+        return $this->belongsTo(District::class, 'district_id');
+    }
+
+    public function liquiditySnapshots()
+    {
+        return $this->hasMany(PropertyLiquiditySnapshot::class);
+    }
+
+    public function latestLiquiditySnapshot()
+    {
+        return $this->hasOne(PropertyLiquiditySnapshot::class)->latestOfMany('calculated_at');
+    }
+
+    public function socialPromotions()
+    {
+        return $this->hasMany(PropertySocialPromotion::class);
+    }
+
+    public function statusHistory()
+    {
+        return $this->hasMany(PropertyStatusHistory::class)->orderBy('changed_at');
+    }
+
+    public function publicPriceBadge(): ?array
+    {
+        if (
+            $this->price_position !== 'below_market'
+            || (int) $this->liquidity_score < (int) config('property-liquidity.liquid_score_threshold', 65)
+            || (int) $this->liquidity_confidence < (int) config('property-liquidity.public_badge_minimum_confidence', 45)
+        ) {
+            return null;
+        }
+
+        return [
+            'code' => 'below_market',
+            'label' => 'Выгодная цена',
+            'tooltip' => 'Цена за м² ниже, чем у похожих квартир в этом районе.',
+            'explanation' => 'Платформа сравнила цену за квадратный метр с похожими активными квартирами в том же районе: учитывались тип объекта, количество комнат и площадь. Это информационная оценка на основе доступных объявлений, а не гарантия продажи или официальная оценка стоимости.',
+        ];
+    }
+
+    public function getPublicPriceBadgeAttribute(): ?array
+    {
+        return $this->publicPriceBadge();
     }
 
     public function repairType()

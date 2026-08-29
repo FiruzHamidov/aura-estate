@@ -1238,6 +1238,7 @@ class PropertyController extends Controller
             ] : null,
             'created_at' => $property->created_at?->toJSON(),
             'listing_updated_at' => $property->listing_updated_at?->toJSON(),
+            'public_price_badge' => $property->publicPriceBadge(),
         ];
     }
 
