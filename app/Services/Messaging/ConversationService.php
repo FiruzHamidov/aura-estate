@@ -5,6 +5,7 @@ namespace App\Services\Messaging;
 use App\Models\Conversation;
 use App\Models\ConversationMessage;
 use App\Models\ConversationParticipant;
+use App\Models\GuestSupportSession;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 
@@ -116,6 +117,31 @@ class ConversationService
         }
 
         return $message->load('author.role');
+    }
+
+    public function createGuestMessage(
+        Conversation $conversation,
+        GuestSupportSession $guestSession,
+        string $body,
+        ?array $meta = null
+    ): ConversationMessage {
+        $ownsConversation = $conversation->supportThread()
+            ->where('guest_session_id', $guestSession->id)
+            ->exists();
+
+        abort_unless($conversation->type === Conversation::TYPE_SUPPORT && $ownsConversation, 404);
+
+        $message = $conversation->messages()->create([
+            'author_id' => null,
+            'guest_session_id' => $guestSession->id,
+            'type' => ConversationMessage::TYPE_TEXT,
+            'body' => $body,
+            'meta' => $meta,
+        ]);
+
+        $conversation->touch();
+
+        return $message->load(['author.role', 'guestSession']);
     }
 
     public function markConversationRead(Conversation $conversation, User $user): void

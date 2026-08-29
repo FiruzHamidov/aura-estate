@@ -39,9 +39,11 @@ class SupportConversationController extends Controller
             ->whereHas('conversation.participants', fn ($query) => $query->where('user_id', $authUser->id))
             ->with([
                 'requester.role',
+                'guestSession',
                 'chatSession',
                 'conversation.participants.user.role',
                 'conversation.latestMessage.author.role',
+                'conversation.latestMessage.guestSession',
             ]);
     }
 
@@ -54,6 +56,7 @@ class SupportConversationController extends Controller
             default => 'internal_user',
         };
         $latestAuthorId = $thread->conversation->latestMessage?->author_id;
+        $latestGuestSessionId = $thread->conversation->latestMessage?->guest_session_id;
         $eligibleResponderIds = $thread->conversation->participants
             ->filter(fn ($participant) => in_array(
                 $participant->user?->role?->slug,
@@ -69,6 +72,7 @@ class SupportConversationController extends Controller
             'status' => $thread->status,
             'summary' => $thread->summary,
             'requester_user_id' => $thread->requester_user_id,
+            'guest_session_id' => $thread->guestSession?->public_id,
             'chat_session_id' => $thread->chatSession?->session_uuid,
             'created_at' => $thread->created_at?->toIso8601String(),
             'updated_at' => $thread->updated_at?->toIso8601String(),
@@ -77,15 +81,25 @@ class SupportConversationController extends Controller
                 'name' => $thread->requester->name,
                 'role_slug' => $thread->requester->role?->slug,
                 'kind' => $requesterKind,
-            ] : null,
+            ] : ($thread->guestSession ? [
+                'id' => $thread->guestSession->public_id,
+                'name' => 'Гость / потенциальный клиент без аккаунта',
+                'role_slug' => null,
+                'kind' => 'guest',
+            ] : null),
             'source' => $thread->meta['source'] ?? ($thread->chat_session_id ? 'chat' : 'support_form'),
             'responsibility' => [
                 'queue' => 'support',
                 'assigned_to_user_id' => null,
                 'eligible_responder_user_ids' => $eligibleResponderIds,
-                'response_required_from' => ! $latestAuthorId
+                'response_required_from' => ! $latestAuthorId && ! $latestGuestSessionId
                     ? 'none'
-                    : ((int) $latestAuthorId === (int) $thread->requester_user_id ? 'support_staff' : 'requester'),
+                    : (($thread->requester_user_id
+                        && (int) $latestAuthorId === (int) $thread->requester_user_id)
+                        || ($thread->guest_session_id
+                            && (int) $latestGuestSessionId === (int) $thread->guest_session_id)
+                            ? 'support_staff'
+                            : 'requester'),
             ],
             'conversation' => [
                 'id' => $thread->conversation->id,
@@ -96,6 +110,27 @@ class SupportConversationController extends Controller
                     'author_id' => $thread->conversation->latestMessage->author_id,
                     'type' => $thread->conversation->latestMessage->type,
                     'body' => $thread->conversation->latestMessage->body,
+                    'sender_identity' => $thread->conversation->latestMessage->guestSession ? [
+                        'kind' => 'guest',
+                        'id' => $thread->conversation->latestMessage->guestSession->public_id,
+                        'name' => 'Гость / потенциальный клиент без аккаунта',
+                        'role_slug' => null,
+                    ] : ($thread->conversation->latestMessage->author ? [
+                        'kind' => match ($thread->conversation->latestMessage->author->role?->slug) {
+                            'client' => 'client',
+                            'agent' => 'agent',
+                            'manager', 'operator', 'admin', 'superadmin' => 'support_staff',
+                            default => 'internal_user',
+                        },
+                        'id' => $thread->conversation->latestMessage->author->id,
+                        'name' => $thread->conversation->latestMessage->author->name,
+                        'role_slug' => $thread->conversation->latestMessage->author->role?->slug,
+                    ] : [
+                        'kind' => 'system',
+                        'id' => null,
+                        'name' => 'System',
+                        'role_slug' => null,
+                    ]),
                     'created_at' => $thread->conversation->latestMessage->created_at?->toIso8601String(),
                 ] : null,
             ],
@@ -182,9 +217,11 @@ class SupportConversationController extends Controller
             ->where('conversation_id', $conversation->id)
             ->with([
                 'requester.role',
+                'guestSession',
                 'chatSession',
                 'conversation.participants.user.role',
                 'conversation.latestMessage.author.role',
+                'conversation.latestMessage.guestSession',
             ])
             ->firstOrFail();
 

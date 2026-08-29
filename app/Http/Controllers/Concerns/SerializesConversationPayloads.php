@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Concerns;
 use App\Models\Conversation;
 use App\Models\ConversationMessage;
 use App\Models\ConversationParticipant;
+use App\Models\GuestSupportSession;
 use App\Models\User;
 
 trait SerializesConversationPayloads
@@ -14,7 +15,9 @@ trait SerializesConversationPayloads
         $conversation->loadMissing([
             'participants.user.role',
             'latestMessage.author.role',
+            'latestMessage.guestSession',
             'supportThread.requester.role',
+            'supportThread.guestSession',
         ]);
 
         return [
@@ -38,21 +41,28 @@ trait SerializesConversationPayloads
                 'id' => $conversation->supportThread->id,
                 'status' => $conversation->supportThread->status,
                 'requester_user_id' => $conversation->supportThread->requester_user_id,
+                'guest_session_id' => $conversation->supportThread->guestSession?->public_id,
                 'chat_session_id' => $conversation->supportThread->chat_session_id,
                 'summary' => $conversation->supportThread->summary,
                 'source' => $conversation->supportThread->meta['source']
                     ?? ($conversation->supportThread->chat_session_id ? 'chat' : 'support_form'),
                 'requester' => $conversation->supportThread->requester
                     ? $this->serializeIdentity($conversation->supportThread->requester)
-                    : null,
+                    : ($conversation->supportThread->guestSession
+                        ? $this->serializeGuestIdentity($conversation->supportThread->guestSession)
+                        : null),
                 'responsibility' => $this->serializeResponsibility($conversation),
             ] : null,
         ];
     }
 
-    private function serializeMessage(ConversationMessage $message, User $viewer, ?Conversation $conversation = null): array
-    {
-        $message->loadMissing('author.role');
+    private function serializeMessage(
+        ConversationMessage $message,
+        ?User $viewer,
+        ?Conversation $conversation = null,
+        ?GuestSupportSession $guestViewer = null
+    ): array {
+        $message->loadMissing('author.role', 'guestSession');
 
         $conversation ??= $message->conversation;
 
@@ -64,15 +74,19 @@ trait SerializesConversationPayloads
             'body' => $message->body,
             'meta' => $message->meta,
             'created_at' => $message->created_at?->toIso8601String(),
-            'role' => $this->messageRole($message, $viewer),
+            'role' => $this->messageRole($message, $viewer, $guestViewer),
             'delivery_status' => $this->deliveryStatus($message, $viewer, $conversation),
-            'sender' => $message->author ? $this->serializeSender($message->author) : null,
-            'sender_identity' => $message->author ? $this->serializeIdentity($message->author) : [
-                'kind' => 'system',
-                'role_slug' => null,
-                'id' => null,
-                'name' => 'System',
-            ],
+            'sender' => $message->author
+                ? $this->serializeSender($message->author)
+                : ($message->guestSession ? $this->serializeGuestSender($message->guestSession) : null),
+            'sender_identity' => $message->author
+                ? $this->serializeIdentity($message->author)
+                : ($message->guestSession ? $this->serializeGuestIdentity($message->guestSession) : [
+                    'kind' => 'system',
+                    'role_slug' => null,
+                    'id' => null,
+                    'name' => 'System',
+                ]),
             'author' => $message->author ? [
                 'id' => $message->author->id,
                 'name' => $message->author->name,
@@ -140,10 +154,34 @@ trait SerializesConversationPayloads
         ];
     }
 
+    private function serializeGuestIdentity(GuestSupportSession $session): array
+    {
+        return [
+            'kind' => 'guest',
+            'id' => $session->public_id,
+            'name' => 'Гость / потенциальный клиент без аккаунта',
+            'role_slug' => null,
+        ];
+    }
+
+    private function serializeGuestSender(GuestSupportSession $session): array
+    {
+        return [
+            'id' => $session->public_id,
+            'name' => 'Гость / потенциальный клиент без аккаунта',
+            'photo' => null,
+        ];
+    }
+
     private function serializeResponsibility(Conversation $conversation): array
     {
-        $latestAuthorId = $conversation->latestMessage?->author_id;
+        $latestMessage = $conversation->latestMessage;
+        $latestAuthorId = $latestMessage?->author_id;
         $requesterId = $conversation->supportThread?->requester_user_id;
+        $latestFromRequester = $requesterId
+            ? (int) $latestAuthorId === (int) $requesterId
+            : ($conversation->supportThread?->guest_session_id
+                && (int) $latestMessage?->guest_session_id === (int) $conversation->supportThread->guest_session_id);
         $eligibleResponders = $conversation->participants
             ->filter(fn (ConversationParticipant $participant) => in_array(
                 $participant->user?->role?->slug,
@@ -158,23 +196,34 @@ trait SerializesConversationPayloads
             'queue' => 'support',
             'assigned_to_user_id' => null,
             'eligible_responder_user_ids' => $eligibleResponders,
-            'response_required_from' => ! $latestAuthorId
+            'response_required_from' => ! $latestAuthorId && ! $latestMessage?->guest_session_id
                 ? 'none'
-                : ((int) $latestAuthorId === (int) $requesterId ? 'support_staff' : 'requester'),
+                : ($latestFromRequester ? 'support_staff' : 'requester'),
         ];
     }
 
-    private function messageRole(ConversationMessage $message, User $viewer): string
-    {
-        if ((int) $message->author_id === (int) $viewer->id) {
+    private function messageRole(
+        ConversationMessage $message,
+        ?User $viewer,
+        ?GuestSupportSession $guestViewer = null
+    ): string {
+        if ($viewer && (int) $message->author_id === (int) $viewer->id) {
             return 'me';
+        }
+
+        if ($guestViewer && (int) $message->guest_session_id === (int) $guestViewer->id) {
+            return 'me';
+        }
+
+        if ($message->guest_session_id) {
+            return 'guest';
         }
 
         return $message->author?->role?->slug
             ?? ($message->author_id ? 'user' : 'system');
     }
 
-    private function deliveryStatus(ConversationMessage $message, User $viewer, ?Conversation $conversation): string
+    private function deliveryStatus(ConversationMessage $message, ?User $viewer, ?Conversation $conversation): string
     {
         $metaStatus = $message->meta['delivery_status'] ?? null;
 
@@ -182,7 +231,7 @@ trait SerializesConversationPayloads
             return $metaStatus;
         }
 
-        if ((int) $message->author_id !== (int) $viewer->id || ! $conversation) {
+        if (! $viewer || (int) $message->author_id !== (int) $viewer->id || ! $conversation) {
             return 'delivered';
         }
 

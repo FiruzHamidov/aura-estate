@@ -45,7 +45,7 @@ class ConversationMessageController extends Controller
         ]);
 
         $messages = $conversation->messages()
-            ->with('author.role')
+            ->with(['author.role', 'guestSession'])
             ->orderByDesc('id')
             ->paginate((int) ($validated['per_page'] ?? 50))
             ->through(fn (ConversationMessage $message) => $this->serializeMessage($message, $authUser, $conversation));

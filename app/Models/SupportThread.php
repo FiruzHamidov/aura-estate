@@ -8,11 +8,13 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 class SupportThread extends Model
 {
     public const STATUS_OPEN = 'open';
+
     public const STATUS_CLOSED = 'closed';
 
     protected $fillable = [
         'conversation_id',
         'requester_user_id',
+        'guest_session_id',
         'chat_session_id',
         'escalated_by_user_id',
         'status',
@@ -40,6 +42,11 @@ class SupportThread extends Model
     public function requester(): BelongsTo
     {
         return $this->belongsTo(User::class, 'requester_user_id');
+    }
+
+    public function guestSession(): BelongsTo
+    {
+        return $this->belongsTo(GuestSupportSession::class, 'guest_session_id');
     }
 
     public function chatSession(): BelongsTo

@@ -45,6 +45,7 @@ use App\Http\Controllers\ExternalAgentController;
 use App\Http\Controllers\ExternalPropertyRequestController;
 use App\Http\Controllers\FavoriteController;
 use App\Http\Controllers\FeatureController;
+use App\Http\Controllers\GuestSupportConversationController;
 use App\Http\Controllers\HeatingTypeController;
 use App\Http\Controllers\KpiModuleController;
 use App\Http\Controllers\KpiPeriodLockController;
@@ -284,6 +285,21 @@ Route::scopeBindings()->group(function () {
 
 // история чата (публично)
 Route::get('/chat/history', [ChatController::class, 'history']);
+
+Route::prefix('guest-support')
+    ->middleware('guest.support.request')
+    ->group(function () {
+        Route::get('/conversations', [GuestSupportConversationController::class, 'index'])
+            ->middleware('throttle:guest-support-read');
+        Route::post('/conversations', [GuestSupportConversationController::class, 'store'])
+            ->middleware('throttle:guest-support-create');
+        Route::get('/conversations/{conversation}', [GuestSupportConversationController::class, 'show'])
+            ->middleware('throttle:guest-support-read');
+        Route::get('/conversations/{conversation}/messages', [GuestSupportConversationController::class, 'messages'])
+            ->middleware('throttle:guest-support-read');
+        Route::post('/conversations/{conversation}/messages', [GuestSupportConversationController::class, 'storeMessage'])
+            ->middleware('throttle:guest-support-message');
+    });
 
 // --- ЗАЩИЩЁННЫЕ ---
 Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(function () {

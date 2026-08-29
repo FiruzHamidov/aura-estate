@@ -415,7 +415,12 @@ class NotificationService
 
     public function handleConversationMessageCreated(ConversationMessage $message): void
     {
-        $message->loadMissing('conversation.supportThread.requester.role', 'author.role');
+        $message->loadMissing(
+            'conversation.supportThread.requester.role',
+            'conversation.supportThread.guestSession',
+            'author.role',
+            'guestSession'
+        );
 
         $recipients = $this->recipients->conversationParticipants($message->conversation, $message->author_id);
         $channels = NotificationType::defaultChannels(NotificationType::CHAT_NEW_MESSAGE);
@@ -460,10 +465,18 @@ class NotificationService
                         'name' => $message->author->name,
                         'role_slug' => $message->author->role?->slug,
                         'kind' => $this->messageAuthorKind($message->author),
-                    ] : null,
+                    ] : ($message->guestSession ? [
+                        'id' => $message->guestSession->public_id,
+                        'name' => 'Гость / потенциальный клиент без аккаунта',
+                        'role_slug' => null,
+                        'kind' => 'guest',
+                    ] : null),
                     'response_required_from' => $message->conversation->type !== Conversation::TYPE_SUPPORT
                         ? 'conversation_participant'
-                        : ((int) $message->author_id === (int) $message->conversation->supportThread?->requester_user_id
+                        : (($message->conversation->supportThread?->requester_user_id
+                            && (int) $message->author_id === (int) $message->conversation->supportThread->requester_user_id)
+                            || ($message->conversation->supportThread?->guest_session_id
+                                && (int) $message->guest_session_id === (int) $message->conversation->supportThread->guest_session_id)
                             ? 'support_staff'
                             : 'requester'),
                 ],
@@ -473,10 +486,13 @@ class NotificationService
 
     private function conversationMessageTitle(ConversationMessage $message): string
     {
-        $kind = $message->author ? $this->messageAuthorKind($message->author) : 'system';
+        $kind = $message->guest_session_id
+            ? 'guest'
+            : ($message->author ? $this->messageAuthorKind($message->author) : 'system');
 
         return match ($kind) {
             'client' => 'Новое сообщение от клиента',
+            'guest' => 'Новое обращение от гостя',
             'agent' => 'Новое сообщение от агента',
             'support_staff', 'internal_user' => 'Новое сообщение от сотрудника',
             default => 'Новое сообщение',

@@ -8,11 +8,13 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 class ConversationMessage extends Model
 {
     public const TYPE_TEXT = 'text';
+
     public const TYPE_SYSTEM = 'system';
 
     protected $fillable = [
         'conversation_id',
         'author_id',
+        'guest_session_id',
         'type',
         'body',
         'meta',
@@ -38,5 +40,10 @@ class ConversationMessage extends Model
     public function author(): BelongsTo
     {
         return $this->belongsTo(User::class, 'author_id');
+    }
+
+    public function guestSession(): BelongsTo
+    {
+        return $this->belongsTo(GuestSupportSession::class, 'guest_session_id');
     }
 }

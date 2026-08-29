@@ -3,6 +3,7 @@
 use App\Http\Middleware\DetectClientLocale;
 use App\Http\Middleware\EnforceRopBranchScope;
 use App\Http\Middleware\EnsureDailyReportSubmitted;
+use App\Http\Middleware\EnsureGuestSupportRequest;
 use App\Http\Middleware\EnsureTraceId;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\EnsureUserIsNotClient;
@@ -45,6 +46,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'active.user' => EnsureUserIsActive::class,
             'daily.report' => EnsureDailyReportSubmitted::class,
+            'guest.support.request' => EnsureGuestSupportRequest::class,
             'non.client' => EnsureUserIsNotClient::class,
             'rop.branch.scope' => EnforceRopBranchScope::class,
             'kpi.performance' => \App\Http\Middleware\LogKpiPerformance::class,

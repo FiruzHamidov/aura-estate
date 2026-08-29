@@ -40,7 +40,9 @@ class ConversationController extends Controller
                 'creator.role',
                 'participants.user.role',
                 'latestMessage.author.role',
-                'supportThread',
+                'latestMessage.guestSession',
+                'supportThread.requester.role',
+                'supportThread.guestSession',
             ]);
     }
 
@@ -111,7 +113,9 @@ class ConversationController extends Controller
             'creator.role',
             'participants.user.role',
             'latestMessage.author.role',
-            'supportThread',
+            'latestMessage.guestSession',
+            'supportThread.requester.role',
+            'supportThread.guestSession',
         ]);
 
         $this->conversations->markConversationRead($conversation, $authUser);
