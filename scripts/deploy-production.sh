@@ -2,6 +2,29 @@
 set -Eeuo pipefail
 source /etc/aura-deploy/runtime.env
 repo=/var/www/aura-estate
+backup_root=/var/backups/aura-deploy
+build_root=/var/lib/aura-deploy/backend-builds
+
+prune_backend_artifacts() {
+  local kept=0
+  local entry
+  local target
+
+  while IFS= read -r -d '' entry; do
+    target=${entry#* }
+    if (( kept < 2 )); then
+      ((kept += 1))
+      continue
+    fi
+    [[ $target == "$backup_root/"backend-* ]] || exit 2
+    rm -rf -- "$target"
+  done < <(find "$backup_root" -mindepth 1 -maxdepth 1 -type d -name 'backend-*' -printf '%T@ %p\0' | sort -z -nr)
+
+  while IFS= read -r -d '' target; do
+    [[ $target == "$build_root/"* ]] || exit 2
+    rm -rf -- "$target"
+  done < <(find "$build_root" -mindepth 1 -maxdepth 1 -type d -print0)
+}
 export GIT_SSH_COMMAND="ssh -i /etc/aura-deploy/backend_readonly -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/aura-deploy/github_known_hosts"
 export GIT_TERMINAL_PROMPT=0 COMPOSER_ALLOW_SUPERUSER=1
 remote=git@github.com:FiruzHamidov/aura-estate.git
@@ -43,11 +66,12 @@ if [[ $sha != "$latest" ]]; then
   exit 0
 fi
 git -C "$repo" merge-base --is-ancestor HEAD "$sha"
+install -d -m 700 "$backup_root" "$build_root"
+prune_backend_artifacts
 available_kb=$(df -Pk /var/www | awk 'NR==2 {print $4}')
 (( available_kb > 3 * 1024 * 1024 )) || { echo 'Less than 3 GiB free; deployment stopped.' >&2; exit 1; }
-install -d -m 700 /var/backups/aura-deploy /var/lib/aura-deploy/backend-builds
-backup=$(mktemp -d "/var/backups/aura-deploy/backend-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")
-stage=$(mktemp -d "/var/lib/aura-deploy/backend-builds/${sha}.XXXXXX")
+backup=$(mktemp -d "$backup_root/backend-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")
+stage=$(mktemp -d "$build_root/${sha}.XXXXXX")
 git -C "$repo" rev-parse HEAD > "$backup/previous-commit"
 git -C "$repo" archive HEAD | gzip > "$backup/source.tar.gz"
 install -m 600 "$repo/.env" "$backup/environment"
@@ -70,6 +94,7 @@ finish() {
   if (( maintenance == 1 )); then (cd "$repo" && php artisan up) || true; fi
   if (( result != 0 )); then
     echo "Backend deployment failed. Source, environment, database and previous dependencies: $backup" >&2
+    echo "Failed build retained for diagnosis until the next deploy: $stage" >&2
     echo 'Database rollback is deliberately not automatic; review migration compatibility before recovery.' >&2
   fi
   exit "$result"
@@ -108,4 +133,5 @@ for attempt in {1..10}; do
 done
 supervisorctl status aura-estate-queue:aura-estate-queue_00 | grep RUNNING
 printf '%s\n' "$sha" > /var/lib/aura-deploy/backend.current
+prune_backend_artifacts
 echo "Backend deployed: $sha; recovery backup: $backup"
