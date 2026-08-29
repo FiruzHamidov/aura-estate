@@ -24,6 +24,7 @@ class UserController extends Controller
     private const HR_EMPLOYEE_ROLE_SLUGS = ['agent', 'rop', 'mop', 'branch_director'];
     private const HR_EDITABLE_ROLE_SLUGS = ['agent', 'rop', 'mop', 'branch_director', 'client'];
     private const HR_CREATABLE_ROLE_SLUGS = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop'];
+    private const ROP_EDITABLE_ROLE_SLUGS = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'external_agent', 'rop', 'client'];
 
     private function authUser(): User
     {
@@ -73,7 +74,7 @@ class UserController extends Controller
         }
 
         // Clients do not belong to branches. This does not expand employee access.
-        if ($roleSlug === 'branch_director' && $includeClients) {
+        if ($this->isBranchScopedManager($roleSlug) && $includeClients) {
             return $query->where(function (Builder $scope) use ($authUser, $includeUnassigned) {
                 $scope->whereHas('role', fn (Builder $roles) => $roles->where('slug', 'client'));
                 if (! empty($authUser->branch_id)) {
@@ -257,7 +258,20 @@ class UserController extends Controller
 
     private function authorizeUserMutation(User $authUser, User $targetUser, string $operation): void
     {
-        if ($this->roleSlug($authUser) !== 'hr') {
+        $actorRole = $this->roleSlug($authUser);
+
+        if ($this->isBranchScopedManager($actorRole)) {
+            $targetUser->loadMissing('role');
+            abort_unless(
+                in_array($this->roleSlug($targetUser), self::ROP_EDITABLE_ROLE_SLUGS, true),
+                403,
+                'РОП может изменять пользователей только до уровня РОП включительно.'
+            );
+
+            return;
+        }
+
+        if ($actorRole !== 'hr') {
             return;
         }
 
@@ -297,7 +311,7 @@ class UserController extends Controller
         return null;
     }
 
-    private function authorizeAssignedRole(User $authUser, ?Role $targetRole): void
+    private function authorizeAssignedRole(User $authUser, ?Role $targetRole, ?User $targetUser = null): void
     {
         if (! $targetRole) {
             return;
@@ -309,7 +323,19 @@ class UserController extends Controller
             return;
         }
 
-        abort_unless(in_array($targetRole->slug, $allowedRoleSlugs, true), 422, 'This role cannot be assigned.');
+        if (in_array($targetRole->slug, $allowedRoleSlugs, true)) {
+            return;
+        }
+
+        if ($targetUser && $this->isBranchScopedManager($this->roleSlug($authUser))) {
+            $targetUser->loadMissing('role');
+            if ($this->roleSlug($targetUser) === $targetRole->slug
+                && in_array($targetRole->slug, self::ROP_EDITABLE_ROLE_SLUGS, true)) {
+                return;
+            }
+        }
+
+        abort(422, 'This role cannot be assigned.');
     }
 
     private function normalizeBranchIdForMutation(array $data, User $authUser, ?Role $targetRole): array
@@ -579,7 +605,7 @@ class UserController extends Controller
         $targetRole = $this->resolveRequestedRole($request, $user);
 
         if ($request->filled('role_id')) {
-            $this->authorizeAssignedRole($authUser, $targetRole);
+            $this->authorizeAssignedRole($authUser, $targetRole, $user);
             $this->authorizeHrRoleTransition($authUser, $user, $targetRole);
         }
 
