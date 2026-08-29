@@ -965,6 +965,68 @@ class UserAccessTest extends TestCase
         }
     }
 
+    public function test_rop_level_managers_edit_clients_and_users_only_through_rop(): void
+    {
+        $branch = Branch::create(['name' => 'Own branch']);
+        $otherBranch = Branch::create(['name' => 'Other branch']);
+        $roleSlugs = ['client', 'agent', 'rop', 'branch_director', 'admin'];
+        $roles = collect($roleSlugs)->mapWithKeys(fn (string $slug) => [
+            $slug => Role::create(['name' => $slug, 'slug' => $slug]),
+        ]);
+
+        $client = User::create([
+            'name' => 'Client', 'phone' => '901150001', 'role_id' => $roles['client']->id,
+            'branch_id' => null, 'status' => 'active',
+        ]);
+        $ownAgent = User::create([
+            'name' => 'Agent', 'phone' => '901150002', 'role_id' => $roles['agent']->id,
+            'branch_id' => $branch->id, 'status' => 'active',
+        ]);
+        $ownRop = User::create([
+            'name' => 'Target ROP', 'phone' => '901150003', 'role_id' => $roles['rop']->id,
+            'branch_id' => $branch->id, 'status' => 'active',
+        ]);
+        $ownDirector = User::create([
+            'name' => 'Director', 'phone' => '901150004', 'role_id' => $roles['branch_director']->id,
+            'branch_id' => $branch->id, 'status' => 'active',
+        ]);
+        $ownAdmin = User::create([
+            'name' => 'Admin', 'phone' => '901150005', 'role_id' => $roles['admin']->id,
+            'branch_id' => $branch->id, 'status' => 'active',
+        ]);
+        $foreignAgent = User::create([
+            'name' => 'Foreign Agent', 'phone' => '901150006', 'role_id' => $roles['agent']->id,
+            'branch_id' => $otherBranch->id, 'status' => 'active',
+        ]);
+
+        foreach (['rop', 'branch_director'] as $index => $actorRole) {
+            $actor = User::create([
+                'name' => 'Actor '.$actorRole, 'phone' => '90115001'.$index,
+                'role_id' => $roles[$actorRole]->id, 'branch_id' => $branch->id, 'status' => 'active',
+            ]);
+            Sanctum::actingAs($actor);
+
+            $this->getJson('/api/user?role=client')->assertOk()->assertJsonFragment(['id' => $client->id]);
+            $this->patchJson('/api/user/'.$client->id, [
+                'name' => 'Client by '.$actorRole, 'role_id' => $roles['client']->id,
+            ])->assertOk()->assertJsonPath('branch_id', null);
+            $this->patchJson('/api/user/'.$ownAgent->id, ['name' => 'Agent by '.$actorRole])
+                ->assertOk()->assertJsonPath('name', 'Agent by '.$actorRole);
+            $this->patchJson('/api/user/'.$ownRop->id, [
+                'name' => 'ROP by '.$actorRole, 'role_id' => $roles['rop']->id,
+            ])->assertOk()->assertJsonPath('role.slug', 'rop');
+
+            $this->patchJson('/api/user/'.$ownDirector->id, ['name' => 'Blocked'])->assertForbidden();
+            $this->patchJson('/api/user/'.$ownAdmin->id, ['name' => 'Blocked'])->assertForbidden();
+            $this->patchJson('/api/user/'.$foreignAgent->id, ['name' => 'Blocked'])->assertForbidden();
+            $this->deleteJson('/api/user/'.$ownDirector->id, ['distribute_to_agents' => true])->assertForbidden();
+        }
+
+        $this->assertDatabaseHas('users', ['id' => $ownDirector->id, 'name' => 'Director']);
+        $this->assertDatabaseHas('users', ['id' => $ownAdmin->id, 'name' => 'Admin']);
+        $this->assertDatabaseHas('users', ['id' => $foreignAgent->id, 'name' => 'Foreign Agent']);
+    }
+
     public function test_hr_creation_role_ceiling_is_enforced_for_every_role_and_cannot_be_bypassed(): void
     {
         $branch = Branch::create(['name' => 'HR Branch']);
