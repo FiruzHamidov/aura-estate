@@ -20,12 +20,13 @@ class ChatController extends Controller
         $validated = $request->validate([
             'message' => ['required', 'string', 'max:5000'],
             'session_id' => ['nullable', 'string', 'max:100'],
-            'user_id' => ['nullable', 'integer'],
             'context' => ['nullable', 'array'],
         ]);
 
-        // Если есть авторизация — перезапишем user_id
-        $userId = $request->user('sanctum')?->id ?: auth()->id() ?: ($validated['user_id'] ?? null);
+        // Identity comes exclusively from the authenticated session. Accepting a
+        // caller-supplied user id would turn an anonymous prospect into another
+        // client/agent in support and lead attribution.
+        $userId = $request->user('sanctum')?->id ?: auth()->id();
 
         $reply = $this->chat->reply(
             $validated['message'],
@@ -40,17 +41,17 @@ class ChatController extends Controller
     public function history(Request $request): JsonResponse
     {
         $sessionUuid = $request->query('session_id');
-        if (!$sessionUuid) {
+        if (! $sessionUuid) {
             return response()->json(['message' => 'session_id required'], 422);
         }
 
         $session = \App\Models\ChatSession::where('session_uuid', $sessionUuid)->first();
-        if (!$session) {
+        if (! $session) {
             return response()->json(['session_id' => $sessionUuid, 'messages' => []], 200);
         }
 
         // Пагинация курсором (опционально в запросе: ?cursor=...&limit=50)
-        $limit  = (int) $request->query('limit', 50);
+        $limit = (int) $request->query('limit', 50);
         $cursor = $request->query('cursor'); // created_at ISO или id — ниже выберем по created_at
 
         $qb = \App\Models\ChatMessage::where('chat_session_id', $session->id)
@@ -62,9 +63,9 @@ class ChatController extends Controller
             // Берём всё «после» курсора по времени
             try {
                 $cursorTs = \Carbon\Carbon::parse($cursor);
-                $qb->where(function($q) use ($cursorTs) {
+                $qb->where(function ($q) use ($cursorTs) {
                     $q->where('created_at', '>', $cursorTs)
-                        ->orWhere(function($qq) use ($cursorTs) {
+                        ->orWhere(function ($qq) use ($cursorTs) {
                             $qq->where('created_at', '=', $cursorTs);
                             $qq->where('id', '>', 0);
                         });
@@ -74,7 +75,7 @@ class ChatController extends Controller
             }
         }
 
-        $msgs = $qb->limit($limit)->get(['id','role','content','items','created_at']);
+        $msgs = $qb->limit($limit)->get(['id', 'role', 'content', 'items', 'created_at']);
 
         // Безопасное преобразование JSON + нормализация времени
         $messages = [];
@@ -94,26 +95,25 @@ class ChatController extends Controller
             }
 
             $messages[] = [
-                'id'         => $m->id,
-                'role'       => $m->role,
-                'content'    => $m->content, // может быть null у tool
-                'items'      => $decodedItems,
+                'id' => $m->id,
+                'role' => $m->role,
+                'content' => $m->content, // может быть null у tool
+                'items' => $decodedItems,
                 'created_at' => optional($m->created_at)->toISOString(),
             ];
         }
 
         // next_cursor = время последнего сообщения
         $nextCursor = null;
-        if (!empty($messages)) {
+        if (! empty($messages)) {
             $last = end($messages);
             $nextCursor = $last['created_at'];
         }
 
         return response()->json([
-            'session_id'  => $sessionUuid,
-            'messages'    => $messages,      // уже массив, не Collection
+            'session_id' => $sessionUuid,
+            'messages' => $messages,      // уже массив, не Collection
             'next_cursor' => $nextCursor,    // можно не использовать на фронте
         ], 200);
     }
-
 }

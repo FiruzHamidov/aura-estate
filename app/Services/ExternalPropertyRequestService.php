@@ -59,11 +59,11 @@ class ExternalPropertyRequestService
             return $query->where(function (Builder $scope) use ($user) {
                 $scope->where('assigned_agent_id', $user->id);
 
-                if (!empty($user->branch_group_id)) {
+                if (! empty($user->branch_group_id)) {
                     $scope->orWhere('branch_group_id', $user->branch_group_id);
                 }
 
-                if (!empty($user->branch_id)) {
+                if (! empty($user->branch_id)) {
                     $scope->orWhere('branch_id', $user->branch_id);
                 }
             });
@@ -171,8 +171,8 @@ class ExternalPropertyRequestService
                 $actor,
                 'external_property_request_assigned',
                 'Назначена заявка внешнего агента',
-                'Вам назначена заявка внешнего агента #' . $request->id . '.',
-                '/external-agent-requests/' . $request->id
+                'Вам назначена заявка внешнего агента #'.$request->id.'.',
+                '/profile/crm/external-agent-requests/'.$request->id
             );
         }
 
@@ -206,8 +206,8 @@ class ExternalPropertyRequestService
                 $actor,
                 'external_property_request_needs_info',
                 'Нужно уточнить заявку',
-                $comment ?: 'По вашей заявке #' . $request->id . ' нужны уточнения.',
-                '/external/property-requests/' . $request->id
+                $comment ?: 'По вашей заявке #'.$request->id.' нужны уточнения.',
+                '/external/property-requests/'.$request->id
             );
         }
 
@@ -218,8 +218,8 @@ class ExternalPropertyRequestService
                 $actor,
                 'external_property_request_rejected',
                 'Заявка отклонена',
-                $comment ?: 'Ваша заявка #' . $request->id . ' отклонена.',
-                '/external/property-requests/' . $request->id
+                $comment ?: 'Ваша заявка #'.$request->id.' отклонена.',
+                '/external/property-requests/'.$request->id
             );
         }
 
@@ -264,17 +264,16 @@ class ExternalPropertyRequestService
         array $payload,
         bool $copyPhotos = true,
         bool $force = false
-    ): Property
-    {
+    ): Property {
         abort_if($request->property_id || $request->status === ExternalPropertyRequest::STATUS_CONVERTED, 422, 'Заявка уже сконвертирована.');
         abort_if(in_array($request->status, [ExternalPropertyRequest::STATUS_REJECTED, ExternalPropertyRequest::STATUS_ARCHIVED], true), 422, 'Закрытую заявку нельзя конвертировать.');
         abort_if($actor->hasRole('intern') || $actor->hasRole('external_agent') || $actor->hasRole('client'), 403, 'Доступ запрещён');
-        abort_if($request->duplicate_property_id && !$force, 409, 'Найден возможный дубль. Подтвердите конвертацию с force=true.');
+        abort_if($request->duplicate_property_id && ! $force, 409, 'Найден возможный дубль. Подтвердите конвертацию с force=true.');
 
         return DB::transaction(function () use ($request, $actor, $payload, $copyPhotos, $force) {
             $request->refresh();
             abort_if($request->property_id, 422, 'Заявка уже сконвертирована.');
-            abort_if($request->duplicate_property_id && !$force, 409, 'Найден возможный дубль. Подтвердите конвертацию с force=true.');
+            abort_if($request->duplicate_property_id && ! $force, 409, 'Найден возможный дубль. Подтвердите конвертацию с force=true.');
 
             $propertyPayload = array_merge($this->prefillPayload($request, $actor), $payload);
             $propertyPayload['created_by'] = $actor->id;
@@ -319,8 +318,8 @@ class ExternalPropertyRequestService
                 $actor,
                 'external_property_request_converted',
                 'Объявление создано',
-                'По вашей заявке #' . $request->id . ' создано объявление #' . $property->id . '.',
-                '/external/property-requests/' . $request->id,
+                'По вашей заявке #'.$request->id.' создано объявление #'.$property->id.'.',
+                '/external/property-requests/'.$request->id,
                 ['property_id' => $property->id]
             );
 
@@ -356,8 +355,8 @@ class ExternalPropertyRequestService
                 $actor,
                 'external_property_request_new',
                 'Новая заявка внешнего агента',
-                'Поступила новая заявка внешнего агента #' . $request->id . '.',
-                '/external-agent-requests/' . $request->id
+                'Поступила новая заявка внешнего агента #'.$request->id.'.',
+                '/profile/crm/external-agent-requests/'.$request->id
             );
         }
     }
@@ -366,7 +365,7 @@ class ExternalPropertyRequestService
     {
         $recipientId = $request->assigned_agent_id;
 
-        if (!$recipientId) {
+        if (! $recipientId) {
             return;
         }
 
@@ -376,8 +375,8 @@ class ExternalPropertyRequestService
             $actor,
             'external_property_request_updated',
             'Заявка внешнего агента обновлена',
-            'Внешний агент обновил заявку #' . $request->id . '.',
-            '/external-agent-requests/' . $request->id
+            'Внешний агент обновил заявку #'.$request->id.'.',
+            '/profile/crm/external-agent-requests/'.$request->id
         );
     }
 
@@ -389,7 +388,7 @@ class ExternalPropertyRequestService
 
         $candidate = $this->duplicateCandidateQuery($request)->first();
 
-        if (!$candidate) {
+        if (! $candidate) {
             if ($request->duplicate_property_id && $request->status === ExternalPropertyRequest::STATUS_DUPLICATE) {
                 $request->update([
                     'duplicate_property_id' => null,
@@ -449,11 +448,13 @@ class ExternalPropertyRequestService
 
         if ($request->branch_group_id && $assignee->branch_group_id) {
             abort_unless((int) $assignee->branch_group_id === (int) $request->branch_group_id, 403, 'Сотрудник вне зоны заявки.');
+
             return;
         }
 
         if ($request->branch_id && $assignee->branch_id) {
             abort_unless((int) $assignee->branch_id === (int) $request->branch_id, 403, 'Сотрудник вне зоны заявки.');
+
             return;
         }
 
@@ -462,7 +463,7 @@ class ExternalPropertyRequestService
 
     private function findOrCreateOwnerClient(ExternalPropertyRequest $request, User $actor, array $propertyPayload): ?Client
     {
-        if (!empty($propertyPayload['owner_client_id'])) {
+        if (! empty($propertyPayload['owner_client_id'])) {
             $client = Client::query()->find($propertyPayload['owner_client_id']);
             if ($client) {
                 $mergedKind = $client->mergedContactKindFor(Client::CONTACT_KIND_SELLER);
@@ -478,7 +479,7 @@ class ExternalPropertyRequestService
         $normalizedPhone = ClientPhone::normalize($phone);
         $name = $propertyPayload['owner_name'] ?? $request->owner_name;
 
-        if (!$normalizedPhone && !$name) {
+        if (! $normalizedPhone && ! $name) {
             return null;
         }
 
@@ -492,7 +493,7 @@ class ExternalPropertyRequestService
                 ->first();
         }
 
-        if (!$client) {
+        if (! $client) {
             $client = Client::query()->create([
                 'full_name' => $name ?: 'Владелец объекта',
                 'phone' => $phone,
@@ -521,7 +522,7 @@ class ExternalPropertyRequestService
 
             if (Storage::disk('public')->exists($photo->file_path)) {
                 $extension = pathinfo($photo->file_path, PATHINFO_EXTENSION) ?: 'jpg';
-                $targetPath = 'properties/external-' . $request->id . '-' . $photo->id . '-' . uniqid('', true) . '.' . $extension;
+                $targetPath = 'properties/external-'.$request->id.'-'.$photo->id.'-'.uniqid('', true).'.'.$extension;
                 Storage::disk('public')->copy($photo->file_path, $targetPath);
             }
 
@@ -541,7 +542,7 @@ class ExternalPropertyRequestService
 
         $parts = [];
         if ($request->rooms) {
-            $parts[] = $request->rooms . '-комн.';
+            $parts[] = $request->rooms.'-комн.';
         }
 
         $parts[] = mb_strtolower($typeName, 'UTF-8');
@@ -578,7 +579,7 @@ class ExternalPropertyRequestService
 
                 if ($lastNine) {
                     $normalizedOwnerPhoneSql = "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(owner_phone, ' ', ''), '+', ''), '-', ''), '(', ''), ')', '')";
-                    $duplicates->orWhereRaw($normalizedOwnerPhoneSql . ' LIKE ?', ['%' . $lastNine]);
+                    $duplicates->orWhereRaw($normalizedOwnerPhoneSql.' LIKE ?', ['%'.$lastNine]);
                 }
             }
 
@@ -598,7 +599,7 @@ class ExternalPropertyRequestService
             }
         });
 
-        if (!$hasStrongSignal) {
+        if (! $hasStrongSignal) {
             return Property::query()->whereRaw('1 = 0');
         }
 
@@ -674,7 +675,7 @@ class ExternalPropertyRequestService
         string $actionUrl,
         array $data = []
     ): void {
-        if (!$recipientId) {
+        if (! $recipientId) {
             return;
         }
 
@@ -694,12 +695,12 @@ class ExternalPropertyRequestService
         string $actionUrl,
         array $data = []
     ): void {
-        if (!$this->canWriteNotification() || ($actor && (int) $actor->id === (int) $recipient->id)) {
+        if (! $this->canWriteNotification() || ($actor && (int) $actor->id === (int) $recipient->id)) {
             return;
         }
 
         try {
-            $dedupeKey = $type . ':' . $request->id . ':' . $recipient->id;
+            $dedupeKey = $type.':'.$request->id.':'.$recipient->id;
             $existing = Notification::query()
                 ->where('user_id', $recipient->id)
                 ->where('type', $type)
@@ -730,6 +731,7 @@ class ExternalPropertyRequestService
                 $existing->update(array_merge($payload, [
                     'occurrences_count' => ((int) $existing->occurrences_count) + 1,
                 ]));
+
                 return;
             }
 

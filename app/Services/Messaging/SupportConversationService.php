@@ -43,7 +43,9 @@ class SupportConversationService
         return DB::transaction(function () use ($requester, $chatSession, $escalatedBy, $summary, $meta) {
             $conversation = Conversation::query()->create([
                 'type' => Conversation::TYPE_SUPPORT,
-                'name' => 'Support #'.now()->format('YmdHis'),
+                'name' => filled($meta['title'] ?? null)
+                    ? (string) $meta['title']
+                    : 'Support #'.now()->format('YmdHis'),
                 'created_by' => $escalatedBy?->id ?: $requester->id,
                 'meta' => $meta,
             ]);

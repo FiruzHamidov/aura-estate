@@ -14,12 +14,13 @@ trait SerializesConversationPayloads
         $conversation->loadMissing([
             'participants.user.role',
             'latestMessage.author.role',
-            'supportThread',
+            'supportThread.requester.role',
         ]);
 
         return [
             'id' => $conversation->id,
             'type' => $conversation->type,
+            'is_support' => $conversation->type === Conversation::TYPE_SUPPORT,
             'name' => $this->conversationDisplayName($conversation, $viewer),
             'created_by' => $conversation->created_by,
             'created_at' => $conversation->created_at?->toIso8601String(),
@@ -39,6 +40,12 @@ trait SerializesConversationPayloads
                 'requester_user_id' => $conversation->supportThread->requester_user_id,
                 'chat_session_id' => $conversation->supportThread->chat_session_id,
                 'summary' => $conversation->supportThread->summary,
+                'source' => $conversation->supportThread->meta['source']
+                    ?? ($conversation->supportThread->chat_session_id ? 'chat' : 'support_form'),
+                'requester' => $conversation->supportThread->requester
+                    ? $this->serializeIdentity($conversation->supportThread->requester)
+                    : null,
+                'responsibility' => $this->serializeResponsibility($conversation),
             ] : null,
         ];
     }
@@ -60,6 +67,12 @@ trait SerializesConversationPayloads
             'role' => $this->messageRole($message, $viewer),
             'delivery_status' => $this->deliveryStatus($message, $viewer, $conversation),
             'sender' => $message->author ? $this->serializeSender($message->author) : null,
+            'sender_identity' => $message->author ? $this->serializeIdentity($message->author) : [
+                'kind' => 'system',
+                'role_slug' => null,
+                'id' => null,
+                'name' => 'System',
+            ],
             'author' => $message->author ? [
                 'id' => $message->author->id,
                 'name' => $message->author->name,
@@ -109,6 +122,45 @@ trait SerializesConversationPayloads
             'id' => $user->id,
             'name' => $user->name,
             'photo' => $this->userPhoto($user),
+        ];
+    }
+
+    private function serializeIdentity(User $user): array
+    {
+        return [
+            'kind' => match ($user->role?->slug) {
+                'client' => 'client',
+                'agent' => 'agent',
+                'manager', 'operator', 'admin', 'superadmin' => 'support_staff',
+                default => 'internal_user',
+            },
+            'id' => $user->id,
+            'name' => $user->name,
+            'role_slug' => $user->role?->slug,
+        ];
+    }
+
+    private function serializeResponsibility(Conversation $conversation): array
+    {
+        $latestAuthorId = $conversation->latestMessage?->author_id;
+        $requesterId = $conversation->supportThread?->requester_user_id;
+        $eligibleResponders = $conversation->participants
+            ->filter(fn (ConversationParticipant $participant) => in_array(
+                $participant->user?->role?->slug,
+                ['manager', 'operator', 'admin', 'superadmin'],
+                true
+            ))
+            ->pluck('user_id')
+            ->values()
+            ->all();
+
+        return [
+            'queue' => 'support',
+            'assigned_to_user_id' => null,
+            'eligible_responder_user_ids' => $eligibleResponders,
+            'response_required_from' => ! $latestAuthorId
+                ? 'none'
+                : ((int) $latestAuthorId === (int) $requesterId ? 'support_staff' : 'requester'),
         ];
     }
 

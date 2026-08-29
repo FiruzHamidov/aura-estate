@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\AttendanceDevice;
 use App\Models\Booking;
+use App\Models\Conversation;
 use App\Models\ConversationMessage;
 use App\Models\DailyReport;
 use App\Models\Deal;
@@ -22,7 +23,6 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Support\Carbon;
-use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 
@@ -414,7 +414,7 @@ class NotificationService
 
     public function handleConversationMessageCreated(ConversationMessage $message): void
     {
-        $message->loadMissing('conversation', 'author.role');
+        $message->loadMissing('conversation.supportThread.requester.role', 'author.role');
 
         $recipients = $this->recipients->conversationParticipants($message->conversation, $message->author_id);
         $channels = NotificationType::defaultChannels(NotificationType::CHAT_NEW_MESSAGE);
@@ -440,7 +440,7 @@ class NotificationService
         $this->notifyUsers(
             $recipients,
             NotificationType::CHAT_NEW_MESSAGE,
-            'Новое сообщение от клиента',
+            $this->conversationMessageTitle($message),
             mb_strimwidth((string) $message->body, 0, 120, '...'),
             $message->conversation,
             $message->author,
@@ -451,9 +451,45 @@ class NotificationService
                 'data' => [
                     'conversation_id' => $message->conversation_id,
                     'message_id' => $message->id,
+                    'conversation_type' => $message->conversation->type,
+                    'source' => $message->conversation->supportThread?->meta['source']
+                        ?? ($message->conversation->type === Conversation::TYPE_SUPPORT ? 'support' : 'messaging'),
+                    'author' => $message->author ? [
+                        'id' => $message->author->id,
+                        'name' => $message->author->name,
+                        'role_slug' => $message->author->role?->slug,
+                        'kind' => $this->messageAuthorKind($message->author),
+                    ] : null,
+                    'response_required_from' => $message->conversation->type !== Conversation::TYPE_SUPPORT
+                        ? 'conversation_participant'
+                        : ((int) $message->author_id === (int) $message->conversation->supportThread?->requester_user_id
+                            ? 'support_staff'
+                            : 'requester'),
                 ],
             ]
         );
+    }
+
+    private function conversationMessageTitle(ConversationMessage $message): string
+    {
+        $kind = $message->author ? $this->messageAuthorKind($message->author) : 'system';
+
+        return match ($kind) {
+            'client' => 'Новое сообщение от клиента',
+            'agent' => 'Новое сообщение от агента',
+            'support_staff', 'internal_user' => 'Новое сообщение от сотрудника',
+            default => 'Новое сообщение',
+        };
+    }
+
+    private function messageAuthorKind(User $author): string
+    {
+        return match ($author->role?->slug) {
+            'client' => 'client',
+            'agent' => 'agent',
+            'manager', 'operator', 'admin', 'superadmin' => 'support_staff',
+            default => 'internal_user',
+        };
     }
 
     public function handleSelectionEvent(Selection $selection, string $eventType, ?array $payload = null): void
@@ -704,7 +740,7 @@ class NotificationService
                 ->with('role')
                 ->where('status', User::STATUS_ACTIVE)
                 ->where('branch_id', $agent->branch_id)
-                ->where(function ($q) use ($agent) {
+                ->where(function ($q) {
                     $q->whereIn('role_id', function ($sub) {
                         $sub->select('id')->from('roles')->whereIn('slug', ['rop', 'branch_director']);
                     });
@@ -930,7 +966,7 @@ class NotificationService
                 'type' => $type,
             ]);
 
-            return new Notification();
+            return new Notification;
         }
 
         $now = now();
@@ -969,7 +1005,7 @@ class NotificationService
             'channels' => $channels,
             'title' => $title,
             'body' => $body,
-            'action_url' => $options['action_url'] ?? null,
+            'action_url' => $this->normalizeActionUrl($options['action_url'] ?? null, $subject),
             'action_type' => $options['action_type'] ?? null,
             'dedupe_key' => $dedupeKey,
             'last_occurred_at' => $now,
@@ -1074,6 +1110,65 @@ class NotificationService
         }
 
         return $base.$normalizedPath;
+    }
+
+    /**
+     * Normalize legacy notification links against the Next.js App Router.
+     */
+    private function normalizeActionUrl(?string $url, ?Model $subject = null): ?string
+    {
+        if (blank($url)) {
+            return $url;
+        }
+
+        if (str_starts_with($url, 'http://') || str_starts_with($url, 'https://')) {
+            $parts = parse_url($url);
+            if (! is_array($parts) || empty($parts['scheme']) || empty($parts['host'])) {
+                return $url;
+            }
+
+            $path = ($parts['path'] ?? '/').(isset($parts['query']) ? '?'.$parts['query'] : '');
+            $normalized = $this->normalizeActionUrl($path, $subject);
+            $origin = $parts['scheme'].'://'.$parts['host'].(isset($parts['port']) ? ':'.$parts['port'] : '');
+
+            return $origin.$normalized;
+        }
+
+        $url = '/'.ltrim($url, '/');
+
+        if (preg_match('#^/(?:profile/crm/)?leads/(\d+)(?:\?.*)?$#', $url, $matches)) {
+            return '/profile/crm/leads?leadId='.$matches[1].'&mode=view';
+        }
+
+        if (preg_match('#^/deals/(\d+)(?:\?.*)?$#', $url, $matches)) {
+            return '/profile/crm/deals?dealId='.$matches[1].'&mode=view';
+        }
+
+        if (preg_match('#^/conversations/(\d+)(?:\?.*)?$#', $url, $matches)) {
+            return '/profile/chats?conversation='.$matches[1];
+        }
+
+        if (preg_match('#^/bookings/(\d+)(?:\?.*)?$#', $url, $matches)) {
+            return '/profile/my-booking?bookingId='.$matches[1];
+        }
+
+        if (preg_match('#^/properties/(\d+)(?:\?.*)?$#', $url, $matches)) {
+            return '/apartment/'.$matches[1];
+        }
+
+        if (preg_match('#^/selections/(\d+)(?:\?.*)?$#', $url)
+            && $subject instanceof Selection
+            && filled($subject->selection_hash)) {
+            return '/s/'.rawurlencode((string) $subject->selection_hash);
+        }
+
+        return match ($url) {
+            '/leads' => '/profile/crm/leads',
+            '/deals' => '/profile/crm/deals',
+            '/bookings' => '/profile/my-booking',
+            '/attendance/devices' => '/attendance?tab=devices',
+            default => $url,
+        };
     }
 
     private function isWithinDailyWindow(string $hhmm, int $windowMinutes): bool

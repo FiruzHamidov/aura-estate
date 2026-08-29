@@ -271,11 +271,19 @@ class MessagingFeatureTest extends TestCase
         Sanctum::actingAs($client);
 
         $create = $this->postJson('/api/support/conversations', [
-            'chat_session_id' => $session->session_uuid,
-            'summary' => 'Нужен живой менеджер',
+            'session_id' => $session->session_uuid,
+            'title' => 'Вопрос по объекту',
+            'initial_message' => 'Нужен живой менеджер',
+            'source' => 'ai_chat',
         ]);
 
-        $create->assertCreated();
+        $create->assertCreated()
+            ->assertJsonPath('source', 'ai_chat')
+            ->assertJsonPath('requester.kind', 'client')
+            ->assertJsonPath('conversation.name', 'Вопрос по объекту')
+            ->assertJsonPath('conversation.latest_message.body', 'Нужен живой менеджер')
+            ->assertJsonPath('responsibility.queue', 'support')
+            ->assertJsonPath('responsibility.response_required_from', 'support_staff');
         $conversationId = $create->json('conversation.id');
 
         $thread = SupportThread::query()->where('conversation_id', $conversationId)->first();
@@ -287,6 +295,12 @@ class MessagingFeatureTest extends TestCase
             'body' => 'Менеджер на связи',
         ]);
         $managerReply->assertCreated();
+
+        $managerThread = $this->getJson('/api/support/conversations/'.$conversationId);
+        $managerThread->assertOk()
+            ->assertJsonPath('requester.kind', 'client')
+            ->assertJsonPath('source', 'ai_chat')
+            ->assertJsonPath('responsibility.response_required_from', 'requester');
 
         Sanctum::actingAs($operator);
         $operatorReply = $this->postJson('/api/conversations/'.$conversationId.'/messages', [

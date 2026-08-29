@@ -5,8 +5,10 @@ namespace App\Http\Controllers;
 use App\Models\Conversation;
 use App\Models\SupportThread;
 use App\Models\User;
+use App\Services\Messaging\ConversationService;
 use App\Services\Messaging\MessageAccessService;
 use App\Services\Messaging\SupportConversationService;
+use App\Services\NotificationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 
@@ -14,7 +16,9 @@ class SupportConversationController extends Controller
 {
     public function __construct(
         private readonly MessageAccessService $access,
-        private readonly SupportConversationService $support
+        private readonly SupportConversationService $support,
+        private readonly ConversationService $conversations,
+        private readonly NotificationService $notifications
     ) {}
 
     private function authUser(): User
@@ -43,6 +47,23 @@ class SupportConversationController extends Controller
 
     private function serializeThread(SupportThread $thread): array
     {
+        $requesterKind = match ($thread->requester?->role?->slug) {
+            'client' => 'client',
+            'agent' => 'agent',
+            'manager', 'operator', 'admin', 'superadmin' => 'support_staff',
+            default => 'internal_user',
+        };
+        $latestAuthorId = $thread->conversation->latestMessage?->author_id;
+        $eligibleResponderIds = $thread->conversation->participants
+            ->filter(fn ($participant) => in_array(
+                $participant->user?->role?->slug,
+                ['manager', 'operator', 'admin', 'superadmin'],
+                true
+            ))
+            ->pluck('user_id')
+            ->values()
+            ->all();
+
         return [
             'id' => $thread->id,
             'status' => $thread->status,
@@ -55,7 +76,17 @@ class SupportConversationController extends Controller
                 'id' => $thread->requester->id,
                 'name' => $thread->requester->name,
                 'role_slug' => $thread->requester->role?->slug,
+                'kind' => $requesterKind,
             ] : null,
+            'source' => $thread->meta['source'] ?? ($thread->chat_session_id ? 'chat' : 'support_form'),
+            'responsibility' => [
+                'queue' => 'support',
+                'assigned_to_user_id' => null,
+                'eligible_responder_user_ids' => $eligibleResponderIds,
+                'response_required_from' => ! $latestAuthorId
+                    ? 'none'
+                    : ((int) $latestAuthorId === (int) $thread->requester_user_id ? 'support_staff' : 'requester'),
+            ],
             'conversation' => [
                 'id' => $thread->conversation->id,
                 'type' => $thread->conversation->type,
@@ -100,19 +131,42 @@ class SupportConversationController extends Controller
 
         $validated = $request->validate([
             'chat_session_id' => 'nullable|string|max:100',
+            'session_id' => 'nullable|string|max:100',
+            'title' => 'nullable|string|max:255',
+            'initial_message' => 'nullable|string|max:10000',
+            'message' => 'nullable|string|max:10000',
+            'source' => 'nullable|string|max:100',
             'summary' => 'nullable|string|max:5000',
             'meta' => 'nullable|array',
         ]);
 
-        $chatSession = $this->support->resolveChatSession($validated['chat_session_id'] ?? null);
+        $sessionId = $validated['chat_session_id'] ?? $validated['session_id'] ?? null;
+        $chatSession = $this->support->resolveChatSession($sessionId);
+        $initialMessage = $validated['initial_message'] ?? $validated['message'] ?? null;
+        $meta = array_filter([
+            ...($validated['meta'] ?? []),
+            'source' => $validated['source'] ?? ($chatSession ? 'chat' : 'support_form'),
+            'title' => $validated['title'] ?? null,
+        ], fn ($value) => $value !== null && $value !== '');
 
         $thread = $this->support->createOrGetSupportConversation(
             $authUser,
             $chatSession,
             $authUser,
-            $validated['summary'] ?? null,
-            $validated['meta'] ?? null
+            $validated['summary'] ?? $initialMessage,
+            $meta
         );
+
+        if (filled($initialMessage)) {
+            $message = $this->conversations->createMessage(
+                $thread->conversation,
+                $authUser,
+                (string) $initialMessage,
+                meta: ['source' => $meta['source']]
+            );
+            $this->notifications->handleConversationMessageCreated($message);
+            $thread->load('conversation.latestMessage.author.role');
+        }
 
         return response()->json($this->serializeThread($thread), 201);
     }

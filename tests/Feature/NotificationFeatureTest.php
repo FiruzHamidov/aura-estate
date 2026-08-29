@@ -8,6 +8,7 @@ use App\Models\ClientType;
 use App\Models\Lead;
 use App\Models\Notification;
 use App\Models\Role;
+use App\Models\Selection;
 use App\Models\User;
 use App\Services\NotificationService;
 use App\Support\Notifications\NotificationCategory;
@@ -270,6 +271,38 @@ class NotificationFeatureTest extends TestCase
         $this->getJson('/api/notifications/unread-count')
             ->assertOk()
             ->assertJsonPath('unread_count', 0);
+    }
+
+    public function test_notification_action_urls_match_frontend_routes(): void
+    {
+        $service = app(NotificationService::class);
+        $method = new \ReflectionMethod(NotificationService::class, 'normalizeActionUrl');
+
+        $this->assertSame(
+            '/profile/crm/leads?leadId=17&mode=view',
+            $method->invoke($service, '/leads/17')
+        );
+        $this->assertSame(
+            '/profile/crm/deals?dealId=23&mode=view',
+            $method->invoke($service, '/deals/23')
+        );
+        $this->assertSame(
+            '/profile/chats?conversation=31',
+            $method->invoke($service, '/conversations/31')
+        );
+        $this->assertSame(
+            '/profile/my-booking?bookingId=47',
+            $method->invoke($service, '/bookings/47')
+        );
+        $this->assertSame('/apartment/59', $method->invoke($service, '/properties/59'));
+        $this->assertSame('/attendance?tab=devices', $method->invoke($service, '/attendance/devices'));
+        $this->assertSame(
+            'https://aura.tj/apartment/59',
+            $method->invoke($service, 'https://aura.tj/properties/59')
+        );
+
+        $selection = new Selection(['selection_hash' => 'public/hash']);
+        $this->assertSame('/s/public%2Fhash', $method->invoke($service, '/selections/71', $selection));
     }
 
     public function test_overdue_lead_without_a_manager_is_skipped_without_an_info_log(): void
