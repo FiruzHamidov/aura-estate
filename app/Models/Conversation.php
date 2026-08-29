@@ -10,8 +10,16 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
 class Conversation extends Model
 {
     public const TYPE_DIRECT = 'direct';
+
     public const TYPE_GROUP = 'group';
+
     public const TYPE_SUPPORT = 'support';
+
+    public const KIND_PERSONAL = 'personal';
+
+    public const KIND_SUPPORT = 'support';
+
+    public const KIND_GROUP = 'group';
 
     protected $fillable = [
         'type',

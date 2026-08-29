@@ -5,8 +5,9 @@ namespace App\Services\Messaging;
 use App\Models\Conversation;
 use App\Models\ConversationMessage;
 use App\Models\ConversationParticipant;
-use App\Models\SupportThread;
+use App\Models\Role;
 use App\Models\User;
+use Illuminate\Database\Eloquent\Builder;
 
 class MessageAccessService
 {
@@ -27,6 +28,16 @@ class MessageAccessService
         'superadmin',
         'manager',
         'operator',
+    ];
+
+    private const GLOBAL_PERSONAL_MESSAGING_ROLE_SLUGS = [
+        'admin',
+        'superadmin',
+        'owner',
+        'marketing',
+        'hr',
+        'accountant',
+        'reels_manager',
     ];
 
     public function roleSlug(?User $user): ?string
@@ -58,12 +69,10 @@ class MessageAccessService
 
     public function canCreateDirectConversation(User $actor, User $target): bool
     {
-        if ((int) $actor->id === (int) $target->id) {
+        if ((int) $actor->id === (int) $target->id
+            || ! $this->isActiveVisibleUser($actor)
+            || ! $this->isActiveVisibleUser($target)) {
             return false;
-        }
-
-        if ($this->isInternalUser($actor) && $this->isInternalUser($target)) {
-            return true;
         }
 
         if ($this->isClient($actor) && $this->isAgent($target)) {
@@ -74,7 +83,59 @@ class MessageAccessService
             return true;
         }
 
-        return false;
+        return $this->isPersonalStaffUser($actor)
+            && $this->isPersonalStaffUser($target)
+            && $this->sharesPersonalMessagingScope($actor, $target);
+    }
+
+    public function eligibleDirectUsers(User $actor, bool $directoryOnly = false): Builder
+    {
+        $query = User::query()
+            ->with('role')
+            ->whereKeyNot($actor->id)
+            ->where('status', User::STATUS_ACTIVE)
+            ->whereNull('deleted_at')
+            ->whereNull('deletion_requested_at');
+
+        if ($this->isClient($actor)) {
+            return $query->whereHas('role', fn (Builder $roles) => $roles->where('slug', 'agent'));
+        }
+
+        if (! $this->isPersonalStaffUser($actor)) {
+            return $query->whereRaw('1 = 0');
+        }
+
+        $staffRoles = $this->personalStaffRoleSlugs();
+        $globalRoles = self::GLOBAL_PERSONAL_MESSAGING_ROLE_SLUGS;
+
+        return $query->where(function (Builder $eligible) use ($actor, $staffRoles, $globalRoles, $directoryOnly) {
+            $eligible->where(function (Builder $staff) use ($actor, $staffRoles, $globalRoles) {
+                $staff->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', $staffRoles));
+
+                if (! $this->isGlobalPersonalMessagingUser($actor)) {
+                    $staff->where(function (Builder $scope) use ($actor, $globalRoles) {
+                        $scope->where('branch_id', $actor->branch_id)
+                            ->whereNotNull('branch_id')
+                            ->orWhereHas('role', fn (Builder $roles) => $roles->whereIn('slug', $globalRoles));
+                    });
+                }
+            });
+
+            if ($this->isAgent($actor) && ! $directoryOnly) {
+                $eligible->orWhereHas('role', fn (Builder $roles) => $roles->where('slug', 'client'));
+            }
+        });
+    }
+
+    public function personalStaffRoleSlugs(): array
+    {
+        return collect(Role::systemRoles())
+            ->pluck('slug')
+            ->filter(fn ($slug) => is_string($slug) && ! in_array($slug, ['client', 'external_agent'], true))
+            ->push('owner')
+            ->unique()
+            ->values()
+            ->all();
     }
 
     public function canCreateGroupConversation(User $actor, array $participants): bool
@@ -101,7 +162,21 @@ class MessageAccessService
 
     public function canSendMessage(User $actor, Conversation $conversation): bool
     {
-        return $this->canAccessConversation($actor, $conversation);
+        if (! $this->canAccessConversation($actor, $conversation)) {
+            return false;
+        }
+
+        if ($conversation->type !== Conversation::TYPE_DIRECT) {
+            return true;
+        }
+
+        $counterpart = $conversation->participants()
+            ->where('user_id', '!=', $actor->id)
+            ->with('user.role')
+            ->first()
+            ?->user;
+
+        return $counterpart && $this->canCreateDirectConversation($actor, $counterpart);
     }
 
     public function canManageParticipants(User $actor, Conversation $conversation): bool
@@ -132,7 +207,11 @@ class MessageAccessService
             return false;
         }
 
-        return $this->isInternalUser($target);
+        return $this->isInternalUser($target)
+            && $this->isActiveVisibleUser($target)
+            && ($this->isGlobalPersonalMessagingUser($actor)
+                || $this->isGlobalPersonalMessagingUser($target)
+                || ($actor->branch_id && (int) $actor->branch_id === (int) $target->branch_id));
     }
 
     public function canRemoveParticipantFromConversation(User $actor, Conversation $conversation, User $target): bool
@@ -212,5 +291,33 @@ class MessageAccessService
     public function ensureCanCreateSupportConversation(User $actor): void
     {
         abort_unless($this->canCreateSupportConversation($actor), 403, 'Forbidden');
+    }
+
+    private function isPersonalStaffUser(?User $user): bool
+    {
+        return in_array($this->roleSlug($user), $this->personalStaffRoleSlugs(), true);
+    }
+
+    private function isGlobalPersonalMessagingUser(?User $user): bool
+    {
+        return in_array($this->roleSlug($user), self::GLOBAL_PERSONAL_MESSAGING_ROLE_SLUGS, true);
+    }
+
+    private function isActiveVisibleUser(?User $user): bool
+    {
+        return $user
+            && $user->status === User::STATUS_ACTIVE
+            && ! $user->isDeletedAccount();
+    }
+
+    private function sharesPersonalMessagingScope(User $actor, User $target): bool
+    {
+        if ($this->isGlobalPersonalMessagingUser($actor) || $this->isGlobalPersonalMessagingUser($target)) {
+            return true;
+        }
+
+        return $actor->branch_id !== null
+            && $target->branch_id !== null
+            && (int) $actor->branch_id === (int) $target->branch_id;
     }
 }

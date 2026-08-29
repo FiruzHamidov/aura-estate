@@ -52,6 +52,7 @@ class ConversationController extends Controller
 
         $validated = $request->validate([
             'type' => ['nullable', Rule::in(Conversation::types())],
+            'kind' => ['nullable', Rule::in(['all', Conversation::KIND_PERSONAL, Conversation::KIND_SUPPORT])],
             'per_page' => 'nullable|integer|min:1|max:100',
         ]);
 
@@ -59,6 +60,12 @@ class ConversationController extends Controller
 
         if (! empty($validated['type'])) {
             $query->where('type', $validated['type']);
+        }
+
+        if (($validated['kind'] ?? 'all') === Conversation::KIND_PERSONAL) {
+            $query->where('type', Conversation::TYPE_DIRECT);
+        } elseif (($validated['kind'] ?? 'all') === Conversation::KIND_SUPPORT) {
+            $query->where('type', Conversation::TYPE_SUPPORT);
         }
 
         $conversations = $query
@@ -76,19 +83,26 @@ class ConversationController extends Controller
         $validated = $request->validate([
             'name' => 'nullable|string|max:255',
             'participant_ids' => 'required|array|min:1',
-            'participant_ids.*' => 'integer|distinct|exists:users,id',
+            'participant_ids.*' => 'integer|distinct',
             'meta' => 'nullable|array',
         ]);
 
-        $participants = User::query()->whereIn('id', $validated['participant_ids'])->get()->all();
-
         if (! $this->access->isInternalUser($authUser)) {
-            abort_unless(count($participants) === 1, 422, 'Direct conversations require exactly one participant.');
+            abort_unless(count($validated['participant_ids']) === 1, 422, 'Direct conversations require exactly one participant.');
 
-            $conversation = $this->conversations->createOrGetDirectConversation($authUser, $participants[0]);
+            $target = $this->access->eligibleDirectUsers($authUser)
+                ->whereKey($validated['participant_ids'][0])
+                ->firstOrFail();
+
+            $conversation = $this->conversations->createOrGetDirectConversation($authUser, $target);
 
             return response()->json($this->serializeConversation($conversation, $authUser));
         }
+
+        $request->validate([
+            'participant_ids.*' => 'exists:users,id',
+        ]);
+        $participants = User::query()->whereIn('id', $validated['participant_ids'])->get()->all();
 
         $request->validate([
             'name' => 'required|string|max:255',
@@ -128,13 +142,38 @@ class ConversationController extends Controller
         $authUser = $this->authUser();
 
         $validated = $request->validate([
-            'target_user_id' => 'required|integer|exists:users,id',
+            'target_user_id' => 'required|integer',
         ]);
 
-        $target = User::query()->findOrFail($validated['target_user_id']);
+        $target = $this->access->eligibleDirectUsers($authUser)
+            ->whereKey($validated['target_user_id'])
+            ->firstOrFail();
 
         $conversation = $this->conversations->createOrGetDirectConversation($authUser, $target);
 
         return response()->json($this->serializeConversation($conversation, $authUser));
+    }
+
+    public function availableUsers(Request $request)
+    {
+        $authUser = $this->authUser();
+        $validated = $request->validate([
+            'search' => 'nullable|string|max:100',
+            'per_page' => 'nullable|integer|min:1|max:50',
+        ]);
+
+        $query = $this->access->eligibleDirectUsers($authUser, directoryOnly: true);
+
+        if (filled($validated['search'] ?? null)) {
+            $query->where('name', 'like', '%'.trim($validated['search']).'%');
+        }
+
+        $users = $query
+            ->orderBy('name')
+            ->orderBy('id')
+            ->paginate((int) ($validated['per_page'] ?? 20))
+            ->through(fn (User $user) => $this->serializeDirectoryUser($user));
+
+        return response()->json($users);
     }
 }

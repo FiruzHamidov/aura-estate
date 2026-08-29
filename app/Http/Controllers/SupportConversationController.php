@@ -69,6 +69,8 @@ class SupportConversationController extends Controller
 
         return [
             'id' => $thread->id,
+            'kind' => Conversation::KIND_SUPPORT,
+            'kind_label' => 'Поддержка',
             'status' => $thread->status,
             'summary' => $thread->summary,
             'requester_user_id' => $thread->requester_user_id,
@@ -88,6 +90,7 @@ class SupportConversationController extends Controller
                 'kind' => 'guest',
             ] : null),
             'source' => $thread->meta['source'] ?? ($thread->chat_session_id ? 'chat' : 'support_form'),
+            'context' => $thread->meta['context'] ?? null,
             'responsibility' => [
                 'queue' => 'support',
                 'assigned_to_user_id' => null,
@@ -104,7 +107,12 @@ class SupportConversationController extends Controller
             'conversation' => [
                 'id' => $thread->conversation->id,
                 'type' => $thread->conversation->type,
+                'kind' => Conversation::KIND_SUPPORT,
+                'kind_label' => 'Поддержка',
                 'name' => $thread->conversation->name,
+                'counterpart' => null,
+                'source' => $thread->meta['source'] ?? ($thread->chat_session_id ? 'chat' : 'support_form'),
+                'context' => $thread->meta['context'] ?? null,
                 'latest_message' => $thread->conversation->latestMessage ? [
                     'id' => $thread->conversation->latestMessage->id,
                     'author_id' => $thread->conversation->latestMessage->author_id,

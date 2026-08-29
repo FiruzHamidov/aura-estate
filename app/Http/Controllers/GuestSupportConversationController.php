@@ -169,9 +169,12 @@ class GuestSupportConversationController extends Controller
 
         return [
             'id' => $thread->id,
+            'kind' => Conversation::KIND_SUPPORT,
+            'kind_label' => 'Поддержка',
             'status' => $thread->status,
             'source' => $thread->meta['source'] ?? 'guest_support',
             'summary' => $thread->summary,
+            'context' => $thread->meta['context'] ?? null,
             'requester' => $this->serializeGuestIdentity($session),
             'responsibility' => $this->serializeResponsibility($conversation),
             'created_at' => $thread->created_at?->toIso8601String(),
@@ -179,8 +182,13 @@ class GuestSupportConversationController extends Controller
             'conversation' => [
                 'id' => $conversation->id,
                 'type' => $conversation->type,
+                'kind' => Conversation::KIND_SUPPORT,
+                'kind_label' => 'Поддержка',
                 'is_support' => true,
                 'name' => $conversation->name,
+                'counterpart' => null,
+                'source' => $thread->meta['source'] ?? 'guest_support',
+                'context' => $thread->meta['context'] ?? null,
                 'latest_message' => $conversation->latestMessage
                     ? $this->serializeMessage($conversation->latestMessage, null, $conversation, $session)
                     : null,

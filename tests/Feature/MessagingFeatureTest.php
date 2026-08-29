@@ -36,9 +36,13 @@ class MessagingFeatureTest extends TestCase
             $table->string('phone')->unique();
             $table->string('password')->nullable();
             $table->foreignId('role_id')->constrained('roles')->cascadeOnDelete();
+            $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('branch_group_id')->nullable();
             $table->enum('status', ['active', 'inactive'])->default('active');
             $table->enum('auth_method', ['password', 'sms'])->default('password');
             $table->rememberToken()->nullable();
+            $table->timestamp('deleted_at')->nullable();
+            $table->timestamp('deletion_requested_at')->nullable();
             $table->timestamps();
         });
 
@@ -166,7 +170,7 @@ class MessagingFeatureTest extends TestCase
             'target_user_id' => $manager->id,
         ]);
 
-        $denied->assertForbidden();
+        $denied->assertNotFound();
     }
 
     public function test_non_internal_user_posting_conversation_with_one_participant_creates_direct_chat(): void
@@ -194,6 +198,7 @@ class MessagingFeatureTest extends TestCase
 
         $internalAttempt->assertCreated();
         $internalAttempt->assertJsonPath('type', Conversation::TYPE_GROUP);
+        $internalAttempt->assertJsonPath('kind', Conversation::KIND_GROUP);
     }
 
     public function test_only_participants_can_access_conversation(): void
@@ -328,6 +333,121 @@ class MessagingFeatureTest extends TestCase
         ])->assertForbidden();
     }
 
+    public function test_personal_conversations_support_cross_role_pairs_and_are_idempotent(): void
+    {
+        $pairs = [
+            ['agent', 'agent', 1],
+            ['agent', 'manager', 1],
+            ['manager', 'operator', 1],
+            ['mop', 'intern', 1],
+            ['hr', 'accountant', null],
+        ];
+
+        foreach ($pairs as $index => [$leftRole, $rightRole, $branchId]) {
+            $left = $this->createUser($leftRole, 'Left '.$index, '9921000'.$index.'1', ['branch_id' => $branchId]);
+            $right = $this->createUser($rightRole, 'Right '.$index, '9921000'.$index.'2', ['branch_id' => $branchId]);
+
+            Sanctum::actingAs($left);
+            $first = $this->postJson('/api/conversations/direct', ['target_user_id' => $right->id]);
+            $first->assertOk()
+                ->assertJsonPath('type', Conversation::TYPE_DIRECT)
+                ->assertJsonPath('kind', Conversation::KIND_PERSONAL)
+                ->assertJsonPath('kind_label', 'Личный диалог')
+                ->assertJsonPath('source', 'personal')
+                ->assertJsonPath('context', null)
+                ->assertJsonPath('counterpart.id', $right->id)
+                ->assertJsonPath('counterpart.role_slug', $rightRole)
+                ->assertJsonPath('participants.1.user.display_role', ucfirst($rightRole))
+                ->assertJsonMissingPath('responsibility');
+
+            Sanctum::actingAs($right);
+            $second = $this->postJson('/api/conversations/direct', ['target_user_id' => $left->id]);
+            $second->assertOk()->assertJsonPath('id', $first->json('id'));
+        }
+
+        $this->assertDatabaseCount('conversations', count($pairs));
+    }
+
+    public function test_personal_directory_and_creation_reject_self_inactive_hidden_and_foreign_scope_users(): void
+    {
+        $actor = $this->createUser('agent', 'Actor', '992200001', ['branch_id' => 1]);
+        $visible = $this->createUser('manager', 'Visible Manager', '992200002', ['branch_id' => 1]);
+        $global = $this->createUser('hr', 'Global HR', '992200003');
+        $inactive = $this->createUser('operator', 'Inactive', '992200004', [
+            'branch_id' => 1,
+            'status' => User::STATUS_INACTIVE,
+        ]);
+        $foreign = $this->createUser('manager', 'Foreign Manager', '992200005', ['branch_id' => 2]);
+        $hidden = $this->createUser('manager', 'Hidden Manager', '992200006', [
+            'branch_id' => 1,
+            'deleted_at' => now(),
+        ]);
+        $client = $this->createUser('client', 'Private Client', '992200007');
+
+        Sanctum::actingAs($actor);
+
+        $directory = $this->getJson('/api/conversations/available-users?per_page=50');
+        $directory->assertOk()
+            ->assertJsonCount(2, 'data')
+            ->assertJsonFragment(['id' => $visible->id, 'role_slug' => 'manager'])
+            ->assertJsonFragment(['id' => $global->id, 'role_slug' => 'hr'])
+            ->assertJsonMissing(['id' => $client->id, 'role_slug' => 'client'])
+            ->assertJsonMissing(['phone' => $visible->phone])
+            ->assertJsonMissing(['email' => $visible->email]);
+
+        foreach ([$actor, $inactive, $foreign, $hidden] as $forbiddenTarget) {
+            $this->postJson('/api/conversations/direct', ['target_user_id' => $forbiddenTarget->id])
+                ->assertNotFound();
+        }
+
+        $conversation = $this->postJson('/api/conversations/direct', ['target_user_id' => $visible->id]);
+        $conversation->assertOk();
+
+        $this->postJson('/api/conversations/'.$conversation->json('id').'/participants', [
+            'user_id' => $foreign->id,
+            'role' => 'admin',
+        ])->assertForbidden();
+
+        $visible->update(['status' => User::STATUS_INACTIVE]);
+        $this->postJson('/api/conversations/'.$conversation->json('id').'/messages', [
+            'body' => 'Нельзя отправить деактивированному пользователю',
+        ])->assertForbidden();
+    }
+
+    public function test_conversation_kind_filters_keep_personal_and_support_separate(): void
+    {
+        $agent = $this->createUser('agent', 'Agent', '992300001', ['branch_id' => 1]);
+        $manager = $this->createUser('manager', 'Manager', '992300002', ['branch_id' => 1]);
+
+        Sanctum::actingAs($agent);
+        $personal = $this->postJson('/api/conversations/direct', ['target_user_id' => $manager->id]);
+        $personal->assertOk()->assertJsonMissingPath('responsibility');
+
+        $support = $this->postJson('/api/support/conversations', [
+            'initial_message' => 'Нужна поддержка',
+            'source' => 'support_form',
+        ]);
+        $support->assertCreated()
+            ->assertJsonPath('kind', Conversation::KIND_SUPPORT)
+            ->assertJsonPath('responsibility.queue', 'support');
+
+        $this->getJson('/api/conversations?kind=all&per_page=50')
+            ->assertOk()
+            ->assertJsonCount(2, 'data');
+        $this->getJson('/api/conversations?kind=personal&per_page=50')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $personal->json('id'))
+            ->assertJsonPath('data.0.kind', Conversation::KIND_PERSONAL)
+            ->assertJsonPath('data.0.support_thread', null)
+            ->assertJsonMissingPath('data.0.responsibility');
+        $this->getJson('/api/conversations?kind=support&per_page=50')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.kind', Conversation::KIND_SUPPORT)
+            ->assertJsonPath('data.0.responsibility.queue', 'support');
+    }
+
     public function test_guest_can_create_read_continue_and_see_staff_reply_in_existing_messaging_domain(): void
     {
         config()->set('guest-support.cookie_secure', true);
@@ -342,6 +462,7 @@ class MessagingFeatureTest extends TestCase
         ]);
 
         $create->assertCreated()
+            ->assertJsonPath('kind', Conversation::KIND_SUPPORT)
             ->assertJsonPath('requester.kind', 'guest')
             ->assertJsonPath('source', 'website')
             ->assertJsonPath('conversation.latest_message.role', 'me')
@@ -495,19 +616,19 @@ class MessagingFeatureTest extends TestCase
         ];
     }
 
-    private function createUser(string $roleSlug, string $name, string $phone): User
+    private function createUser(string $roleSlug, string $name, string $phone, array $attributes = []): User
     {
         $role = Role::query()->firstOrCreate(
             ['slug' => $roleSlug],
             ['name' => ucfirst($roleSlug)]
         );
 
-        return User::query()->create([
+        return User::query()->create(array_merge([
             'name' => $name,
             'phone' => $phone,
             'password' => bcrypt('password'),
             'role_id' => $role->id,
             'status' => 'active',
-        ]);
+        ], $attributes));
     }
 }

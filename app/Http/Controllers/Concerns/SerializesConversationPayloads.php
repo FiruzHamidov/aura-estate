@@ -20,11 +20,21 @@ trait SerializesConversationPayloads
             'supportThread.guestSession',
         ]);
 
+        $kind = $this->conversationKind($conversation);
+        $responsibility = $conversation->type === Conversation::TYPE_SUPPORT
+            ? $this->serializeResponsibility($conversation)
+            : null;
+
         return [
             'id' => $conversation->id,
             'type' => $conversation->type,
+            'kind' => $kind,
+            'kind_label' => $this->conversationKindLabel($kind),
             'is_support' => $conversation->type === Conversation::TYPE_SUPPORT,
             'name' => $this->conversationDisplayName($conversation, $viewer),
+            'counterpart' => $this->serializeCounterpart($conversation, $viewer),
+            'source' => $this->conversationSource($conversation),
+            'context' => $conversation->meta['context'] ?? null,
             'created_by' => $conversation->created_by,
             'created_at' => $conversation->created_at?->toIso8601String(),
             'updated_at' => $conversation->updated_at?->toIso8601String(),
@@ -53,6 +63,7 @@ trait SerializesConversationPayloads
                         : null),
                 'responsibility' => $this->serializeResponsibility($conversation),
             ] : null,
+            ...($responsibility ? ['responsibility' => $responsibility] : []),
         ];
     }
 
@@ -127,6 +138,20 @@ trait SerializesConversationPayloads
                 ? $lastSeenAt->format(\DateTimeInterface::ATOM)
                 : $lastSeenAt,
             'role_slug' => $user->role?->slug,
+            'display_role' => $user->role?->name,
+        ];
+    }
+
+    private function serializeDirectoryUser(User $user): array
+    {
+        $user->loadMissing('role');
+
+        return [
+            'id' => $user->id,
+            'name' => $user->name,
+            'photo' => $this->userPhoto($user),
+            'role_slug' => $user->role?->slug,
+            'display_role' => $user->role?->name,
         ];
     }
 
@@ -151,6 +176,7 @@ trait SerializesConversationPayloads
             'id' => $user->id,
             'name' => $user->name,
             'role_slug' => $user->role?->slug,
+            'display_role' => $user->role?->name,
         ];
     }
 
@@ -161,6 +187,7 @@ trait SerializesConversationPayloads
             'id' => $session->public_id,
             'name' => 'Гость / потенциальный клиент без аккаунта',
             'role_slug' => null,
+            'display_role' => null,
         ];
     }
 
@@ -276,6 +303,50 @@ trait SerializesConversationPayloads
             ->first(fn (ConversationParticipant $participant) => (int) $participant->user_id !== (int) $viewer->id)
             ?->user
             ?->name;
+    }
+
+    private function serializeCounterpart(Conversation $conversation, User $viewer): ?array
+    {
+        if ($conversation->type !== Conversation::TYPE_DIRECT) {
+            return null;
+        }
+
+        $counterpart = $conversation->participants
+            ->first(fn (ConversationParticipant $participant) => (int) $participant->user_id !== (int) $viewer->id)
+            ?->user;
+
+        return $counterpart ? $this->serializeDirectoryUser($counterpart) : null;
+    }
+
+    private function conversationKind(Conversation $conversation): string
+    {
+        return match ($conversation->type) {
+            Conversation::TYPE_DIRECT => Conversation::KIND_PERSONAL,
+            Conversation::TYPE_SUPPORT => Conversation::KIND_SUPPORT,
+            Conversation::TYPE_GROUP => Conversation::KIND_GROUP,
+            default => $conversation->type,
+        };
+    }
+
+    private function conversationKindLabel(string $kind): string
+    {
+        return match ($kind) {
+            Conversation::KIND_PERSONAL => 'Личный диалог',
+            Conversation::KIND_SUPPORT => 'Поддержка',
+            Conversation::KIND_GROUP => 'Групповой диалог',
+            default => $kind,
+        };
+    }
+
+    private function conversationSource(Conversation $conversation): string
+    {
+        if ($conversation->type === Conversation::TYPE_SUPPORT) {
+            return $conversation->supportThread?->meta['source']
+                ?? ($conversation->supportThread?->chat_session_id ? 'chat' : 'support_form');
+        }
+
+        return $conversation->meta['source']
+            ?? ($conversation->type === Conversation::TYPE_DIRECT ? 'personal' : 'group');
     }
 
     private function userPhoto(User $user): ?string

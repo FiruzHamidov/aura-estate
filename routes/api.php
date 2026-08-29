@@ -413,6 +413,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     // Messaging
     Route::get('/conversations', [ConversationController::class, 'index']);
     Route::post('/conversations', [ConversationController::class, 'store']);
+    Route::get('/conversations/available-users', [ConversationController::class, 'availableUsers']);
     Route::post('/conversations/direct', [ConversationController::class, 'storeDirect']);
     Route::get('/conversations/{conversation}', [ConversationController::class, 'show']);
     Route::get('/conversations/{conversation}/messages', [ConversationMessageController::class, 'index']);
