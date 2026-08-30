@@ -216,6 +216,26 @@ server {
         try_files $uri $uri/ /index.php?$query_string;
     }
 
+    location /app/ {
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "Upgrade";
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 70s;
+        proxy_send_timeout 70s;
+        proxy_pass http://127.0.0.1:8080;
+    }
+
+    location /apps/ {
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_pass http://127.0.0.1:8080;
+    }
+
     location ~ \.php$ {
         include snippets/fastcgi-php.conf;
         fastcgi_pass unix:/run/php/php8.2-fpm.sock;
@@ -265,6 +285,26 @@ sudo supervisorctl update
 sudo supervisorctl start aura-estate-worker:*
 sudo supervisorctl status
 ```
+
+## 9.1 Configure Laravel Reverb with Supervisor
+
+Messaging and location realtime require a separate long-running Reverb process. Create `/etc/supervisor/conf.d/aura-estate-reverb.conf` only after the Reverb environment and reverse-proxy values in [the messaging realtime contract](messaging-realtime.md) are configured:
+
+```ini
+[program:aura-estate-reverb]
+command=/usr/bin/php /var/www/aura-estate/artisan reverb:start --host=0.0.0.0 --port=8080
+directory=/var/www/aura-estate
+user=www-data
+autostart=true
+autorestart=true
+stopasgroup=true
+killasgroup=true
+redirect_stderr=true
+stdout_logfile=/var/www/aura-estate/storage/logs/reverb.log
+stopwaitsecs=30
+```
+
+Run `sudo supervisorctl reread`, `sudo supervisorctl update`, and verify `sudo supervisorctl status aura-estate-reverb` reports `RUNNING`. A deploy must run `php artisan reverb:restart` after rebuilding config/route caches. Do not enable messaging realtime until the public WebSocket proxy and private-channel auth smoke tests pass.
 
 ## 10. Optional cron for scheduler
 

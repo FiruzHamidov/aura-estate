@@ -11,13 +11,14 @@ Required repository Actions secrets: `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`
 3. Prepare Composer production dependencies and Vite assets in `/var/lib/aura-deploy/backend-builds/`, before entering maintenance mode.
 4. Enter maintenance mode, fast-forward the source checkout, retain previous dependencies/assets in the backup, then install prepared dependencies/assets.
 5. Rebuild generated manifests, run `php artisan migrate --force`, and rebuild configuration, route and view caches.
-6. Signal Aura queue workers to restart, gracefully reload PHP 8.2 FPM, leave maintenance mode, and check `/up`, the public `/api/new-buildings` JSON contract and the Aura Supervisor worker.
+6. Ensure the versioned `aura-estate-reverb` Supervisor program is running and verify the approved/foreign Origin WebSocket boundary through `backend.aura.tj:443` before enabling realtime.
+7. Enable `BROADCAST_CONNECTION=reverb` and `MESSAGING_REALTIME_BROADCAST_ENABLED=true` atomically, rebuild config cache, restart queue/Reverb, and verify both Supervisor processes, unauthenticated auth boundaries, `/up`, and the public `/api/new-buildings` contract. A failed post-enable check restores the previous environment and rebuilds cache, leaving messaging polling available.
 
 The source directory, `.env`, persistent `storage`, public storage link, existing scheduler and Supervisor configuration remain in place. Other applications are not deployed. Both Aura repositories use one server lock to prevent overlapping builds/migrations. Superseded commits are skipped.
 
 ## Recovery and maintenance
 
-Use Actions → Deploy production → Run workflow → `main` to retry. The installed entry point `/usr/local/lib/aura-deploy/backend.sh` comes from `scripts/deploy-production.sh`; `/usr/local/lib/aura-deploy/backup-database.php` performs the database backup. Runtime configuration lives in `/etc/aura-deploy/`. Updating installed deployment tooling requires administrator review/reinstallation.
+Use Actions → Deploy production → Run workflow → `main` to retry. The installed entry point `/usr/local/lib/aura-deploy/backend.sh` comes from `scripts/deploy-production.sh`; `/usr/local/lib/aura-deploy/backup-database.php` performs the database backup. Runtime configuration lives in `/etc/aura-deploy/`. Updating installed deployment tooling requires administrator review/reinstallation. Realtime deployment requires the installed entry point to match the repository version; otherwise the old workflow can deploy application code but cannot provision, enable, or verify Reverb.
 
 Failures attempt to leave maintenance mode and report the backup path. Database and source rollback are **not automatic**: an administrator must check migration compatibility before restoring source, dependencies or the database. Never restore a database blindly over new user writes. Prefer a forward fix when possible.
 

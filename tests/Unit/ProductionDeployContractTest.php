@@ -36,7 +36,7 @@ class ProductionDeployContractTest extends TestCase
         $this->assertIsInt($maintenanceEnds);
         $this->assertIsInt($queueVerification);
         $this->assertGreaterThan($maintenanceEnds, $postSwitchCheck);
-        $this->assertLessThan($queueVerification, $postSwitchCheck);
+        $this->assertGreaterThan($queueVerification, $postSwitchCheck);
     }
 
     public function test_deploy_rotates_recovery_backups_and_removes_stale_builds(): void
@@ -57,5 +57,30 @@ class ProductionDeployContractTest extends TestCase
         $this->assertIsInt($postDeployPrune);
         $this->assertLessThan($diskGate, $preflightPrune);
         $this->assertGreaterThan($deployedState, $postDeployPrune);
+    }
+
+    public function test_reverb_is_verified_before_enablement_and_failures_restore_the_environment(): void
+    {
+        $this->assertStringContainsString('aura-estate-reverb.conf', $this->deploy);
+        $this->assertStringContainsString('wait_for_supervisor_program aura-estate-reverb', $this->deploy);
+        $this->assertStringContainsString('php scripts/verify-reverb-runtime.php)', $this->deploy);
+        $this->assertStringContainsString('php scripts/verify-reverb-runtime.php --expect-enabled', $this->deploy);
+        $this->assertStringContainsString('php scripts/enable-messaging-realtime.php', $this->deploy);
+        $this->assertStringContainsString('check_realtime_auth_boundaries', $this->deploy);
+        $this->assertStringContainsString('pre-realtime-environment', $this->deploy);
+        $this->assertStringContainsString('result != 0 && realtime_env_changed == 1', $this->deploy);
+
+        $preEnableProbe = strpos($this->deploy, '(cd "$stage" && php scripts/verify-reverb-runtime.php)');
+        $enable = strpos($this->deploy, 'php scripts/enable-messaging-realtime.php');
+        $enabledProbe = strpos($this->deploy, 'php scripts/verify-reverb-runtime.php --expect-enabled');
+        $deployedState = strpos($this->deploy, 'backend.current');
+
+        $this->assertIsInt($preEnableProbe);
+        $this->assertIsInt($enable);
+        $this->assertIsInt($enabledProbe);
+        $this->assertIsInt($deployedState);
+        $this->assertLessThan($enable, $preEnableProbe);
+        $this->assertLessThan($enabledProbe, $enable);
+        $this->assertLessThan($deployedState, $enabledProbe);
     }
 }

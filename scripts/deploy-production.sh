@@ -29,7 +29,7 @@ export GIT_SSH_COMMAND="ssh -i /etc/aura-deploy/backend_readonly -o IdentitiesOn
 export GIT_TERMINAL_PROMPT=0 COMPOSER_ALLOW_SUPERUSER=1
 remote=git@github.com:FiruzHamidov/aura-estate.git
 
-for command in git php composer curl flock tar gzip mysqldump; do command -v "$command" >/dev/null; done
+for command in git php composer curl flock tar gzip mysqldump install supervisorctl systemctl; do command -v "$command" >/dev/null; done
 test -d "$repo/.git"
 test "$(git -C "$repo" branch --show-current)" = main
 
@@ -43,6 +43,38 @@ check_public_api() {
           exit(1);
       }
     '
+}
+
+wait_for_supervisor_program() {
+  local program=$1
+
+  for attempt in {1..15}; do
+    if supervisorctl status "$program" | grep -q RUNNING; then return 0; fi
+    sleep 2
+  done
+
+  supervisorctl status "$program" | grep RUNNING
+}
+
+check_realtime_auth_boundaries() {
+  local authenticated_status
+  local guest_status
+
+  authenticated_status=$(curl --silent --output /dev/null --max-time 20 --write-out '%{http_code}' \
+    --request POST https://backend.aura.tj/api/broadcasting/auth \
+    --header 'Origin: https://aura.tj' \
+    --header 'Accept: application/json' \
+    --data-urlencode 'socket_id=1234.5678' \
+    --data-urlencode 'channel_name=private-messaging.user.1')
+  guest_status=$(curl --silent --output /dev/null --max-time 20 --write-out '%{http_code}' \
+    --request POST https://backend.aura.tj/api/guest-support/broadcasting/auth \
+    --header 'Origin: https://aura.tj' \
+    --header 'Accept: application/json' \
+    --data-urlencode 'socket_id=1234.5678' \
+    --data-urlencode 'channel_name=private-guest-support.conversation.00000000-0000-4000-8000-000000000000')
+
+  [[ $authenticated_status == 401 ]]
+  [[ $guest_status == 401 ]]
 }
 
 # Existing generated runtime files and their permissions are not application changes.
@@ -88,9 +120,14 @@ if [[ -f package-lock.json ]]; then
 fi
 
 maintenance=0
+realtime_env_changed=0
 finish() {
   result=$?
   trap - EXIT
+  if (( result != 0 && realtime_env_changed == 1 )); then
+    install -m 600 "$backup/pre-realtime-environment" "$repo/.env" || true
+    (cd "$repo" && php artisan config:cache && php artisan queue:restart && php artisan reverb:restart) || true
+  fi
   if (( maintenance == 1 )); then (cd "$repo" && php artisan up) || true; fi
   if (( result != 0 )); then
     echo "Backend deployment failed. Source, environment, database and previous dependencies: $backup" >&2
@@ -101,6 +138,13 @@ finish() {
 }
 trap finish EXIT
 trap 'exit 143' TERM INT
+
+install -m 644 "$stage/deploy/supervisor/aura-estate-reverb.conf" /etc/supervisor/conf.d/aura-estate-reverb.conf
+supervisorctl reread
+supervisorctl update
+wait_for_supervisor_program aura-estate-reverb
+(cd "$stage" && php scripts/verify-reverb-runtime.php)
+
 cd "$repo"
 maintenance=1
 php artisan down --retry=10
@@ -122,16 +166,22 @@ php artisan config:cache
 php artisan route:cache
 php artisan view:cache
 chown -R www-data:www-data bootstrap/cache
-php artisan queue:restart
 systemctl reload php8.2-fpm
 php artisan up
 maintenance=0
+
+install -m 600 "$repo/.env" "$backup/pre-realtime-environment"
+php scripts/enable-messaging-realtime.php
+realtime_env_changed=1
+php artisan config:cache
+php artisan queue:restart
+php artisan reverb:restart
+wait_for_supervisor_program aura-estate-queue:aura-estate-queue_00
+wait_for_supervisor_program aura-estate-reverb
+php scripts/verify-reverb-runtime.php --expect-enabled
+check_realtime_auth_boundaries
 check_public_api
-for attempt in {1..10}; do
-  if supervisorctl status aura-estate-queue:aura-estate-queue_00 | grep -q RUNNING; then break; fi
-  sleep 2
-done
-supervisorctl status aura-estate-queue:aura-estate-queue_00 | grep RUNNING
+realtime_env_changed=0
 printf '%s\n' "$sha" > /var/lib/aura-deploy/backend.current
 prune_backend_artifacts
 echo "Backend deployed: $sha; recovery backup: $backup"
