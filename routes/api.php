@@ -45,6 +45,7 @@ use App\Http\Controllers\ExternalAgentController;
 use App\Http\Controllers\ExternalPropertyRequestController;
 use App\Http\Controllers\FavoriteController;
 use App\Http\Controllers\FeatureController;
+use App\Http\Controllers\GuestBroadcastAuthController;
 use App\Http\Controllers\GuestSupportConversationController;
 use App\Http\Controllers\HeatingTypeController;
 use App\Http\Controllers\KpiModuleController;
@@ -289,6 +290,9 @@ Route::get('/chat/history', [ChatController::class, 'history']);
 Route::prefix('guest-support')
     ->middleware('guest.support.request')
     ->group(function () {
+        Route::post('/broadcasting/auth', GuestBroadcastAuthController::class)
+            ->name('guest-support.broadcasting.auth')
+            ->middleware('throttle:guest-support-read');
         Route::get('/conversations', [GuestSupportConversationController::class, 'index'])
             ->middleware('throttle:guest-support-read');
         Route::post('/conversations', [GuestSupportConversationController::class, 'store'])
@@ -418,6 +422,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::get('/conversations/{conversation}', [ConversationController::class, 'show']);
     Route::get('/conversations/{conversation}/messages', [ConversationMessageController::class, 'index']);
     Route::post('/conversations/{conversation}/messages', [ConversationMessageController::class, 'store']);
+    Route::post('/conversations/{conversation}/read', [ConversationMessageController::class, 'markRead']);
     Route::get('/conversations/{conversation}/participants', [ConversationParticipantController::class, 'index']);
     Route::post('/conversations/{conversation}/participants', [ConversationParticipantController::class, 'store']);
     Route::delete('/conversations/{conversation}/participants/{user}', [ConversationParticipantController::class, 'destroy']);

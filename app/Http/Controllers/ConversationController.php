@@ -132,8 +132,6 @@ class ConversationController extends Controller
             'supportThread.guestSession',
         ]);
 
-        $this->conversations->markConversationRead($conversation, $authUser);
-
         return response()->json($this->serializeConversation($conversation, $authUser));
     }
 

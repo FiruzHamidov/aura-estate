@@ -123,6 +123,7 @@ class GuestSupportConversationController extends Controller
 
         $validated = $request->validate([
             'body' => 'required|string|min:1|max:5000',
+            'client_message_id' => 'nullable|uuid',
             'user_id' => 'prohibited',
             'author_id' => 'prohibited',
             'role' => 'prohibited',
@@ -134,13 +135,17 @@ class GuestSupportConversationController extends Controller
             $thread->conversation,
             $session,
             $validated['body'],
-            ['source' => $thread->meta['source'] ?? 'guest_support']
+            ['source' => $thread->meta['source'] ?? 'guest_support'],
+            $validated['client_message_id'] ?? null,
         );
-        $this->notifications->handleConversationMessageCreated($message);
+
+        if ($message->wasRecentlyCreated) {
+            $this->notifications->handleConversationMessageCreated($message);
+        }
 
         return response()->json(
             $this->serializeMessage($message, null, $thread->conversation, $session),
-            201
+            $message->wasRecentlyCreated ? 201 : 200,
         );
     }
 
@@ -169,6 +174,7 @@ class GuestSupportConversationController extends Controller
 
         return [
             'id' => $thread->id,
+            'public_id' => $thread->public_id,
             'kind' => Conversation::KIND_SUPPORT,
             'kind_label' => 'Поддержка',
             'status' => $thread->status,

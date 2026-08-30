@@ -7,12 +7,14 @@ use App\Models\ConversationMessage;
 use App\Models\ConversationParticipant;
 use App\Models\GuestSupportSession;
 use App\Models\User;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 
 class ConversationService
 {
     public function __construct(
-        private readonly MessageAccessService $access
+        private readonly MessageAccessService $access,
+        private readonly MessagingRealtimePublisher $realtime,
     ) {}
 
     public function directKeyForUsers(User $first, User $second): string
@@ -56,6 +58,7 @@ class ConversationService
                 $actor->id,
                 $target->id
             ));
+            $this->realtime->publishConversationCreated($conversation);
 
             return $conversation->load(['participants.user.role', 'latestMessage.author', 'supportThread']);
         });
@@ -84,6 +87,7 @@ class ConversationService
             }
 
             $this->createSystemMessage($conversation, 'Group conversation created.');
+            $this->realtime->publishConversationCreated($conversation);
 
             return $conversation->load(['participants.user.role', 'latestMessage.author', 'supportThread']);
         });
@@ -101,14 +105,41 @@ class ConversationService
         $this->createSystemMessage($conversation, sprintf('User #%d removed from conversation.', $user->id));
     }
 
-    public function createMessage(Conversation $conversation, ?User $author, string $body, string $type = ConversationMessage::TYPE_TEXT, ?array $meta = null): ConversationMessage
-    {
-        $message = $conversation->messages()->create([
-            'author_id' => $author?->id,
-            'type' => $type,
-            'body' => $body,
-            'meta' => $meta,
-        ]);
+    public function createMessage(
+        Conversation $conversation,
+        ?User $author,
+        string $body,
+        string $type = ConversationMessage::TYPE_TEXT,
+        ?array $meta = null,
+        ?string $clientMessageId = null,
+    ): ConversationMessage {
+        if ($author && $clientMessageId) {
+            $existing = $this->findAuthoredMessage($conversation, $author, $clientMessageId);
+
+            if ($existing) {
+                return $this->ensureIdempotentMessageMatches($existing, $body, $type);
+            }
+        }
+
+        try {
+            $message = $conversation->messages()->create([
+                'author_id' => $author?->id,
+                'client_message_id' => $clientMessageId,
+                'type' => $type,
+                'body' => $body,
+                'meta' => $meta,
+            ]);
+        } catch (QueryException $exception) {
+            $existing = $author && $clientMessageId
+                ? $this->findAuthoredMessage($conversation, $author, $clientMessageId)
+                : null;
+
+            if (! $existing) {
+                throw $exception;
+            }
+
+            return $this->ensureIdempotentMessageMatches($existing, $body, $type);
+        }
 
         $conversation->touch();
 
@@ -116,14 +147,18 @@ class ConversationService
             $this->access->touchParticipantReadState($conversation, $author, $message);
         }
 
-        return $message->load('author.role');
+        $message->load('author.role');
+        $this->realtime->publishMessageCreated($message);
+
+        return $message;
     }
 
     public function createGuestMessage(
         Conversation $conversation,
         GuestSupportSession $guestSession,
         string $body,
-        ?array $meta = null
+        ?array $meta = null,
+        ?string $clientMessageId = null,
     ): ConversationMessage {
         $ownsConversation = $conversation->supportThread()
             ->where('guest_session_id', $guestSession->id)
@@ -131,23 +166,61 @@ class ConversationService
 
         abort_unless($conversation->type === Conversation::TYPE_SUPPORT && $ownsConversation, 404);
 
-        $message = $conversation->messages()->create([
-            'author_id' => null,
-            'guest_session_id' => $guestSession->id,
-            'type' => ConversationMessage::TYPE_TEXT,
-            'body' => $body,
-            'meta' => $meta,
-        ]);
+        if ($clientMessageId) {
+            $existing = $this->findGuestMessage($conversation, $guestSession, $clientMessageId);
+
+            if ($existing) {
+                return $this->ensureIdempotentMessageMatches(
+                    $existing,
+                    $body,
+                    ConversationMessage::TYPE_TEXT,
+                );
+            }
+        }
+
+        try {
+            $message = $conversation->messages()->create([
+                'author_id' => null,
+                'guest_session_id' => $guestSession->id,
+                'client_message_id' => $clientMessageId,
+                'type' => ConversationMessage::TYPE_TEXT,
+                'body' => $body,
+                'meta' => $meta,
+            ]);
+        } catch (QueryException $exception) {
+            $existing = $clientMessageId
+                ? $this->findGuestMessage($conversation, $guestSession, $clientMessageId)
+                : null;
+
+            if (! $existing) {
+                throw $exception;
+            }
+
+            return $this->ensureIdempotentMessageMatches(
+                $existing,
+                $body,
+                ConversationMessage::TYPE_TEXT,
+            );
+        }
 
         $conversation->touch();
 
-        return $message->load(['author.role', 'guestSession']);
+        $message->load(['author.role', 'guestSession']);
+        $this->realtime->publishMessageCreated($message);
+
+        return $message;
     }
 
     public function markConversationRead(Conversation $conversation, User $user): void
     {
         $latestMessage = $conversation->latestMessage()->first();
         $this->access->touchParticipantReadState($conversation, $user, $latestMessage);
+        $this->realtime->publishConversationRead($conversation, $user);
+    }
+
+    public function announceConversationCreated(Conversation $conversation): void
+    {
+        $this->realtime->publishConversationCreated($conversation);
     }
 
     private function attachParticipant(Conversation $conversation, User $user, string $role): ConversationParticipant
@@ -167,5 +240,43 @@ class ConversationService
     private function createSystemMessage(Conversation $conversation, string $body, ?array $meta = null): ConversationMessage
     {
         return $this->createMessage($conversation, null, $body, ConversationMessage::TYPE_SYSTEM, $meta);
+    }
+
+    private function findAuthoredMessage(
+        Conversation $conversation,
+        User $author,
+        string $clientMessageId,
+    ): ?ConversationMessage {
+        return $conversation->messages()
+            ->where('author_id', $author->id)
+            ->where('client_message_id', $clientMessageId)
+            ->with('author.role')
+            ->first();
+    }
+
+    private function findGuestMessage(
+        Conversation $conversation,
+        GuestSupportSession $guestSession,
+        string $clientMessageId,
+    ): ?ConversationMessage {
+        return $conversation->messages()
+            ->where('guest_session_id', $guestSession->id)
+            ->where('client_message_id', $clientMessageId)
+            ->with(['author.role', 'guestSession'])
+            ->first();
+    }
+
+    private function ensureIdempotentMessageMatches(
+        ConversationMessage $existing,
+        string $body,
+        string $type,
+    ): ConversationMessage {
+        abort_if(
+            $existing->body !== $body || $existing->type !== $type,
+            409,
+            'client_message_id is already used for a different message.',
+        );
+
+        return $existing;
     }
 }

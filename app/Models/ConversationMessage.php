@@ -15,6 +15,7 @@ class ConversationMessage extends Model
         'conversation_id',
         'author_id',
         'guest_session_id',
+        'client_message_id',
         'type',
         'body',
         'meta',

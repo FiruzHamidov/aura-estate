@@ -69,6 +69,8 @@ class SupportConversationService
                 'meta' => $meta,
             ]);
 
+            $this->conversations->announceConversationCreated($conversation);
+
             $this->conversations->createMessage(
                 $conversation,
                 null,
@@ -115,6 +117,8 @@ class SupportConversationService
                 'summary' => $initialMessage,
                 'meta' => $meta,
             ]);
+
+            $this->conversations->announceConversationCreated($conversation);
 
             $this->conversations->createMessage(
                 $conversation,

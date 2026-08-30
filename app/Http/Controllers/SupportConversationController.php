@@ -116,6 +116,7 @@ class SupportConversationController extends Controller
                 'latest_message' => $thread->conversation->latestMessage ? [
                     'id' => $thread->conversation->latestMessage->id,
                     'author_id' => $thread->conversation->latestMessage->author_id,
+                    'client_message_id' => $thread->conversation->latestMessage->client_message_id,
                     'type' => $thread->conversation->latestMessage->type,
                     'body' => $thread->conversation->latestMessage->body,
                     'sender_identity' => $thread->conversation->latestMessage->guestSession ? [

@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Str;
 
 class SupportThread extends Model
 {
@@ -12,6 +13,7 @@ class SupportThread extends Model
     public const STATUS_CLOSED = 'closed';
 
     protected $fillable = [
+        'public_id',
         'conversation_id',
         'requester_user_id',
         'guest_session_id',
@@ -21,6 +23,13 @@ class SupportThread extends Model
         'summary',
         'meta',
     ];
+
+    protected static function booted(): void
+    {
+        static::creating(function (SupportThread $thread): void {
+            $thread->public_id ??= (string) Str::uuid();
+        });
+    }
 
     protected $casts = [
         'meta' => 'array',

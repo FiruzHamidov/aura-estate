@@ -81,6 +81,7 @@ trait SerializesConversationPayloads
             'id' => $message->id,
             'conversation_id' => $message->conversation_id,
             'author_id' => $message->author_id,
+            'client_message_id' => $message->client_message_id,
             'type' => $message->type,
             'body' => $message->body,
             'meta' => $message->meta,

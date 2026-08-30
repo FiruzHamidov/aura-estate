@@ -2,14 +2,23 @@
 
 namespace Tests\Feature;
 
+use App\Events\ConversationMessageCreated;
+use App\Events\ConversationUpdated;
 use App\Models\ChatSession;
 use App\Models\Conversation;
+use App\Models\ConversationMessage;
 use App\Models\GuestSupportSession;
 use App\Models\Role;
 use App\Models\SupportThread;
 use App\Models\User;
+use App\Services\Messaging\ConversationService;
+use Illuminate\Broadcasting\BroadcastManager;
+use Illuminate\Contracts\Events\ShouldDispatchAfterCommit;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
@@ -93,10 +102,14 @@ class MessagingFeatureTest extends TestCase
             $table->foreignId('conversation_id')->constrained('conversations')->cascadeOnDelete();
             $table->foreignId('author_id')->nullable()->constrained('users')->nullOnDelete();
             $table->foreignId('guest_session_id')->nullable()->constrained('guest_support_sessions')->nullOnDelete();
+            $table->uuid('client_message_id')->nullable();
             $table->string('type', 32)->default('text');
             $table->longText('body')->nullable();
             $table->json('meta')->nullable();
             $table->timestamps();
+
+            $table->unique(['conversation_id', 'author_id', 'client_message_id']);
+            $table->unique(['conversation_id', 'guest_session_id', 'client_message_id']);
         });
 
         Schema::create('conversation_participants', function (Blueprint $table) {
@@ -115,6 +128,7 @@ class MessagingFeatureTest extends TestCase
 
         Schema::create('support_threads', function (Blueprint $table) {
             $table->id();
+            $table->uuid('public_id')->unique();
             $table->foreignId('conversation_id')->constrained('conversations')->cascadeOnDelete()->unique();
             $table->foreignId('requester_user_id')->nullable()->constrained('users')->cascadeOnDelete();
             $table->foreignId('guest_session_id')->nullable()->constrained('guest_support_sessions')->cascadeOnDelete();
@@ -239,7 +253,7 @@ class MessagingFeatureTest extends TestCase
         $show->assertOk()
             ->assertJsonPath('name', 'Current User')
             ->assertJsonPath('type', Conversation::TYPE_DIRECT)
-            ->assertJsonPath('unread_count', 0)
+            ->assertJsonPath('unread_count', 1)
             ->assertJsonPath('participants.0.user.is_online', false)
             ->assertJsonPath('participants.0.user.status', 'offline')
             ->assertJsonPath('participants.0.user.last_seen_at', null);
@@ -468,6 +482,8 @@ class MessagingFeatureTest extends TestCase
             ->assertJsonPath('conversation.latest_message.role', 'me')
             ->assertJsonPath('conversation.latest_message.sender_identity.kind', 'guest')
             ->assertJsonPath('responsibility.response_required_from', 'support_staff');
+        $publicId = $create->json('public_id');
+        $this->assertMatchesRegularExpression('/^[0-9a-f-]{36}$/i', $publicId);
 
         $cookie = collect($create->headers->getCookies())
             ->first(fn ($candidate) => $candidate->getName() === config('guest-support.cookie'));
@@ -484,7 +500,13 @@ class MessagingFeatureTest extends TestCase
             ->getJson('/api/guest-support/conversations')
             ->assertOk()
             ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.public_id', $publicId)
             ->assertJsonPath('data.0.conversation.id', $conversationId);
+
+        $this->withCredentials()->withUnencryptedCookie(config('guest-support.cookie'), $guestCookie)
+            ->getJson('/api/guest-support/conversations/'.$conversationId)
+            ->assertOk()
+            ->assertJsonPath('public_id', $publicId);
 
         $this->withCredentials()->withUnencryptedCookie(config('guest-support.cookie'), $guestCookie)
             ->postJson('/api/guest-support/conversations/'.$conversationId.'/messages', [
@@ -608,6 +630,318 @@ class MessagingFeatureTest extends TestCase
         $this->assertSame(1, GuestSupportSession::query()->count());
     }
 
+    public function test_private_messaging_channels_only_authorize_the_owner_and_conversation_participants(): void
+    {
+        $this->enableRealtimeBroadcasting();
+        [$owner, $participant] = $this->seedInternalPair('admin', 'manager');
+        $outsider = $this->createUser('operator', 'Outsider', '991000071');
+
+        Sanctum::actingAs($owner);
+        $conversationId = $this->postJson('/api/conversations/direct', [
+            'target_user_id' => $participant->id,
+        ])->assertOk()->json('id');
+
+        $this->postJson('/api/broadcasting/auth', [
+            'socket_id' => '1234.5678',
+            'channel_name' => 'private-messaging.user.'.$owner->id,
+        ])->assertOk();
+        $this->postJson('/api/broadcasting/auth', [
+            'socket_id' => '1234.5678',
+            'channel_name' => 'private-messaging.user.'.$participant->id,
+        ])->assertForbidden();
+        $this->postJson('/api/broadcasting/auth', [
+            'socket_id' => '1234.5678',
+            'channel_name' => 'private-messaging.conversation.'.$conversationId,
+        ])->assertOk();
+
+        Sanctum::actingAs($outsider);
+        $this->postJson('/api/broadcasting/auth', [
+            'socket_id' => '1234.5678',
+            'channel_name' => 'private-messaging.conversation.'.$conversationId,
+        ])->assertForbidden();
+    }
+
+    public function test_guest_broadcast_auth_requires_own_unexpired_cookie_and_public_thread_uuid(): void
+    {
+        $this->enableRealtimeBroadcasting();
+        $this->createUser('manager', 'Manager', '991000072');
+
+        $first = $this->withHeader('Origin', 'https://aura.tj')
+            ->postJson('/api/guest-support/conversations', ['initial_message' => 'Первое обращение']);
+        $first->assertCreated();
+        $publicId = $first->json('public_id');
+        $this->assertMatchesRegularExpression('/^[0-9a-f-]{36}$/i', $publicId);
+        $firstCookie = collect($first->headers->getCookies())
+            ->first(fn ($cookie) => $cookie->getName() === config('guest-support.cookie'))
+            ?->getValue();
+
+        $this->withHeader('Origin', 'https://aura.tj')
+            ->withUnencryptedCookie(config('guest-support.cookie'), $firstCookie)
+            ->post('/api/guest-support/broadcasting/auth', [
+                'socket_id' => '1234.5678',
+                'channel_name' => 'private-guest-support.conversation.'.$publicId,
+            ])->assertOk();
+
+        $second = $this->withServerVariables(['REMOTE_ADDR' => '10.0.0.72'])
+            ->postJson('/api/guest-support/conversations', ['initial_message' => 'Второе обращение']);
+        $secondCookie = collect($second->headers->getCookies())
+            ->first(fn ($cookie) => $cookie->getName() === config('guest-support.cookie'))
+            ?->getValue();
+
+        $this->withUnencryptedCookie(config('guest-support.cookie'), $secondCookie)
+            ->post('/api/guest-support/broadcasting/auth', [
+                'socket_id' => '1234.5678',
+                'channel_name' => 'private-guest-support.conversation.'.$publicId,
+            ])->assertForbidden();
+
+        GuestSupportSession::query()
+            ->where('token_hash', hash('sha256', $firstCookie))
+            ->update(['expires_at' => now()->subMinute()]);
+
+        $this->withUnencryptedCookie(config('guest-support.cookie'), $firstCookie)
+            ->post('/api/guest-support/broadcasting/auth', [
+                'socket_id' => '1234.5678',
+                'channel_name' => 'private-guest-support.conversation.'.$publicId,
+            ])->assertUnauthorized();
+
+        $this->post('/api/guest-support/broadcasting/auth', [
+            'socket_id' => '1234.5678',
+            'channel_name' => 'private-guest-support.conversation.'.$first->json('conversation.id'),
+        ])->assertUnprocessable();
+    }
+
+    public function test_realtime_events_are_after_commit_minimal_and_cover_direct_group_and_guest_support(): void
+    {
+        config()->set('messaging.realtime_broadcast_enabled', true);
+        Event::fake([ConversationMessageCreated::class, ConversationUpdated::class]);
+        [$admin, $manager] = $this->seedInternalPair('admin', 'manager');
+
+        Sanctum::actingAs($admin);
+        $directId = $this->postJson('/api/conversations/direct', [
+            'target_user_id' => $manager->id,
+        ])->assertOk()->json('id');
+        $this->postJson('/api/conversations/'.$directId.'/messages', [
+            'body' => 'Direct realtime body',
+        ])->assertCreated();
+
+        $operator = $this->createUser('operator', 'Operator', '991000073');
+        $groupId = $this->postJson('/api/conversations', [
+            'name' => 'Realtime group',
+            'participant_ids' => [$manager->id, $operator->id],
+        ])->assertCreated()->json('id');
+        $this->postJson('/api/conversations/'.$groupId.'/messages', [
+            'body' => 'Group realtime body',
+        ])->assertCreated();
+
+        $supportId = $this->postJson('/api/support/conversations', [
+            'initial_message' => 'Authenticated support realtime body',
+        ])->assertCreated()->json('conversation.id');
+
+        Sanctum::actingAs($manager);
+        $this->postJson('/api/conversations/'.$directId.'/read')->assertOk();
+
+        auth()->forgetGuards();
+        $guest = $this->postJson('/api/guest-support/conversations', [
+            'initial_message' => 'Guest support realtime body',
+        ])->assertCreated();
+        $guestConversationId = $guest->json('conversation.id');
+        $guestPublicId = $guest->json('public_id');
+
+        Event::assertDispatched(ConversationMessageCreated::class, function ($event) use ($directId) {
+            return $event instanceof ShouldDispatchAfterCommit
+                && $event->broadcastAs() === 'conversation.message.created'
+                && $event->conversationId === $directId
+                && $event->payload['conversation_id'] === $directId
+                && $event->payload['message']['body'] === 'Direct realtime body'
+                && ! str_contains(json_encode($event->payload), '991000')
+                && ! preg_match('/phone|token|hash|password|photo|email|name|role_slug/i', json_encode($event->payload));
+        });
+        Event::assertDispatched(ConversationMessageCreated::class, fn ($event) => $event->conversationId === $groupId
+            && $event->payload['conversation']['kind'] === Conversation::KIND_GROUP
+        );
+        Event::assertDispatched(ConversationMessageCreated::class, fn ($event) => $event->conversationId === $supportId
+            && $event->payload['conversation']['kind'] === Conversation::KIND_SUPPORT
+            && $event->guestThreadPublicId === null
+        );
+        Event::assertDispatched(ConversationMessageCreated::class, fn ($event) => $event->conversationId === $guestConversationId
+            && $event->guestThreadPublicId === $guestPublicId
+            && collect($event->broadcastOn())->contains(fn ($channel) => $channel->name === 'private-guest-support.conversation.'.$guestPublicId
+            )
+        );
+        Event::assertDispatched(ConversationUpdated::class, fn ($event) => $event->userId === $manager->id
+            && $event->payload['conversation_id'] === $directId
+            && $event->payload['unread_count'] === 1
+            && $event->broadcastAs() === 'conversation.updated'
+        );
+        Event::assertDispatched(ConversationUpdated::class, fn ($event) => $event->userId === $manager->id
+            && $event->payload['conversation_id'] === $directId
+            && $event->payload['reason'] === 'conversation_read'
+            && $event->payload['unread_count'] === 0
+        );
+    }
+
+    public function test_rollback_never_dispatches_message_event_but_commit_does_and_system_messages_are_suppressed(): void
+    {
+        [$admin, $manager] = $this->seedInternalPair('admin', 'manager');
+        Sanctum::actingAs($admin);
+        $conversationId = $this->postJson('/api/conversations/direct', [
+            'target_user_id' => $manager->id,
+        ])->assertOk()->json('id');
+        $conversation = Conversation::query()->findOrFail($conversationId);
+
+        config()->set('messaging.realtime_broadcast_enabled', true);
+        Event::fake([ConversationMessageCreated::class, ConversationUpdated::class]);
+
+        DB::beginTransaction();
+        app(ConversationService::class)->createMessage($conversation, $admin, 'Rolled back body');
+        Event::assertNotDispatched(ConversationMessageCreated::class);
+        DB::rollBack();
+        Event::assertNotDispatched(ConversationMessageCreated::class);
+
+        DB::transaction(fn () => app(ConversationService::class)
+            ->createMessage($conversation, $admin, 'Committed body'));
+        Event::assertDispatched(ConversationMessageCreated::class, fn ($event) => $event->payload['message']['body'] === 'Committed body'
+        );
+
+        Event::fake([ConversationMessageCreated::class]);
+        app(ConversationService::class)->createMessage(
+            $conversation,
+            null,
+            'Internal lifecycle event',
+            ConversationMessage::TYPE_SYSTEM,
+        );
+        Event::assertNotDispatched(ConversationMessageCreated::class);
+    }
+
+    public function test_authenticated_message_client_id_is_idempotent_echoed_and_rejects_conflicting_reuse(): void
+    {
+        [$admin, $manager] = $this->seedInternalPair('admin', 'manager');
+        Sanctum::actingAs($admin);
+        $conversationId = $this->postJson('/api/conversations/direct', [
+            'target_user_id' => $manager->id,
+        ])->assertOk()->json('id');
+        $clientMessageId = (string) Str::uuid();
+
+        config()->set('messaging.realtime_broadcast_enabled', true);
+        Event::fake([ConversationMessageCreated::class, ConversationUpdated::class]);
+
+        $first = $this->postJson('/api/conversations/'.$conversationId.'/messages', [
+            'body' => 'Idempotent authenticated message',
+            'client_message_id' => $clientMessageId,
+        ])->assertCreated()
+            ->assertJsonPath('client_message_id', $clientMessageId);
+
+        $this->postJson('/api/conversations/'.$conversationId.'/messages', [
+            'body' => 'Idempotent authenticated message',
+            'client_message_id' => $clientMessageId,
+        ])->assertOk()
+            ->assertJsonPath('id', $first->json('id'))
+            ->assertJsonPath('client_message_id', $clientMessageId);
+
+        $this->postJson('/api/conversations/'.$conversationId.'/messages', [
+            'body' => 'Conflicting authenticated message',
+            'client_message_id' => $clientMessageId,
+        ])->assertConflict();
+
+        $this->assertSame(1, ConversationMessage::query()
+            ->where('conversation_id', $conversationId)
+            ->where('client_message_id', $clientMessageId)
+            ->count());
+        Event::assertDispatchedTimes(ConversationMessageCreated::class, 1);
+        Event::assertDispatched(ConversationMessageCreated::class, fn ($event) => $event->payload['message']['client_message_id'] === $clientMessageId
+            && $event->payload['message']['id'] === $first->json('id')
+        );
+    }
+
+    public function test_guest_message_client_id_is_idempotent_echoed_and_rejects_conflicting_reuse(): void
+    {
+        $this->createUser('manager', 'Manager', '991000074');
+        $create = $this->postJson('/api/guest-support/conversations', [
+            'initial_message' => 'Guest idempotency thread',
+        ])->assertCreated();
+        $conversationId = $create->json('conversation.id');
+        $cookie = collect($create->headers->getCookies())
+            ->first(fn ($candidate) => $candidate->getName() === config('guest-support.cookie'))
+            ?->getValue();
+        $clientMessageId = (string) Str::uuid();
+
+        config()->set('messaging.realtime_broadcast_enabled', true);
+        Event::fake([ConversationMessageCreated::class, ConversationUpdated::class]);
+
+        $first = $this->withCredentials()
+            ->withUnencryptedCookie(config('guest-support.cookie'), $cookie)
+            ->postJson('/api/guest-support/conversations/'.$conversationId.'/messages', [
+                'body' => 'Idempotent guest message',
+                'client_message_id' => $clientMessageId,
+            ])->assertCreated()
+            ->assertJsonPath('client_message_id', $clientMessageId);
+
+        $this->withCredentials()
+            ->withUnencryptedCookie(config('guest-support.cookie'), $cookie)
+            ->postJson('/api/guest-support/conversations/'.$conversationId.'/messages', [
+                'body' => 'Idempotent guest message',
+                'client_message_id' => $clientMessageId,
+            ])->assertOk()
+            ->assertJsonPath('id', $first->json('id'));
+
+        $this->withCredentials()
+            ->withUnencryptedCookie(config('guest-support.cookie'), $cookie)
+            ->postJson('/api/guest-support/conversations/'.$conversationId.'/messages', [
+                'body' => 'Conflicting guest message',
+                'client_message_id' => $clientMessageId,
+            ])->assertConflict();
+
+        $this->assertSame(1, ConversationMessage::query()
+            ->where('conversation_id', $conversationId)
+            ->where('client_message_id', $clientMessageId)
+            ->count());
+        Event::assertDispatchedTimes(ConversationMessageCreated::class, 1);
+        Event::assertDispatched(ConversationMessageCreated::class, fn ($event) => $event->payload['message']['client_message_id'] === $clientMessageId
+        );
+    }
+
+    public function test_read_is_explicit_and_broadcasts_zero_unread_only_after_post(): void
+    {
+        [$admin, $manager] = $this->seedInternalPair('admin', 'manager');
+        Sanctum::actingAs($admin);
+        $conversationId = $this->postJson('/api/conversations/direct', [
+            'target_user_id' => $manager->id,
+        ])->assertOk()->json('id');
+        $messageId = $this->postJson('/api/conversations/'.$conversationId.'/messages', [
+            'body' => 'Explicit read marker',
+        ])->assertCreated()->json('id');
+        $lastReadBeforeGet = DB::table('conversation_participants')
+            ->where('conversation_id', $conversationId)
+            ->where('user_id', $manager->id)
+            ->value('last_read_message_id');
+
+        Sanctum::actingAs($manager);
+        $this->getJson('/api/conversations/'.$conversationId.'/messages')->assertOk();
+        $this->getJson('/api/conversations/'.$conversationId)->assertOk();
+        $this->assertSame($lastReadBeforeGet, DB::table('conversation_participants')
+            ->where('conversation_id', $conversationId)
+            ->where('user_id', $manager->id)
+            ->value('last_read_message_id'));
+
+        config()->set('messaging.realtime_broadcast_enabled', true);
+        Event::fake([ConversationUpdated::class]);
+
+        $this->postJson('/api/conversations/'.$conversationId.'/read')
+            ->assertOk()
+            ->assertJsonPath('conversation_id', $conversationId)
+            ->assertJsonPath('unread_count', 0)
+            ->assertJsonPath('last_read_message_id', $messageId);
+
+        Event::assertDispatched(ConversationUpdated::class, fn ($event) => $event->userId === $manager->id
+            && $event->payload['reason'] === 'conversation_read'
+            && $event->payload['unread_count'] === 0
+        );
+
+        $outsider = $this->createUser('operator', 'Read Outsider', '991000075');
+        Sanctum::actingAs($outsider);
+        $this->postJson('/api/conversations/'.$conversationId.'/read')->assertForbidden();
+    }
+
     private function seedInternalPair(string $firstRole, string $secondRole): array
     {
         return [
@@ -630,5 +964,16 @@ class MessagingFeatureTest extends TestCase
             'role_id' => $role->id,
             'status' => 'active',
         ], $attributes));
+    }
+
+    private function enableRealtimeBroadcasting(): void
+    {
+        config()->set('broadcasting.default', 'reverb');
+        config()->set('broadcasting.connections.reverb.key', 'test-public-key');
+        config()->set('broadcasting.connections.reverb.secret', 'test-secret');
+        config()->set('broadcasting.connections.reverb.app_id', 'test-app');
+        config()->set('messaging.realtime_broadcast_enabled', false);
+        app(BroadcastManager::class)->setDefaultDriver('reverb');
+        require base_path('routes/channels.php');
     }
 }
