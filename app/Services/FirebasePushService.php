@@ -12,11 +12,31 @@ use Kreait\Firebase\Messaging\WebPushConfig;
 
 class FirebasePushService
 {
+    public function isConfigured(): bool
+    {
+        $credentials = $this->credentialsPath();
+
+        if ($credentials === '' || ! is_readable($credentials)) {
+            return false;
+        }
+
+        $payload = json_decode((string) file_get_contents($credentials), true);
+
+        return is_array($payload)
+            && ($payload['type'] ?? null) === 'service_account'
+            && is_string($payload['project_id'] ?? null)
+            && $payload['project_id'] !== ''
+            && is_string($payload['client_email'] ?? null)
+            && $payload['client_email'] !== ''
+            && is_string($payload['private_key'] ?? null)
+            && str_contains($payload['private_key'], 'BEGIN PRIVATE KEY');
+    }
+
     public function send(AppNotification $notification): void
     {
-        $credentials = (string) config('services.firebase.credentials', '');
+        $credentials = $this->credentialsPath();
 
-        if ($credentials === '' || ! is_file($credentials)) {
+        if (! $this->isConfigured()) {
             Log::warning('Firebase push skipped because credentials are not configured.', [
                 'notification_id' => $notification->id,
             ]);
@@ -159,5 +179,10 @@ class FirebasePushService
         }
 
         return $result;
+    }
+
+    private function credentialsPath(): string
+    {
+        return (string) config('services.firebase.credentials', '');
     }
 }

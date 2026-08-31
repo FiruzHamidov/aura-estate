@@ -71,6 +71,7 @@ use App\Http\Controllers\PropertyPhotoController;
 use App\Http\Controllers\PropertyReportController;
 use App\Http\Controllers\PropertyStatusController;
 use App\Http\Controllers\PropertyTypeController;
+use App\Http\Controllers\PushHealthController;
 use App\Http\Controllers\PublicRealtorController;
 use App\Http\Controllers\PublicTeamController;
 use App\Http\Controllers\PushSubscriptionController;
@@ -89,6 +90,7 @@ use Illuminate\Support\Facades\Route;
 
 // --- ПИНГ ---
 Route::get('/ping', fn () => response()->json(['message' => 'API works']));
+Route::get('/push/health', PushHealthController::class)->middleware('throttle:20,1');
 
 // --- ПУБЛИЧНЫЕ ---
 Route::post('/register', [AuthController::class, 'register']);
