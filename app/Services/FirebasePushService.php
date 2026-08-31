@@ -22,10 +22,12 @@ class FirebasePushService
 
         $payload = json_decode((string) file_get_contents($credentials), true);
 
-        return is_array($payload)
+        $expectedProjectId = (string) config('services.firebase.project_id', '');
+
+        return $expectedProjectId !== ''
+            && is_array($payload)
             && ($payload['type'] ?? null) === 'service_account'
-            && is_string($payload['project_id'] ?? null)
-            && $payload['project_id'] !== ''
+            && hash_equals($expectedProjectId, (string) ($payload['project_id'] ?? ''))
             && is_string($payload['client_email'] ?? null)
             && $payload['client_email'] !== ''
             && is_string($payload['private_key'] ?? null)

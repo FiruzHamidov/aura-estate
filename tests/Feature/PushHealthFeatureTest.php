@@ -38,4 +38,25 @@ class PushHealthFeatureTest extends TestCase
             unlink($credentials);
         }
     }
+
+    public function test_it_rejects_credentials_for_another_firebase_project(): void
+    {
+        $credentials = tempnam(sys_get_temp_dir(), 'aura-firebase-');
+        file_put_contents($credentials, json_encode([
+            'type' => 'service_account',
+            'project_id' => 'another-project',
+            'client_email' => 'firebase-adminsdk@example.iam.gserviceaccount.com',
+            'private_key' => "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n",
+        ], JSON_THROW_ON_ERROR));
+        config()->set('services.firebase.credentials', $credentials);
+        config()->set('services.firebase.project_id', 'aura-estate-e7696');
+
+        try {
+            $this->getJson('/api/push/health')
+                ->assertOk()
+                ->assertExactJson(['status' => 'not_configured']);
+        } finally {
+            unlink($credentials);
+        }
+    }
 }
