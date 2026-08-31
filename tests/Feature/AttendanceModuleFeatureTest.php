@@ -840,6 +840,20 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->assertStringContainsString('04:00', $details);
     }
 
+    public function test_hr_timesheet_export_accepts_31_calendar_days_and_rejects_32(): void
+    {
+        $context = $this->context();
+        Sanctum::actingAs($context['admin']);
+
+        $this->get('/api/attendance/export?format=xlsx&date_from=2026-08-01&date_to=2026-08-31&view=users&page=1&per_page=50')
+            ->assertOk()
+            ->assertHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+
+        $this->getJson('/api/attendance/export?format=xlsx&date_from=2026-08-01&date_to=2026-09-01&view=users&page=1&per_page=50')
+            ->assertStatus(422)
+            ->assertJsonPath('message', 'Диапазон табеля не может превышать 31 день.');
+    }
+
     public function test_only_administrators_can_manage_devices_and_changes_are_audited(): void
     {
         $context = $this->context();

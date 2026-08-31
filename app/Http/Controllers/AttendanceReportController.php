@@ -123,7 +123,7 @@ final class AttendanceReportController extends Controller
         if ($request->query('format') === 'xlsx') {
             $timezone = (string) config('attendance.timezone', 'Asia/Dushanbe');
             $from = CarbonImmutable::parse($validated['date_from'] ?? now($timezone)->startOfMonth()->toDateString(), $timezone)->startOfDay();
-            $to = CarbonImmutable::parse($validated['date_to'] ?? now($timezone)->endOfMonth()->toDateString(), $timezone)->endOfDay();
+            $to = CarbonImmutable::parse($validated['date_to'] ?? now($timezone)->endOfMonth()->toDateString(), $timezone)->startOfDay();
             if ($from->diffInDays($to) > 30) {
                 abort(422, 'Диапазон табеля не может превышать 31 день.');
             }
