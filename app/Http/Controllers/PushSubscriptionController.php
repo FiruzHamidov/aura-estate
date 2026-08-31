@@ -12,7 +12,7 @@ class PushSubscriptionController extends Controller
     {
         $validated = $request->validate([
             'token' => ['required', 'string', 'max:4096'],
-            'platform' => ['nullable', 'string', 'in:web'],
+            'platform' => ['nullable', 'string', 'in:web,android,ios'],
             'device_name' => ['nullable', 'string', 'max:255'],
         ]);
 

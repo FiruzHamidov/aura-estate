@@ -337,13 +337,34 @@ class NotificationFeatureTest extends TestCase
         $this->assertDatabaseHas('push_subscriptions', [
             'user_id' => $firstUser->id,
             'token_hash' => hash('sha256', $token),
+            'platform' => 'web',
         ]);
+
+        foreach (['android', 'ios'] as $platform) {
+            $mobileToken = "{$platform}-firebase-registration-token";
+            $this->putJson('/api/push-subscriptions', [
+                'token' => $mobileToken,
+                'platform' => $platform,
+                'device_name' => "Aura {$platform}",
+            ])->assertCreated()->assertJsonPath('registered', true);
+
+            $this->assertDatabaseHas('push_subscriptions', [
+                'user_id' => $firstUser->id,
+                'token_hash' => hash('sha256', $mobileToken),
+                'platform' => $platform,
+            ]);
+        }
+
+        $this->putJson('/api/push-subscriptions', [
+            'token' => 'unsupported-platform-token',
+            'platform' => 'desktop',
+        ])->assertUnprocessable();
 
         Sanctum::actingAs($secondUser);
         $this->putJson('/api/push-subscriptions', ['token' => $token])
             ->assertOk();
 
-        $this->assertDatabaseCount('push_subscriptions', 1);
+        $this->assertDatabaseCount('push_subscriptions', 3);
         $this->assertDatabaseHas('push_subscriptions', [
             'user_id' => $secondUser->id,
             'token_hash' => hash('sha256', $token),
@@ -352,7 +373,31 @@ class NotificationFeatureTest extends TestCase
         $this->deleteJson('/api/push-subscriptions', ['token' => $token])
             ->assertOk()
             ->assertJsonPath('registered', false);
-        $this->assertDatabaseCount('push_subscriptions', 0);
+        $this->assertDatabaseCount('push_subscriptions', 2);
+        $this->assertDatabaseMissing('push_subscriptions', [
+            'token_hash' => hash('sha256', $token),
+        ]);
+    }
+
+    public function test_firebase_push_builds_platform_specific_payloads(): void
+    {
+        $service = app(\App\Services\FirebasePushService::class);
+        $method = new \ReflectionMethod($service, 'messageForPlatform');
+        $data = [
+            'title' => 'Новое сообщение',
+            'body' => 'Вам ответили в чате',
+            'action_url' => 'https://aura.tj/profile/chats?conversation=42',
+        ];
+
+        $web = $method->invoke($service, 'web', $data, $data['action_url'], 3)->jsonSerialize();
+        $android = $method->invoke($service, 'android', $data, $data['action_url'], 3)->jsonSerialize();
+        $ios = $method->invoke($service, 'ios', $data, $data['action_url'], 3)->jsonSerialize();
+
+        $this->assertSame($data['action_url'], $web['webpush']['fcm_options']['link']);
+        $this->assertSame('high', $android['android']['priority']);
+        $this->assertSame('Новое сообщение', $android['android']['notification']['title']);
+        $this->assertSame('10', $ios['apns']['headers']['apns-priority']);
+        $this->assertSame('Вам ответили в чате', $ios['apns']['payload']['aps']['alert']['body']);
     }
 
     public function test_overdue_lead_without_a_manager_is_skipped_without_an_info_log(): void
