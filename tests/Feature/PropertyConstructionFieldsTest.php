@@ -897,7 +897,7 @@ class PropertyConstructionFieldsTest extends TestCase
         $this->assertDatabaseCount('properties', 2);
     }
 
-    public function test_property_store_finds_same_property_from_another_agent_with_different_phone_address_and_coordinates(): void
+    public function test_property_store_only_flags_duplicate_when_similarity_is_above_90_percent(): void
     {
         $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
         $firstAgent = User::create([
@@ -960,19 +960,35 @@ class PropertyConstructionFieldsTest extends TestCase
             'longitude' => 68.779716,
         ];
 
-        $response = $this->postJson('/api/properties', $payload)
+        $this->assertSame(
+            [],
+            app(\App\Services\PropertyDuplicateService::class)->find($payload)->all(),
+            'A similarity score of 90% or lower must not be treated as a duplicate.'
+        );
+
+        $highConfidencePayload = [
+            ...$payload,
+            'description' => $existing->description,
+            'owner_phone' => $existing->owner_phone,
+            'address' => $existing->address,
+            'latitude' => $existing->latitude,
+            'longitude' => $existing->longitude,
+        ];
+
+        $response = $this->postJson('/api/properties', $highConfidencePayload)
             ->assertStatus(409)
             ->assertJsonPath('code', 'PROPERTY_REVIEW_REQUIRED')
             ->assertJsonPath('duplicates.0.id', $existing->id)
             ->assertJsonPath('duplicates.0.photos.0.file_path', 'properties/existing.jpg')
-            ->assertJsonPath('duplicates.0.summary.coordinates_conflict', true);
+            ->assertJsonPath('duplicates.0.score', 100)
+            ->assertJsonPath('duplicates.0.summary.coordinates_conflict', false);
 
         $signals = collect($response->json('duplicates.0.signals'));
         $this->assertTrue($signals->contains(fn (array $signal) => $signal['code'] === 'text' && $signal['matched']));
         $this->assertTrue($signals->contains(fn (array $signal) => $signal['code'] === 'total_area' && $signal['matched']));
         $this->assertDatabaseCount('properties', 1);
 
-        $createdId = $this->postJson('/api/properties', [...$payload, 'force' => true])
+        $createdId = $this->postJson('/api/properties', [...$highConfidencePayload, 'force' => true])
             ->assertOk()
             ->assertJsonPath('moderation_status', 'pending')
             ->json('id');

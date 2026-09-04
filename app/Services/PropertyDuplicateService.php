@@ -12,7 +12,7 @@ final class PropertyDuplicateService
         'deleted', 'rejected', 'denied', 'draft', 'sold', 'rented', 'sold_by_owner',
     ];
 
-    private const SCORE_THRESHOLD = 58.0;
+    private const DUPLICATE_SCORE_THRESHOLD = 90.0;
 
     /** @return Collection<int, array<string, mixed>> */
     public function find(array $data, ?int $excludePropertyId = null): Collection
@@ -191,10 +191,9 @@ final class PropertyDuplicateService
             return null;
         }
 
-        $supportingMatch = $physicalMatches >= 1 || $sharedTokens !== [] || $geoNear;
-        $qualified = (($phoneMatch || $ownerClientMatch) && $supportingMatch)
-            || $score >= self::SCORE_THRESHOLD
-            || ($passportMatches >= 6 && count($sharedTokens) >= 1);
+        // Only very high-confidence matches are treated as duplicates. Lower
+        // similarity must not block creation or send the property to moderation.
+        $qualified = $score > self::DUPLICATE_SCORE_THRESHOLD;
 
         if (! $qualified) {
             return null;
