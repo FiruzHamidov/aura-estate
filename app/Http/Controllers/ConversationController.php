@@ -76,6 +76,13 @@ class ConversationController extends Controller
         return response()->json($conversations);
     }
 
+    public function unreadSummary()
+    {
+        return response()->json([
+            'unread_count' => $this->access->unreadMessageCount($this->authUser()),
+        ]);
+    }
+
     public function store(Request $request)
     {
         $authUser = $this->authUser();
