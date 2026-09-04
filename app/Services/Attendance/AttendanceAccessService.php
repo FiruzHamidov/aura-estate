@@ -93,7 +93,7 @@ final class AttendanceAccessService
     {
         $this->assertCanViewModule($viewer);
         // Apply the same employee scope to the table, totals, reports and day details.
-        $excludedRoles = array_unique(['client', ...(array) config('attendance.excluded_table_user_roles', [])]);
+        $excludedRoles = array_unique(['client', 'external_agent', ...(array) config('attendance.excluded_table_user_roles', [])]);
         $query = $this->participants->query()
             ->whereHas('role', fn (Builder $roles) => $roles->whereNotIn('slug', $excludedRoles))
             ->with(['role', 'branch', 'branchGroup']);

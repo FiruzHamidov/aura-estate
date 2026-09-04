@@ -721,7 +721,7 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->assertStringContainsString("'=HYPERLINK", $safeContent);
     }
 
-    public function test_clients_are_excluded_from_attendance_reports_statistics_and_direct_details(): void
+    public function test_non_employee_roles_are_excluded_from_attendance_reports_statistics_and_direct_details(): void
     {
         $context = $this->context();
         $device = $this->device('ZAM230-NO-CLIENTS', $context['branch'], $context['group']);
@@ -735,11 +735,21 @@ class AttendanceModuleFeatureTest extends TestCase
             'status' => User::STATUS_ACTIVE,
             'auth_method' => 'password',
         ]);
-        foreach ([$context['agent'], $client] as $user) {
+        $externalAgentRole = Role::query()->firstOrCreate(['slug' => 'external_agent'], ['name' => 'External agent']);
+        $externalAgent = User::query()->create([
+            'name' => 'Excluded External Agent',
+            'phone' => '992000007779',
+            'role_id' => $externalAgentRole->id,
+            'branch_id' => $context['branch']->id,
+            'branch_group_id' => $context['group']->id,
+            'status' => User::STATUS_ACTIVE,
+            'auth_method' => 'password',
+        ]);
+        foreach ([$context['agent'], $client, $externalAgent] as $user) {
             AttendanceDailySummary::query()->create([
                 'user_id' => $user->id,
                 'work_date' => '2026-08-17',
-                'late_minutes' => $user->id === $client->id ? 100 : 7,
+                'late_minutes' => $user->id === $context['agent']->id ? 7 : 100,
                 'status' => 'late',
             ]);
             AttendanceEvent::query()->create([
@@ -752,7 +762,7 @@ class AttendanceModuleFeatureTest extends TestCase
             ]);
         }
 
-        // Clients remain excluded even if an older config cache has no exclusions.
+        // Non-employees remain excluded even if an older config cache has no exclusions.
         config(['attendance.excluded_table_user_roles' => []]);
         CarbonImmutable::setTestNow(CarbonImmutable::parse('2026-08-17 12:00:00', 'Asia/Dushanbe'));
         try {
@@ -764,33 +774,43 @@ class AttendanceModuleFeatureTest extends TestCase
                     ->assertJsonPath('meta.summary.checked_in_today', 1)
                     ->assertJsonPath('meta.summary.average_late_minutes', 7);
                 $this->assertNotContains($client->id, array_column(array_column($matrix->json('data'), 'user'), 'id'));
-                $this->getJson('/api/attendance/matrix?'.$range.'&role=client')->assertOk()
-                    ->assertJsonCount(0, 'data')->assertJsonPath('meta.pagination.total', 0);
+                $this->assertNotContains($externalAgent->id, array_column(array_column($matrix->json('data'), 'user'), 'id'));
+                foreach (['client', 'external_agent'] as $excludedRole) {
+                    $this->getJson('/api/attendance/matrix?'.$range.'&role='.$excludedRole)->assertOk()
+                        ->assertJsonCount(0, 'data')->assertJsonPath('meta.pagination.total', 0);
+                }
                 $branches = $this->getJson('/api/attendance/matrix?'.$range.'&view=branches')->assertOk();
                 $lateCount = collect($branches->json('data'))->sum(fn ($row) => $row['days']['2026-08-17']['late_count']);
                 $this->assertSame(1, $lateCount);
                 foreach (['daily', 'events'] as $report) {
                     $this->getJson('/api/attendance/'.$report.'?'.$range)->assertOk()
                         ->assertJsonCount(1, 'data')->assertJsonPath('data.0.user_id', $context['agent']->id);
-                    $this->getJson('/api/attendance/'.$report.'?'.$range.'&user_id='.$client->id)
-                        ->assertOk()->assertJsonCount(0, 'data');
+                    foreach ([$client, $externalAgent] as $excludedUser) {
+                        $this->getJson('/api/attendance/'.$report.'?'.$range.'&user_id='.$excludedUser->id)
+                            ->assertOk()->assertJsonCount(0, 'data');
+                    }
                 }
-                foreach (['daily', 'days/2026-08-17'] as $detail) {
-                    $this->getJson('/api/attendance/users/'.$client->id.'/'.$detail)
-                        ->assertForbidden()->assertJsonPath('code', 'ATTENDANCE_FORBIDDEN_SCOPE');
-                }
-                foreach (['schedule', 'leaves', 'duties'] as $detail) {
-                    $this->getJson('/api/attendance/users/'.$client->id.'/'.$detail)->assertForbidden();
+                foreach ([$client, $externalAgent] as $excludedUser) {
+                    foreach (['daily', 'days/2026-08-17'] as $detail) {
+                        $this->getJson('/api/attendance/users/'.$excludedUser->id.'/'.$detail)
+                            ->assertForbidden()->assertJsonPath('code', 'ATTENDANCE_FORBIDDEN_SCOPE');
+                    }
+                    foreach (['schedule', 'leaves', 'duties'] as $detail) {
+                        $this->getJson('/api/attendance/users/'.$excludedUser->id.'/'.$detail)->assertForbidden();
+                    }
                 }
                 $csv = $this->get('/api/attendance/export?'.$range)->assertOk()->streamedContent();
                 $this->assertStringContainsString($context['agent']->name, $csv);
                 $this->assertStringNotContainsString($client->name, $csv);
+                $this->assertStringNotContainsString($externalAgent->name, $csv);
             }
         } finally {
             CarbonImmutable::setTestNow();
         }
         $this->assertDatabaseHas('users', ['id' => $client->id]);
         $this->assertDatabaseHas('attendance_daily_summaries', ['user_id' => $client->id]);
+        $this->assertDatabaseHas('users', ['id' => $externalAgent->id]);
+        $this->assertDatabaseHas('attendance_daily_summaries', ['user_id' => $externalAgent->id]);
     }
 
     public function test_hr_timesheet_export_is_a_valid_excel_workbook_and_excludes_clients(): void
