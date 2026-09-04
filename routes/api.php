@@ -479,6 +479,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         // Properties CRUD + photos
         Route::post('/properties', [PropertyController::class, 'store']);
         Route::get('/properties/{property}/logs', [PropertyController::class, 'logs']);
+        Route::get('/properties/{property}/duplicate-candidates', [PropertyController::class, 'duplicateCandidates']);
         Route::get('/properties/{property}/matching-clients', [PropertyController::class, 'matchingClients']);
         Route::put('/properties/{property}', [PropertyController::class, 'update']);
         Route::post('/properties/{property}/refresh-listing-date', [PropertyController::class, 'refreshListingDate']);

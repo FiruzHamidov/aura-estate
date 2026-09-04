@@ -9,6 +9,8 @@ use App\Models\PropertyLog;
 use App\Models\User;
 use App\Services\Crm\ClientAttachService;
 use App\Services\Crm\Matching\ClientPropertyMatcher;
+use App\Services\PropertyDuplicateService;
+use App\Services\PropertyQualityService;
 use App\Support\ClientAccess;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\QueryException;
@@ -32,12 +34,20 @@ class PropertyController extends Controller
 
     protected ClientPropertyMatcher $clientPropertyMatcher;
 
-    public function __construct()
-    {
+    protected PropertyDuplicateService $propertyDuplicateService;
+
+    protected PropertyQualityService $propertyQualityService;
+
+    public function __construct(
+        PropertyDuplicateService $propertyDuplicateService,
+        PropertyQualityService $propertyQualityService
+    ) {
         $this->imageManager = new ImageManager(new Driver);
         $this->clientAccess = app(ClientAccess::class);
         $this->clientAttachService = app(ClientAttachService::class);
         $this->clientPropertyMatcher = app(ClientPropertyMatcher::class);
+        $this->propertyDuplicateService = $propertyDuplicateService;
+        $this->propertyQualityService = $propertyQualityService;
     }
 
     private function propertyDetailRelations(): array
@@ -2098,13 +2108,19 @@ class PropertyController extends Controller
         // --- Дубликаты: пропускаем только если force=1
         $force = (bool) $request->boolean('force', false);
 
-        if (! $force) {
-            $dups = $this->findDuplicateCandidates($validated);
+        $dups = $this->propertyDuplicateService->find($validated);
+        $qualityWarnings = $this->propertyQualityService->inspect($validated);
 
-            if ($dups->count() > 0) {
+        if (! $force) {
+
+            if ($dups->isNotEmpty() || $qualityWarnings !== []) {
                 return response()->json([
-                    'message' => 'Найдены возможные дубликаты (телефон/адрес/гео/этаж/площадь)',
+                    'code' => 'PROPERTY_REVIEW_REQUIRED',
+                    'message' => $dups->isNotEmpty()
+                        ? 'Найдены похожие объекты. Сравните признаки и фотографии перед продолжением.'
+                        : 'Проверьте подозрительные данные перед продолжением.',
                     'duplicates' => $dups->take(10)->values(),
+                    'quality_warnings' => $qualityWarnings,
                 ], 409);
             }
         }
@@ -2115,8 +2131,6 @@ class PropertyController extends Controller
         $validated = $this->applyListingTypeAccessRules($user, $validated);
 
         if ($force) {
-            $dups = $this->findDuplicateCandidates($validated);
-
             $dupCount = $dups->count();
             if ($dupCount > 0) {
                 $items = $dups->take(10)->map(function ($d) {
@@ -2171,13 +2185,19 @@ class PropertyController extends Controller
         return response()->json($property->fresh($this->propertyMutationRelations()));
     }
 
-    /**
-     * Кандидаты-дубликаты:
-     *  - Совпадает телефон владельца (owner_phone) И
-     *  - Совпадает этаж (floor) И
-     *  - Площадь близка (±1 м²) — порог можно вынести в конфиг
-     *  - (Опционально) тот же created_by/agent_id/адрес, если нужно ужесточить
-     */
+    public function duplicateCandidates(Request $request, Property $property)
+    {
+        $this->authorizePropertyMutation($property);
+
+        $data = $property->getAttributes();
+
+        return response()->json([
+            'property_id' => (int) $property->id,
+            'duplicates' => $this->propertyDuplicateService->find($data, (int) $property->id),
+            'quality_warnings' => $this->propertyQualityService->inspect($data),
+        ]);
+    }
+
     public function update(Request $request, Property $property)
     {
         $user = $this->authorizePropertyMutation($property);
@@ -2838,251 +2858,6 @@ class PropertyController extends Controller
         }
 
         return response()->noContent();
-    }
-
-    // === НОРМАЛИЗАЦИЯ ===
-    private function normalizePhone(?string $raw): string
-    {
-        if (! $raw) {
-            return '';
-        }
-        // только цифры; для Таджикистана можно нормализовать префикс 992 при необходимости
-        $digits = preg_replace('/\D+/', '', $raw);
-        if (str_starts_with($digits, '992') === false && strlen($digits) === 9) {
-            // пример: локальный -> добавим код страны (подстрой под свои правила)
-            $digits = '992'.$digits;
-        }
-
-        return $digits;
-    }
-
-    private function normalizeAddress(?string $raw): string
-    {
-        if (! $raw) {
-            return '';
-        }
-        $s = mb_strtolower($raw, 'UTF-8');
-        $s = strtr($s, ['ё' => 'е']);                    // русские варианты
-        $s = preg_replace('/[^\p{L}\p{N}\s]+/u', ' ', $s); // убрать знаки препинания
-        $s = preg_replace('/\s+/u', ' ', trim($s));       // схлопнуть пробелы
-
-        return $s;
-    }
-
-    /**
-     * Быстрая грубая проверка: разложим адрес на токены (>=3 символов) и
-     * потребуем совпадение хотя бы 2 токенов через LIKE в SQL (кора фильтр).
-     */
-    private function applyAddressCoarseFilter(\Illuminate\Database\Eloquent\Builder $q, string $addressNorm): void
-    {
-        if ($addressNorm === '') {
-            return;
-        }
-
-        $tokens = array_values(array_filter(explode(' ', $addressNorm), fn ($t) => mb_strlen($t, 'UTF-8') >= 3));
-        if (count($tokens) === 0) {
-            return;
-        }
-
-        // ограничимся первыми 3-4 токенами, чтобы не раздувать запрос
-        $tokens = array_slice($tokens, 0, 4);
-
-        if (count($tokens) === 1) {
-            $q->where('address', 'like', '%'.$tokens[0].'%');
-
-            return;
-        }
-
-        // Нужны совпадения хотя бы двух токенов.
-        $q->where(function ($qq) use ($tokens) {
-            $tokenCount = count($tokens);
-
-            for ($i = 0; $i < $tokenCount; $i++) {
-                for ($j = $i + 1; $j < $tokenCount; $j++) {
-                    $first = $tokens[$i];
-                    $second = $tokens[$j];
-
-                    $qq->orWhere(function ($pairQuery) use ($first, $second) {
-                        $pairQuery
-                            ->where('address', 'like', '%'.$first.'%')
-                            ->where('address', 'like', '%'.$second.'%');
-                    });
-                }
-            }
-        });
-    }
-
-    /** Похожесть адресов для тонкой сортировки (уже в PHP) */
-    private function addressSimilarity(string $a, string $b): float
-    {
-        if ($a === '' || $b === '') {
-            return 0.0;
-        }
-        similar_text($a, $b, $pct); // 0..100
-
-        return (float) $pct;
-    }
-
-    /** Быстрая проверка близости гео — ~150 м (можно подстроить) */
-    private function withinGeoBox(float $lat, float $lng, float $candLat, float $candLng): bool
-    {
-        $dLat = 0.0015; // ~ 167 м
-        $dLng = 0.0015 * max(0.2, cos(deg2rad(max(1e-6, $lat))));
-
-        return abs($lat - $candLat) <= $dLat && abs($lng - $candLng) <= $dLng;
-    }
-
-    private function hasSupportingDuplicateSignal(bool $floorMatch, bool $areaMatch, bool $geoNear, float $addrScore): bool
-    {
-        return $floorMatch || $areaMatch || $geoNear || $addrScore >= 85.0;
-    }
-
-    /**
-     * Кандидаты-дубликаты.
-     * Триггеры под подозрение:
-     *  - Совпадает нормализованный телефон владельца И (плюс любая из: этаж/площадь/адрес/гео)
-     *  - ИЛИ без телефона, но высокая похожесть по адресу + близкие координаты + (этаж/площадь)
-     *
-     * Возвращаем список с "score", отсортированный по вероятности (100..0).
-     */
-    private function findDuplicateCandidates(array $data)
-    {
-        $phoneNorm = $this->normalizePhone($data['owner_phone'] ?? null);
-        $addrNormNew = $this->normalizeAddress($data['address'] ?? null);
-
-        $floor = isset($data['floor']) ? (int) $data['floor'] : null;
-        $area = isset($data['total_area']) ? (float) $data['total_area'] : null;
-        $latNew = isset($data['latitude']) ? (float) $data['latitude'] : null;
-        $lngNew = isset($data['longitude']) ? (float) $data['longitude'] : null;
-
-        $q = Property::query()
-            ->select([
-                'id', 'title', 'address', 'owner_name', 'owner_phone',
-                'total_area', 'floor', 'price', 'currency', 'created_at', 'moderation_status',
-                'latitude', 'longitude',
-            ])
-            ->whereNotIn('moderation_status', ['deleted', 'rejected', 'denied', 'draft', 'sold', 'rented', 'sold_by_owner'])
-            // Продажа и аренда одного объекта — это разные объявления, не дубли.
-            ->where('offer_type', $data['offer_type']);
-
-        // --- Грубая SQL-фаза: сильно сузим кандидатов ---
-        $q->where(function ($qq) use ($phoneNorm, $addrNormNew, $floor, $area, $latNew, $lngNew) {
-            // 1) По телефону — нормализация на SQL стороне через REPLACE (MySQL 8: REGEXP_REPLACE, но сделаем совместимо)
-            if ($phoneNorm !== '') {
-                $qq->orWhere(function ($qPhone) use ($phoneNorm, $floor, $area) {
-                    // убираем нецифры: +, -, пробелы, скобки
-                    $normalizedSql = "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(owner_phone, '+', ''), '-', ''), ' ', ''), '(', ''), ')', '')";
-                    $qPhone->whereRaw("$normalizedSql LIKE ?", ["%{$phoneNorm}%"]);
-                    if ($floor !== null) {
-                        $qPhone->where('floor', $floor);
-                    }
-                    if ($area !== null) {
-                        $qPhone->whereBetween('total_area', [$area - 1.0, $area + 1.0]);
-                    }
-                });
-            }
-
-            // 2) По адресу (хотя бы 2 токена LIKE) + доп. признаки
-            if ($addrNormNew !== '') {
-                $qq->orWhere(function ($qAddr) use ($addrNormNew, $floor, $area) {
-                    $this->applyAddressCoarseFilter($qAddr, $addrNormNew);
-                    if ($floor !== null) {
-                        $qAddr->where('floor', $floor);
-                    }
-                    if ($area !== null) {
-                        $qAddr->whereBetween('total_area', [$area - 2.0, $area + 2.0]);
-                    }
-                });
-            }
-
-            // 3) По гео (узкая коробка) + этаж/площадь
-            if ($latNew !== null && $lngNew !== null) {
-                $dLat = 0.0015;
-                $dLng = 0.0015 * max(0.2, cos(deg2rad(max(1e-6, $latNew))));
-                $qq->orWhere(function ($qGeo) use ($latNew, $lngNew, $dLat, $dLng, $floor, $area) {
-                    $qGeo->whereBetween('latitude', [$latNew - $dLat, $latNew + $dLat])
-                        ->whereBetween('longitude', [$lngNew - $dLng, $lngNew + $dLng]);
-                    if ($floor !== null) {
-                        $qGeo->where('floor', $floor);
-                    }
-                    if ($area !== null) {
-                        $qGeo->whereBetween('total_area', [$area - 2.0, $area + 2.0]);
-                    }
-                });
-            }
-        });
-
-        // Не раздуваем ответ
-        $candidates = $q->orderByDesc('created_at')->limit(100)->get();
-
-        // --- Тонкая PHP-фаза: считаем score и фильтруем слабые совпадения ---
-        $result = [];
-        foreach ($candidates as $p) {
-            $pPhoneNorm = $this->normalizePhone($p->owner_phone);
-            $pAddrNorm = $this->normalizeAddress($p->address);
-
-            $phoneMatch = ($phoneNorm !== '' && $pPhoneNorm !== '' && $pPhoneNorm === $phoneNorm);
-            $floorMatch = ($floor !== null && $p->floor !== null && (int) $p->floor === $floor);
-            $areaDelta = ($area !== null && $p->total_area !== null) ? abs((float) $p->total_area - $area) : null;
-            $areaMatch = ($areaDelta !== null && $areaDelta <= 1.5);
-            $addrScore = $this->addressSimilarity($addrNormNew, $pAddrNorm); // 0..100
-            $geoNear = ($latNew !== null && $lngNew !== null && $p->latitude !== null && $p->longitude !== null)
-                ? $this->withinGeoBox($latNew, $lngNew, (float) $p->latitude, (float) $p->longitude) : false;
-            $hasSupportingSignal = $this->hasSupportingDuplicateSignal($floorMatch, $areaMatch, $geoNear, $addrScore);
-
-            // Композитный скор:
-            // телефон — самый сильный сигнал; затем адрес; затем гео; бонусы за этаж/площадь
-            $score = 0.0;
-            if ($phoneMatch) {
-                $score += 55;
-            }
-            $score += min(35.0, $addrScore * 0.35);     // макс +35
-            if ($geoNear) {
-                $score += 20;
-            }              // +20
-            if ($floorMatch) {
-                $score += 8;
-            }               // +8
-            if ($areaMatch) {
-                $score += 8;
-            }               // +8
-            $score = min(100.0, $score);
-
-            // Телефон сам по себе не должен блокировать новое объявление:
-            // у одного владельца может быть несколько объектов.
-            if (($phoneMatch && $hasSupportingSignal) || $score >= 60.0) {
-                $result[] = [
-                    'id' => (int) $p->id,
-                    'title' => $p->title,
-                    'address' => $p->address,
-                    'owner_name' => $p->owner_name,
-                    'owner_phone' => $p->owner_phone,
-                    'total_area' => $p->total_area,
-                    'floor' => $p->floor,
-                    'price' => $p->price,
-                    'currency' => $p->currency,
-                    'moderation_status' => $p->moderation_status,
-                    'created_at' => $p->created_at,
-                    'score' => round($score, 1),
-                    'links' => [
-                        'view' => url("https://aura.tj/apartment/{$p->id}"),
-                    ],
-                    'signals' => [
-                        'phone_match' => $phoneMatch,
-                        'address_similarity' => round($addrScore, 1),
-                        'geo_near' => $geoNear,
-                        'floor_match' => $floorMatch,
-                        'area_delta' => $areaDelta,
-                    ],
-                ];
-            }
-        }
-
-        // Отсортируем по score
-        usort($result, fn ($a, $b) => $b['score'] <=> $a['score']);
-
-        // Вернём коллекцию
-        return collect($result);
     }
 
     /** Подготовка строки: нижний регистр, схлопнуть пробелы */

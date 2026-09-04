@@ -67,6 +67,15 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('locations', function (Blueprint $table) {
+            $table->id();
+            $table->string('city');
+            $table->string('district')->nullable();
+            $table->decimal('latitude', 10, 8)->nullable();
+            $table->decimal('longitude', 11, 8)->nullable();
+            $table->timestamps();
+        });
+
         Schema::create('properties', function (Blueprint $table) {
             $table->id();
             $table->string('title')->nullable();
@@ -885,6 +894,212 @@ class PropertyConstructionFieldsTest extends TestCase
         ]);
 
         $response->assertOk();
+        $this->assertDatabaseCount('properties', 2);
+    }
+
+    public function test_property_store_finds_same_property_from_another_agent_with_different_phone_address_and_coordinates(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $firstAgent = User::create([
+            'name' => 'First Agent',
+            'phone' => '930000120',
+            'password' => bcrypt('password'),
+            'role_id' => $role->id,
+            'status' => 'active',
+        ]);
+        $secondAgent = User::create([
+            'name' => 'Second Agent',
+            'phone' => '930000121',
+            'password' => bcrypt('password'),
+            'role_id' => $role->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $status = \App\Models\PropertyStatus::create(['name' => 'Available']);
+
+        $existing = \App\Models\Property::query()->create([
+            'title' => 'Existing apartment',
+            'description' => 'Локация: Сино, кольцевой Профсоюз. Новый ремонт.',
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 999000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'moderation_status' => 'approved',
+            'created_by' => $firstAgent->id,
+            'agent_id' => $firstAgent->id,
+            'owner_phone' => '116614466',
+            'address' => 'Душанбе, махалла Яккачинор',
+            'district' => 'Сино',
+            'rooms' => 2,
+            'total_area' => 65,
+            'floor' => 4,
+            'total_floors' => 14,
+            'latitude' => 38.555846,
+            'longitude' => 68.754671,
+        ]);
+        $existing->photos()->create(['file_path' => 'properties/existing.jpg', 'position' => 0]);
+
+        Sanctum::actingAs($secondAgent);
+        $payload = [
+            'description' => 'Продаётся квартира около кольцевого Профсоюза, новый ремонт.',
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 960000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'moderation_status' => 'approved',
+            'owner_phone' => '+992 93 944 1035',
+            'address' => 'Душанбе профсоюз',
+            'district' => 'Сино',
+            'rooms' => 2,
+            'total_area' => 65,
+            'floor' => 4,
+            'total_floors' => 14,
+            'latitude' => 38.576271,
+            'longitude' => 68.779716,
+        ];
+
+        $response = $this->postJson('/api/properties', $payload)
+            ->assertStatus(409)
+            ->assertJsonPath('code', 'PROPERTY_REVIEW_REQUIRED')
+            ->assertJsonPath('duplicates.0.id', $existing->id)
+            ->assertJsonPath('duplicates.0.photos.0.file_path', 'properties/existing.jpg')
+            ->assertJsonPath('duplicates.0.summary.coordinates_conflict', true);
+
+        $signals = collect($response->json('duplicates.0.signals'));
+        $this->assertTrue($signals->contains(fn (array $signal) => $signal['code'] === 'text' && $signal['matched']));
+        $this->assertTrue($signals->contains(fn (array $signal) => $signal['code'] === 'total_area' && $signal['matched']));
+        $this->assertDatabaseCount('properties', 1);
+
+        $createdId = $this->postJson('/api/properties', [...$payload, 'force' => true])
+            ->assertOk()
+            ->assertJsonPath('moderation_status', 'pending')
+            ->json('id');
+        $this->assertDatabaseCount('properties', 2);
+
+        $this->getJson("/api/properties/{$createdId}/duplicate-candidates")
+            ->assertOk()
+            ->assertJsonPath('property_id', $createdId)
+            ->assertJsonPath('duplicates.0.id', $existing->id)
+            ->assertJsonPath('duplicates.0.photos.0.file_path', 'properties/existing.jpg');
+    }
+
+    public function test_property_store_warns_about_suspicious_price_and_phone_but_force_can_continue(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = User::create([
+            'name' => 'Agent',
+            'phone' => '930000122',
+            'password' => bcrypt('password'),
+            'role_id' => $role->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $status = \App\Models\PropertyStatus::create(['name' => 'Available']);
+        Sanctum::actingAs($agent);
+
+        $payload = [
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 960,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'owner_phone' => '12345',
+        ];
+
+        $response = $this->postJson('/api/properties', $payload)
+            ->assertStatus(409)
+            ->assertJsonPath('duplicates', []);
+
+        $codes = collect($response->json('quality_warnings'))->pluck('code');
+        $this->assertTrue($codes->contains('suspicious_price'));
+        $this->assertTrue($codes->contains('suspicious_owner_phone'));
+
+        $this->postJson('/api/properties', [...$payload, 'force' => true])->assertOk();
+        $this->assertDatabaseCount('properties', 1);
+    }
+
+    public function test_property_store_warns_when_coordinates_are_far_from_selected_location(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = User::create([
+            'name' => 'Agent',
+            'phone' => '930000124',
+            'password' => bcrypt('password'),
+            'role_id' => $role->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $status = \App\Models\PropertyStatus::create(['name' => 'Available']);
+        $location = \App\Models\Location::query()->create([
+            'city' => 'Душанбе',
+            'latitude' => 38.5598,
+            'longitude' => 68.7870,
+        ]);
+        Sanctum::actingAs($agent);
+
+        $response = $this->postJson('/api/properties', [
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'location_id' => $location->id,
+            'price' => 900000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'latitude' => 40.2826,
+            'longitude' => 69.6222,
+        ])->assertStatus(409);
+
+        $this->assertContains(
+            'coordinates_outside_location',
+            collect($response->json('quality_warnings'))->pluck('code')->all()
+        );
+    }
+
+    public function test_property_store_does_not_warn_for_explicitly_different_apartments_in_same_building(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = User::create([
+            'name' => 'Agent',
+            'phone' => '930000123',
+            'password' => bcrypt('password'),
+            'role_id' => $role->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $status = \App\Models\PropertyStatus::create(['name' => 'Available']);
+        \App\Models\Property::query()->create([
+            'title' => 'Apartment 12',
+            'description' => 'Дом Рудаки 10, кв. 12, новый ремонт',
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 800000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'moderation_status' => 'approved',
+            'created_by' => $agent->id,
+            'rooms' => 2,
+            'total_area' => 65,
+            'floor' => 4,
+            'total_floors' => 14,
+            'address' => 'Рудаки 10',
+        ]);
+        Sanctum::actingAs($agent);
+
+        $this->postJson('/api/properties', [
+            'description' => 'Дом Рудаки 10, квартира 14, новый ремонт',
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 805000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'rooms' => 2,
+            'total_area' => 65,
+            'floor' => 4,
+            'total_floors' => 14,
+            'address' => 'Рудаки 10',
+        ])->assertOk();
+
         $this->assertDatabaseCount('properties', 2);
     }
 
