@@ -1290,11 +1290,11 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->assertNull($device->fresh()->offline_notified_at);
     }
 
-    public function test_stale_queued_event_is_requeued_without_flooding_fresh_jobs(): void
+    public function test_reprocessor_only_queues_pending_or_failed_events(): void
     {
         Queue::fake();
         $device = $this->device('ZAM230-STALE');
-        $stale = AttendanceRawEvent::query()->create([
+        $queued = AttendanceRawEvent::query()->create([
             'device_id' => $device->id,
             'event_hash' => str_repeat('a', 64),
             'device_user_id' => '777',
@@ -1304,22 +1304,23 @@ class AttendanceModuleFeatureTest extends TestCase
             'received_at' => now()->subHour(),
             'processing_status' => 'queued',
         ]);
-        $stale->forceFill(['updated_at' => now()->subHour()])->save();
-        AttendanceRawEvent::query()->create([
+        $queued->forceFill(['updated_at' => now()->subHour()])->save();
+        $pending = AttendanceRawEvent::query()->create([
             'device_id' => $device->id,
             'event_hash' => str_repeat('b', 64),
             'device_user_id' => '778',
             'occurred_at_local' => '2026-08-16 09:01:00',
             'occurred_at_utc' => '2026-08-16 04:01:00',
             'raw_payload' => 'fixture',
-            'received_at' => now(),
-            'processing_status' => 'queued',
+            'received_at' => now()->subHour(),
+            'processing_status' => 'pending',
         ]);
 
         Artisan::call('attendance:reprocess-pending');
 
         Queue::assertPushed(ProcessAttendanceRawEvent::class, 1);
-        Queue::assertPushed(ProcessAttendanceRawEvent::class, fn ($job) => $job->rawEventId === $stale->id);
+        Queue::assertPushed(ProcessAttendanceRawEvent::class, fn ($job) => $job->rawEventId === $pending->id);
+        Queue::assertNotPushed(ProcessAttendanceRawEvent::class, fn ($job) => $job->rawEventId === $queued->id);
     }
 
     public function test_raw_retention_keeps_normalized_attendance(): void

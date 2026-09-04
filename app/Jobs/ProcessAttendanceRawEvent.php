@@ -4,10 +4,11 @@ namespace App\Jobs;
 
 use App\Models\AttendanceRawEvent;
 use App\Services\Attendance\AttendanceIngestionService;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 
-final class ProcessAttendanceRawEvent implements ShouldQueue
+final class ProcessAttendanceRawEvent implements ShouldBeUnique, ShouldQueue
 {
     use Queueable;
 
@@ -15,7 +16,14 @@ final class ProcessAttendanceRawEvent implements ShouldQueue
 
     public array $backoff = [10, 30, 120, 300];
 
+    public int $uniqueFor = 604800;
+
     public function __construct(public readonly int $rawEventId) {}
+
+    public function uniqueId(): string
+    {
+        return (string) $this->rawEventId;
+    }
 
     public function handle(AttendanceIngestionService $ingestion): void
     {

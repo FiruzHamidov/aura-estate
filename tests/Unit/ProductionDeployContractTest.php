@@ -72,7 +72,7 @@ class ProductionDeployContractTest extends TestCase
 
         $preEnableProbe = strpos($this->deploy, '(cd "$stage" && php scripts/verify-reverb-runtime.php)');
         $enable = strpos($this->deploy, 'php scripts/enable-messaging-realtime.php');
-        $enabledProbe = strpos($this->deploy, 'php scripts/verify-reverb-runtime.php --expect-enabled');
+        $enabledProbe = strrpos($this->deploy, 'wait_for_realtime_runtime');
         $deployedState = strpos($this->deploy, 'backend.current');
 
         $this->assertIsInt($preEnableProbe);

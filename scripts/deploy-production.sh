@@ -163,6 +163,7 @@ trap finish EXIT
 trap 'exit 143' TERM INT
 
 install -m 644 "$stage/deploy/supervisor/aura-estate-reverb.conf" /etc/supervisor/conf.d/aura-estate-reverb.conf
+install -m 644 "$stage/deploy/supervisor/aura-estate-queue.conf" /etc/supervisor/conf.d/aura-estate-queue.conf
 supervisorctl reread
 supervisorctl update
 wait_for_supervisor_program aura-estate-reverb

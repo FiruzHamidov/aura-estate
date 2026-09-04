@@ -9,7 +9,6 @@ return [
     'clock_drift_warning_seconds' => (int) env('ATTENDANCE_CLOCK_DRIFT_WARNING_SECONDS', 300),
     'clock_drift_measurement_window_seconds' => (int) env('ATTENDANCE_CLOCK_DRIFT_MEASUREMENT_WINDOW_SECONDS', 1800),
     'raw_retention_days' => (int) env('ATTENDANCE_RAW_RETENTION_DAYS', 90),
-    'queue_stale_after_minutes' => (int) env('ATTENDANCE_QUEUE_STALE_AFTER_MINUTES', 15),
     'allowed_ips' => array_values(array_filter(array_map(
         'trim',
         explode(',', (string) env('ATTENDANCE_ALLOWED_IPS', ''))

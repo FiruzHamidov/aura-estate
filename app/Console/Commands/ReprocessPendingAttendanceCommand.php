@@ -16,16 +16,7 @@ final class ReprocessPendingAttendanceCommand extends Command
     {
         $limit = max(1, min(5000, (int) $this->option('limit')));
         $ids = AttendanceRawEvent::query()
-            ->where(function ($query) {
-                $query->whereIn('processing_status', ['pending', 'failed'])
-                    ->orWhere(function ($stale) {
-                        $stale->where('processing_status', 'queued')
-                            ->where('updated_at', '<', now()->subMinutes(max(
-                                1,
-                                (int) config('attendance.queue_stale_after_minutes', 15)
-                            )));
-                    });
-            })
+            ->whereIn('processing_status', ['pending', 'failed'])
             ->orderBy('id')
             ->limit($limit)
             ->pluck('id');
