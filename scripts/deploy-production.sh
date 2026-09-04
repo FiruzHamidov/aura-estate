@@ -4,6 +4,15 @@ source /etc/aura-deploy/runtime.env
 repo=/var/www/aura-estate
 backup_root=/var/backups/aura-deploy
 build_root=/var/lib/aura-deploy/backend-builds
+deploy_step=bootstrap
+
+report_deploy_error() {
+  local exit_code=$?
+  local failed_command=${BASH_COMMAND:-unknown}
+  printf 'Backend deploy step "%s" failed (exit %s): %s\n' "$deploy_step" "$exit_code" "$failed_command" >&2
+  return "$exit_code"
+}
+trap report_deploy_error ERR
 
 prune_backend_artifacts() {
   local kept=0
@@ -54,6 +63,20 @@ wait_for_supervisor_program() {
   done
 
   supervisorctl status "$program" | grep RUNNING
+}
+
+wait_for_realtime_runtime() {
+  local attempt
+
+  for attempt in {1..3}; do
+    if php scripts/verify-reverb-runtime.php --expect-enabled; then return 0; fi
+    if (( attempt < 3 )); then
+      echo "Reverb readiness check failed; retrying (${attempt}/3)." >&2
+      sleep 3
+    fi
+  done
+
+  return 1
 }
 
 check_realtime_auth_boundaries() {
@@ -170,18 +193,29 @@ systemctl reload php8.2-fpm
 php artisan up
 maintenance=0
 
+deploy_step='preserve realtime environment'
 install -m 600 "$repo/.env" "$backup/pre-realtime-environment"
+deploy_step='enable messaging realtime'
 php scripts/enable-messaging-realtime.php
 realtime_env_changed=1
+deploy_step='cache realtime configuration'
 php artisan config:cache
+deploy_step='restart queues'
 php artisan queue:restart
+deploy_step='restart Reverb'
 php artisan reverb:restart
+deploy_step='wait for queue worker'
 wait_for_supervisor_program aura-estate-queue:aura-estate-queue_00
+deploy_step='wait for Reverb worker'
 wait_for_supervisor_program aura-estate-reverb
-php scripts/verify-reverb-runtime.php --expect-enabled
+deploy_step='verify Reverb runtime'
+wait_for_realtime_runtime
+deploy_step='verify realtime auth boundaries'
 check_realtime_auth_boundaries
+deploy_step='verify public API'
 check_public_api
 realtime_env_changed=0
+deploy_step='record deployed commit'
 printf '%s\n' "$sha" > /var/lib/aura-deploy/backend.current
 prune_backend_artifacts
 echo "Backend deployed: $sha; recovery backup: $backup"
