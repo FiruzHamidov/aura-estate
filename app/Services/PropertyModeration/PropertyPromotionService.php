@@ -25,7 +25,7 @@ final class PropertyPromotionService
             $lockedProperty = Property::query()->lockForUpdate()->findOrFail($property->id);
             abort_if((int) $lockedProperty->moderation_version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
             abort_unless($this->access->canEdit($actor, $lockedProperty), 403, 'PROMOTION_PERMISSION_DENIED');
-            abort_unless($this->moderation->isPublic($lockedProperty), 409, 'PROMOTION_BLOCKED_BY_MODERATION');
+            abort_unless(in_array($lockedProperty->publication_status, ['published', 'pending'], true), 409, 'PROMOTION_BLOCKED_BY_MODERATION');
             abort_if($lockedProperty->promotions()->where('status', PropertyPromotion::STATUS_REQUESTED)->exists(), 409, 'PROMOTION_ALREADY_REQUESTED');
             abort_unless(trim($comment) !== '' && $requestedDays >= 1 && $requestedDays <= (int) config('property-moderation.promotion_max_days', 30), 422);
 
@@ -128,9 +128,10 @@ final class PropertyPromotionService
             $property = Property::query()->lockForUpdate()->findOrFail($promotion->property_id);
             $promotion = PropertyPromotion::query()->lockForUpdate()->findOrFail($promotion->id);
             $promotion->setRelation('property', $property);
-            abort_unless($promotion->status === PropertyPromotion::STATUS_ACTIVE, 409, 'PROMOTION_NOT_ACTIVE');
+            abort_unless(in_array($promotion->status, [PropertyPromotion::STATUS_ACTIVE, PropertyPromotion::STATUS_REQUESTED], true), 409, 'PROMOTION_NOT_ACTIVE');
+            $wasActive = $promotion->status === PropertyPromotion::STATUS_ACTIVE;
             abort_if($expectedVersion !== null && $promotion->version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
-            abort_unless($this->access->canModerate($actor, $property), 403, 'PROMOTION_PERMISSION_DENIED');
+            abort_unless($wasActive ? $this->access->canModerate($actor, $property) : $this->access->canEdit($actor, $property), 403, 'PROMOTION_PERMISSION_DENIED');
             $promotion->update([
                 'status' => PropertyPromotion::STATUS_REVOKED,
                 'revoked_by' => $actor->id,
@@ -139,7 +140,7 @@ final class PropertyPromotionService
                 'version' => $promotion->version + 1,
             ]);
             $property->forceFill([
-                'listing_type' => 'regular',
+                'listing_type' => $wasActive ? 'regular' : $property->listing_type,
                 'moderation_version' => (int) $property->moderation_version + 1,
             ])->save();
             app(PropertyModerationNotifier::class)->promotionEvent($promotion, 'revoked', $actor);

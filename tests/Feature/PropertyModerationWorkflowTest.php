@@ -661,6 +661,53 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertDatabaseCount('properties', 1);
     }
 
+    public function test_vip_and_urgent_creation_wait_for_listing_and_promotion_approval(): void
+    {
+        [$agent, $rop] = $this->users();
+        $service = $this->moderation();
+        $promotions = app(\App\Services\PropertyModeration\PropertyPromotionService::class);
+        foreach (['vip', 'urgent'] as $type) {
+            $property = Property::create($service->creationState($this->propertyPayload($agent), collect(), [], true));
+            $service->recordCreation($property, $agent, collect(), [], true);
+            $promotion = $promotions->request($property, $agent, $type, 'Выбрано при добавлении', 7, $property->moderation_version);
+            $this->assertSame('pending', $property->fresh()->publication_status);
+            $this->assertSame('regular', $property->fresh()->listing_type);
+            $this->assertSame('requested', $promotion->status);
+            $case = $property->moderationCases()->where('type', 'initial_review')->firstOrFail();
+            try {
+                $promotions->approve($promotion, $rop, 7, null, $promotion->version);
+                $this->fail('Promotion must not activate before listing approval.');
+            } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
+                $this->assertSame(409, $e->getStatusCode());
+            }
+            $service->approveCase($case, $rop, 'Объявление проверено');
+            $this->assertSame('published', $property->fresh()->publication_status);
+            $promotions->approve($promotion, $rop, 7, 'Продвижение подтверждено', $promotion->version);
+            $this->assertSame($type, $property->fresh()->listing_type);
+            $this->assertSame('active', $promotion->fresh()->status);
+        }
+    }
+
+    public function test_owner_can_cancel_pending_promotion_but_cannot_revoke_active_promotion(): void
+    {
+        [$agent, $rop] = $this->users();
+        $property = $this->publishedProperty($agent);
+        $service = app(\App\Services\PropertyModeration\PropertyPromotionService::class);
+        $promotion = $service->request($property, $agent, 'vip', 'Заявка на VIP', 7, $property->moderation_version);
+        $service->revoke($promotion, $agent, 'Выбран обычный тип', $promotion->version);
+        $this->assertSame('revoked', $promotion->fresh()->status);
+        $promotion = $service->request($property->fresh(), $agent, 'urgent', 'Заявка на срочное', 7, $property->fresh()->moderation_version);
+        $service->approve($promotion, $rop, 7, null, $promotion->version);
+        try {
+            $service->revoke($promotion->fresh(), $agent, 'Отмена', $promotion->fresh()->version);
+            $this->fail('Owner cannot revoke approved promotion.');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
+            $this->assertSame(403, $e->getStatusCode());
+        }
+        $service->revoke($promotion->fresh(), $rop, 'Выбран обычный тип', $promotion->fresh()->version);
+        $this->assertSame('regular', $property->fresh()->listing_type);
+    }
+
     private function moderation(): PropertyModerationService
     {
         return new PropertyModerationService(new PropertyDuplicateService, new PropertyModerationAccess);

@@ -149,9 +149,9 @@ final class PropertyModerationService
     }
 
     /** @param Collection<int, array<string, mixed>> $duplicates */
-    public function creationState(array $payload, Collection $duplicates, array $qualityWarnings = []): array
+    public function creationState(array $payload, Collection $duplicates, array $qualityWarnings = [], bool $requiresReview = false): array
     {
-        $published = $duplicates->isEmpty() && $qualityWarnings === [];
+        $published = ! $requiresReview && $duplicates->isEmpty() && $qualityWarnings === [];
 
         if (! $this->workflowAvailable()) {
             return array_merge($payload, [
@@ -170,13 +170,13 @@ final class PropertyModerationService
     }
 
     /** @param Collection<int, array<string, mixed>> $duplicates */
-    public function recordCreation(Property $property, User $actor, Collection $duplicates, array $qualityWarnings = []): void
+    public function recordCreation(Property $property, User $actor, Collection $duplicates, array $qualityWarnings = [], bool $requiresReview = false): void
     {
         if (! $this->workflowAvailable()) {
             return;
         }
 
-        if ($duplicates->isEmpty() && $qualityWarnings === []) {
+        if (! $requiresReview && $duplicates->isEmpty() && $qualityWarnings === []) {
             $snapshot = $this->contentSnapshot($property);
             $property->forceFill(['approved_content_snapshot' => $snapshot])->saveQuietly();
             $this->event($property, null, 'property_auto_published', $actor, ['snapshot' => $snapshot]);
@@ -197,6 +197,11 @@ final class PropertyModerationService
             $this->event($property, $case, 'duplicate_review_opened', $actor, [
                 'candidate_ids' => $duplicates->pluck('id')->map(fn ($id) => (int) $id)->values()->all(),
             ]);
+        }
+
+        if ($requiresReview && $qualityWarnings === []) {
+            $case = $this->upsertOpenCase($property, PropertyModerationCase::TYPE_INITIAL, $actor, null, $this->contentSnapshot($property), ['promotion_requested']);
+            $this->event($property, $case, 'property_sent_to_moderation', $actor, ['reason' => 'promotion_requested']);
         }
 
         if ($qualityWarnings !== []) {

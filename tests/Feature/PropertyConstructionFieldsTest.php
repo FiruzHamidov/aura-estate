@@ -211,6 +211,24 @@ class PropertyConstructionFieldsTest extends TestCase
         parent::tearDown();
     }
 
+    public function test_agent_can_select_vip_or_urgent_when_creating_a_listing(): void
+    {
+        (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create(['name' => 'Agent', 'phone' => '930000099', 'role_id' => $role->id, 'status' => 'active']);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        Sanctum::actingAs($user);
+        foreach (['vip', 'urgent'] as $listingType) {
+            $response = $this->postJson('/api/properties', [
+                'type_id' => $type->id, 'price' => 990000, 'currency' => 'TJS', 'offer_type' => 'sale',
+                'requested_listing_type' => $listingType,
+            ])->assertOk()->assertJsonPath('publication_status', 'pending')->assertJsonPath('listing_type', 'regular');
+            $this->assertDatabaseHas('property_promotions', ['property_id' => $response->json('id'), 'type' => $listingType, 'status' => 'requested']);
+            $this->assertDatabaseHas('property_moderation_cases', ['property_id' => $response->json('id'), 'type' => 'initial_review', 'status' => 'open']);
+        }
+        $this->postJson('/api/properties', ['type_id' => $type->id, 'price' => 990000, 'currency' => 'TJS', 'offer_type' => 'sale', 'requested_listing_type' => 'invalid'])->assertUnprocessable();
+    }
+
     public function test_property_store_accepts_construction_and_renovation_statuses(): void
     {
         $agentRole = Role::create([

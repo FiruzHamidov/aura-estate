@@ -2136,6 +2136,9 @@ class PropertyController extends Controller
         $this->moderation->assertCanCreate($user);
         $this->moderation->assertNoProtectedFields($request, ['branch_id', 'branch_group_id'], $user);
 
+        $promotionInput = $request->validate(['requested_listing_type' => 'nullable|in:regular,vip,urgent']);
+        $requestedType = $promotionInput['requested_listing_type'] ?? 'regular';
+        $requiresReview = $requestedType !== 'regular';
         $validated = $this->validateProperty($request);
         $featureIds = $validated['features'] ?? [];
         $tagIds = $validated['tags'] ?? [];
@@ -2148,9 +2151,9 @@ class PropertyController extends Controller
         $dups = $this->propertyDuplicateService->find($validated);
         $qualityWarnings = $this->propertyQualityService->inspect($validated);
         $validated['created_by'] = $user->id;
-        $validated = $this->moderation->creationState($validated, $dups, $qualityWarnings);
+        $validated = $this->moderation->creationState($validated, $dups, $qualityWarnings, $requiresReview);
 
-        $property = DB::transaction(function () use ($request, $validated, $featureIds, $tagIds, $dups, $qualityWarnings, $user) {
+        $property = DB::transaction(function () use ($request, $validated, $featureIds, $tagIds, $dups, $qualityWarnings, $user, $requiresReview, $requestedType) {
             $property = Property::create($validated);
             if ($this->supportsPropertyFeatures()) {
                 $property->features()->sync($featureIds);
@@ -2159,7 +2162,13 @@ class PropertyController extends Controller
                 $property->tags()->sync($tagIds);
             }
             $this->storePhotosFromRequest($request, $property);
-            $this->moderation->recordCreation($property, $user, $dups, $qualityWarnings);
+            $this->moderation->recordCreation($property, $user, $dups, $qualityWarnings, $requiresReview);
+            if ($requiresReview) {
+                app(\App\Services\PropertyModeration\PropertyPromotionService::class)->request(
+                    $property, $user, $requestedType, 'Тип выбран при добавлении объявления',
+                    (int) config('property-moderation.promotion_default_days', 7), (int) $property->moderation_version,
+                );
+            }
 
             return $property;
         });
