@@ -76,19 +76,29 @@ final class EnsurePropertyModerationIdempotency
             ], 409);
         }
 
+        DB::beginTransaction();
         try {
-            return DB::transaction(function () use ($request, $next, $record): Response {
-                $response = $next($request);
-                $record->forceFill([
-                    'status' => 'completed',
-                    'response_status' => $response->getStatusCode(),
-                    'response_body' => $response->getContent(),
-                    'response_content_type' => $response->headers->get('Content-Type', 'application/json'),
-                ])->save();
+            $response = $next($request);
+            // Laravel can render exceptions inside the routing pipeline. A returned
+            // 5xx must roll back just like a thrown exception, without poisoning retries.
+            if ($response->isServerError()) {
+                DB::rollBack();
+                $record->delete();
 
                 return $response;
-            });
+            }
+
+            $record->forceFill([
+                'status' => 'completed',
+                'response_status' => $response->getStatusCode(),
+                'response_body' => $response->getContent(),
+                'response_content_type' => $response->headers->get('Content-Type', 'application/json'),
+            ])->save();
+            DB::commit();
+
+            return $response;
         } catch (\Throwable $exception) {
+            DB::rollBack();
             $record->delete();
             throw $exception;
         }

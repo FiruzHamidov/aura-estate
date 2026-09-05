@@ -7,6 +7,7 @@ use App\Models\Property;
 use App\Models\PropertyModerationCase;
 use App\Models\PropertyPromotion;
 use App\Models\User;
+use App\Support\Notifications\NotificationType;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Schema;
 
@@ -165,7 +166,7 @@ final class PropertyModerationNotifier
                 'type' => $type,
                 'category' => 'property',
                 'status' => 'pending',
-                'priority' => 'normal',
+                'priority' => NotificationType::defaultPriority($type),
                 'channels' => ['in_app'],
                 'title' => $title,
                 'body' => $body,

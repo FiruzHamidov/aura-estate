@@ -81,6 +81,8 @@ class PropertyModerationWorkflowTest extends TestCase
         });
 
         (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
+        (require database_path('migrations/2025_06_23_004510_create_notifications_table.php'))->up();
+        (require database_path('migrations/2026_04_04_180000_expand_notifications_table.php'))->up();
     }
 
     public function test_migration_backfills_published_state_and_price_baseline(): void
@@ -612,6 +614,51 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertSame(1, $calls);
         $this->assertSame($first->getContent(), $replayed->getContent());
         $this->assertSame('true', $replayed->headers->get('Idempotent-Replayed'));
+    }
+
+    public function test_moderation_notifications_use_a_numeric_priority_and_are_deduplicated(): void
+    {
+        [$agent, $rop, $director] = $this->users();
+        $property = Property::create($this->propertyPayload($agent));
+        $notifier = app(\App\Services\PropertyModeration\PropertyModerationNotifier::class);
+        $notifier->moderationEvent($property, 'duplicate_review_opened', $agent);
+        $notifier->moderationEvent($property, 'duplicate_review_opened', $agent);
+
+        $notifications = DB::table('notifications')->get();
+        $this->assertEqualsCanonicalizing([$agent->id, $rop->id, $director->id], $notifications->pluck('user_id')->all());
+        foreach ($notifications as $notification) {
+            $this->assertTrue(is_numeric($notification->priority), 'Notification priority must match the integer database column.');
+            $this->assertContains((int) $notification->priority, \App\Support\Notifications\NotificationPriority::all());
+        }
+    }
+
+    public function test_rendered_server_error_rolls_back_writes_and_allows_retry_with_the_same_key(): void
+    {
+        [$agent] = $this->users();
+        $request = Request::create('/api/properties', 'POST');
+        $request->headers->set('Idempotency-Key', 'failed-property-create-0001');
+        $request->setUserResolver(fn () => $agent);
+        $middleware = new EnsurePropertyModerationIdempotency;
+        $failed = $middleware->handle($request, function () use ($agent) {
+            Property::create($this->propertyPayload($agent));
+            // Laravel's routing pipeline can render an exception before it reaches this middleware.
+            return response()->json(['message' => 'Server Error.'], 500);
+        });
+        $this->assertSame(500, $failed->getStatusCode());
+        $this->assertDatabaseCount('properties', 0);
+        $this->assertDatabaseCount('property_moderation_idempotency_keys', 0);
+
+        $calls = 0;
+        $action = function () use ($agent, &$calls) {
+            $calls++;
+            return response()->json(['id' => Property::create($this->propertyPayload($agent))->id], 201);
+        };
+        $retried = $middleware->handle($request, $action);
+        $replayed = $middleware->handle($request, $action);
+        $this->assertSame(201, $retried->getStatusCode());
+        $this->assertSame($retried->getContent(), $replayed->getContent());
+        $this->assertSame(1, $calls);
+        $this->assertDatabaseCount('properties', 1);
     }
 
     private function moderation(): PropertyModerationService
