@@ -8,6 +8,7 @@ use App\Http\Middleware\EnsureTraceId;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\EnsureUserIsNotClient;
 use App\Http\Middleware\LogApiRequest;
+use App\Http\Middleware\EnsurePropertyModerationIdempotency;
 use Illuminate\Auth\AuthenticationException;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Application;
@@ -50,6 +51,8 @@ return Application::configure(basePath: dirname(__DIR__))
             'non.client' => EnsureUserIsNotClient::class,
             'rop.branch.scope' => EnforceRopBranchScope::class,
             'kpi.performance' => \App\Http\Middleware\LogKpiPerformance::class,
+            'moderation.idempotent' => EnsurePropertyModerationIdempotency::class,
+            'moderation.payload' => \App\Http\Middleware\EnsurePropertyModerationPayload::class,
         ]);
 
         $middleware->redirectGuestsTo(function (Request $request): ?string {
@@ -75,11 +78,16 @@ return Application::configure(basePath: dirname(__DIR__))
         $exceptions->render(function (ValidationException $e, $request) {
             $isKpi = str_starts_with((string) $request->path(), 'api/kpi')
                 || str_starts_with((string) $request->path(), 'api/daily-reports');
+            $errors = $e->errors();
+            $validationCode = $errors['code'][0] ?? null;
+            $domainCode = is_string($validationCode) && preg_match('/^[A-Z][A-Z0-9_]+$/', $validationCode) === 1
+                ? $validationCode
+                : null;
 
             return response()->json([
-                'code' => $isKpi ? 'KPI_VALIDATION_FAILED' : 'VALIDATION_ERROR',
+                'code' => $domainCode ?? ($isKpi ? 'KPI_VALIDATION_FAILED' : 'VALIDATION_ERROR'),
                 'message' => 'Validation failed.',
-                'details' => ['errors' => $e->errors()],
+                'details' => ['errors' => $errors],
                 'trace_id' => $request->attributes->get('trace_id'),
             ], 422);
         });
@@ -130,8 +138,11 @@ return Application::configure(basePath: dirname(__DIR__))
                 report($e);
             }
 
+            $message = $status === 500 ? 'Server Error.' : ($e->getMessage() ?: 'Request failed.');
+            $domainCode = preg_match('/^[A-Z][A-Z0-9_]+$/', $message) === 1 ? $message : null;
+
             return response()->json([
-                'code' => match ($status) {
+                'code' => $domainCode ?? match ($status) {
                     401 => 'UNAUTHENTICATED',
                     403 => 'FORBIDDEN',
                     404 => 'NOT_FOUND',
@@ -140,7 +151,7 @@ return Application::configure(basePath: dirname(__DIR__))
                     500 => 'INTERNAL_ERROR',
                     default => 'REQUEST_FAILED',
                 },
-                'message' => $status === 500 ? 'Server Error.' : ($e->getMessage() ?: 'Request failed.'),
+                'message' => $message,
                 'details' => (object) [],
                 'trace_id' => $request->attributes->get('trace_id'),
             ], $status);
@@ -157,5 +168,6 @@ return Application::configure(basePath: dirname(__DIR__))
         $schedule->command('attendance:prune-raw')->dailyAt('04:15');
         $schedule->command('properties:refresh-liquidity-market')->dailyAt('02:00')->withoutOverlapping();
         $schedule->command('properties:recalculate-liquidity')->dailyAt('02:30')->withoutOverlapping();
+        $schedule->command('properties:expire-promotions')->everyFiveMinutes()->withoutOverlapping();
     })
     ->create();

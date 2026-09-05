@@ -243,7 +243,7 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         Route::patch('/{externalPropertyRequest}/assign', [ExternalPropertyRequestController::class, 'assign'])->whereNumber('externalPropertyRequest');
         Route::patch('/{externalPropertyRequest}/status', [ExternalPropertyRequestController::class, 'changeStatus'])->whereNumber('externalPropertyRequest');
         Route::get('/{externalPropertyRequest}/prefill', [ExternalPropertyRequestController::class, 'prefill'])->whereNumber('externalPropertyRequest');
-        Route::post('/{externalPropertyRequest}/convert', [ExternalPropertyRequestController::class, 'convert'])->whereNumber('externalPropertyRequest');
+        Route::post('/{externalPropertyRequest}/convert', [ExternalPropertyRequestController::class, 'convert'])->whereNumber('externalPropertyRequest')->middleware('moderation.idempotent');
     });
 });
 
@@ -478,18 +478,49 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         Route::patch('/properties/{property}/liquidity/business-priority', [PropertyLiquidityController::class, 'updateBusinessPriority'])->whereNumber('property');
 
         // Properties CRUD + photos
-        Route::post('/properties', [PropertyController::class, 'store']);
+        Route::post('/properties', [PropertyController::class, 'store'])->middleware('moderation.idempotent');
         Route::get('/properties/{property}/logs', [PropertyController::class, 'logs']);
         Route::get('/properties/{property}/duplicate-candidates', [PropertyController::class, 'duplicateCandidates']);
         Route::get('/properties/{property}/matching-clients', [PropertyController::class, 'matchingClients']);
-        Route::put('/properties/{property}', [PropertyController::class, 'update']);
+        Route::put('/properties/{property}', [PropertyController::class, 'update'])->middleware('moderation.idempotent');
         Route::post('/properties/{property}/refresh-listing-date', [PropertyController::class, 'refreshListingDate']);
-        Route::patch('/properties/{property}/co-owner', [PropertyController::class, 'updateCoOwner']);
+        Route::patch('/properties/{property}/co-owner', [PropertyController::class, 'updateCoOwner'])->middleware('moderation.idempotent');
         Route::delete('/properties/{property}', [PropertyController::class, 'destroy']);
         Route::patch('/properties/{property}/moderation-listing', [PropertyController::class, 'updateModerationAndListingType']);
-        Route::post('properties/{property}/photos', [PropertyPhotoController::class, 'store']);
-        Route::put('properties/{property}/photos/reorder', [PropertyPhotoController::class, 'reorder']);
-        Route::delete('properties/{property}/photos/{photo}', [PropertyPhotoController::class, 'destroy'])->whereNumber('photo');
+        Route::post('/properties/{property}/moderation/withdraw-changes', [\App\Http\Controllers\PropertyModerationController::class, 'withdrawChanges'])->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/properties/{property}/moderation/submit', [\App\Http\Controllers\PropertyModerationController::class, 'submit'])->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/properties/{property}/moderation/withdraw-listing', [\App\Http\Controllers\PropertyModerationController::class, 'withdrawListing'])->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/properties/{property}/withdraw', [\App\Http\Controllers\PropertyModerationController::class, 'withdrawListing'])->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/properties/{property}/transfer', [\App\Http\Controllers\PropertyModerationController::class, 'transfer'])->middleware('moderation.idempotent')->middleware('moderation.payload:agent_id,co_owner_user_id');
+        Route::post('/properties/{property}/moderation/cases/{case}/approve', [\App\Http\Controllers\PropertyModerationController::class, 'approveForProperty'])->whereNumber(['property', 'case'])->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/properties/{property}/moderation/cases/{case}/reject', [\App\Http\Controllers\PropertyModerationController::class, 'rejectForProperty'])->whereNumber(['property', 'case'])->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/properties/{property}/moderation/cases/{case}/withdraw', [\App\Http\Controllers\PropertyModerationController::class, 'withdrawCaseForProperty'])->whereNumber(['property', 'case'])->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/properties/{property}/moderation/cases/{case}/appeal', [\App\Http\Controllers\PropertyModerationController::class, 'appealForProperty'])->whereNumber(['property', 'case'])->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/properties/{property}/moderation/cases/{case}/resolve-appeal', [\App\Http\Controllers\PropertyModerationController::class, 'resolveAppeal'])->whereNumber(['property', 'case'])->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/properties/{property}/duplicates/{candidate}/confirm', [\App\Http\Controllers\PropertyModerationController::class, 'confirmDuplicateForProperty'])->whereNumber(['property', 'candidate'])->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/properties/{property}/duplicates/{candidate}/dismiss', [\App\Http\Controllers\PropertyModerationController::class, 'dismissDuplicateForProperty'])->whereNumber(['property', 'candidate'])->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/properties/{property}/duplicates/{candidate}/merge', [\App\Http\Controllers\PropertyModerationController::class, 'mergeDuplicateForProperty'])->whereNumber(['property', 'candidate'])->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/properties/{property}/duplicates/{candidate}/reject', [\App\Http\Controllers\PropertyModerationController::class, 'rejectDuplicateForProperty'])->whereNumber(['property', 'candidate'])->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::get('/property-moderation-cases', [\App\Http\Controllers\PropertyModerationController::class, 'queue']);
+        Route::post('/property-moderation-cases/{case}/approve', [\App\Http\Controllers\PropertyModerationController::class, 'approve'])->whereNumber('case')->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/property-moderation-cases/{case}/reject', [\App\Http\Controllers\PropertyModerationController::class, 'reject'])->whereNumber('case')->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/property-moderation-cases/{case}/break-glass-approve', [\App\Http\Controllers\PropertyModerationController::class, 'breakGlassApprove'])->whereNumber('case')->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/property-moderation-cases/{case}/appeal', [\App\Http\Controllers\PropertyModerationController::class, 'appeal'])->whereNumber('case')->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/property-moderation-cases/{case}/withdraw', [\App\Http\Controllers\PropertyModerationController::class, 'withdrawCase'])->whereNumber('case')->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/property-duplicate-candidates/{candidate}/decision', [\App\Http\Controllers\PropertyModerationController::class, 'decideDuplicate'])->whereNumber('candidate')->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/property-duplicate-candidates/{candidate}/merge', [\App\Http\Controllers\PropertyModerationController::class, 'mergeDuplicate'])->whereNumber('candidate')->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/properties/{property}/promotions', [\App\Http\Controllers\PropertyModerationController::class, 'requestPromotion'])->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/properties/{property}/promotions/{promotion}/approve', [\App\Http\Controllers\PropertyModerationController::class, 'approvePromotionForProperty'])->whereNumber(['property', 'promotion'])->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/properties/{property}/promotions/{promotion}/reject', [\App\Http\Controllers\PropertyModerationController::class, 'rejectPromotionForProperty'])->whereNumber(['property', 'promotion'])->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/properties/{property}/promotions/{promotion}/revoke', [\App\Http\Controllers\PropertyModerationController::class, 'revokePromotionForProperty'])->whereNumber(['property', 'promotion'])->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::get('/property-promotions', [\App\Http\Controllers\PropertyModerationController::class, 'promotionQueue']);
+        Route::get('/employee-trust', [\App\Http\Controllers\PropertyModerationController::class, 'trustReport']);
+        Route::post('/property-promotions/{promotion}/approve', [\App\Http\Controllers\PropertyModerationController::class, 'approvePromotion'])->whereNumber('promotion')->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/property-promotions/{promotion}/reject', [\App\Http\Controllers\PropertyModerationController::class, 'rejectPromotion'])->whereNumber('promotion')->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/property-promotions/{promotion}/revoke', [\App\Http\Controllers\PropertyModerationController::class, 'revokePromotion'])->whereNumber('promotion')->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('properties/{property}/photos', [PropertyPhotoController::class, 'store'])->middleware('moderation.idempotent');
+        Route::put('properties/{property}/photos/reorder', [PropertyPhotoController::class, 'reorder'])->middleware('moderation.idempotent');
+        Route::delete('properties/{property}/photos/{photo}', [PropertyPhotoController::class, 'destroy'])->whereNumber('photo')->middleware('moderation.idempotent');
         Route::post('/reels/direct-upload', [ReelController::class, 'initDirectUpload']);
         Route::post('/reels/{reel}/complete-upload', [ReelController::class, 'completeDirectUpload']);
         Route::post('/reels', [ReelController::class, 'store']);
@@ -589,7 +620,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         Route::post(
             '/properties/{property}/deal',
             [PropertyController::class, 'saveDeal']
-        );
+        )->middleware('moderation.idempotent');
 
         // агрегированный — новый (без параметра agent)
         Route::get('/reports/agents/properties', [PropertyReportController::class, 'agentPropertiesReport'])->middleware('rop.branch.scope');

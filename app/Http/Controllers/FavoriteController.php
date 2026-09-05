@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Favorite;
+use App\Models\Property;
 use App\Services\NotificationService;
 use Illuminate\Http\Request;
 
@@ -17,6 +18,7 @@ class FavoriteController extends Controller
     {
         $favorites = Favorite::where('user_id', auth()->id())
             ->where('entity_type', 'property')
+            ->whereHas('property', fn ($properties) => $properties->publicSearchable())
             ->with('property.photos', 'property.type') // Загрузка property и его photos
             ->get();
 
@@ -26,13 +28,12 @@ class FavoriteController extends Controller
     // Добавить объект в избранное
     public function store(Request $request)
     {
-        $request->validate([
-            'property_id' => 'required|exists:properties,id',
-        ]);
+        $data = $request->validate(['property_id' => 'required|integer']);
+        Property::query()->publicSearchable()->findOrFail($data['property_id']);
 
         $favorite = Favorite::firstOrCreate([
             'user_id' => auth()->id(),
-            'property_id' => $request->property_id,
+            'property_id' => $data['property_id'],
         ]);
 
         if ($favorite->wasRecentlyCreated) {

@@ -9,6 +9,7 @@ use App\Models\PropertySocialPromotion;
 use App\Models\User;
 use App\Services\PropertyLiquidity\PropertyLiquidityAccess;
 use App\Services\PropertyLiquidity\PropertyLiquidityCalculator;
+use App\Services\PropertyModeration\PropertyModerationService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -19,6 +20,7 @@ class PropertyLiquidityController extends Controller
     public function __construct(
         private readonly PropertyLiquidityAccess $access,
         private readonly PropertyLiquidityCalculator $calculator,
+        private readonly PropertyModerationService $moderation,
     ) {}
 
     public function show(Request $request, Property $property)
@@ -27,6 +29,7 @@ class PropertyLiquidityController extends Controller
         $user = auth('sanctum')->user();
 
         if (! $user || $user->hasRole('client') || ! $this->access->isInternal($user)) {
+            $this->moderation->publicOrFail($property, null);
             return response()->json(['data' => [
                 'public_price_badge' => $property->publicPriceBadge(),
                 'calculated_at' => $property->publicPriceBadge() ? $property->liquidity_calculated_at?->toJSON() : null,
@@ -280,8 +283,8 @@ class PropertyLiquidityController extends Controller
     private function scopedActiveQuery(User $user): Builder
     {
         $query = Property::query()
+            ->publicSearchable()
             ->whereNotNull('liquidity_score')
-            ->where('moderation_status', Property::PUBLIC_MODERATION_STATUS)
             ->whereNull('sold_at')
             ->where('offer_type', 'sale');
         $this->access->scope($query, $user);

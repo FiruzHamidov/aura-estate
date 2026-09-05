@@ -5,13 +5,19 @@ namespace App\Http\Controllers;
 use App\Models\Property;
 use App\Models\PropertyPhoto;
 use App\Models\User;
+use App\Services\PropertyModeration\PropertyModerationAccess;
+use App\Services\PropertyModeration\PropertyModerationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Schema;
 use Intervention\Image\Encoders\JpegEncoder;
 
 class PropertyPhotoController extends Controller
 {
+    public function __construct(
+        private readonly PropertyModerationAccess $access,
+        private readonly PropertyModerationService $moderation,
+    ) {}
+
     private function crmAuthUser(): User
     {
         /** @var User|null $user */
@@ -23,62 +29,21 @@ class PropertyPhotoController extends Controller
         return $user;
     }
 
-    private function canMutateProperty(User $user, Property $property): bool
-    {
-        if ($user->hasRole('admin') || $user->hasRole('superadmin')) {
-            return true;
-        }
-
-        if ($property->created_by === $user->id || $property->agent_id === $user->id) {
-            return true;
-        }
-
-        if ($user->hasRole('client') || $user->hasRole('intern')) {
-            return false;
-        }
-
-        if ($user->hasRole('mop')) {
-            if (empty($user->branch_group_id)) {
-                return false;
-            }
-
-            $propertyBranchGroupId = $property->branch_group_id;
-
-            if (empty($propertyBranchGroupId) && Schema::hasColumn('users', 'branch_group_id')) {
-                $property->loadMissing(['agent', 'creator']);
-                $propertyBranchGroupId = $property->agent?->branch_group_id ?: $property->creator?->branch_group_id;
-            }
-
-            return ! empty($propertyBranchGroupId)
-                && (int) $propertyBranchGroupId === (int) $user->branch_group_id;
-        }
-
-        if (! $user->hasRole('branch_director') && ! $user->hasRole('rop')) {
-            return false;
-        }
-
-        if (empty($user->branch_id)) {
-            return false;
-        }
-
-        $property->loadMissing(['agent', 'creator']);
-        $propertyBranchId = $property->agent?->branch_id ?: $property->creator?->branch_id;
-
-        return ! empty($propertyBranchId) && (int) $propertyBranchId === (int) $user->branch_id;
-    }
-
-    private function authorizePropertyMutation(Property $property): void
+    private function authorizePropertyMutation(Property $property): User
     {
         $user = $this->crmAuthUser();
 
-        if (! $this->canMutateProperty($user, $property)) {
+        if (! $this->access->canEdit($user, $property)) {
             abort(403, 'Доступ запрещён');
         }
+
+        return $user;
     }
 
     public function store(Request $request, Property $property)
     {
-        $this->authorizePropertyMutation($property);
+        $actor = $this->authorizePropertyMutation($property);
+        $this->moderation->assertNoProtectedFields($request, [], $actor, $property);
 
         $request->validate([
             'photos' => ['required', 'array', 'max:40'],
@@ -87,8 +52,12 @@ class PropertyPhotoController extends Controller
             'photo_positions.*' => ['integer', 'min:0'],
         ]);
 
-        DB::transaction(function () use ($request, $property): void {
-            $basePos = (int) ($property->photos()->max('position') ?? -1) + 1;
+        DB::transaction(function () use ($request, $property, $actor): void {
+            $locked = Property::query()->lockForUpdate()->findOrFail($property->id);
+            $this->moderation->assertMutationVersion($request, $locked);
+            abort_unless($this->access->canEdit($actor, $locked), 403);
+            $beforePhotos = $this->moderation->photoSnapshot($locked);
+            $basePos = (int) ($locked->photos()->max('position') ?? -1) + 1;
 
             foreach (array_values($request->file('photos')) as $i => $photo) {
                 $image = app('image')->read($photo)->scaleDown(1600, null);
@@ -102,32 +71,45 @@ class PropertyPhotoController extends Controller
 
                 $position = $request->input("photo_positions.$i", $basePos + $i);
 
-                $property->photos()->create(['file_path' => $filename, 'position' => $position]);
+                $locked->photos()->create(['file_path' => $filename, 'position' => $position]);
             }
 
-            $property->markListingUpdated();
+            $locked->markListingUpdated();
+            $this->moderation->handleMediaMutation($locked, $actor, ['action' => 'photos_added', 'before_photos' => $beforePhotos]);
         });
 
         return response()->json($property->fresh('photos'));
     }
 
-    public function destroy(Property $property, PropertyPhoto $photo)
+    public function destroy(Request $request, Property $property, PropertyPhoto $photo)
     {
-        $this->authorizePropertyMutation($property);
-
+        $actor = $this->authorizePropertyMutation($property);
+        $this->moderation->assertNoProtectedFields($request, [], $actor, $property);
         abort_unless($photo->property_id === $property->id, 404);
 
-        DB::transaction(function () use ($property, $photo): void {
-            \Storage::disk('public')->delete($photo->file_path);
-            $photo->delete();
+        DB::transaction(function () use ($request, $property, $photo, $actor): void {
+            $locked = Property::query()->lockForUpdate()->findOrFail($property->id);
+            $this->moderation->assertMutationVersion($request, $locked);
+            abort_unless($this->access->canEdit($actor, $locked), 403);
+            $beforePhotos = $this->moderation->photoSnapshot($locked);
+            $lockedPhoto = PropertyPhoto::query()
+                ->where('property_id', $locked->id)
+                ->lockForUpdate()
+                ->findOrFail($photo->id);
+            $preserveFileForRollback = (array) $locked->approved_content_snapshot !== [];
+            if (! $preserveFileForRollback) {
+                \Storage::disk('public')->delete($lockedPhoto->file_path);
+            }
+            $lockedPhoto->delete();
 
             // Re-pack positions
-            $photos = $property->photos()->orderBy('position')->get();
+            $photos = $locked->photos()->orderBy('position')->get();
             foreach ($photos as $idx => $p) {
                 $p->update(['position' => $idx]);
             }
 
-            $property->markListingUpdated();
+            $locked->markListingUpdated();
+            $this->moderation->handleMediaMutation($locked, $actor, ['action' => 'photo_deleted', 'before_photos' => $beforePhotos, 'photo_id' => $lockedPhoto->id]);
         });
 
         return response()->json(['ok' => true]);
@@ -135,17 +117,22 @@ class PropertyPhotoController extends Controller
 
     public function reorder(Request $request, Property $property)
     {
-        $this->authorizePropertyMutation($property);
+        $actor = $this->authorizePropertyMutation($property);
+        $this->moderation->assertNoProtectedFields($request, [], $actor, $property);
 
         $data = $request->validate([
             'photo_order' => ['required', 'array'],
             'photo_order.*' => ['integer', 'exists:property_photos,id'],
         ]);
 
-        DB::transaction(function () use ($data, $property): void {
+        DB::transaction(function () use ($request, $data, $property, $actor): void {
+            $locked = Property::query()->lockForUpdate()->findOrFail($property->id);
+            $this->moderation->assertMutationVersion($request, $locked);
+            abort_unless($this->access->canEdit($actor, $locked), 403);
+            $beforePhotos = $this->moderation->photoSnapshot($locked);
             $changed = false;
             foreach ($data['photo_order'] as $pos => $id) {
-                $photo = $property->photos()->whereKey($id)->first();
+                $photo = $locked->photos()->whereKey($id)->first();
 
                 if ($photo && (int) $photo->position !== $pos) {
                     $photo->update(['position' => $pos]);
@@ -154,7 +141,8 @@ class PropertyPhotoController extends Controller
             }
 
             if ($changed) {
-                $property->markListingUpdated();
+                $locked->markListingUpdated();
+                $this->moderation->handleMediaMutation($locked, $actor, ['action' => 'photos_reordered', 'before_photos' => $beforePhotos]);
             }
         });
 

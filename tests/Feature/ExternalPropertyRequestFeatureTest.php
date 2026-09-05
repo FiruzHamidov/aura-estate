@@ -156,6 +156,17 @@ class ExternalPropertyRequestFeatureTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('property_agent_sales', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('property_id');
+            $table->unsignedBigInteger('agent_id');
+            $table->string('role')->nullable();
+            $table->decimal('agent_commission_amount', 15, 2)->nullable();
+            $table->string('agent_commission_currency', 3)->nullable();
+            $table->timestamp('agent_paid_at')->nullable();
+            $table->timestamps();
+        });
+
         Schema::create('property_photos', function (Blueprint $table) {
             $table->id();
             $table->unsignedBigInteger('property_id');
@@ -475,14 +486,15 @@ class ExternalPropertyRequestFeatureTest extends TestCase
         $requestId = $createdResponse->json('id');
         Sanctum::actingAs($internalAgent);
 
-        $this->postJson("/api/external-agent-requests/{$requestId}/convert", [
+        $converted = $this->postJson("/api/external-agent-requests/{$requestId}/convert", [
             'status_id' => $status->id,
-        ])->assertStatus(409);
+        ])->assertCreated();
+        $converted->assertJsonPath('data.moderation_status', 'pending');
 
         $this->postJson("/api/external-agent-requests/{$requestId}/convert", [
             'status_id' => $status->id,
             'force' => true,
-        ])->assertCreated();
+        ])->assertUnprocessable();
     }
 
     public function test_internal_agent_cannot_assign_request_to_external_agent(): void

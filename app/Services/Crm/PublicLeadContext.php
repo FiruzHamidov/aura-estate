@@ -32,7 +32,7 @@ class PublicLeadContext
             }
         }
         if (! empty($input['property_id'])) {
-            $property = Property::query()->where('moderation_status', 'approved')->findOrFail($input['property_id']);
+            $property = Property::query()->publicSearchable()->findOrFail($input['property_id']);
             $context['property_title'] = $property->title;
             $context['property_price'] = $property->price;
         }

@@ -34,6 +34,7 @@ class AttendanceModuleFeatureTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
+        config(['services.firebase.credentials' => '']);
         $this->withoutMiddleware([EnsureDailyReportSubmitted::class, LogApiRequest::class]);
         Schema::dropAllTables();
         $this->createBaseSchema();

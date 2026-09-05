@@ -11,6 +11,7 @@ use App\Models\PropertyPhoto;
 use App\Models\PropertyStatus;
 use App\Models\PropertyType;
 use App\Models\User;
+use App\Services\PropertyModeration\PropertyModerationService;
 use App\Support\ClientPhone;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
@@ -21,6 +22,11 @@ use Illuminate\Validation\ValidationException;
 
 class ExternalPropertyRequestService
 {
+    public function __construct(
+        private readonly PropertyDuplicateService $duplicates,
+        private readonly PropertyModerationService $moderation,
+    ) {}
+
     public function scopedInternalQuery(User $user): Builder
     {
         $user->loadMissing('role');
@@ -253,8 +259,6 @@ class ExternalPropertyRequestService
             'branch_id' => $request->branch_id ?: $actor->branch_id,
             'branch_group_id' => $request->branch_group_id ?: $actor->branch_group_id,
             'agent_id' => $request->assigned_agent_id ?: $actor->id,
-            'moderation_status' => 'pending',
-            'listing_type' => 'regular',
         ], fn ($value) => $value !== null && $value !== '');
     }
 
@@ -263,17 +267,15 @@ class ExternalPropertyRequestService
         User $actor,
         array $payload,
         bool $copyPhotos = true,
-        bool $force = false
     ): Property {
         abort_if($request->property_id || $request->status === ExternalPropertyRequest::STATUS_CONVERTED, 422, 'Заявка уже сконвертирована.');
         abort_if(in_array($request->status, [ExternalPropertyRequest::STATUS_REJECTED, ExternalPropertyRequest::STATUS_ARCHIVED], true), 422, 'Закрытую заявку нельзя конвертировать.');
         abort_if($actor->hasRole('intern') || $actor->hasRole('external_agent') || $actor->hasRole('client'), 403, 'Доступ запрещён');
-        abort_if($request->duplicate_property_id && ! $force, 409, 'Найден возможный дубль. Подтвердите конвертацию с force=true.');
+        $this->moderation->assertCanCreate($actor);
 
-        return DB::transaction(function () use ($request, $actor, $payload, $copyPhotos, $force) {
+        return DB::transaction(function () use ($request, $actor, $payload, $copyPhotos) {
             $request->refresh();
             abort_if($request->property_id, 422, 'Заявка уже сконвертирована.');
-            abort_if($request->duplicate_property_id && ! $force, 409, 'Найден возможный дубль. Подтвердите конвертацию с force=true.');
 
             $propertyPayload = array_merge($this->prefillPayload($request, $actor), $payload);
             $propertyPayload['created_by'] = $actor->id;
@@ -283,8 +285,7 @@ class ExternalPropertyRequestService
             $propertyPayload['external_agent_id'] = $request->external_agent_id;
             $propertyPayload['external_property_request_id'] = $request->id;
             $propertyPayload['source_type'] = ExternalPropertyRequest::SOURCE_TYPE;
-            $propertyPayload['moderation_status'] = $propertyPayload['moderation_status'] ?? 'pending';
-            $propertyPayload['listing_type'] = $propertyPayload['listing_type'] ?? 'regular';
+            unset($propertyPayload['moderation_status'], $propertyPayload['publication_status'], $propertyPayload['listing_type']);
 
             $ownerClient = $this->findOrCreateOwnerClient($request, $actor, $propertyPayload);
             if ($ownerClient) {
@@ -293,11 +294,24 @@ class ExternalPropertyRequestService
                 $propertyPayload['owner_phone'] = $ownerClient->phone;
             }
 
+            $duplicates = $this->duplicates->find($propertyPayload);
+            if ($request->duplicate_property_id && ! $duplicates->contains(fn (array $item) => (int) ($item['id'] ?? 0) === (int) $request->duplicate_property_id)) {
+                $knownDuplicate = Property::query()->with('photos')->find($request->duplicate_property_id);
+                if ($knownDuplicate) {
+                    $duplicates->push(array_merge($knownDuplicate->toArray(), [
+                        'id' => (int) $knownDuplicate->id,
+                        'score' => 100,
+                        'signals' => ['external_request_duplicate'],
+                    ]));
+                }
+            }
+            $propertyPayload = $this->moderation->creationState($propertyPayload, $duplicates);
             $property = Property::create($propertyPayload);
 
             if ($copyPhotos) {
                 $this->copyPhotosToProperty($request, $property);
             }
+            $this->moderation->recordCreation($property, $actor, $duplicates);
 
             $oldStatus = $request->status;
             $request->update([

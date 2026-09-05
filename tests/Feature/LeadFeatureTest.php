@@ -28,6 +28,12 @@ class LeadFeatureTest extends TestCase
         parent::setUp();
 
         Schema::dropAllTables();
+        // Deal scope includes property ownership, even when this fixture has no listings.
+        Schema::create('properties', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('created_by')->nullable();
+            $table->unsignedBigInteger('agent_id')->nullable();
+        });
 
         Schema::create('roles', function (Blueprint $table) {
             $table->id();

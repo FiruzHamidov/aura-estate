@@ -2135,16 +2135,16 @@ class UserAccessTest extends TestCase
         $agentProperty = Property::create(['title' => 'Agent property', 'created_by' => $agent->id]);
 
         Sanctum::actingAs($agent);
-        $this->patchJson('/api/properties/'.$agentProperty->id.'/co-owner', ['co_owner_user_id' => $agentPeer->id])
+        $this->patchJson('/api/properties/'.$agentProperty->id.'/co-owner', ['co_owner_user_id' => $agentPeer->id, 'reason' => 'Совместная работа', 'version' => 0])
             ->assertOk()
             ->assertJsonPath('co_owner_user_id', $agentPeer->id)
             ->assertJsonPath('co_owner.id', $agentPeer->id)
             ->assertJsonPath('co_owner.name', 'Agent peer')
             ->assertJsonPath('co_owner.phone', '900000222')
             ->assertJsonPath('co_owner.photo', 'peer.jpg');
-        $this->patchJson('/api/properties/'.$agentProperty->id.'/co-owner', ['co_owner_user_id' => 999999])->assertUnprocessable();
-        $this->patchJson('/api/properties/'.$agentProperty->id.'/co-owner', ['co_owner_user_id' => $foreignAgent->id])->assertForbidden();
-        $this->patchJson('/api/properties/'.$agentProperty->id.'/co-owner', ['co_owner_user_id' => $agent->id])->assertUnprocessable();
+        $this->patchJson('/api/properties/'.$agentProperty->id.'/co-owner', ['co_owner_user_id' => 999999, 'reason' => 'Совместная работа', 'version' => 0])->assertUnprocessable();
+        $this->patchJson('/api/properties/'.$agentProperty->id.'/co-owner', ['co_owner_user_id' => $foreignAgent->id, 'reason' => 'Совместная работа', 'version' => 0])->assertForbidden();
+        $this->patchJson('/api/properties/'.$agentProperty->id.'/co-owner', ['co_owner_user_id' => $agent->id, 'reason' => 'Совместная работа', 'version' => 0])->assertUnprocessable();
 
         $mop = User::create(['name' => 'MOP A', 'phone' => '900000224', 'role_id' => $mopRole->id, 'branch_id' => $branchA->id, 'branch_group_id' => $groupA->id, 'status' => 'active']);
         $mopPeer = User::create(['name' => 'MOP peer', 'phone' => '900000225', 'role_id' => $agentRole->id, 'branch_id' => $branchA->id, 'branch_group_id' => $groupA->id, 'status' => 'active']);
@@ -2152,16 +2152,16 @@ class UserAccessTest extends TestCase
         $mopProperty = Property::create(['title' => 'MOP property', 'created_by' => $mop->id]);
 
         Sanctum::actingAs($mop);
-        $this->patchJson('/api/properties/'.$mopProperty->id.'/co-owner', ['co_owner_user_id' => $mopPeer->id])
+        $this->patchJson('/api/properties/'.$mopProperty->id.'/co-owner', ['co_owner_user_id' => $mopPeer->id, 'reason' => 'Совместная работа', 'version' => 0])
             ->assertOk()
             ->assertJsonPath('co_owner_user_id', $mopPeer->id)
             ->assertJsonPath('co_owner.id', $mopPeer->id);
-        $this->patchJson('/api/properties/'.$mopProperty->id.'/co-owner', ['co_owner_user_id' => $otherGroup->id])
+        $this->patchJson('/api/properties/'.$mopProperty->id.'/co-owner', ['co_owner_user_id' => $otherGroup->id, 'reason' => 'Совместная работа', 'version' => 0])
             ->assertOk()
             ->assertJsonPath('co_owner.id', $otherGroup->id);
-        $this->patchJson('/api/properties/'.$mopProperty->id.'/co-owner', ['co_owner_user_id' => $foreignAgent->id])->assertForbidden();
+        $this->patchJson('/api/properties/'.$mopProperty->id.'/co-owner', ['co_owner_user_id' => $foreignAgent->id, 'reason' => 'Совместная работа', 'version' => 0])->assertForbidden();
 
         Sanctum::actingAs($foreignAgent);
-        $this->patchJson('/api/properties/'.$agentProperty->id.'/co-owner', ['co_owner_user_id' => $agentPeer->id])->assertForbidden();
+        $this->patchJson('/api/properties/'.$agentProperty->id.'/co-owner', ['co_owner_user_id' => $agentPeer->id, 'reason' => 'Совместная работа', 'version' => 0])->assertForbidden();
     }
 }

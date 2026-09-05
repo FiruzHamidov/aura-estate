@@ -391,7 +391,8 @@ class ClientIntegrationTest extends TestCase
         Sanctum::actingAs($agent);
 
         $response = $this->postJson('/api/properties/'.$property->id.'/deal', [
-            'moderation_status' => 'sold',
+            'deal_status' => 'sold',
+            'version' => 0,
             'buyer_client_id' => $client->id,
             'actual_sale_price' => 150000,
             'actual_sale_currency' => 'USD',
@@ -417,7 +418,8 @@ class ClientIntegrationTest extends TestCase
         Sanctum::actingAs($agent);
 
         $response = $this->postJson('/api/properties/'.$property->id.'/deal', [
-            'moderation_status' => 'deposit',
+            'deal_status' => 'deposit',
+            'version' => 0,
             'buyer_client_id' => $client->id,
             'deposit_amount' => 10000,
             'deposit_currency' => 'TJS',
@@ -466,7 +468,8 @@ class ClientIntegrationTest extends TestCase
         ])->assertOk()->json('id');
 
         $response = $this->postJson('/api/properties/'.$propertyId.'/deal', [
-            'moderation_status' => 'sold',
+            'deal_status' => 'sold',
+            'version' => 0,
             'buyer_client_id' => $client->id,
             'actual_sale_price' => 140000,
             'actual_sale_currency' => 'USD',

@@ -14,6 +14,9 @@ class Property extends Model
 
     public const LISTING_CONTENT_FIELDS = [
         'title',
+        'owner_phone',
+        'owner_name',
+        'owner_client_id',
         'description',
         'type_id',
         'status_id',
@@ -47,7 +50,6 @@ class Property extends Model
         'longitude',
         'district',
         'address',
-        'listing_type',
         'developer_id',
         'is_full_apartment',
         'is_for_aura',
@@ -91,6 +93,12 @@ class Property extends Model
         'listing_updated_at' => 'datetime',
         'listed_at' => 'datetime',
         'liquidity_calculated_at' => 'datetime',
+        'approved_price' => 'decimal:2',
+        'approved_discount_price' => 'decimal:2',
+        'approved_effective_price' => 'decimal:2',
+        'price_approved_at' => 'datetime',
+        'approved_content_snapshot' => 'array',
+        'moderation_version' => 'integer',
         'liquidity_score' => 'integer',
         'liquidity_confidence' => 'integer',
         'price_delta_pct' => 'decimal:2',
@@ -114,6 +122,16 @@ class Property extends Model
         'liquidity_business_priority_at',
         'liquidity_calculated_at',
         'liquidity_model_version',
+        'approved_price',
+        'approved_discount_price',
+        'approved_effective_price',
+        'approved_currency',
+        'price_approved_at',
+        'price_approved_by',
+        'approved_content_snapshot',
+        'duplicate_of_property_id',
+        'moderation_version',
+        'activePromotion',
     ];
 
     protected $fillable = [
@@ -145,6 +163,17 @@ class Property extends Model
         'is_mortgage_available',
         'is_from_developer',
         'moderation_status',
+        'publication_status',
+        'deal_status',
+        'approved_price',
+        'approved_discount_price',
+        'approved_effective_price',
+        'approved_currency',
+        'price_approved_at',
+        'price_approved_by',
+        'approved_content_snapshot',
+        'duplicate_of_property_id',
+        'moderation_version',
         'landmark',
         'latitude',
         'longitude',
@@ -441,6 +470,45 @@ class Property extends Model
         return $this->hasMany(PropertyLog::class)->latest();
     }
 
+    public function moderationCases()
+    {
+        return $this->hasMany(PropertyModerationCase::class);
+    }
+
+    public function promotions()
+    {
+        return $this->hasMany(PropertyPromotion::class);
+    }
+
+    public function activePromotion()
+    {
+        return $this->hasOne(PropertyPromotion::class)->currentlyActive()->latestOfMany('starts_at');
+    }
+
+    public function getListingTypeAttribute($value): string
+    {
+        if (! Schema::hasTable('property_promotions') || ! $this->exists) {
+            return (string) ($value ?: 'regular');
+        }
+
+        $promotion = $this->relationLoaded('activePromotion')
+            ? $this->getRelation('activePromotion')
+            : $this->activePromotion()->first();
+
+        if (! $promotion || ! $promotion->starts_at || ! $promotion->ends_at
+            || $promotion->starts_at->isFuture() || $promotion->ends_at->isPast()
+            || ! static::query()->publicSearchable()->whereKey($this->id)->exists()) {
+            return 'regular';
+        }
+
+        return $promotion->type;
+    }
+
+    public function duplicateOf()
+    {
+        return $this->belongsTo(self::class, 'duplicate_of_property_id');
+    }
+
     public function developer()
     {
         return $this->belongsTo(Developer::class);
@@ -484,9 +552,20 @@ class Property extends Model
 
     public function scopePublicSearchable(Builder $query): Builder
     {
-        $query
-            ->where('properties.moderation_status', self::PUBLIC_MODERATION_STATUS)
-            ->whereNotIn('properties.moderation_status', self::CLOSED_MODERATION_STATUSES);
+        if (Schema::hasColumn($this->getTable(), 'publication_status')) {
+            $query
+                ->where('properties.publication_status', 'published')
+                ->whereDoesntHave('moderationCases', fn (Builder $cases) => $cases
+                    ->whereIn('status', [PropertyModerationCase::STATUS_OPEN, PropertyModerationCase::STATUS_REJECTED])
+                    ->where('blocking', true))
+                ->whereDoesntHave('moderationCases.duplicateCandidates', fn (Builder $candidates) => $candidates
+                    ->where('decision', PropertyDuplicateCandidate::DECISION_CONFIRMED)
+                    ->whereNull('reversed_at'));
+        } else {
+            $query
+                ->where('properties.moderation_status', self::PUBLIC_MODERATION_STATUS)
+                ->whereNotIn('properties.moderation_status', self::CLOSED_MODERATION_STATUSES);
+        }
 
         if (Schema::hasColumn('properties', 'sold_at')) {
             $query->whereNull('properties.sold_at');

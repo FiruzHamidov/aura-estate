@@ -160,9 +160,7 @@ class ReelController extends Controller
             ])
             ->where(function ($query) {
                 $query->whereNull('property_id')
-                    ->orWhereHas('property', function ($propertyQuery) {
-                        $propertyQuery->where('moderation_status', '!=', 'deleted');
-                    });
+                    ->orWhereHas('property', fn ($propertyQuery) => $propertyQuery->publicSearchable());
             })
             ->published();
     }
@@ -327,11 +325,14 @@ class ReelController extends Controller
             ->where('property_id', $property->id);
 
         $includeUnpublished = $request->boolean('include_unpublished');
+        $canIncludeUnpublished = $includeUnpublished && $this->canManageProperty($this->authUser(), $property);
 
-        if (!$includeUnpublished || !$this->canManageProperty($this->authUser(), $property)) {
-            $query->whereHas('property', function ($builder) {
-                $builder->where('moderation_status', '!=', 'deleted');
-            })->published();
+        if (! $canIncludeUnpublished && ! Property::query()->publicSearchable()->whereKey($property->id)->exists()) {
+            abort(404);
+        }
+
+        if (!$canIncludeUnpublished) {
+            $query->whereHas('property', fn ($builder) => $builder->publicSearchable())->published();
         }
 
         $reels = $query->ordered()
@@ -348,7 +349,10 @@ class ReelController extends Controller
         $query = Reel::query()->with('property');
 
         if (!$user) {
-            $query->published();
+            $query->published()->where(function ($builder) {
+                $builder->whereNull('property_id')
+                    ->orWhereHas('property', fn ($propertyQuery) => $propertyQuery->publicSearchable());
+            });
         }
 
         /** @var Reel $reel */

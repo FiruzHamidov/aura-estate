@@ -468,7 +468,7 @@ class ClientAccessTest extends TestCase
         $response->assertJsonCount(1, 'data');
         $response->assertJsonPath('data.0.id', $ownClient->id);
 
-        $this->getJson('/api/clients/' . $foreignClient->id)->assertForbidden();
+        $this->getJson('/api/clients/'.$foreignClient->id)->assertForbidden();
     }
 
     public function test_branch_director_sees_all_clients_from_own_branch_even_in_own_only_mode(): void
@@ -521,7 +521,7 @@ class ClientAccessTest extends TestCase
 
         Sanctum::actingAs($director);
 
-        $this->putJson('/api/properties/' . $propertyA->id, [
+        $this->putJson('/api/properties/'.$propertyA->id, [
             'title' => 'Director updated property',
             'type_id' => $propertyType->id,
             'status_id' => $propertyStatus->id,
@@ -531,7 +531,7 @@ class ClientAccessTest extends TestCase
         ])->assertOk()
             ->assertJsonPath('title', 'Director updated property');
 
-        $this->putJson('/api/properties/' . $propertyB->id, [
+        $this->putJson('/api/properties/'.$propertyB->id, [
             'title' => 'Foreign property',
             'type_id' => $propertyType->id,
             'status_id' => $propertyStatus->id,
@@ -561,7 +561,7 @@ class ClientAccessTest extends TestCase
 
         Sanctum::actingAs($rop);
 
-        $this->putJson('/api/properties/' . $propertyA->id, [
+        $this->putJson('/api/properties/'.$propertyA->id, [
             'title' => 'ROP updated property',
             'type_id' => $propertyType->id,
             'status_id' => $propertyStatus->id,
@@ -571,7 +571,7 @@ class ClientAccessTest extends TestCase
         ])->assertOk()
             ->assertJsonPath('title', 'ROP updated property');
 
-        $this->putJson('/api/properties/' . $propertyB->id, [
+        $this->putJson('/api/properties/'.$propertyB->id, [
             'title' => 'Foreign property',
             'type_id' => $propertyType->id,
             'status_id' => $propertyStatus->id,
@@ -603,12 +603,12 @@ class ClientAccessTest extends TestCase
 
         Sanctum::actingAs($director);
 
-        $this->putJson('/api/clients/' . $clientA->id, [
+        $this->putJson('/api/clients/'.$clientA->id, [
             'full_name' => 'Director updated client',
         ])->assertOk()
             ->assertJsonPath('full_name', 'Director updated client');
 
-        $this->putJson('/api/clients/' . $clientB->id, [
+        $this->putJson('/api/clients/'.$clientB->id, [
             'full_name' => 'Foreign client',
         ])->assertForbidden();
     }
@@ -635,12 +635,12 @@ class ClientAccessTest extends TestCase
 
         Sanctum::actingAs($rop);
 
-        $this->putJson('/api/clients/' . $clientA->id, [
+        $this->putJson('/api/clients/'.$clientA->id, [
             'full_name' => 'ROP updated client',
         ])->assertOk()
             ->assertJsonPath('full_name', 'ROP updated client');
 
-        $this->putJson('/api/clients/' . $clientB->id, [
+        $this->putJson('/api/clients/'.$clientB->id, [
             'full_name' => 'Foreign client',
         ])->assertForbidden();
     }
@@ -677,8 +677,8 @@ class ClientAccessTest extends TestCase
             ->assertJsonFragment(['id' => $sellerA->id])
             ->assertJsonMissing(['full_name' => $sellerB->full_name]);
 
-        $this->getJson('/api/clients/' . $buyerB->id)->assertOk();
-        $this->getJson('/api/clients/' . $sellerB->id)->assertForbidden();
+        $this->getJson('/api/clients/'.$buyerB->id)->assertOk();
+        $this->getJson('/api/clients/'.$sellerB->id)->assertForbidden();
     }
 
     public function test_agent_does_not_see_any_sellers_when_seller_visibility_setting_is_disabled(): void
@@ -713,9 +713,9 @@ class ClientAccessTest extends TestCase
             ->assertJsonMissing(['id' => $sellerA->id])
             ->assertJsonMissing(['id' => $sellerB->id]);
 
-        $this->getJson('/api/clients/' . $buyerB->id)->assertOk();
-        $this->getJson('/api/clients/' . $sellerA->id)->assertForbidden();
-        $this->getJson('/api/clients/' . $sellerB->id)->assertForbidden();
+        $this->getJson('/api/clients/'.$buyerB->id)->assertOk();
+        $this->getJson('/api/clients/'.$sellerA->id)->assertForbidden();
+        $this->getJson('/api/clients/'.$sellerB->id)->assertForbidden();
     }
 
     public function test_agent_in_own_only_mode_does_not_see_own_seller_when_seller_visibility_setting_is_disabled(): void
@@ -745,7 +745,7 @@ class ClientAccessTest extends TestCase
             ->assertJsonPath('data.0.id', $ownBuyer->id)
             ->assertJsonMissing(['id' => $ownSeller->id]);
 
-        $this->getJson('/api/clients/' . $ownSeller->id)->assertForbidden();
+        $this->getJson('/api/clients/'.$ownSeller->id)->assertForbidden();
     }
 
     public function test_branch_director_can_filter_sellers_and_see_entire_branch(): void
@@ -988,7 +988,7 @@ class ClientAccessTest extends TestCase
             ->assertJsonPath('data.0.branch_group.id', $groupA->id)
             ->assertJsonMissing(['id' => $clientB->id]);
 
-        $this->getJson('/api/clients/' . $clientB->id)->assertForbidden();
+        $this->getJson('/api/clients/'.$clientB->id)->assertForbidden();
     }
 
     public function test_agent_from_branch_visible_group_sees_contacts_from_entire_branch(): void
@@ -1017,7 +1017,7 @@ class ClientAccessTest extends TestCase
             ->assertJsonFragment(['id' => $clientA->id])
             ->assertJsonFragment(['id' => $clientB->id]);
 
-        $this->getJson('/api/clients/' . $clientB->id)->assertOk();
+        $this->getJson('/api/clients/'.$clientB->id)->assertOk();
     }
 
     public function test_own_only_setting_is_applied_after_group_scope(): void
@@ -1121,7 +1121,7 @@ class ClientAccessTest extends TestCase
         $response->assertJsonPath('branch_group.id', $group->id);
         $response->assertJsonPath('branch_group_id', $group->id);
 
-        $this->getJson('/api/clients/' . $clientId)
+        $this->getJson('/api/clients/'.$clientId)
             ->assertOk()
             ->assertJsonPath('branch_group.id', $group->id);
     }
@@ -1154,7 +1154,7 @@ class ClientAccessTest extends TestCase
 
         Sanctum::actingAs($agentA);
 
-        $this->putJson('/api/properties/' . $property->id, [
+        $this->putJson('/api/properties/'.$property->id, [
             'title' => 'Updated title',
             'type_id' => $propertyType->id,
             'status_id' => $propertyStatus->id,
@@ -1207,7 +1207,7 @@ class ClientAccessTest extends TestCase
 
         Sanctum::actingAs($agentA);
 
-        $this->putJson('/api/properties/' . $property->id, [
+        $this->putJson('/api/properties/'.$property->id, [
             'title' => 'Updated title',
             'type_id' => $propertyType->id,
             'status_id' => $propertyStatus->id,
@@ -1215,7 +1215,11 @@ class ClientAccessTest extends TestCase
             'currency' => 'TJS',
             'offer_type' => 'sale',
             $field => $hiddenSeller->id,
-        ])->assertForbidden()->assertJsonPath('code', 'RBAC_SCOPE_VIOLATION');
+        ])->when(
+            $field === 'buyer_client_id',
+            fn ($response) => $response->assertUnprocessable()->assertJsonPath('code', 'PROTECTED_FIELD'),
+            fn ($response) => $response->assertForbidden()->assertJsonPath('code', 'RBAC_SCOPE_VIOLATION'),
+        );
 
         $this->assertSame($before, $property->fresh()->getAttributes());
         $this->assertDatabaseCount('client_collaborators', 0);
@@ -1310,6 +1314,17 @@ class ClientAccessTest extends TestCase
             ? $this->putJson('/api/properties/'.$property->id, $payload)
             : $this->postJson('/api/properties', $payload);
 
+        if ($field === 'buyer_client_id') {
+            $response->assertUnprocessable()->assertJsonPath('code', 'PROTECTED_FIELD');
+            $this->assertDatabaseCount('properties', $property ? 1 : 0);
+            $this->assertSame($before, $property?->fresh()->getAttributes());
+            $this->assertSame($clientBefore, $client->fresh()->getAttributes());
+            $this->assertDatabaseCount('client_collaborators', 0);
+            $this->assertDatabaseCount('crm_audit_logs', 0);
+
+            return;
+        }
+
         if (! $sameBranch) {
             $response->assertForbidden()->assertJsonPath('code', 'RBAC_SCOPE_VIOLATION');
             $this->assertDatabaseCount('properties', $property ? 1 : 0);
@@ -1366,7 +1381,7 @@ class ClientAccessTest extends TestCase
             'offer_type' => 'sale',
             'owner_client_id' => $owner->id,
             'buyer_client_id' => $buyer->id,
-        ])->assertForbidden()->assertJsonPath('code', 'RBAC_SCOPE_VIOLATION');
+        ])->assertUnprocessable()->assertJsonPath('code', 'PROTECTED_FIELD');
 
         $this->assertDatabaseCount('properties', 0);
         $this->assertDatabaseCount('client_collaborators', 0);
@@ -1504,7 +1519,7 @@ class ClientAccessTest extends TestCase
 
         Sanctum::actingAs($mop);
 
-        $this->putJson('/api/properties/' . $propertyA->id, [
+        $this->putJson('/api/properties/'.$propertyA->id, [
             'title' => 'MOP updated',
             'type_id' => $propertyType->id,
             'status_id' => $propertyStatus->id,
@@ -1515,7 +1530,7 @@ class ClientAccessTest extends TestCase
             ->assertOk()
             ->assertJsonPath('title', 'MOP updated');
 
-        $this->putJson('/api/properties/' . $propertyB->id, [
+        $this->putJson('/api/properties/'.$propertyB->id, [
             'title' => 'Forbidden update',
             'type_id' => $propertyType->id,
             'status_id' => $propertyStatus->id,
@@ -1540,11 +1555,11 @@ class ClientAccessTest extends TestCase
             'updated_at' => now(),
         ]);
 
-        $this->putJson('/api/properties/' . $propertyA->id . '/photos/reorder', [
+        $this->putJson('/api/properties/'.$propertyA->id.'/photos/reorder', [
             'photo_order' => [$photoAId],
         ])->assertOk();
 
-        $this->putJson('/api/properties/' . $propertyB->id . '/photos/reorder', [
+        $this->putJson('/api/properties/'.$propertyB->id.'/photos/reorder', [
             'photo_order' => [$photoBId],
         ])->assertForbidden();
     }
@@ -1568,7 +1583,7 @@ class ClientAccessTest extends TestCase
 
         Sanctum::actingAs($mop);
 
-        $this->deleteJson('/api/properties/' . $property->id)->assertForbidden();
+        $this->deleteJson('/api/properties/'.$property->id)->assertForbidden();
 
         $photoId = DB::table('property_photos')->insertGetId([
             'property_id' => $property->id,
@@ -1578,7 +1593,7 @@ class ClientAccessTest extends TestCase
             'updated_at' => now(),
         ]);
 
-        $this->putJson('/api/properties/' . $property->id . '/photos/reorder', [
+        $this->putJson('/api/properties/'.$property->id.'/photos/reorder', [
             'photo_order' => [$photoId],
         ])
             ->assertForbidden()
@@ -1612,7 +1627,7 @@ class ClientAccessTest extends TestCase
 
         Sanctum::actingAs($intern);
 
-        $this->putJson('/api/properties/' . $property->id . '/photos/reorder', [
+        $this->putJson('/api/properties/'.$property->id.'/photos/reorder', [
             'photo_order' => [$photoId],
         ])
             ->assertForbidden()
@@ -1650,7 +1665,7 @@ class ClientAccessTest extends TestCase
 
         Sanctum::actingAs($admin);
 
-        $response = $this->getJson('/api/properties?branch_group_id=' . $groupA->id);
+        $response = $this->getJson('/api/properties?branch_group_id='.$groupA->id);
 
         $response->assertOk();
         $ids = collect($response->json('data'))->pluck('id')->all();
@@ -1697,7 +1712,7 @@ class ClientAccessTest extends TestCase
         $this->assertNotContains($otherGroup->id, $ids);
         $this->assertNotContains($otherBranch->id, $ids);
 
-        $this->getJson('/api/clients?branch_group_id=' . $groupB->id . '&responsible_agent_id=' . $agentB->id)
+        $this->getJson('/api/clients?branch_group_id='.$groupB->id.'&responsible_agent_id='.$agentB->id)
             ->assertOk()
             ->assertJsonCount(0, 'data')
             ->assertJsonPath('total', 0);
@@ -1718,7 +1733,7 @@ class ClientAccessTest extends TestCase
 
         Sanctum::actingAs($mop);
 
-        $this->getJson('/api/clients/' . $foreignClient->id)
+        $this->getJson('/api/clients/'.$foreignClient->id)
             ->assertForbidden()
             ->assertJsonPath('code', 'RBAC_SCOPE_VIOLATION')
             ->assertJsonStructure(['trace_id']);
@@ -1944,12 +1959,11 @@ class ClientAccessTest extends TestCase
         int $clientTypeId = 1,
         string $contactKind = Client::CONTACT_KIND_BUYER,
         ?BranchGroup $branchGroup = null
-    ): Client
-    {
+    ): Client {
         return Client::create([
             'full_name' => $fullName,
-            'phone' => '+992900000' . random_int(100, 999),
-            'phone_normalized' => '992900000' . random_int(100, 999),
+            'phone' => '+992900000'.random_int(100, 999),
+            'phone_normalized' => '992900000'.random_int(100, 999),
             'branch_id' => $branch->id,
             'branch_group_id' => $branchGroup?->id,
             'created_by' => $creator->id,

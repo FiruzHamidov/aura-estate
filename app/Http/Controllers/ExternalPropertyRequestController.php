@@ -6,6 +6,7 @@ use App\Models\ExternalPropertyRequest;
 use App\Models\ExternalPropertyRequestPhoto;
 use App\Models\User;
 use App\Services\ExternalPropertyRequestService;
+use App\Services\PropertyModeration\PropertyModerationService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
@@ -17,7 +18,8 @@ use Illuminate\Validation\Rule;
 class ExternalPropertyRequestController extends Controller
 {
     public function __construct(
-        private readonly ExternalPropertyRequestService $service
+        private readonly ExternalPropertyRequestService $service,
+        private readonly PropertyModerationService $moderation,
     ) {
     }
 
@@ -367,8 +369,9 @@ class ExternalPropertyRequestController extends Controller
     {
         $user = $this->internalUser($request);
         $this->service->ensureInternalCanAccess($user, $externalPropertyRequest);
+        $this->moderation->assertNoProtectedFields($request, ['branch_id', 'branch_group_id'], $user);
 
-        $incoming = $request->except(['copy_photos', 'force']);
+        $incoming = $request->except(['copy_photos']);
         $merged = array_merge($this->service->prefillPayload($externalPropertyRequest, $user), $incoming);
         $validated = Validator::make($merged, $this->convertRules())->validate();
 
@@ -376,8 +379,7 @@ class ExternalPropertyRequestController extends Controller
             $externalPropertyRequest,
             $user,
             $validated,
-            $request->boolean('copy_photos', true),
-            $request->boolean('force', false)
+            $request->boolean('copy_photos', true)
         );
 
         return response()->json([
@@ -442,8 +444,6 @@ class ExternalPropertyRequestController extends Controller
             'branch_id' => ['nullable', 'integer', 'exists:branches,id'],
             'branch_group_id' => ['nullable', 'integer', 'exists:branch_groups,id'],
             'agent_id' => ['nullable', 'integer', 'exists:users,id'],
-            'moderation_status' => ['sometimes', Rule::in(['pending', 'approved', 'rejected', 'draft', 'deleted', 'deposit', 'sold', 'rented', 'sold_by_owner', 'denied'])],
-            'listing_type' => ['sometimes', Rule::in(['regular', 'vip', 'urgent'])],
         ];
     }
 

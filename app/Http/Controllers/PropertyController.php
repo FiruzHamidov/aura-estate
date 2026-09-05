@@ -6,10 +6,13 @@ use App\Http\Requests\SavePropertyDealRequest;
 use App\Models\Client;
 use App\Models\Property;
 use App\Models\PropertyLog;
+use App\Models\PropertyModerationCase;
 use App\Models\User;
 use App\Services\Crm\ClientAttachService;
 use App\Services\Crm\Matching\ClientPropertyMatcher;
 use App\Services\PropertyDuplicateService;
+use App\Services\PropertyModeration\PropertyModerationAccess;
+use App\Services\PropertyModeration\PropertyModerationService;
 use App\Services\PropertyQualityService;
 use App\Support\ClientAccess;
 use Illuminate\Database\Eloquent\Builder;
@@ -38,9 +41,15 @@ class PropertyController extends Controller
 
     protected PropertyQualityService $propertyQualityService;
 
+    protected PropertyModerationService $moderation;
+
+    protected PropertyModerationAccess $moderationAccess;
+
     public function __construct(
         PropertyDuplicateService $propertyDuplicateService,
-        PropertyQualityService $propertyQualityService
+        PropertyQualityService $propertyQualityService,
+        PropertyModerationService $moderation,
+        PropertyModerationAccess $moderationAccess,
     ) {
         $this->imageManager = new ImageManager(new Driver);
         $this->clientAccess = app(ClientAccess::class);
@@ -48,6 +57,8 @@ class PropertyController extends Controller
         $this->clientPropertyMatcher = app(ClientPropertyMatcher::class);
         $this->propertyDuplicateService = $propertyDuplicateService;
         $this->propertyQualityService = $propertyQualityService;
+        $this->moderation = $moderation;
+        $this->moderationAccess = $moderationAccess;
     }
 
     private function propertyDetailRelations(): array
@@ -83,6 +94,10 @@ class PropertyController extends Controller
             $relations[] = 'tags';
         }
 
+        if (Schema::hasTable('property_promotions')) {
+            $relations[] = 'activePromotion';
+        }
+
         return $relations;
     }
 
@@ -105,6 +120,10 @@ class PropertyController extends Controller
     {
         $relations = ['photos', 'contractType', 'documentType', 'ownerClient.type', 'buyerClient.type', 'coOwner.role'];
 
+        if (Schema::hasTable('property_promotions')) {
+            $relations[] = 'activePromotion';
+        }
+
         if ($this->supportsPropertyFeatures()) {
             $relations[] = 'features';
         }
@@ -119,6 +138,10 @@ class PropertyController extends Controller
     private function propertySearchRelations(): array
     {
         $relations = ['type', 'status', 'location', 'photos', 'creator', 'developer'];
+
+        if (Schema::hasTable('property_promotions')) {
+            $relations[] = 'activePromotion';
+        }
 
         if ($this->supportsPropertyTags()) {
             $relations[] = 'tags';
@@ -152,96 +175,6 @@ class PropertyController extends Controller
         return $user->hasRole('agent') || $user->hasRole('intern');
     }
 
-    private function canManageVipAndUrgentListing(User $user): bool
-    {
-        return $user->hasRole('rop')
-            || $user->hasRole('branch_director')
-            || $user->hasRole('admin')
-            || $user->hasRole('superadmin');
-    }
-
-    private function applyListingTypeAccessRules(User $user, array $payload): array
-    {
-        if (! array_key_exists('listing_type', $payload)) {
-            return $payload;
-        }
-
-        $requestedListingType = (string) $payload['listing_type'];
-
-        if (! in_array($requestedListingType, ['vip', 'urgent'], true)) {
-            return $payload;
-        }
-
-        if ($this->canManageVipAndUrgentListing($user)) {
-            return $payload;
-        }
-
-        $payload['listing_type'] = 'regular';
-        $payload['moderation_status'] = 'pending';
-
-        $autoComment = sprintf(
-            'Автоматически отправлено на модерацию: роль "%s" не может устанавливать тип объявления "%s".',
-            $user->role?->slug ?? 'unknown',
-            $requestedListingType
-        );
-
-        $existingComment = isset($payload['status_comment']) ? trim((string) $payload['status_comment']) : '';
-        $payload['status_comment'] = $existingComment !== ''
-            ? $existingComment.PHP_EOL.$autoComment
-            : $autoComment;
-
-        return $payload;
-    }
-
-    private function canMutateProperty(User $user, Property $property): bool
-    {
-        if ($user->hasRole('admin') || $user->hasRole('superadmin')) {
-            return true;
-        }
-
-        if ($property->created_by === $user->id || $property->agent_id === $user->id) {
-            return true;
-        }
-
-        if (
-            $this->supportsPropertyCoOwner()
-            && ! empty($property->co_owner_user_id)
-            && (int) $property->co_owner_user_id === (int) $user->id
-        ) {
-            return true;
-        }
-
-        if ($user->hasRole('client')) {
-            return false;
-        }
-
-        if ($user->hasRole('mop')) {
-            if (empty($user->branch_group_id)) {
-                return false;
-            }
-
-            $propertyBranchGroupId = $this->resolvePropertyBranchGroupId($property);
-
-            return ! empty($propertyBranchGroupId)
-                && (int) $propertyBranchGroupId === (int) $user->branch_group_id;
-        }
-
-        if (! $user->hasRole('branch_director') && ! $user->hasRole('rop')) {
-            return false;
-        }
-
-        if (empty($user->branch_id)) {
-            return false;
-        }
-
-        $property->loadMissing(['agent', 'creator']);
-
-        $propertyBranchId = $property->agent?->branch_id
-            ?: $property->creator?->branch_id;
-
-        return ! empty($propertyBranchId) && (int) $propertyBranchId === (int) $user->branch_id;
-    }
-
     private function authorizePropertyMutation(Property $property): User
     {
         /** @var User|null $user */
@@ -250,7 +183,7 @@ class PropertyController extends Controller
         abort_unless($user, 401, 'Unauthenticated.');
         $user->loadMissing('role');
 
-        if (! $this->canMutateProperty($user, $property)) {
+        if (! $this->moderationAccess->canEdit($user, $property)) {
             abort(403, 'Доступ запрещён');
         }
 
@@ -277,7 +210,7 @@ class PropertyController extends Controller
             }
         }
 
-        $available = $property->moderation_status === Property::PUBLIC_MODERATION_STATUS
+        $available = $this->moderation->isPublic($property)
             && ($nextAvailableAt === null || now()->greaterThanOrEqualTo($nextAvailableAt));
 
         return [
@@ -288,16 +221,16 @@ class PropertyController extends Controller
 
     private function propertyCapabilities(?User $user, Property $property, ?array $refreshState = null): array
     {
-        $canMutate = $user !== null && $this->canMutateProperty($user, $property);
+        $workflow = $this->moderationAccess->capabilities($user, $property);
+        $canMutate = $workflow['can_edit'];
         $refreshState ??= $this->listingDateRefreshState($property);
 
-        return [
-            'can_edit' => $canMutate,
+        return array_merge($workflow, [
             'can_refresh_listing_date' => $canMutate && $refreshState['available'],
             'can_view_history' => $canMutate,
-            'can_moderate' => $canMutate,
+            'can_moderate' => $workflow['can_approve'],
             'can_manage_co_owner' => $canMutate,
-        ];
+        ]);
     }
 
     /**
@@ -315,8 +248,9 @@ class PropertyController extends Controller
 
         abort_unless($user, 401, 'Unauthenticated.');
         $user->loadMissing('role');
+        abort_unless($this->moderationAccess->canManageDeal($user, $property), 403, 'MODERATION_PERMISSION_DENIED');
 
-        if ($this->canMutateProperty($user, $property)) {
+        if ($this->moderationAccess->canEdit($user, $property)) {
             return $user;
         }
 
@@ -347,6 +281,19 @@ class PropertyController extends Controller
             || $actor->hasRole('branch_director')
             || $actor->hasRole('manager')
             || $actor->hasRole('operator');
+    }
+
+    /** Fields that belong exclusively to the deal DTO, not publication. */
+    private function dealProtectedFieldExceptions(): array
+    {
+        return [
+            'deal_status', 'status_comment', 'buyer_client_id', 'buyer_full_name',
+            'buyer_phone', 'deposit_amount', 'deposit_currency', 'deposit_received_at',
+            'deposit_taken_at', 'deposit_user_id', 'money_holder', 'money_received_at',
+            'contract_signed_at', 'company_expected_income', 'company_expected_income_currency',
+            'company_commission_amount', 'company_commission_currency', 'actual_sale_price',
+            'actual_sale_currency', 'planned_contract_signed_at', 'sale_user_id', 'agents',
+        ];
     }
 
     private function canAssignSpecificCoOwner(User $actor, User $coOwner): bool
@@ -477,6 +424,56 @@ class PropertyController extends Controller
             $payload['capabilities'] = $this->propertyCapabilities($authUser, $property, $refreshState);
             $payload['listing_date_refresh'] = $refreshState;
         }
+
+        if ($authUser && (
+            $this->moderationAccess->canEdit($authUser, $property)
+            || $this->moderationAccess->canModerate($authUser, $property)
+        )) {
+            $payload = $this->withModerationWorkflow($property, $authUser, $payload);
+        }
+
+        return $payload;
+    }
+
+    private function withModerationWorkflow(Property $property, User $user, ?array $payload = null): array
+    {
+        $payload ??= $property->toArray();
+        if (! Schema::hasTable('property_moderation_cases')) {
+            $payload['moderation_reasons'] = [];
+            $payload['open_moderation_cases'] = [];
+            $payload['price_review'] = null;
+            $payload['capabilities'] = $this->propertyCapabilities($user, $property);
+
+            return $payload;
+        }
+
+        $cases = $property->moderationCases()
+            ->open()
+            ->with(['submitter.role', 'duplicateCandidates.candidateProperty.photos'])
+            ->orderBy('submitted_at')
+            ->get();
+        $priceCase = $cases->firstWhere('type', PropertyModerationCase::TYPE_PRICE_INCREASE);
+        $baseline = (array) ($priceCase?->baseline_snapshot ?? []);
+        $proposed = (array) ($priceCase?->proposed_snapshot ?? []);
+        $oldEffective = isset($baseline['effective_price']) ? (float) $baseline['effective_price'] : null;
+        $newEffective = isset($proposed['effective_price']) ? (float) $proposed['effective_price'] : null;
+        $difference = $oldEffective !== null && $newEffective !== null ? $newEffective - $oldEffective : null;
+
+        $payload['moderation_reasons'] = $cases->pluck('reason_codes')->flatten()->filter()->unique()->values()->all();
+        $payload['open_moderation_cases'] = $cases->toArray();
+        $payload['price_review'] = $priceCase ? [
+            'approved' => $baseline,
+            'proposed' => $proposed,
+            'absolute_difference' => $difference,
+            'percent_difference' => $difference !== null && $oldEffective > 0
+                ? round(($difference / $oldEffective) * 100, 2)
+                : null,
+            'submitted_by' => $priceCase->submitted_by,
+            'submitted_at' => $priceCase->submitted_at?->toJSON(),
+            'reason_codes' => $priceCase->reason_codes ?? [],
+        ] : null;
+        $payload['moderation_version'] = (int) $property->moderation_version;
+        $payload['capabilities'] = $this->propertyCapabilities($user, $property);
 
         return $payload;
     }
@@ -710,12 +707,18 @@ class PropertyController extends Controller
     {
         $this->validateListFilters($request);
 
-        $query = $this->baseQuery($request);
+        $compact = $request->boolean('compact');
+        $query = $this->baseQuery($request, $compact ? $this->propertyCompactRelations() : null);
         $this->applyFilters($query, $request);
         $this->applySorts($query, $request->input('sort'), $request->input('dir'));
         $perPage = (int) $request->input('per_page', 20);
 
-        return response()->json($query->latest()->paginate($perPage));
+        $page = $query->latest()->paginate($perPage);
+        if ($compact) {
+            $page->through(fn (Property $property): array => $this->compactFeedProperty($property));
+        }
+
+        return response()->json($page);
     }
 
     /**
@@ -793,6 +796,55 @@ class PropertyController extends Controller
         return $relations;
     }
 
+    private function propertyCompactRelations(): array
+    {
+        $relations = ['type', 'status', 'location', 'repairType', 'photos', 'creator', 'heating', 'parking', 'developer'];
+
+        if (Schema::hasTable('document_types') && Schema::hasColumn('properties', 'document_type_id')) {
+            $relations[] = 'documentType';
+        }
+
+        return $relations;
+    }
+
+    private function compactFeedProperty(Property $property): array
+    {
+        $item = $property->only([
+            'id', 'title', 'description', 'type_id', 'status_id', 'location_id', 'repair_type_id',
+            'heating_type_id', 'parking_type_id', 'document_type_id', 'developer_id', 'created_by',
+            'price', 'discount_price', 'currency', 'offer_type', 'rooms', 'total_area', 'land_size',
+            'living_area', 'floor', 'total_floors', 'year_built', 'condition', 'construction_status',
+            'apartment_type', 'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
+            'landmark', 'latitude', 'longitude', 'district', 'address', 'listing_type', 'views_count',
+            'moderation_status', 'publication_expires_at', 'listed_at', 'created_at', 'updated_at',
+        ]);
+        foreach ([
+            'type' => ['id', 'name', 'slug'],
+            'status' => ['id', 'name', 'slug'],
+            'location' => ['id', 'name', 'slug'],
+            'repair_type' => ['id', 'name', 'slug'],
+            'heating' => ['id', 'name', 'slug'],
+            'parking' => ['id', 'name', 'slug'],
+            'document_type' => ['id', 'name', 'slug'],
+            'developer' => ['id', 'name', 'slug', 'logo'],
+            'creator' => ['id', 'name', 'photo'],
+        ] as $key => $fields) {
+            $relationName = match ($key) {
+                'repair_type' => 'repairType',
+                'document_type' => 'documentType',
+                default => $key,
+            };
+            $relation = $property->relationLoaded($relationName) ? $property->getRelation($relationName) : null;
+            $item[$key] = $relation?->only($fields);
+        }
+        $item['photos'] = $property->photos
+            ->map(fn ($photo): array => $photo->only(['id', 'file_path', 'path', 'url', 'type', 'is_main', 'position']))
+            ->values()
+            ->all();
+
+        return $item;
+    }
+
     private function baseQueryMyProperties(Request $request): Builder
     {
         $user = auth()->user();
@@ -802,8 +854,8 @@ class PropertyController extends Controller
 
         if ($user && ($user->hasRole('admin') || $user->hasRole('superadmin'))) {
             // без ограничений
-        } elseif (! $user) {
-            $query->where('moderation_status', 'approved');
+        } elseif (! $user || $user->hasRole('client')) {
+            $query->publicSearchable();
         } elseif ($this->hasOwnPropertyScope($user)) {
             $query->where(function (Builder $ownerQuery) use ($user) {
                 $ownerQuery->where('created_by', $user->id);
@@ -822,10 +874,6 @@ class PropertyController extends Controller
                 $this->applyBranchGroupFilter($query, [$user->branch_group_id]);
             }
 
-            if (! $hasStatusFilter) {
-                $query->where('moderation_status', '!=', 'deleted');
-            }
-        } elseif ($user->hasRole('client')) {
             if (! $hasStatusFilter) {
                 $query->where('moderation_status', '!=', 'deleted');
             }
@@ -844,8 +892,8 @@ class PropertyController extends Controller
 
         if ($user && ($user->hasRole('admin') || $user->hasRole('superadmin'))) {
             // без ограничений
-        } elseif (! $user) {
-            $query->where('moderation_status', Property::PUBLIC_MODERATION_STATUS);
+        } elseif (! $user || $user->hasRole('client')) {
+            $query->publicSearchable();
         } elseif ($this->hasOwnPropertyScope($user)) {
             $query->where(function (Builder $ownerQuery) use ($user) {
                 $ownerQuery->where('created_by', $user->id);
@@ -864,10 +912,6 @@ class PropertyController extends Controller
                 $this->applyBranchGroupFilter($query, [$user->branch_group_id]);
             }
 
-            if (! $hasStatusFilter) {
-                $query->where('moderation_status', '!=', 'deleted');
-            }
-        } elseif ($user->hasRole('client')) {
             if (! $hasStatusFilter) {
                 $query->where('moderation_status', '!=', 'deleted');
             }
@@ -1285,25 +1329,8 @@ class PropertyController extends Controller
         $zoom = (int) $request->query('zoom', 12);
         $zoom = max(1, min(22, $zoom));
 
-        // Ключ кэша: bbox округлим до сетки, чтобы лучше переиспользовать
-        $round = fn (float $n) => round($n * 400) / 400; // ~0.0025°
-        $bboxKey = implode(',', [$round($south), $round($west), $round($north), $round($east)]);
-        $filtersKey = md5(json_encode($request->except(['bbox', 'zoom'])));
-        $authUser = $this->propertyShowAuthUser($request);
-        $accessScopeKey = $authUser
-            ? implode(':', [
-                'user',
-                $authUser->id,
-                $authUser->role?->slug ?? 'no-role',
-                $authUser->branch_id ?? 'no-branch',
-                $authUser->branch_group_id ?? 'no-group',
-            ])
-            : 'guest';
-
-        $cacheKey = "map:{$accessScopeKey}:{$bboxKey}:z{$zoom}:{$filtersKey}";
-        $ttl = now()->addSeconds(20);
-
-        return Cache::remember($cacheKey, $ttl, function () use ($request, $south, $west, $north, $east, $zoom) {
+        // Always query current visibility, including moderation blockers and promotion expiry.
+        return (function () use ($request, $south, $west, $north, $east, $zoom) {
             $query = $this->baseQuery($request);
 
             // Ограничение по bbox (полям latitude/longitude)
@@ -1395,7 +1422,7 @@ class PropertyController extends Controller
                 'type' => 'FeatureCollection',
                 'features' => $features,
             ]);
-        });
+        })();
     }
 
     private function normalizeRawNumber($value)
@@ -1648,6 +1675,23 @@ class PropertyController extends Controller
             }
 
             if ($hasFilter) {
+                if ($field === 'listing_type' && Schema::hasTable('property_promotions')) {
+                    $types = array_values(array_intersect($toArray($filterInput), ['regular', 'vip', 'urgent']));
+                    if ($types === [] && is_string($filterInput) && in_array($filterInput, ['regular', 'vip', 'urgent'], true)) {
+                        $types = [$filterInput];
+                    }
+                    $query->where(function (Builder $promotionQuery) use ($types): void {
+                        if (in_array('regular', $types, true)) {
+                            $promotionQuery->orWhereDoesntHave('promotions', fn (Builder $promotions) => $promotions->currentlyActive());
+                        }
+                        foreach (array_intersect($types, ['vip', 'urgent']) as $type) {
+                            $promotionQuery->orWhereHas('promotions', fn (Builder $promotions) => $promotions->currentlyActive()->where('type', $type));
+                        }
+                    });
+
+                    continue;
+                }
+
                 // normalize boolean-like params: support true/false (bool), 'true'/'false' (strings), and '1'/'0'
                 $booleanFields = [
                     'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
@@ -1908,6 +1952,7 @@ class PropertyController extends Controller
             'per_page' => ['sometimes', 'integer', 'min:1', 'max:100'],
             'sort' => ['sometimes', 'nullable', Rule::in(['none', 'listing_type', 'created_at', 'listing_updated_at', 'date', 'price', 'total_area', 'area', 'rooms', 'views_count', 'id'])],
             'dir' => ['sometimes', 'nullable', Rule::in(['asc', 'desc'])],
+            'compact' => ['sometimes', 'boolean'],
         ], [
             'construction_status.in' => 'Поле construction_status должно быть одним из значений: under_construction, built, commissioned.',
         ]);
@@ -2088,101 +2133,42 @@ class PropertyController extends Controller
     public function store(Request $request)
     {
         $user = $this->crmAuthUser();
-
-        abort_if($user->hasRole('intern'), 403, 'Стажер не может добавлять объекты.');
+        $this->moderation->assertCanCreate($user);
+        $this->moderation->assertNoProtectedFields($request, ['branch_id', 'branch_group_id'], $user);
 
         $validated = $this->validateProperty($request);
         $featureIds = $validated['features'] ?? [];
         $tagIds = $validated['tags'] ?? [];
         unset($validated['features']);
         unset($validated['tags']);
-        $this->ensureValidCoOwner(
-            $user,
-            isset($validated['co_owner_user_id']) ? (int) $validated['co_owner_user_id'] : null,
-            $user->id
-        );
         $validated = $this->normalizeMopBranchGroupPayload($user, $validated);
         $this->ensureVisibleClientsForProperty($validated);
         $validated = $this->syncPropertyClientSnapshots($validated);
 
-        // --- Дубликаты: пропускаем только если force=1
-        $force = (bool) $request->boolean('force', false);
-
         $dups = $this->propertyDuplicateService->find($validated);
         $qualityWarnings = $this->propertyQualityService->inspect($validated);
-
-        if (! $force) {
-
-            if ($dups->isNotEmpty() || $qualityWarnings !== []) {
-                return response()->json([
-                    'code' => 'PROPERTY_REVIEW_REQUIRED',
-                    'message' => $dups->isNotEmpty()
-                        ? 'Найдены похожие объекты. Сравните признаки и фотографии перед продолжением.'
-                        : 'Проверьте подозрительные данные перед продолжением.',
-                    'duplicates' => $dups->take(10)->values(),
-                    'quality_warnings' => $qualityWarnings,
-                ], 409);
-            }
-        }
-
         $validated['created_by'] = $user->id;
-        //        $validated['moderation_status'] = auth()->user()->hasRole('client') ? 'pending' : 'approved';
-        $validated['listing_type'] = $request->input('listing_type', 'regular');
-        $validated = $this->applyListingTypeAccessRules($user, $validated);
+        $validated = $this->moderation->creationState($validated, $dups, $qualityWarnings);
 
-        if ($force) {
-            $dupCount = $dups->count();
-            if ($dupCount > 0) {
-                $items = $dups->take(10)->map(function ($d) {
-                    $rooms = $d['rooms'] ?? null;
-                    $title = isset($d['title']) && $d['title'] !== ''
-                        ? $d['title']
-                        : ($rooms ? "{$rooms} ком" : 'Объект');
-                    $score = isset($d['score']) ? (string) $d['score'] : 'n/a';
-                    $id = $d['id'] ?? '';
-                    $url = 'https://aura.tj/apartment/'.$id;
-
-                    $titleEsc = e($title);
-                    $urlEsc = e($url);
-
-                    return [
-                        'text' => "[ID {$id}] {$title} (Совпадения: {$score}%)",
-                        'html' => "<a href=\"{$urlEsc}\" target=\"_blank\" rel=\"noopener noreferrer\">[ID {$id}] {$titleEsc}</a> (score: {$score})",
-                    ];
-                })->toArray();
-
-                $textItems = array_map(fn ($x) => $x['text'], $items);
-                $htmlItems = array_map(fn ($x) => $x['html'], $items);
-
-                $listText = implode('; ', $textItems);
-                $listHtml = '<ul><li>'.implode('</li><li>', $htmlItems).'</li></ul>';
-
-                if ($dupCount > 10) {
-                    $listText .= '; ... и ещё '.($dupCount - 10).' штук.';
-                    $listHtml .= '<p>... и ещё '.($dupCount - 10).' штук.</p>';
-                }
-
-                $validated['moderation_status'] = 'pending';
-                // сохраняем HTML в поле rejection_comment — фронтенд будет рендерить как HTML
-                $validated['rejection_comment'] = "<p>Причина автоматически: Найдены возможные дубликаты ({$dupCount}):</p>".$listHtml;
-                // можно дополнительно сохранить plain-text, если есть поле
-                // $validated['rejection_comment_text'] = "Найдены возможные дубликаты ({$dupCount}): " . $listText;
+        $property = DB::transaction(function () use ($request, $validated, $featureIds, $tagIds, $dups, $qualityWarnings, $user) {
+            $property = Property::create($validated);
+            if ($this->supportsPropertyFeatures()) {
+                $property->features()->sync($featureIds);
             }
-        }
+            if ($this->supportsPropertyTags()) {
+                $property->tags()->sync($tagIds);
+            }
+            $this->storePhotosFromRequest($request, $property);
+            $this->moderation->recordCreation($property, $user, $dups, $qualityWarnings);
 
-        $property = Property::create($validated);
+            return $property;
+        });
 
-        if ($this->supportsPropertyFeatures()) {
-            $property->features()->sync($featureIds);
-        }
+        $fresh = $property->fresh($this->propertyMutationRelations());
+        $fresh->setAttribute('duplicate_candidates', $dups->take(10)->values());
+        $fresh->setAttribute('quality_warnings', $qualityWarnings);
 
-        if ($this->supportsPropertyTags()) {
-            $property->tags()->sync($tagIds);
-        }
-
-        $this->storePhotosFromRequest($request, $property);
-
-        return response()->json($property->fresh($this->propertyMutationRelations()));
+        return response()->json($this->withModerationWorkflow($fresh, $user));
     }
 
     public function duplicateCandidates(Request $request, Property $property)
@@ -2194,6 +2180,9 @@ class PropertyController extends Controller
         return response()->json([
             'property_id' => (int) $property->id,
             'duplicates' => $this->propertyDuplicateService->find($data, (int) $property->id),
+            'cases' => Schema::hasTable('property_moderation_cases')
+                ? $property->moderationCases()->with(['submitter.role', 'duplicateCandidates.candidateProperty.photos'])->latest()->get()
+                : [],
             'quality_warnings' => $this->propertyQualityService->inspect($data),
         ]);
     }
@@ -2201,6 +2190,7 @@ class PropertyController extends Controller
     public function update(Request $request, Property $property)
     {
         $user = $this->authorizePropertyMutation($property);
+        $this->moderation->assertNoProtectedFields($request, [], $user, $property);
 
         $validated = $this->validateProperty($request, isUpdate: true, property: $property);
         $shouldSyncFeatures = array_key_exists('features', $validated);
@@ -2209,14 +2199,7 @@ class PropertyController extends Controller
         $tagIds = $validated['tags'] ?? [];
         unset($validated['features']);
         unset($validated['tags']);
-        $ownerUserId = (int) ($validated['created_by'] ?? $property->created_by);
-        $this->ensureValidCoOwner(
-            $user,
-            array_key_exists('co_owner_user_id', $validated) ? (int) $validated['co_owner_user_id'] : null,
-            $ownerUserId
-        );
         $validated = $this->normalizeMopBranchGroupPayload($user, $validated);
-        $validated = $this->applyListingTypeAccessRules($user, $validated);
         $this->ensureVisibleClientsForProperty($validated, $property);
         $validated = $this->syncPropertyClientSnapshots($validated);
 
@@ -2227,41 +2210,53 @@ class PropertyController extends Controller
             $shouldSyncFeatures,
             $featureIds,
             $shouldSyncTags,
-            $tagIds
+            $tagIds,
+            $user
         ): void {
+            $property = Property::query()->lockForUpdate()->findOrFail($property->id);
+            $this->moderation->assertMutationVersion($request, $property);
+            abort_unless($this->moderationAccess->canEdit($user, $property), 403);
             $property->fill($validated);
             $listingContentChanged = $property->isDirty(Property::LISTING_CONTENT_FIELDS);
+            $relationsChanged = false;
+            $beforePhotos = $this->moderation->photoSnapshot($property);
+            $qualityWarnings = $this->propertyQualityService->inspect($property->getAttributes());
+            $outcome = $this->moderation->evaluateUpdate($property, $user, $qualityWarnings);
             $property->save();
 
             if ($shouldSyncFeatures && $this->supportsPropertyFeatures()) {
                 $syncChanges = $property->features()->sync($featureIds);
-                $listingContentChanged = $listingContentChanged || $this->relationSyncChanged($syncChanges);
+                $featuresChanged = $this->relationSyncChanged($syncChanges);
+                $relationsChanged = $relationsChanged || $featuresChanged;
+                $listingContentChanged = $listingContentChanged || $featuresChanged;
             }
 
             if ($shouldSyncTags && $this->supportsPropertyTags()) {
                 $syncChanges = $property->tags()->sync($tagIds);
-                $listingContentChanged = $listingContentChanged || $this->relationSyncChanged($syncChanges);
-            }
-
-            // Если статус закрытый и sold_at ещё не установлен — ставим текущую дату
-            if (
-                $request->filled('moderation_status') &&
-                in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true) &&
-                empty($property->sold_at)
-            ) {
-                $property->update([
-                    'sold_at' => now(),
-                ]);
+                $tagsChanged = $this->relationSyncChanged($syncChanges);
+                $relationsChanged = $relationsChanged || $tagsChanged;
+                $listingContentChanged = $listingContentChanged || $tagsChanged;
             }
 
             // Optional: allow adding more photos on update
-            $listingContentChanged = $this->storePhotosFromRequest($request, $property, append: true)
-                || $listingContentChanged;
+            $mediaChanged = $this->storePhotosFromRequest($request, $property, append: true);
+            $listingContentChanged = $mediaChanged || $listingContentChanged;
 
             // Optional: reorder via `photo_order` = [photoId1, photoId2, ...]
             if ($request->filled('photo_order') && is_array($request->photo_order)) {
-                $listingContentChanged = $this->applyOrder($property, $request->photo_order)
-                    || $listingContentChanged;
+                $reordered = $this->applyOrder($property, $request->photo_order);
+                $mediaChanged = $reordered || $mediaChanged;
+                $listingContentChanged = $reordered || $listingContentChanged;
+            }
+
+            $this->moderation->recordUpdateOutcome($property, $user, $outcome);
+            if ($mediaChanged || $relationsChanged) {
+                $this->moderation->handleMediaMutation($property, $user, [
+                    'action' => 'listing_media_or_relations_changed',
+                    'before_photos' => $beforePhotos,
+                    'photos_changed' => $mediaChanged,
+                    'relations_changed' => $relationsChanged,
+                ]);
             }
 
             if ($listingContentChanged) {
@@ -2269,25 +2264,28 @@ class PropertyController extends Controller
             }
         });
 
-        return response()->json($property->fresh($this->propertyMutationRelations()));
+        return response()->json($this->withModerationWorkflow(
+            $property->fresh($this->propertyMutationRelations()),
+            $user,
+        ));
     }
 
     public function updateCoOwner(Request $request, Property $property)
     {
-        $actor = $this->authorizePropertyMutation($property);
-
         $validated = $request->validate([
             'co_owner_user_id' => 'nullable|integer|exists:users,id',
+            'reason' => 'required|string|min:5|max:2000',
+            'version' => 'required|integer|min:0',
         ]);
+        $updated = $this->moderation->transfer(
+            $property,
+            $request->user(),
+            ['co_owner_user_id' => $validated['co_owner_user_id'] ?? null],
+            $validated['reason'],
+            $validated['version'],
+        );
 
-        $coOwnerUserId = $validated['co_owner_user_id'] ?? null;
-        $this->ensureValidCoOwner($actor, $coOwnerUserId ? (int) $coOwnerUserId : null, (int) $property->created_by);
-
-        $property->update([
-            'co_owner_user_id' => $coOwnerUserId,
-        ]);
-
-        return response()->json($property->fresh(['coOwner.role', 'creator.role', 'agent.role']));
+        return response()->json($updated->load(['coOwner.role', 'creator.role', 'agent.role']));
     }
 
     private function relationSyncChanged(array $changes): bool
@@ -2300,11 +2298,14 @@ class PropertyController extends Controller
     private function storePhotosFromRequest(Request $request, Property $property, bool $append = false): bool
     {
         $changed = false;
+        $preserveDeletedFiles = (array) $property->approved_content_snapshot !== [];
 
         // Delete selected photos if requested
         if ($request->filled('delete_photo_ids')) {
             foreach ($property->photos()->whereIn('id', $request->delete_photo_ids)->get() as $old) {
-                \Storage::disk('public')->delete($old->file_path);
+                if (! $preserveDeletedFiles) {
+                    \Storage::disk('public')->delete($old->file_path);
+                }
                 $old->delete();
                 $changed = true;
             }
@@ -2376,8 +2377,15 @@ class PropertyController extends Controller
     public function show(Request $request, Property $property)
     {
         $authUser = $this->propertyShowAuthUser($request);
+        $this->moderation->publicOrFail($property, $authUser);
 
         $property->load($this->propertyDetailRelations());
+        if ($authUser && Schema::hasTable('property_moderation_cases') && (
+            $this->moderationAccess->canEdit($authUser, $property)
+            || $this->moderationAccess->canModerate($authUser, $property)
+        )) {
+            $property->load(['moderationCases.duplicateCandidates.candidateProperty.photos', 'promotions']);
+        }
 
         if (Schema::hasTable('reels')) {
             $property->load([
@@ -2486,9 +2494,13 @@ class PropertyController extends Controller
 
     public function destroy(Property $property)
     {
-        $this->authorizePropertyMutation($property);
+        $actor = $this->authorizePropertyMutation($property);
 
-        $property->update(['moderation_status' => 'deleted']);
+        if (Schema::hasColumn('properties', 'publication_status')) {
+            $this->moderation->withdrawListing($property, $actor, PropertyModerationService::PUBLICATION_ARCHIVED);
+        } else {
+            $property->update(['moderation_status' => 'deleted']);
+        }
 
         if (Schema::hasTable('reels')) {
             $property->reels()->update([
@@ -2529,108 +2541,14 @@ class PropertyController extends Controller
     //        ]);
     //    }
 
-    public function updateModerationAndListingType(
-        SavePropertyDealRequest $request,
-        Property $property
-    ) {
-        $user = $this->authorizePropertyDealMutation(
-            $property,
-            $request->moderation_status,
-            $request->filled('sale_user_id') ? (int) $request->input('sale_user_id') : null
-        );
-        $isColleagueProperty = ! $this->canMutateProperty($user, $property);
-        $this->ensureDealAssignmentUsersInScope($user, $request->validated(), $property);
-        $isDepositStatus = $request->moderation_status === 'deposit';
-        $isSaleStatus = in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true);
-
-        DB::transaction(function () use ($request, $property, $user, $isColleagueProperty, $isDepositStatus, $isSaleStatus) {
-
-            /**
-             * 1️⃣ ОБНОВЛЯЕМ ВСЁ, ЧТО ПРИШЛО
-             * независимо от статуса
-             */
-            $fillable = [
-                // moderation
-                'moderation_status',
-                'listing_type',
-                'status_comment',
-
-                // buyer / deposit
-                'buyer_client_id',
-                'buyer_full_name',
-                'buyer_phone',
-                'deposit_amount',
-                'deposit_currency',
-                'deposit_received_at',
-                'deposit_taken_at',
-                'deposit_user_id',
-
-                // money
-                'money_holder',
-                'money_received_at',
-                'contract_signed_at',
-
-                // company
-                'company_expected_income',
-                'company_expected_income_currency',
-                'company_commission_amount',
-                'company_commission_currency',
-
-                // deal
-                'actual_sale_price',
-                'actual_sale_currency',
-                'planned_contract_signed_at',
-                'sale_user_id',
-            ];
-
-            $payload = collect($fillable)
-                ->filter(fn ($field) => $request->has($field))
-                ->mapWithKeys(fn ($field) => [$field => $request->$field])
-                ->toArray();
-
-            if ($isDepositStatus && ! array_key_exists('deposit_user_id', $payload)) {
-                $payload['deposit_user_id'] = $property->deposit_user_id ?? $user->id;
-            }
-
-            if ($isSaleStatus && ! array_key_exists('sale_user_id', $payload)) {
-                $payload['sale_user_id'] = $isColleagueProperty
-                    ? $user->id
-                    : ($property->sale_user_id ?? $user->id);
-            }
-
-            $payload = $this->applyListingTypeAccessRules($user, $payload);
-            $this->ensureVisibleClientsForProperty($payload, $property);
-            $payload = $this->syncPropertyClientSnapshots($payload);
-
-            $property->fill($payload);
-            $listingContentChanged = $property->isDirty(Property::LISTING_CONTENT_FIELDS);
-            $property->save();
-
-            /**
-             * 2️⃣ ЛОГИКА ПО СТАТУСУ (ТОЛЬКО БИЗНЕС-ПРАВИЛА)
-             */
-            if (in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true)) {
-                $property->update([
-                    'sold_at' => now(),
-                ]);
-            }
-
-            /**
-             * 3️⃣ АГЕНТЫ — ТОЛЬКО ЕСЛИ SOLD
-             */
-            if ($request->moderation_status === 'sold' && $request->filled('agents')) {
-                $property->saleAgents()->sync($this->saleAgentsSyncPayload($request->agents));
-            }
-
-            if ($listingContentChanged) {
-                $property->markListingUpdated();
-            }
-        });
-
+    public function updateModerationAndListingType(Request $request, Property $property)
+    {
+        $actor = $this->authorizePropertyMutation($property);
+        $this->moderation->assertNoProtectedFields($request, [], $actor, $property);
         return response()->json([
-            'message' => 'Объявление успешно обновлено',
-            'data' => $property->fresh(['saleAgents', 'buyerClient.type', 'ownerClient.type']),
-        ]);
+            'code' => 'MODERATION_ENDPOINT_RETIRED',
+            'message' => 'Используйте отдельные действия модерации и endpoint /properties/{id}/deal.',
+        ], 410);
     }
 
     /**
@@ -2647,11 +2565,8 @@ class PropertyController extends Controller
         $validated = $request->validate([
             'title' => 'nullable|string',
             'description' => 'nullable|string',
-            'created_by' => 'nullable|string',
             'district' => 'nullable|string',
             'address' => 'nullable|string',
-            // --- Moderation status with deposit and fixed enum
-            'moderation_status' => 'sometimes|in:pending,approved,rejected,draft,deleted,deposit,sold,rented,sold_by_owner,denied',
             'contract_type_id' => 'nullable|exists:contract_types,id',
             'document_type_id' => 'nullable|exists:document_types,id',
             'type_id' => 'required|exists:property_types,id',
@@ -2695,15 +2610,11 @@ class PropertyController extends Controller
             'landmark' => 'nullable|string',
             'latitude' => 'nullable|numeric|between:-90,90',
             'longitude' => 'nullable|numeric|between:-180,180',
-            'agent_id' => 'nullable|exists:users,id',
-            'co_owner_user_id' => 'sometimes|nullable|integer|exists:users,id',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'owner_phone' => 'nullable|string|max:30',
-            'listing_type' => 'sometimes|in:regular,vip,urgent',
             'owner_name' => 'nullable|string|max:255',
             'owner_client_id' => 'nullable|exists:clients,id',
             'object_key' => 'nullable|string|max:255',
-            'rejection_comment' => 'nullable|string',
             'features' => 'sometimes|nullable|array',
             'features.*' => 'integer|distinct|exists:features,id',
             'tags' => 'sometimes|nullable|array',
@@ -2729,37 +2640,6 @@ class PropertyController extends Controller
             'is_business_owner' => 'sometimes|boolean',
             'is_full_apartment' => 'sometimes|boolean',
             'is_for_aura' => 'sometimes|boolean',
-            'status_comment' => 'nullable|string',
-            'sold_at' => 'nullable|date',
-
-            // ===== Deposit stage (optional) =====
-            'buyer_full_name' => 'nullable|string|max:255',
-            'buyer_phone' => 'nullable|string|max:30',
-            'buyer_client_id' => 'nullable|exists:clients,id',
-            'deposit_amount' => 'nullable|numeric|min:0',
-            'deposit_currency' => 'nullable|in:TJS,USD',
-            'deposit_received_at' => 'nullable|date',
-            'deposit_taken_at' => 'nullable|date',
-            'deposit_user_id' => 'nullable|exists:users,id',
-            'planned_contract_signed_at' => 'nullable|date',
-            'company_expected_income' => 'nullable|numeric|min:0',
-            'company_expected_income_currency' => 'nullable|in:TJS,USD',
-
-            // ===== Final deal stage (optional) =====
-            'actual_sale_price' => 'nullable|numeric|min:0',
-            'actual_sale_currency' => 'nullable|in:TJS,USD',
-            'company_commission_amount' => 'nullable|numeric|min:0',
-            'company_commission_currency' => 'nullable|in:TJS,USD',
-            'money_holder' => 'nullable|in:company,agent,owner,developer,client',
-            'money_received_at' => 'nullable|date',
-            'contract_signed_at' => 'nullable|date',
-            'sale_user_id' => 'nullable|exists:users,id',
-            'agents' => 'nullable|array|max:3',
-            'agents.*.agent_id' => 'nullable|exists:users,id|distinct',
-            'agents.*.role' => 'nullable|in:main,assistant,partner',
-            'agents.*.commission_amount' => 'nullable|numeric|min:0',
-            'agents.*.commission_currency' => 'nullable|in:TJS,USD',
-            'agents.*.paid_at' => 'nullable|date',
         ]);
 
         $effectivePrice = array_key_exists('price', $validated)
@@ -2792,13 +2672,25 @@ class PropertyController extends Controller
 
         // Специальный порядок для listing_type (urgent -> vip -> regular -> others)
         if ($sort === 'listing_type') {
-            $orderExpr = "CASE listing_type
-            WHEN 'urgent' THEN 1
-            WHEN 'vip' THEN 2
-            WHEN 'regular' THEN 3
-            ELSE 4 END";
+            $bindings = [];
+            if (Schema::hasTable('property_promotions')) {
+                $activeUrgent = "EXISTS (SELECT 1 FROM property_promotions pp
+                    WHERE pp.property_id = properties.id AND pp.status = 'active'
+                    AND pp.starts_at <= ? AND pp.ends_at > ? AND pp.type = ?)";
+                $activeVip = "EXISTS (SELECT 1 FROM property_promotions pp
+                    WHERE pp.property_id = properties.id AND pp.status = 'active'
+                    AND pp.starts_at <= ? AND pp.ends_at > ? AND pp.type = ?)";
+                $orderExpr = "CASE WHEN {$activeUrgent} THEN 1 WHEN {$activeVip} THEN 2 ELSE 3 END";
+                $bindings = [now(), now(), 'urgent', now(), now(), 'vip'];
+            } else {
+                $orderExpr = "CASE listing_type
+                WHEN 'urgent' THEN 1
+                WHEN 'vip' THEN 2
+                WHEN 'regular' THEN 3
+                ELSE 4 END";
+            }
             // Сначала по listing_type согласно CASE, затем по дате (чтобы детерминировать порядок)
-            $query->orderByRaw($orderExpr)->orderBy('created_at', $dir);
+            $query->orderByRaw($orderExpr, $bindings)->orderBy('created_at', $dir);
 
             return;
         }
@@ -2843,6 +2735,7 @@ class PropertyController extends Controller
 
     public function trackView(Request $request, Property $property)
     {
+        $this->moderation->publicOrFail($property, $this->propertyShowAuthUser($request));
         // Ключ "видел" = по объекту + IP + UA + текущая дата
         $fingerprint = sha1(
             ($request->ip() ?? '0.0.0.0').'|'.
@@ -2922,6 +2815,7 @@ class PropertyController extends Controller
 
     public function similar(Property $property, Request $request)
     {
+        $this->moderation->publicOrFail($property, $this->propertyShowAuthUser($request));
         $validated = $request->validate([
             'limit' => ['sometimes', 'integer', 'min:1', 'max:50'],
             'price_tolerance' => ['sometimes', 'numeric', 'min:0', 'max:1'],
@@ -3017,6 +2911,7 @@ class PropertyController extends Controller
      */
     public function logs(Request $request, Property $property)
     {
+        $this->authorizePropertyMutation($property);
         $perPage = (int) $request->input('per_page', 50);
 
         $logs = $property->logs()->with('user')->paginate($perPage);
@@ -3030,54 +2925,89 @@ class PropertyController extends Controller
     ) {
         $user = $this->authorizePropertyDealMutation(
             $property,
-            $request->moderation_status,
+            $request->deal_status,
             $request->filled('sale_user_id') ? (int) $request->input('sale_user_id') : null
         );
+        $this->moderation->assertNoProtectedFields($request, $this->dealProtectedFieldExceptions(), $user, $property);
         $this->ensureDealAssignmentUsersInScope($user, $request->validated(), $property);
-        $isDepositStatus = $request->moderation_status === 'deposit';
-        $isSaleStatus = in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true);
 
-        DB::transaction(function () use ($request, $property, $user, $isDepositStatus, $isSaleStatus) {
+        $updated = DB::transaction(function () use ($request, $property): Property {
+            $locked = Property::query()->lockForUpdate()->findOrFail($property->id);
+            $user = $this->authorizePropertyDealMutation(
+                $locked,
+                $request->deal_status,
+                $request->filled('sale_user_id') ? (int) $request->input('sale_user_id') : null
+            );
+            abort_if(
+                Schema::hasColumn('properties', 'moderation_version')
+                    && (int) $locked->moderation_version !== (int) $request->integer('version'),
+                409,
+                'MODERATION_VERSION_CONFLICT'
+            );
+            $this->ensureDealAssignmentUsersInScope($user, $request->validated(), $locked);
+            $isDepositStatus = $request->deal_status === 'deposit';
+            $isSaleStatus = in_array($request->deal_status, ['sold', 'sold_by_owner', 'rented'], true);
+            $legacyStatus = match ($request->deal_status) {
+                'client_denied' => 'denied',
+                'available' => $locked->moderation_status,
+                default => $request->deal_status,
+            };
             $payload = [
-                'buyer_client_id' => $request->buyer_client_id,
-                'buyer_full_name' => $request->buyer_full_name,
-                'buyer_phone' => $request->buyer_phone,
-                'actual_sale_price' => $request->actual_sale_price,
-                'actual_sale_currency' => $request->actual_sale_currency ?? 'TJS',
-                'company_commission_amount' => $request->company_commission_amount,
-                'company_commission_currency' => $request->company_commission_currency ?? 'TJS',
-                'money_holder' => $request->money_holder,
-                'money_received_at' => $request->money_received_at,
-                'contract_signed_at' => $request->contract_signed_at,
-                'deposit_amount' => $request->deposit_amount,
-                'deposit_currency' => $request->deposit_currency ?? 'TJS',
-                'deposit_received_at' => $request->deposit_received_at,
-                'deposit_taken_at' => $request->deposit_taken_at,
-                'deposit_user_id' => $request->input('deposit_user_id')
-                    ?? ($isDepositStatus ? $user->id : $property->deposit_user_id),
-                'moderation_status' => $request->moderation_status,
-                'sold_at' => in_array($request->moderation_status, ['sold', 'sold_by_owner', 'rented'], true)
+                // Legacy field is server-owned compatibility output. The client
+                // controls only deal_status through this endpoint.
+                'moderation_status' => $legacyStatus,
+                ...Schema::hasColumn('properties', 'deal_status')
+                    ? ['deal_status' => $request->deal_status]
+                    : [],
+                ...Schema::hasColumn('properties', 'publication_status') && $isSaleStatus
+                    ? ['publication_status' => PropertyModerationService::PUBLICATION_ARCHIVED]
+                    : [],
+                'sold_at' => $isSaleStatus
                     ? now()
-                    : $property->sold_at,
+                    : $locked->sold_at,
                 'sale_user_id' => $request->input('sale_user_id')
-                    ?? ($isSaleStatus ? $user->id : $property->sale_user_id),
+                    ?? ($isSaleStatus ? $user->id : $locked->sale_user_id),
+                ...Schema::hasColumn('properties', 'moderation_version')
+                    ? ['moderation_version' => (int) $locked->moderation_version + 1]
+                    : [],
             ];
+            foreach ([
+                'status_comment', 'buyer_client_id', 'buyer_full_name', 'buyer_phone',
+                'actual_sale_price', 'actual_sale_currency', 'company_commission_amount',
+                'company_commission_currency', 'money_holder', 'money_received_at',
+                'contract_signed_at', 'deposit_amount', 'deposit_currency',
+                'deposit_received_at', 'deposit_taken_at', 'planned_contract_signed_at',
+                'company_expected_income', 'company_expected_income_currency',
+            ] as $field) {
+                if ($request->has($field)) {
+                    $payload[$field] = $request->input($field);
+                }
+            }
+            if ($request->has('deposit_user_id') || $isDepositStatus) {
+                $payload['deposit_user_id'] = $request->input('deposit_user_id') ?? $user->id;
+            }
 
-            $this->ensureVisibleClientsForProperty($payload, $property);
+            $this->ensureVisibleClientsForProperty($payload, $locked);
             $payload = $this->syncPropertyClientSnapshots($payload);
 
             // 1️⃣ Обновляем сам объект
-            $property->update($payload);
+            $locked->update($payload);
 
             // 2️⃣ Агенты — заменяем только если клиент прислал список
             if ($request->has('agents')) {
-                $property->saleAgents()->sync($this->saleAgentsSyncPayload($request->input('agents', [])));
+                $locked->saleAgents()->sync($this->saleAgentsSyncPayload($request->input('agents', [])));
             }
+            $this->moderation->auditPropertyEvent($locked, $user, 'property_deal_status_changed', [
+                'status_comment' => $request->status_comment,
+            ]);
+
+            return $locked->fresh();
         });
 
         return response()->json([
             'message' => 'Сделка успешно сохранена',
-            'property_id' => $property->id,
+            'property_id' => $updated->id,
+            'data' => $updated,
         ]);
     }
 

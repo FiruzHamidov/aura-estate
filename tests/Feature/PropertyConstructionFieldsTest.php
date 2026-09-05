@@ -599,8 +599,7 @@ class PropertyConstructionFieldsTest extends TestCase
             'currency' => 'TJS',
             'offer_type' => 'sale',
             'moderation_status' => 'approved',
-        ])->assertOk();
-        $this->assertSame($changedListingUpdatedAt, $moderated->json('listing_updated_at'));
+        ])->assertUnprocessable();
 
         Carbon::setTestNow('2026-08-14 13:00:00');
         $this->postJson('/api/properties/'.$propertyId.'/view')->assertNoContent();
@@ -758,7 +757,6 @@ class PropertyConstructionFieldsTest extends TestCase
             'price' => 100000,
             'currency' => 'TJS',
             'offer_type' => 'sale',
-            'moderation_status' => 'approved',
             'created_by' => $user->id,
             'agent_id' => $user->id,
             'owner_phone' => '+992 90 111 2233',
@@ -948,7 +946,6 @@ class PropertyConstructionFieldsTest extends TestCase
             'price' => 960000,
             'currency' => 'TJS',
             'offer_type' => 'sale',
-            'moderation_status' => 'approved',
             'owner_phone' => '+992 93 944 1035',
             'address' => 'Душанбе профсоюз',
             'district' => 'Сино',
@@ -976,22 +973,17 @@ class PropertyConstructionFieldsTest extends TestCase
         ];
 
         $response = $this->postJson('/api/properties', $highConfidencePayload)
-            ->assertStatus(409)
-            ->assertJsonPath('code', 'PROPERTY_REVIEW_REQUIRED')
-            ->assertJsonPath('duplicates.0.id', $existing->id)
-            ->assertJsonPath('duplicates.0.photos.0.file_path', 'properties/existing.jpg')
-            ->assertJsonPath('duplicates.0.score', 100)
-            ->assertJsonPath('duplicates.0.summary.coordinates_conflict', false);
-
-        $signals = collect($response->json('duplicates.0.signals'));
-        $this->assertTrue($signals->contains(fn (array $signal) => $signal['code'] === 'text' && $signal['matched']));
-        $this->assertTrue($signals->contains(fn (array $signal) => $signal['code'] === 'total_area' && $signal['matched']));
-        $this->assertDatabaseCount('properties', 1);
-
-        $createdId = $this->postJson('/api/properties', [...$highConfidencePayload, 'force' => true])
             ->assertOk()
             ->assertJsonPath('moderation_status', 'pending')
-            ->json('id');
+            ->assertJsonPath('duplicate_candidates.0.id', $existing->id)
+            ->assertJsonPath('duplicate_candidates.0.photos.0.file_path', 'properties/existing.jpg')
+            ->assertJsonPath('duplicate_candidates.0.score', 100)
+            ->assertJsonPath('duplicate_candidates.0.summary.coordinates_conflict', false);
+
+        $signals = collect($response->json('duplicate_candidates.0.signals'));
+        $this->assertTrue($signals->contains(fn (array $signal) => $signal['code'] === 'text' && $signal['matched']));
+        $this->assertTrue($signals->contains(fn (array $signal) => $signal['code'] === 'total_area' && $signal['matched']));
+        $createdId = $response->json('id');
         $this->assertDatabaseCount('properties', 2);
 
         $this->getJson("/api/properties/{$createdId}/duplicate-candidates")
@@ -1025,14 +1017,15 @@ class PropertyConstructionFieldsTest extends TestCase
         ];
 
         $response = $this->postJson('/api/properties', $payload)
-            ->assertStatus(409)
-            ->assertJsonPath('duplicates', []);
+            ->assertOk()
+            ->assertJsonPath('moderation_status', 'pending')
+            ->assertJsonPath('duplicate_candidates', []);
 
         $codes = collect($response->json('quality_warnings'))->pluck('code');
         $this->assertTrue($codes->contains('suspicious_price'));
         $this->assertTrue($codes->contains('suspicious_owner_phone'));
 
-        $this->postJson('/api/properties', [...$payload, 'force' => true])->assertOk();
+        $this->postJson('/api/properties', [...$payload, 'force' => true])->assertUnprocessable();
         $this->assertDatabaseCount('properties', 1);
     }
 
@@ -1064,7 +1057,7 @@ class PropertyConstructionFieldsTest extends TestCase
             'offer_type' => 'sale',
             'latitude' => 40.2826,
             'longitude' => 69.6222,
-        ])->assertStatus(409);
+        ])->assertOk()->assertJsonPath('moderation_status', 'pending');
 
         $this->assertContains(
             'coordinates_outside_location',
@@ -1260,6 +1253,50 @@ class PropertyConstructionFieldsTest extends TestCase
         $response->assertJsonCount(1, 'data');
         $response->assertJsonPath('data.0.title', 'Built Match');
         $response->assertJsonPath('data.0.construction_status', 'built');
+    }
+
+    public function test_compact_property_feed_omits_crm_fields_and_keeps_card_data(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Feed Agent',
+            'phone' => '930000299',
+            'password' => bcrypt('password'),
+            'role_id' => $role->id,
+            'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment', 'slug' => 'apartments']);
+        $status = \App\Models\PropertyStatus::create(['name' => 'Available', 'slug' => 'available']);
+        $property = \App\Models\Property::query()->create([
+            'title' => 'Compact Feed Card',
+            'description' => str_repeat('Public description ', 10),
+            'type_id' => $type->id,
+            'status_id' => $status->id,
+            'price' => 140000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'rooms' => 2,
+            'moderation_status' => 'approved',
+            'owner_phone' => 'PRIVATE-OWNER-PHONE',
+            'status_comment' => 'PRIVATE-CRM-COMMENT',
+            'created_by' => $user->id,
+        ]);
+        \App\Models\PropertyPhoto::query()->create([
+            'property_id' => $property->id,
+            'file_path' => 'properties/card.jpg',
+            'position' => 0,
+        ]);
+
+        $response = $this->getJson('/api/properties?compact=1&per_page=4')
+            ->assertOk()
+            ->assertJsonPath('per_page', 4)
+            ->assertJsonPath('data.0.title', 'Compact Feed Card')
+            ->assertJsonPath('data.0.type.slug', 'apartments')
+            ->assertJsonPath('data.0.photos.0.file_path', 'properties/card.jpg')
+            ->assertJsonMissing(['owner_phone' => 'PRIVATE-OWNER-PHONE'])
+            ->assertJsonMissing(['status_comment' => 'PRIVATE-CRM-COMMENT']);
+
+        $this->assertArrayNotHasKey('phone', $response->json('data.0.creator'));
     }
 
     public function test_document_type_multi_filter_is_consistent_across_property_collections(): void
@@ -1708,7 +1745,7 @@ class PropertyConstructionFieldsTest extends TestCase
         $this->getJson('/api/properties/count')->assertOk()->assertJsonPath('count', 1);
     }
 
-    public function test_rop_can_set_urgent_listing_type_without_auto_moderation(): void
+    public function test_legacy_moderation_listing_endpoint_is_retired(): void
     {
         $ropRole = Role::create([
             'name' => 'ROP',
@@ -1744,12 +1781,12 @@ class PropertyConstructionFieldsTest extends TestCase
             'listing_type' => 'urgent',
         ]);
 
-        $response->assertOk();
-        $response->assertJsonPath('data.listing_type', 'urgent');
-        $response->assertJsonPath('data.moderation_status', 'approved');
+        $response->assertUnprocessable()->assertJsonPath('code', 'PROMOTION_PROTECTED_FIELD');
+        $this->patchJson("/api/properties/{$property->id}/moderation-listing", [])
+            ->assertStatus(410)->assertJsonPath('code', 'MODERATION_ENDPOINT_RETIRED');
 
         $property->refresh();
-        $this->assertSame('urgent', $property->listing_type);
+        $this->assertSame('regular', $property->listing_type);
         $this->assertSame('approved', $property->moderation_status);
         $this->assertNull($property->status_comment);
     }
@@ -1845,10 +1882,10 @@ class PropertyConstructionFieldsTest extends TestCase
 
     private function createListingDateRefreshFixture(string $moderationStatus, string $phone): array
     {
-        $role = Role::create([
-            'name' => 'Agent '.$phone,
-            'slug' => 'agent-'.$phone,
-        ]);
+        $role = Role::firstOrCreate(
+            ['slug' => 'agent'],
+            ['name' => 'Agent']
+        );
         $owner = User::create([
             'name' => 'Listing Owner',
             'phone' => $phone,
@@ -1870,4 +1907,40 @@ class PropertyConstructionFieldsTest extends TestCase
 
         return [$owner, $property];
     }
+    public function test_moderation_workflow_is_enforced_through_http_crud_and_actions(): void
+    {
+        (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = User::forceCreate(['name' => 'Agent', 'phone' => '930000009', 'role_id' => $role->id, 'status' => 'active']);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        Sanctum::actingAs($agent);
+        $payload = ['type_id' => $type->id, 'price' => 100000, 'currency' => 'TJS', 'offer_type' => 'sale'];
+
+        $this->postJson('/api/properties', $payload + ['moderation_status' => 'approved'])
+            ->assertUnprocessable()->assertJsonPath('code', 'PROTECTED_FIELD');
+        $this->postJson('/api/properties', $payload + ['listing_type' => 'vip'])
+            ->assertUnprocessable()->assertJsonPath('code', 'PROMOTION_PROTECTED_FIELD');
+        $created = $this->postJson('/api/properties', $payload)->assertOk()->assertJsonPath('publication_status', 'published');
+        $id = $created->json('id');
+        $version = $created->json('moderation_version');
+        $key = ['Idempotency-Key' => 'moderation-price-change-001'];
+        $changed = $this->putJson("/api/properties/{$id}", ['price' => 100001, 'version' => $version] + $payload, $key)
+            ->assertOk()->assertJsonPath('publication_status', 'pending');
+        $this->putJson("/api/properties/{$id}", ['price' => 100001, 'version' => $version] + $payload, $key)
+            ->assertOk()->assertHeader('Idempotent-Replayed', 'true');
+        $this->putJson("/api/properties/{$id}", ['price' => 100002, 'version' => $version] + $payload)
+            ->assertConflict()->assertJsonPath('code', 'MODERATION_VERSION_CONFLICT');
+        $case = \App\Models\PropertyModerationCase::where('property_id', $id)->firstOrFail();
+        $this->postJson("/api/property-moderation-cases/{$case->id}/approve", ['version' => $case->version])
+            ->assertForbidden();
+        $this->postJson("/api/properties/{$id}/moderation/submit", ['version' => $changed->json('moderation_version'), 'listing_type' => 'urgent'])
+            ->assertUnprocessable()->assertJsonPath('code', 'PROMOTION_PROTECTED_FIELD');
+        $this->assertSame(1, \App\Models\PropertyModerationCase::where('property_id', $id)->count());
+        $clientRole = Role::create(['name' => 'Client', 'slug' => 'client']);
+        $client = User::forceCreate(['name' => 'Client', 'phone' => '930000010', 'role_id' => $clientRole->id, 'status' => 'active']);
+        Sanctum::actingAs($client);
+        $this->getJson("/api/properties/{$id}")->assertNotFound();
+
+    }
+
 }

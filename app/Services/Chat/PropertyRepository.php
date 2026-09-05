@@ -44,11 +44,47 @@ class PropertyRepository
                 'properties.currency',
                 'properties.address',
                 'properties.district',
-                'properties.listing_type',
                 'properties.created_at',
             ])
             ->addSelect(DB::raw("{$effectivePriceSql} as effective_price"))
-            ->where('properties.moderation_status', '=', 'approved');
+            ->when(
+                Schema::hasColumn('properties', 'publication_status'),
+                fn ($query) => $query->where('properties.publication_status', 'published'),
+                fn ($query) => $query->where('properties.moderation_status', 'approved'),
+            );
+
+        if (Schema::hasTable('property_moderation_cases')) {
+            $base->whereNotExists(function ($query): void {
+                $query->selectRaw('1')
+                    ->from('property_moderation_cases as pmc')
+                    ->whereColumn('pmc.property_id', 'properties.id')
+                    ->where('pmc.status', 'open')
+                    ->where('pmc.blocking', true);
+            });
+        }
+        if (Schema::hasTable('property_duplicate_candidates') && Schema::hasTable('property_moderation_cases')) {
+            $base->whereNotExists(function ($query): void {
+                $query->selectRaw('1')
+                    ->from('property_duplicate_candidates as pdc')
+                    ->join('property_moderation_cases as duplicate_cases', 'duplicate_cases.id', '=', 'pdc.moderation_case_id')
+                    ->whereColumn('duplicate_cases.property_id', 'properties.id')
+                    ->where('pdc.decision', 'confirmed_duplicate')
+                    ->whereNull('pdc.reversed_at');
+            });
+        }
+
+        if (Schema::hasTable('property_promotions')) {
+            $base->addSelect(DB::raw("COALESCE((
+                SELECT pp.type FROM property_promotions pp
+                WHERE pp.property_id = properties.id
+                  AND pp.status = 'active'
+                  AND pp.starts_at <= CURRENT_TIMESTAMP
+                  AND pp.ends_at > CURRENT_TIMESTAMP
+                ORDER BY pp.starts_at DESC, pp.id DESC LIMIT 1
+            ), 'regular') as listing_type"));
+        } else {
+            $base->addSelect('properties.listing_type');
+        }
 
         if ($hasDiscountPrice) {
             $base->addSelect('properties.discount_price');
@@ -118,8 +154,15 @@ class PropertyRepository
                 $q->whereRaw("{$effectivePriceSql} <= ?", [$priceMax]);
             }
 
-            $q->orderByRaw("CASE WHEN properties.listing_type='vip' THEN 0 WHEN properties.listing_type='urgent' THEN 1 ELSE 2 END")
-                ->orderByDesc('properties.created_at');
+            if (Schema::hasTable('property_promotions')) {
+                $q->orderByRaw("CASE
+                    WHEN EXISTS (SELECT 1 FROM property_promotions pp WHERE pp.property_id = properties.id AND pp.status = 'active' AND pp.starts_at <= CURRENT_TIMESTAMP AND pp.ends_at > CURRENT_TIMESTAMP AND pp.type = 'urgent') THEN 0
+                    WHEN EXISTS (SELECT 1 FROM property_promotions pp WHERE pp.property_id = properties.id AND pp.status = 'active' AND pp.starts_at <= CURRENT_TIMESTAMP AND pp.ends_at > CURRENT_TIMESTAMP AND pp.type = 'vip') THEN 1
+                    ELSE 2 END");
+            } else {
+                $q->orderByRaw("CASE WHEN properties.listing_type='urgent' THEN 0 WHEN properties.listing_type='vip' THEN 1 ELSE 2 END");
+            }
+            $q->orderByDesc('properties.created_at');
         };
 
         // значения цены

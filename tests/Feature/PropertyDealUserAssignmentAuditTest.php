@@ -219,8 +219,9 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
 
         Sanctum::actingAs($owner);
 
-        $cases[] = $this->runCase('A1_patch_deposit_explicit_deposit_user_id', 'patchJson', "/api/properties/{$property->id}/moderation-listing", [
-            'moderation_status' => 'deposit',
+        $cases[] = $this->runCase('A1_post_deposit_explicit_deposit_user_id', 'postJson', "/api/properties/{$property->id}/deal", [
+            'deal_status' => 'deposit',
+            'version' => 0,
             'deposit_user_id' => $sameBranchAgent45->id,
             'buyer_full_name' => 'Buyer One',
             'buyer_phone' => '900000111',
@@ -233,8 +234,9 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
             'money_holder' => 'company',
         ], $property->id);
 
-        $cases[] = $this->runCase('A2_patch_deposit_without_deposit_user_id_autofill_current_user', 'patchJson', "/api/properties/{$property->id}/moderation-listing", [
-            'moderation_status' => 'deposit',
+        $cases[] = $this->runCase('A2_post_deposit_without_deposit_user_id_autofill_current_user', 'postJson', "/api/properties/{$property->id}/deal", [
+            'deal_status' => 'deposit',
+            'version' => 0,
             'buyer_full_name' => 'Buyer Two',
             'buyer_phone' => '900000112',
             'deposit_amount' => 1100,
@@ -247,7 +249,8 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
         ], $property->id);
 
         $cases[] = $this->runCase('B1_post_sold_explicit_sale_user_id', 'postJson', "/api/properties/{$property->id}/deal", [
-            'moderation_status' => 'sold',
+            'deal_status' => 'sold',
+            'version' => 0,
             'sale_user_id' => $sameBranchAgent52->id,
             'actual_sale_price' => 120000,
             'actual_sale_currency' => 'USD',
@@ -256,7 +259,8 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
         ], $property->id);
 
         $cases[] = $this->runCase('B2_post_sold_without_sale_user_id_autofill_current_user', 'postJson', "/api/properties/{$property->id}/deal", [
-            'moderation_status' => 'sold',
+            'deal_status' => 'sold',
+            'version' => 0,
             'actual_sale_price' => 121000,
             'actual_sale_currency' => 'USD',
             'company_commission_amount' => 3050,
@@ -265,8 +269,9 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
 
         Sanctum::actingAs($sameBranchRop);
 
-        $cases[] = $this->runCase('C1_rop_patch_deposit_can_assign_other_agent_same_branch', 'patchJson', "/api/properties/{$property->id}/moderation-listing", [
-            'moderation_status' => 'deposit',
+        $cases[] = $this->runCase('C1_rop_post_deposit_can_assign_other_agent_same_branch', 'postJson', "/api/properties/{$property->id}/deal", [
+            'deal_status' => 'deposit',
+            'version' => 0,
             'deposit_user_id' => $sameBranchAgent45->id,
             'buyer_full_name' => 'Buyer Three',
             'buyer_phone' => '900000113',
@@ -280,7 +285,8 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
         ], $property->id);
 
         $cases[] = $this->runCase('C2_rop_post_sold_can_assign_other_agent_same_branch', 'postJson', "/api/properties/{$property->id}/deal", [
-            'moderation_status' => 'sold',
+            'deal_status' => 'sold',
+            'version' => 0,
             'sale_user_id' => $sameBranchAgent52->id,
             'actual_sale_price' => 123000,
             'actual_sale_currency' => 'USD',
@@ -288,8 +294,9 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
             'company_commission_currency' => 'USD',
         ], $property->id);
 
-        $cases[] = $this->runCase('E1_patch_deposit_nonexistent_deposit_user_id', 'patchJson', "/api/properties/{$property->id}/moderation-listing", [
-            'moderation_status' => 'deposit',
+        $cases[] = $this->runCase('E1_post_deposit_nonexistent_deposit_user_id', 'postJson', "/api/properties/{$property->id}/deal", [
+            'deal_status' => 'deposit',
+            'version' => 0,
             'deposit_user_id' => 999999,
             'buyer_full_name' => 'Buyer Four',
             'buyer_phone' => '900000114',
@@ -303,7 +310,8 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
         ], $property->id);
 
         $cases[] = $this->runCase('E2_post_sold_nonexistent_sale_user_id', 'postJson', "/api/properties/{$property->id}/deal", [
-            'moderation_status' => 'sold',
+            'deal_status' => 'sold',
+            'version' => 0,
             'sale_user_id' => 999998,
             'actual_sale_price' => 124000,
             'actual_sale_currency' => 'USD',
@@ -311,8 +319,9 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
             'company_commission_currency' => 'USD',
         ], $property->id);
 
-        $cases[] = $this->runCase('E3_rop_assign_out_of_scope_user_from_other_branch', 'patchJson', "/api/properties/{$property->id}/moderation-listing", [
-            'moderation_status' => 'deposit',
+        $cases[] = $this->runCase('E3_rop_assign_out_of_scope_user_from_other_branch', 'postJson', "/api/properties/{$property->id}/deal", [
+            'deal_status' => 'deposit',
+            'version' => 0,
             'deposit_user_id' => $otherBranchAgent->id,
             'buyer_full_name' => 'Buyer Five',
             'buyer_phone' => '900000115',
@@ -363,7 +372,7 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
 
         Sanctum::actingAs($agentA);
 
-        $this->patchJson("/api/properties/{$sameBranchProperty->id}/moderation-listing", $this->depositPayload())
+        $this->postJson("/api/properties/{$sameBranchProperty->id}/deal", $this->depositPayload())
             ->assertOk();
 
         $sameBranchProperty->refresh();
@@ -383,7 +392,7 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
 
         $this->assertSame($agentA->id, $sameBranchProperty->fresh()->sale_user_id);
 
-        $this->patchJson("/api/properties/{$otherBranchProperty->id}/moderation-listing", $this->depositPayload())
+        $this->postJson("/api/properties/{$otherBranchProperty->id}/deal", $this->depositPayload())
             ->assertOk();
 
         $this->assertSame('deposit', $otherBranchProperty->fresh()->moderation_status);
@@ -580,7 +589,8 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
     private function depositPayload(array $overrides = []): array
     {
         return array_merge([
-            'moderation_status' => 'deposit',
+            'deal_status' => 'deposit',
+            'version' => 0,
             'buyer_full_name' => 'Buyer One',
             'buyer_phone' => '900000111',
             'deposit_amount' => 1000,
@@ -596,7 +606,8 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
     private function salePayload(array $overrides = []): array
     {
         return array_merge([
-            'moderation_status' => 'sold',
+            'deal_status' => 'sold',
+            'version' => 0,
             'actual_sale_price' => 120000,
             'actual_sale_currency' => 'USD',
             'company_commission_amount' => 3000,

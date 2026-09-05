@@ -3,11 +3,13 @@
 namespace App\Http\Controllers;
 
 use App\Models\Selection;
+use App\Models\Property;
 use App\Services\NotificationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 
@@ -94,6 +96,9 @@ class SelectionController extends Controller
             abort_if($sel->expires_at && now()->greaterThan($sel->expires_at), 410, 'Selection expired');
             if (isset($validated['payload']['property_id'])) {
                 abort_unless(in_array((int) $validated['payload']['property_id'], array_map('intval', $sel->property_ids), true), 422, 'Объект не входит в подборку.');
+                if (Schema::hasTable('properties')) {
+                    Property::query()->publicSearchable()->findOrFail((int) $validated['payload']['property_id']);
+                }
             }
 
             // простая логика обновления статусов
@@ -129,10 +134,14 @@ class SelectionController extends Controller
             abort(410, 'Selection expired');
         }
 
+        $publicPropertyIds = Schema::hasTable('properties')
+            ? Property::query()->publicSearchable()->whereKey((array) $sel->property_ids)->pluck('id')->map(fn ($id) => (int) $id)->values()->all()
+            : array_map('intval', (array) $sel->property_ids);
+
         return [
             'id' => $sel->id,
             'title' => $sel->title,
-            'property_ids' => $sel->property_ids,
+            'property_ids' => $publicPropertyIds,
             'note' => $sel->note,
             'status' => $sel->status,
         ];
