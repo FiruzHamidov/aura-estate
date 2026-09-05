@@ -59,6 +59,43 @@ class NotificationRecipientResolver
             ->values();
     }
 
+    public function securityOfficers(): Collection
+    {
+        return $this->usersByRole(['security']);
+    }
+
+    public function propertyControlBranchRecipients(Deal $deal): Collection
+    {
+        $deal->loadMissing('primaryProperty.agent.role', 'primaryProperty.creator.role');
+
+        return collect([
+            $deal->primaryProperty?->agent,
+            $deal->primaryProperty?->creator,
+        ])->filter()
+            ->merge($this->usersByRole(['rop', 'branch_director'], $deal->branch_id))
+            ->filter(fn ($user) => $user instanceof User && $user->status === User::STATUS_ACTIVE)
+            ->unique('id')
+            ->values();
+    }
+
+    public function propertyControlParticipants(Deal $deal): Collection
+    {
+        $deal->loadMissing('responsibleAgent.role');
+
+        return $this->propertyControlBranchRecipients($deal)
+            ->merge(collect([$deal->responsibleAgent])->filter())
+            ->unique('id')
+            ->values();
+    }
+
+    public function propertyControlEscalationRecipients(Deal $deal): Collection
+    {
+        return $this->usersByRole(['admin', 'superadmin', 'owner'])
+            ->merge($this->propertyControlParticipants($deal))
+            ->unique('id')
+            ->values();
+    }
+
     public function bookingAgent(Booking $booking): Collection
     {
         $booking->loadMissing('agent.role');

@@ -370,6 +370,88 @@ class NotificationService
         }
     }
 
+    public function handlePropertyControlCreated(Deal $deal, ?User $actor = null): void
+    {
+        $this->notifyUsers(
+            $this->recipients->securityOfficers(),
+            NotificationType::PROPERTY_CONTROL_NEW,
+            'Новая карточка контроля',
+            sprintf('Объект #%d поступил на проверку СБ.', (int) $deal->primary_property_id),
+            $deal,
+            $actor,
+            [
+                'action_url' => '/profile/crm/deals?pipelineType=property_control&view=list&dealId='.$deal->id,
+                'action_type' => 'open_property_control',
+                'dedupe_key' => 'property-control:new:'.($deal->source_event_uuid ?: $deal->id),
+                'data' => [
+                    'deal_id' => $deal->id,
+                    'property_id' => $deal->primary_property_id,
+                    'branch_id' => $deal->branch_id,
+                    'source_property_status' => $deal->source_property_status,
+                ],
+            ]
+        );
+    }
+
+    public function handlePropertyControlStageChanged(
+        Deal $deal,
+        ?User $actor,
+        ?string $oldStageSlug,
+        string $newStageSlug
+    ): void {
+        [$recipients, $type, $title, $body] = match ($newStageSlug) {
+            'branch_clarification' => [
+                $this->recipients->propertyControlBranchRecipients($deal),
+                NotificationType::PROPERTY_CONTROL_BRANCH_CLARIFICATION,
+                'СБ запросила уточнение',
+                sprintf('По карточке контроля #%d требуется ответ филиала.', $deal->id),
+            ],
+            'security_recheck' => [
+                collect([$deal->responsibleAgent])->filter(),
+                NotificationType::PROPERTY_CONTROL_SECURITY_RECHECK,
+                'Карточка возвращена на проверку',
+                sprintf('Филиал завершил исправление по карточке #%d.', $deal->id),
+            ],
+            'security_verified' => [
+                $this->recipients->propertyControlParticipants($deal),
+                NotificationType::PROPERTY_CONTROL_VERIFIED,
+                'Проверка СБ завершена',
+                sprintf('Карточка контроля #%d подтверждена СБ.', $deal->id),
+            ],
+            'security_flagged' => [
+                $this->recipients->propertyControlEscalationRecipients($deal),
+                NotificationType::PROPERTY_CONTROL_FLAGGED,
+                'СБ выявила подозрительную сделку',
+                sprintf('Карточка контроля #%d требует внимания администратора.', $deal->id),
+            ],
+            default => [collect(), null, null, null],
+        };
+
+        if (! $type) {
+            return;
+        }
+
+        $this->notifyUsers($recipients, $type, $title, $body, $deal, $actor, [
+            'action_url' => '/profile/crm/deals?pipelineType=property_control&view=list&dealId='.$deal->id,
+            'action_type' => 'open_property_control',
+            'dedupe_key' => implode(':', [
+                'property-control',
+                'stage',
+                $deal->id,
+                $oldStageSlug ?: 'none',
+                $newStageSlug,
+                $deal->updated_at?->format('Uu') ?: 'unknown',
+            ]),
+            'data' => [
+                'deal_id' => $deal->id,
+                'property_id' => $deal->primary_property_id,
+                'branch_id' => $deal->branch_id,
+                'old_stage' => $oldStageSlug,
+                'new_stage' => $newStageSlug,
+            ],
+        ]);
+    }
+
     public function handleBookingCreated(Booking $booking, ?User $actor = null): void
     {
         $this->notifyUsers(

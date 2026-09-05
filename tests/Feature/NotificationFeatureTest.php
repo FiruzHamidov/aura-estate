@@ -6,6 +6,7 @@ use App\Jobs\SendFirebasePushNotification;
 use App\Models\Branch;
 use App\Models\Client;
 use App\Models\ClientType;
+use App\Models\Deal;
 use App\Models\Lead;
 use App\Models\Notification;
 use App\Models\Role;
@@ -226,6 +227,35 @@ class NotificationFeatureTest extends TestCase
             'user_id' => $creator->id,
             'type' => NotificationType::LEAD_NEW,
         ]);
+    }
+
+    public function test_property_control_event_notifies_security_once_and_aggregates_retries(): void
+    {
+        $branch = Branch::create(['name' => 'Central']);
+        $securityRole = Role::create(['name' => 'Security', 'slug' => 'security']);
+        $security = $this->createUser($securityRole, $branch, 'Security Officer');
+        $deal = new Deal;
+        $deal->forceFill([
+            'id' => 501,
+            'primary_property_id' => 77,
+            'branch_id' => $branch->id,
+            'source_property_status' => 'sold',
+            'source_event_uuid' => 'f9cd6454-cb8e-5aac-a6a4-876d6fd8f4ce',
+        ]);
+        $deal->exists = true;
+
+        $service = app(NotificationService::class);
+        $service->handlePropertyControlCreated($deal);
+        $service->handlePropertyControlCreated($deal);
+
+        $this->assertSame(1, Notification::query()
+            ->where('user_id', $security->id)
+            ->where('type', NotificationType::PROPERTY_CONTROL_NEW)
+            ->count());
+        $this->assertSame(2, (int) Notification::query()
+            ->where('user_id', $security->id)
+            ->where('type', NotificationType::PROPERTY_CONTROL_NEW)
+            ->value('occurrences_count'));
     }
 
     public function test_notification_api_lists_marks_read_and_counts_unread(): void

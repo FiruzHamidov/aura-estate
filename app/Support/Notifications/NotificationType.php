@@ -25,6 +25,12 @@ final class NotificationType
     public const DEAL_WON = 'deal_won';
     public const DEAL_LOST = 'deal_lost';
 
+    public const PROPERTY_CONTROL_NEW = 'property_control_new';
+    public const PROPERTY_CONTROL_BRANCH_CLARIFICATION = 'property_control_branch_clarification';
+    public const PROPERTY_CONTROL_SECURITY_RECHECK = 'property_control_security_recheck';
+    public const PROPERTY_CONTROL_VERIFIED = 'property_control_verified';
+    public const PROPERTY_CONTROL_FLAGGED = 'property_control_flagged';
+
     public const BOOKING_CREATED = 'booking_created';
     public const BOOKING_UPDATED = 'booking_updated';
     public const BOOKING_REMINDER_24H = 'booking_reminder_24h';
@@ -83,6 +89,11 @@ final class NotificationType
             self::DEAL_ACTIVITY_OVERDUE,
             self::DEAL_WON,
             self::DEAL_LOST,
+            self::PROPERTY_CONTROL_NEW,
+            self::PROPERTY_CONTROL_BRANCH_CLARIFICATION,
+            self::PROPERTY_CONTROL_SECURITY_RECHECK,
+            self::PROPERTY_CONTROL_VERIFIED,
+            self::PROPERTY_CONTROL_FLAGGED,
             self::BOOKING_CREATED,
             self::BOOKING_UPDATED,
             self::BOOKING_REMINDER_24H,
@@ -123,6 +134,7 @@ final class NotificationType
             self::LEAD_SLA_OVERDUE,
             self::LEAD_FOLLOW_UP_OVERDUE,
             self::DEAL_ACTIVITY_OVERDUE,
+            self::PROPERTY_CONTROL_FLAGGED,
             self::KPI_EARLY_RISK,
             self::CHAT_NEW_MESSAGE,
             self::CHAT_RESPONSE_OVERDUE => NotificationCategory::CRITICAL,

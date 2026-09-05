@@ -53,11 +53,21 @@ class DealStageController extends Controller
             ->update(['is_default' => false]);
     }
 
+    private function ensureNotSystemPropertyControl(DealPipeline $pipeline): void
+    {
+        abort_if(
+            $pipeline->code === DealPipeline::CODE_PROPERTY_CONTROL,
+            409,
+            'System property-control stages are managed by the application.'
+        );
+    }
+
     public function store(Request $request, DealPipeline $dealPipeline)
     {
         $authUser = $this->authUser();
 
         $this->pipelineAccess->ensureManageable($authUser, $dealPipeline);
+        $this->ensureNotSystemPropertyControl($dealPipeline);
 
         $validated = $request->validate([
             'name' => 'required|string|max:255',
@@ -111,6 +121,7 @@ class DealStageController extends Controller
         $authUser = $this->authUser();
         $dealStage->loadMissing('pipeline');
         $this->pipelineAccess->ensureManageable($authUser, $dealStage->pipeline);
+        $this->ensureNotSystemPropertyControl($dealStage->pipeline);
 
         $validated = $request->validate([
             'name' => 'sometimes|string|max:255',
@@ -167,6 +178,7 @@ class DealStageController extends Controller
         $authUser = $this->authUser();
         $dealStage->loadMissing('pipeline');
         $this->pipelineAccess->ensureManageable($authUser, $dealStage->pipeline);
+        $this->ensureNotSystemPropertyControl($dealStage->pipeline);
 
         if ($dealStage->deals()->exists()) {
             return response()->json([
@@ -208,6 +220,7 @@ class DealStageController extends Controller
     {
         $authUser = $this->authUser();
         $this->pipelineAccess->ensureManageable($authUser, $dealPipeline);
+        $this->ensureNotSystemPropertyControl($dealPipeline);
 
         $validated = $request->validate([
             'stage_ids' => 'required|array|min:1',

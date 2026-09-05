@@ -49,6 +49,11 @@ class DealAccess
         return $this->pipelineAccess->isHrRole($roleSlug);
     }
 
+    public function isSecurityRole(?string $roleSlug): bool
+    {
+        return $this->pipelineAccess->isSecurityRole($roleSlug);
+    }
+
     public function visibleQuery(User $authUser): Builder
     {
         $roleSlug = $this->roleSlug($authUser);
@@ -72,6 +77,15 @@ class DealAccess
             return $query->whereHas('pipeline', fn (Builder $builder) => $builder->where('code', DealPipeline::CODE_HR_RECRUITMENT));
         }
 
+        if ($this->isSecurityRole($roleSlug)) {
+            return $query->whereHas(
+                'pipeline',
+                fn (Builder $builder) => $builder
+                    ->where('code', DealPipeline::CODE_PROPERTY_CONTROL)
+                    ->where('is_active', true)
+            );
+        }
+
         if (! $this->isBranchScopedRole($roleSlug) || empty($authUser->branch_id)) {
             return $query->whereRaw('1 = 0');
         }
@@ -82,10 +96,22 @@ class DealAccess
             return $query;
         }
 
-        return $query->where(function (Builder $builder) use ($authUser) {
+        return $query->where(function (Builder $builder) use ($authUser, $roleSlug) {
             $builder
                 ->where('responsible_agent_id', $authUser->id)
                 ->orWhere('created_by', $authUser->id);
+
+            if (in_array($roleSlug, ['agent', 'intern'], true)) {
+                $builder->orWhere(function (Builder $propertyControl) use ($authUser) {
+                    $propertyControl
+                        ->whereHas('pipeline', fn (Builder $pipeline) => $pipeline->where('code', DealPipeline::CODE_PROPERTY_CONTROL))
+                        ->whereHas('primaryProperty', function (Builder $property) use ($authUser) {
+                            $property
+                                ->where('created_by', $authUser->id)
+                                ->orWhere('agent_id', $authUser->id);
+                        });
+                });
+            }
         });
     }
 
@@ -129,6 +155,42 @@ class DealAccess
         }
 
         return $data;
+    }
+
+    public function ensureCanCreate(User $authUser): void
+    {
+        abort_if(
+            $this->isSecurityRole($this->roleSlug($authUser)),
+            403,
+            'Security users cannot create CRM deals.'
+        );
+    }
+
+    public function ensureCanUpdate(User $authUser, Deal $deal): void
+    {
+        $roleSlug = $this->roleSlug($authUser);
+
+        abort_if(
+            $this->isSecurityRole($roleSlug),
+            403,
+            'Security users can update control cards only through CRM activities and workflow actions.'
+        );
+
+        $deal->loadMissing('pipeline');
+        abort_if(
+            $deal->isPropertyControl() && ! in_array($roleSlug, ['admin', 'superadmin'], true),
+            403,
+            'Property control cards can be changed only through CRM activities and workflow actions.'
+        );
+    }
+
+    public function ensureCanDelete(User $authUser, ?Deal $deal = null): void
+    {
+        abort_if(
+            $this->isSecurityRole($this->roleSlug($authUser)) || $deal?->isPropertyControl(),
+            403,
+            'System property-control cards cannot be deleted.'
+        );
     }
 
     public function validateMutationTargets(User $authUser, array $data): void

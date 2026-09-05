@@ -46,11 +46,12 @@ class PropertyObserver
         return $user instanceof User ? $user : null;
     }
 
-    protected function syncPropertyControl(Property $property): void
+    protected function syncPropertyControl(Property $property, ?string $sourceEventUuid = null): void
     {
         app(PropertyControlService::class)->syncForProperty(
             $property->fresh(['agent.role', 'creator.role', 'ownerClient.type', 'logs.user']),
-            $this->currentUser()
+            $this->currentUser(),
+            $sourceEventUuid
         );
     }
 
@@ -69,15 +70,19 @@ class PropertyObserver
             ];
         }
 
-        PropertyLog::create([
+        $propertyLog = PropertyLog::create([
             'property_id' => $property->id,
             'user_id' => $this->currentUserId(),
             'action' => 'created',
             'changes' => $changes,
         ]);
 
-        if (in_array($property->moderation_status, ['deleted', 'sold_by_owner'], true)) {
-            $this->syncPropertyControl($property);
+        if (in_array($property->moderation_status, config('security-property-control.trigger_statuses', []), true)) {
+            $service = app(PropertyControlService::class);
+            $this->syncPropertyControl(
+                $property,
+                $service->eventUuidFor($property, 'property-log-'.$propertyLog->id)
+            );
         }
 
         $this->recordInitialHistory($property);
@@ -122,7 +127,7 @@ class PropertyObserver
                 ? ($property->status_comment ?: $property->rejection_comment)
                 : null;
 
-            PropertyLog::create([
+            $propertyLog = PropertyLog::create([
                 'property_id' => $property->id,
                 'user_id' => $this->currentUserId(),
                 'action' => $action,
@@ -131,7 +136,11 @@ class PropertyObserver
             ]);
 
             if (array_key_exists('moderation_status', $changes)) {
-                $this->syncPropertyControl($property);
+                $service = app(PropertyControlService::class);
+                $this->syncPropertyControl(
+                    $property,
+                    $service->eventUuidFor($property, 'property-log-'.$propertyLog->id)
+                );
             }
 
             $this->recordChangedHistory($property, $changes);

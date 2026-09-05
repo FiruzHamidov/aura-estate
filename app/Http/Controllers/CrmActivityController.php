@@ -186,6 +186,23 @@ class CrmActivityController extends Controller
 
         $data = $this->validateActivity($request, true);
 
+        $deal->loadMissing('pipeline');
+        if ($deal->isPropertyControl()) {
+            abort_unless(
+                in_array($data['type'], ['comment', 'follow_up_changed'], true),
+                422,
+                'CRM_PROPERTY_CONTROL_ACTIVITY_NOT_ALLOWED'
+            );
+
+            if ($data['type'] === 'follow_up_changed') {
+                abort_unless(
+                    in_array($authUser->role?->slug, ['security', 'admin', 'superadmin'], true),
+                    403,
+                    'CRM_DEAL_FORBIDDEN'
+                );
+            }
+        }
+
         match ($data['type']) {
             'comment' => $this->dealComment($deal, $authUser, $data),
             'tag_added' => $this->dealTagAdded($deal, $authUser, $data),

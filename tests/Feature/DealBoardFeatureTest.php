@@ -13,6 +13,7 @@ use App\Models\Property;
 use App\Models\Role;
 use App\Models\Setting;
 use App\Models\User;
+use App\Services\Crm\PropertyControlService;
 use App\Support\ClientAccess;
 use App\Support\ClientPhone;
 use Illuminate\Database\Schema\Blueprint;
@@ -135,10 +136,34 @@ class DealBoardFeatureTest extends TestCase
         Schema::create('properties', function (Blueprint $table) {
             $table->id();
             $table->string('title')->nullable();
+            $table->string('object_key')->nullable();
+            $table->string('moderation_status')->nullable();
+            $table->unsignedBigInteger('branch_id')->nullable();
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('agent_id')->nullable();
             $table->unsignedBigInteger('owner_client_id')->nullable();
             $table->unsignedBigInteger('buyer_client_id')->nullable();
+            $table->unsignedBigInteger('sale_user_id')->nullable();
+            $table->unsignedBigInteger('deposit_user_id')->nullable();
+            $table->string('owner_name')->nullable();
+            $table->string('owner_phone')->nullable();
+            $table->string('buyer_full_name')->nullable();
+            $table->string('buyer_phone')->nullable();
+            $table->decimal('actual_sale_price', 15, 2)->nullable();
+            $table->string('actual_sale_currency', 3)->nullable();
+            $table->decimal('company_expected_income', 15, 2)->nullable();
+            $table->string('company_expected_income_currency', 3)->nullable();
+            $table->decimal('company_commission_amount', 15, 2)->nullable();
+            $table->string('company_commission_currency', 3)->nullable();
+            $table->string('money_holder')->nullable();
+            $table->timestamp('money_received_at')->nullable();
+            $table->timestamp('contract_signed_at')->nullable();
+            $table->decimal('deposit_amount', 15, 2)->nullable();
+            $table->string('deposit_currency', 3)->nullable();
+            $table->timestamp('deposit_received_at')->nullable();
+            $table->text('status_comment')->nullable();
+            $table->text('rejection_comment')->nullable();
+            $table->timestamp('sold_at')->nullable();
             $table->timestamps();
         });
 
@@ -212,6 +237,8 @@ class DealBoardFeatureTest extends TestCase
             $table->string('last_contact_result', 100)->nullable();
             $table->timestamp('next_activity_at')->nullable();
             $table->string('source_property_status', 40)->nullable();
+            $table->string('control_kind', 64)->nullable();
+            $table->uuid('source_event_uuid')->nullable()->unique();
             $table->unsignedBigInteger('updated_by')->nullable();
             $table->softDeletes();
             $table->timestamps();
@@ -512,6 +539,313 @@ class DealBoardFeatureTest extends TestCase
             ->assertJsonPath('message', 'Нельзя удалить стадию: в ней есть сделки.');
     }
 
+    public function test_security_sees_only_property_control_pipelines_across_branches(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+        $securityRole = Role::create(['name' => 'Security', 'slug' => 'security']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $security = $this->createUser($securityRole, $branchA, 'Security Officer');
+        $agentA = $this->createUser($agentRole, $branchA, 'Agent A');
+        $agentB = $this->createUser($agentRole, $branchB, 'Agent B');
+
+        [$controlA, $newA] = $this->createPropertyControlPipeline($branchA);
+        [$controlB, $newB] = $this->createPropertyControlPipeline($branchB);
+        [$sales] = $this->createPipelineWithStages($branchA);
+
+        $controlDealA = $this->createControlDeal($controlA, $newA, $branchA, $agentA, 'Control A');
+        $controlDealB = $this->createControlDeal($controlB, $newB, $branchB, $agentB, 'Control B');
+        $salesDeal = Deal::create([
+            'title' => 'Sales hidden',
+            'branch_id' => $branchA->id,
+            'created_by' => $agentA->id,
+            'pipeline_id' => $sales->id,
+            'stage_id' => $sales->defaultStage()->firstOrFail()->id,
+        ]);
+
+        Sanctum::actingAs($security);
+
+        $pipelines = $this->getJson('/api/deal-pipelines')
+            ->assertOk()
+            ->assertJsonCount(2)
+            ->json();
+        $this->assertEqualsCanonicalizing(
+            [$controlA->id, $controlB->id],
+            collect($pipelines)->pluck('id')->all()
+        );
+
+        $deals = $this->getJson('/api/deals?pipeline_type=property_control')
+            ->assertOk()
+            ->json('data');
+        $this->assertEqualsCanonicalizing(
+            [$controlDealA->id, $controlDealB->id],
+            collect($deals)->pluck('id')->all()
+        );
+        $this->assertNotContains($salesDeal->id, collect($deals)->pluck('id')->all());
+    }
+
+    public function test_security_claim_and_workflow_transitions_are_enforced(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $securityRole = Role::create(['name' => 'Security', 'slug' => 'security']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $security = $this->createUser($securityRole, $branch, 'Security Officer');
+        $rop = $this->createUser($ropRole, $branch, 'ROP A');
+        $agent = $this->createUser($agentRole, $branch, 'Agent A');
+
+        [$pipeline, $new, $review, $clarification, $correction, $recheck, $verified] =
+            $this->createPropertyControlPipeline($branch);
+        $deal = $this->createControlDeal($pipeline, $new, $branch, $agent, 'Control card');
+
+        Sanctum::actingAs($security);
+
+        $this->postJson('/api/deals/'.$deal->id.'/claim')
+            ->assertOk()
+            ->assertJsonPath('responsible_agent_id', $security->id)
+            ->assertJsonPath('stage.slug', 'security_review');
+
+        $this->postJson('/api/deals/'.$deal->id.'/claim')
+            ->assertStatus(409)
+            ->assertJsonPath('code', 'CRM_DEAL_ALREADY_CLAIMED');
+
+        $this->patchJson('/api/deals/'.$deal->id.'/move', [
+            'stage_id' => $clarification->id,
+            'comment' => 'short',
+        ])->assertUnprocessable();
+
+        $this->patchJson('/api/deals/'.$deal->id.'/move', [
+            'stage_id' => $clarification->id,
+            'comment' => 'Нужно уточнить данные комиссии.',
+        ])->assertOk()->assertJsonPath('stage_id', $clarification->id);
+
+        Sanctum::actingAs($rop);
+        $this->patchJson('/api/deals/'.$deal->id.'/move', [
+            'stage_id' => $verified->id,
+        ])->assertUnprocessable();
+        $this->patchJson('/api/deals/'.$deal->id.'/move', [
+            'stage_id' => $correction->id,
+        ])->assertOk();
+        $this->patchJson('/api/deals/'.$deal->id.'/move', [
+            'stage_id' => $recheck->id,
+        ])->assertOk();
+
+        Sanctum::actingAs($security);
+        $this->patchJson('/api/deals/'.$deal->id.'/move', [
+            'stage_id' => $verified->id,
+        ])->assertOk()->assertJsonPath('stage_id', $verified->id);
+
+        $this->assertDatabaseHas('crm_audit_logs', [
+            'auditable_id' => $deal->id,
+            'actor_id' => $security->id,
+            'event' => 'status_change',
+        ]);
+    }
+
+    public function test_security_cannot_create_update_or_delete_deals(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $securityRole = Role::create(['name' => 'Security', 'slug' => 'security']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $security = $this->createUser($securityRole, $branch, 'Security Officer');
+        $agent = $this->createUser($agentRole, $branch, 'Agent A');
+        [$pipeline, $new] = $this->createPropertyControlPipeline($branch);
+        $deal = $this->createControlDeal($pipeline, $new, $branch, $agent, 'Control card');
+
+        Sanctum::actingAs($security);
+
+        $this->postJson('/api/deals', [
+            'title' => 'Forbidden',
+            'pipeline_id' => $pipeline->id,
+        ])->assertForbidden();
+        $this->patchJson('/api/deals/'.$deal->id, ['title' => 'Changed'])->assertForbidden();
+        $this->deleteJson('/api/deals/'.$deal->id)->assertForbidden();
+    }
+
+    public function test_property_control_report_filters_export_and_meta_are_scoped_to_crm_control(): void
+    {
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+        $securityRole = Role::create(['name' => 'Security', 'slug' => 'security']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $security = $this->createUser($securityRole, $branchA, 'Security Officer');
+        $agentA = $this->createUser($agentRole, $branchA, 'Agent A');
+        $agentB = $this->createUser($agentRole, $branchB, 'Agent B');
+        [$pipelineA, $newA] = $this->createPropertyControlPipeline($branchA);
+        [$pipelineB, $newB] = $this->createPropertyControlPipeline($branchB);
+
+        $this->createControlDeal($pipelineA, $newA, $branchA, $agentA, 'Control A');
+        $this->createControlDeal($pipelineB, $newB, $branchB, $agentB, 'Control B');
+
+        Sanctum::actingAs($security);
+
+        $this->getJson('/api/crm/property-control/report?branch_id='.$branchB->id.'&stage_slug=new&source_property_status=sold')
+            ->assertOk()
+            ->assertJsonPath('total', 1)
+            ->assertJsonPath('open', 1)
+            ->assertJsonPath('closed', 0)
+            ->assertJsonPath('by_stage.0.slug', 'new');
+
+        $this->getJson('/api/crm/property-control/meta')
+            ->assertOk()
+            ->assertJsonCount(2, 'branches')
+            ->assertJsonPath('security_officers.0.id', $security->id);
+
+        $this->get('/api/crm/property-control/export?branch_id='.$branchA->id)
+            ->assertOk()
+            ->assertHeader('content-type', 'text/csv; charset=UTF-8');
+
+        $this->assertDatabaseHas('crm_audit_logs', [
+            'auditable_type' => $security->getMorphClass(),
+            'auditable_id' => $security->id,
+            'event' => 'property_control_report_viewed',
+        ]);
+        $this->assertDatabaseHas('crm_audit_logs', [
+            'auditable_type' => $security->getMorphClass(),
+            'auditable_id' => $security->id,
+            'event' => 'property_control_exported',
+        ]);
+    }
+
+    public function test_agent_sees_control_card_for_own_property_but_cannot_set_deadline_or_final_stage(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = $this->createUser($agentRole, $branch, 'Agent A');
+        $other = $this->createUser($agentRole, $branch, 'Agent B');
+        $control = $this->createPropertyControlPipeline($branch);
+        $pipeline = $control[0];
+        $clarification = $control[3];
+        $verified = $control[6];
+        $property = Property::create(['title' => 'Own property', 'created_by' => $other->id, 'agent_id' => $agent->id]);
+        $deal = $this->createControlDeal($pipeline, $clarification, $branch, $other, 'Related control card');
+        $deal->update(['primary_property_id' => $property->id]);
+
+        Sanctum::actingAs($agent);
+
+        $this->getJson('/api/deals?pipeline_type=property_control')
+            ->assertOk()
+            ->assertJsonPath('data.0.id', $deal->id);
+        $this->postJson('/api/crm/deals/'.$deal->id.'/activities', [
+            'type' => 'follow_up_changed',
+            'next_activity_at' => now()->addDay()->toIso8601String(),
+        ])->assertForbidden();
+        $this->patchJson('/api/deals/'.$deal->id.'/move', [
+            'stage_id' => $verified->id,
+        ])->assertUnprocessable();
+        $this->deleteJson('/api/deals/'.$deal->id)->assertForbidden();
+    }
+
+    public function test_system_property_control_stages_cannot_be_edited_or_reordered(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $admin = $this->createUser($adminRole, $branch, 'Admin');
+        [$pipeline, $new] = $this->createPropertyControlPipeline($branch);
+
+        Sanctum::actingAs($admin);
+
+        $this->patchJson('/api/deal-stages/'.$new->id, ['slug' => 'renamed'])->assertStatus(409);
+        $this->patchJson('/api/deal-pipelines/'.$pipeline->id.'/stages/reorder', [
+            'stage_ids' => $pipeline->stages()->pluck('id')->reverse()->values()->all(),
+        ])->assertStatus(409);
+    }
+
+    public function test_closing_events_are_idempotent_snapshot_based_and_repeat_after_reactivation(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = $this->createUser($agentRole, $branch, 'Agent A');
+        $property = Property::create([
+            'title' => 'Apartment',
+            'object_key' => 'OBJ-100',
+            'moderation_status' => 'approved',
+            'branch_id' => $branch->id,
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+            'owner_name' => 'Owner',
+            'owner_phone' => '992900000000',
+            'actual_sale_price' => 125000,
+            'actual_sale_currency' => 'USD',
+            'company_commission_amount' => 2500,
+            'company_commission_currency' => 'USD',
+        ]);
+
+        $property->update(['moderation_status' => 'sold', 'status_comment' => 'Closed by agent']);
+        $first = Deal::query()->where('primary_property_id', $property->id)->sole();
+
+        $this->assertSame('security_property_closure', $first->control_kind);
+        $this->assertSame('sold', $first->source_property_status);
+        $this->assertNotEmpty($first->source_event_uuid);
+        $this->assertSame('Owner', data_get($first->meta, 'control.closing_snapshot.owner.name'));
+        $this->assertSame(125000.0, (float) data_get($first->meta, 'control.closing_snapshot.actual_sale_price'));
+
+        $statusLog = $property->logs()->where('action', 'status_change')->latest('id')->firstOrFail();
+        $uuid = app(PropertyControlService::class)->eventUuidFor($property->fresh(), 'property-log-'.$statusLog->id);
+        app(PropertyControlService::class)->syncForProperty($property->fresh(), $agent, $uuid);
+        $this->assertSame(1, Deal::query()->where('primary_property_id', $property->id)->count());
+
+        $property->update(['moderation_status' => 'approved']);
+        $this->assertSame('cancelled', $first->fresh('stage')->stage->slug);
+
+        $property->update(['moderation_status' => 'sold']);
+        $this->assertSame(2, Deal::query()->where('primary_property_id', $property->id)->count());
+        $this->assertNotSame($first->source_event_uuid, Deal::query()->latest('id')->firstOrFail()->source_event_uuid);
+    }
+
+    public function test_all_trigger_statuses_create_control_cards_and_missing_branch_is_audited(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = $this->createUser($agentRole, $branch, 'Agent A');
+
+        foreach (['deposit', 'sold', 'sold_by_owner', 'rented', 'deleted'] as $index => $status) {
+            $property = Property::create([
+                'title' => 'Property '.$index,
+                'moderation_status' => 'approved',
+                'branch_id' => $branch->id,
+                'created_by' => $agent->id,
+            ]);
+            $property->update(['moderation_status' => $status]);
+            $this->assertDatabaseHas('crm_deals', [
+                'primary_property_id' => $property->id,
+                'source_property_status' => $status,
+                'control_kind' => 'security_property_closure',
+            ]);
+        }
+
+        $orphan = Property::create(['title' => 'No branch', 'moderation_status' => 'approved']);
+        $orphan->update(['moderation_status' => 'sold']);
+        $this->assertDatabaseHas('crm_audit_logs', [
+            'auditable_type' => $orphan->getMorphClass(),
+            'auditable_id' => $orphan->id,
+            'event' => 'property_control_branch_missing',
+        ]);
+    }
+
+    public function test_property_control_backfill_is_idempotent_and_uses_historical_event_time(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = $this->createUser($agentRole, $branch, 'Agent A');
+        $soldAt = now()->subDays(5)->startOfSecond();
+
+        $property = Property::withoutEvents(fn () => Property::create([
+            'title' => 'Historical sale',
+            'moderation_status' => 'sold_by_owner',
+            'branch_id' => $branch->id,
+            'created_by' => $agent->id,
+            'sold_at' => $soldAt,
+        ]));
+
+        $this->artisan('security:backfill-property-control', ['--apply' => true])->assertExitCode(0);
+        $first = Deal::query()->where('primary_property_id', $property->id)->sole();
+        $this->assertSame($soldAt->toIso8601String(), data_get($first->meta, 'control.triggered_at'));
+
+        $this->artisan('security:backfill-property-control', ['--apply' => true])->assertExitCode(0);
+        $this->assertSame(1, Deal::query()->where('primary_property_id', $property->id)->count());
+    }
+
     private function createUser(Role $role, Branch $branch, string $name): User
     {
         return User::create([
@@ -633,6 +967,67 @@ class DealBoardFeatureTest extends TestCase
         ]);
 
         return [$pipeline, $newStage, $offerStage, $hiredStage];
+    }
+
+    private function createPropertyControlPipeline(Branch $branch): array
+    {
+        $pipeline = DealPipeline::create([
+            'name' => 'Контроль объектов',
+            'slug' => 'property_control_'.$branch->id.'_'.$this->nextPhone(),
+            'code' => DealPipeline::CODE_PROPERTY_CONTROL,
+            'type' => DealPipeline::TYPE_PROPERTY_CONTROL,
+            'branch_id' => $branch->id,
+            'sort_order' => 20,
+            'is_default' => false,
+            'is_active' => true,
+        ]);
+
+        $definitions = [
+            ['Новая', 'new', false, false],
+            ['На проверке СБ', 'security_review', false, false],
+            ['Запрос в филиал', 'branch_clarification', false, false],
+            ['Исправление филиалом', 'branch_correction', false, false],
+            ['Повторная проверка', 'security_recheck', false, false],
+            ['Подтверждено СБ', 'security_verified', true, false],
+            ['Подозрительно', 'security_flagged', true, true],
+            ['Отменено', 'cancelled', true, false],
+        ];
+        $stages = [];
+
+        foreach ($definitions as $index => [$name, $slug, $closed, $lost]) {
+            $stages[] = DealStage::create([
+                'pipeline_id' => $pipeline->id,
+                'name' => $name,
+                'slug' => $slug,
+                'sort_order' => ($index + 1) * 10,
+                'is_default' => $slug === 'new',
+                'is_closed' => $closed,
+                'is_lost' => $lost,
+                'is_active' => true,
+            ]);
+        }
+
+        return array_merge([$pipeline], $stages);
+    }
+
+    private function createControlDeal(
+        DealPipeline $pipeline,
+        DealStage $stage,
+        Branch $branch,
+        User $creator,
+        string $title
+    ): Deal {
+        return Deal::create([
+            'title' => $title,
+            'branch_id' => $branch->id,
+            'created_by' => $creator->id,
+            'pipeline_id' => $pipeline->id,
+            'stage_id' => $stage->id,
+            'source_property_status' => 'sold',
+            'control_kind' => 'security_property_closure',
+            'source_event_uuid' => (string) \Illuminate\Support\Str::uuid(),
+            'board_position' => 1,
+        ]);
     }
 
     private function createDeal(DealPipeline $pipeline, DealStage $stage, Branch $branch, User $agent, Client $client, string $title): Deal

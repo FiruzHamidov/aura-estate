@@ -68,5 +68,6 @@ class RoleSeederTest extends TestCase
         $this->assertTrue(Role::query()->where('slug', 'intern')->exists());
         $this->assertTrue(Role::query()->where('slug', 'hr')->exists());
         $this->assertTrue(Role::query()->where('slug', 'accountant')->exists());
+        $this->assertTrue(Role::query()->where('slug', 'security')->exists());
     }
 }

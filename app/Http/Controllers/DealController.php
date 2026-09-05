@@ -12,6 +12,8 @@ use App\Models\User;
 use App\Services\Crm\ActivityService;
 use App\Services\Crm\AuditLogger;
 use App\Services\Crm\DealBoardService;
+use App\Services\Crm\DealListQuery;
+use App\Services\Crm\PropertyControlWorkflow;
 use App\Services\NotificationService;
 use App\Support\DealAccess;
 use Illuminate\Database\Eloquent\Model;
@@ -19,6 +21,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\ValidationException;
 
@@ -29,7 +32,9 @@ class DealController extends Controller
         private readonly DealBoardService $boardService,
         private readonly AuditLogger $auditLogger,
         private readonly ActivityService $activityService,
-        private readonly NotificationService $notifications
+        private readonly NotificationService $notifications,
+        private readonly PropertyControlWorkflow $propertyControlWorkflow,
+        private readonly DealListQuery $dealListQuery
     ) {}
 
     private function authUser(): User
@@ -53,12 +58,24 @@ class DealController extends Controller
             'creator',
             'responsibleAgent',
             'updater',
-            'pipeline',
+            'pipeline.stages',
             'stage',
             'primaryProperty.ownerClient.type',
+            'primaryProperty.buyerClient.type',
+            'primaryProperty.agent.role',
+            'primaryProperty.creator.role',
+            'primaryProperty.saleUser.role',
+            'primaryProperty.depositUser.role',
             'primaryProperty.logs.user',
             'auditLogs.actor',
         ];
+
+        if (Schema::hasTable('property_agent_sales')) {
+            $relations[] = 'primaryProperty.saleAgents.role';
+        }
+        if (Schema::hasTable('property_photos')) {
+            $relations[] = 'primaryProperty.photos';
+        }
 
         return array_merge($relations, $this->clientNeedRelations());
     }
@@ -555,78 +572,18 @@ class DealController extends Controller
     public function index(Request $request)
     {
         $authUser = $this->authUser();
+        $validated = $request->validate($this->dealListQuery->rules());
+        $query = $this->dealListQuery
+            ->build($request, $authUser, $validated)
+            ->with($this->listRelations())
+            ->withCount('auditLogs')
+            ->withMax('auditLogs as latest_activity_at', 'created_at');
 
-        $validated = $request->validate([
-            'search' => 'nullable|string',
-            'pipeline_id' => 'nullable|integer|exists:crm_deal_pipelines,id',
-            'pipeline_code' => 'nullable|string|max:255',
-            'pipeline_type' => 'nullable|string|max:255',
-            'stage_id' => 'nullable|integer|exists:crm_deal_stages,id',
-            'client_id' => 'nullable|integer|exists:clients,id',
-            'lead_id' => 'nullable|integer|exists:leads,id',
-            'client_need_id' => 'nullable|integer|exists:client_needs,id',
-            'primary_property_id' => 'nullable|integer|exists:properties,id',
-            'source_property_status' => 'nullable|string|max:40',
-            'source' => 'nullable|string|max:100',
-            'responsible_agent_id' => 'nullable|integer|exists:users,id',
-            'branch_id' => 'nullable|integer|exists:branches,id',
-            'overdue_activity' => 'nullable|boolean',
-            'per_page' => 'nullable|integer|min:1|max:100',
-        ]);
-
-        $query = $this->dealAccess->visibleQuery($authUser)->with($this->listRelations());
-
-        if (! empty($validated['search'])) {
-            $term = trim($validated['search']);
-            $query->where(function ($builder) use ($term) {
-                $builder
-                    ->where('title', 'like', '%'.$term.'%')
-                    ->orWhere('source', 'like', '%'.$term.'%')
-                    ->orWhereHas('client', fn ($q) => $q->where('full_name', 'like', '%'.$term.'%'))
-                    ->orWhereHas('lead', fn ($q) => $q->where('full_name', 'like', '%'.$term.'%'));
-            });
-        }
-
-        foreach (['pipeline_id', 'stage_id', 'client_id', 'lead_id', 'client_need_id', 'responsible_agent_id', 'primary_property_id', 'source_property_status'] as $field) {
-            if (! empty($validated[$field])) {
-                $query->where($field, $validated[$field]);
-            }
-        }
-
-        if (! empty($validated['source'])) {
-            $query->where('source', trim($validated['source']));
-        }
-
-        if (! empty($validated['pipeline_code'])) {
-            $query->whereHas('pipeline', fn ($builder) => $builder->where('code', trim($validated['pipeline_code'])));
-        }
-
-        if (! empty($validated['pipeline_type'])) {
-            $query->whereHas('pipeline', fn ($builder) => $builder->where('type', trim($validated['pipeline_type'])));
-        }
-
-        if ($this->dealAccess->isPrivilegedRole($this->dealAccess->roleSlug($authUser)) && ! empty($validated['branch_id'])) {
-            $query->where('branch_id', $validated['branch_id']);
-        }
-
-        if (array_key_exists('overdue_activity', $validated) && $validated['overdue_activity'] !== null) {
-            if ($request->boolean('overdue_activity')) {
-                $query
-                    ->whereNull('closed_at')
-                    ->whereNotNull('next_activity_at')
-                    ->where('next_activity_at', '<', now());
-            } else {
-                $query->where(function ($builder) {
-                    $builder
-                        ->whereNotNull('closed_at')
-                        ->orWhereNull('next_activity_at')
-                        ->orWhere('next_activity_at', '>=', now());
-                });
-            }
-        }
+        $sort = $validated['sort'] ?? 'id';
+        $dir = $validated['dir'] ?? 'desc';
 
         return response()->json(
-            $query->orderByDesc('id')
+            $query->orderBy($sort, $dir)
                 ->paginate((int) ($validated['per_page'] ?? 15))
                 ->withQueryString()
         );
@@ -635,6 +592,7 @@ class DealController extends Controller
     public function store(Request $request)
     {
         $authUser = $this->authUser();
+        $this->dealAccess->ensureCanCreate($authUser);
 
         $data = $this->validatePayload($request);
         $client = $this->resolveVisibleClient($authUser, $data['client_id'] ?? null);
@@ -716,11 +674,28 @@ class DealController extends Controller
 
     public function show(Request $request, Deal $deal)
     {
-        $this->dealAccess->ensureVisible($this->authUser(), $deal);
+        $authUser = $this->authUser();
+        $this->dealAccess->ensureVisible($authUser, $deal);
 
         $deal->load($this->relations());
         $this->appendActivitySummary($deal);
         $this->attachShowIncludes($deal, $this->parseIncludes($request));
+        $deal->setAttribute(
+            'capabilities',
+            $this->propertyControlWorkflow->isControlDeal($deal)
+                ? $this->propertyControlWorkflow->capabilities($authUser, $deal)
+                : null
+        );
+        if ($this->propertyControlWorkflow->isControlDeal($deal)) {
+            $this->auditLogger->log(
+                $deal,
+                $authUser,
+                'property_control_viewed',
+                [],
+                [],
+                'Просмотрена CRM-карточка контроля объекта.'
+            );
+        }
 
         return response()->json($deal);
     }
@@ -729,13 +704,30 @@ class DealController extends Controller
     {
         $authUser = $this->authUser();
         $this->dealAccess->ensureVisible($authUser, $deal);
+        $this->dealAccess->ensureCanUpdate($authUser, $deal);
 
         $data = $this->validatePayload($request, $deal);
+        if ($deal->isPropertyControl()) {
+            $forbiddenFields = array_diff(array_keys($data), ['responsible_agent_id', 'next_activity_at']);
+            if ($forbiddenFields !== []) {
+                throw ValidationException::withMessages(collect($forbiddenFields)
+                    ->mapWithKeys(fn ($field) => [$field => ['Поле недоступно для изменения в карточке контроля.']])
+                    ->all());
+            }
+        }
         $client = $this->resolveVisibleClient($authUser, $data['client_id'] ?? $deal->client_id);
         $lead = $this->resolveVisibleLead($authUser, $data['lead_id'] ?? $deal->lead_id);
         $property = $this->resolveVisibleProperty($authUser, $data['primary_property_id'] ?? $deal->primary_property_id);
         $data = $this->normalizeInput($data, $client, $lead, $property);
         $data = $this->dealAccess->normalizeMutationData($data, $authUser);
+        if ($deal->isPropertyControl() && array_key_exists('responsible_agent_id', $data) && $data['responsible_agent_id']) {
+            $responsible = User::query()->with('role')->findOrFail($data['responsible_agent_id']);
+            if ($responsible->role?->slug !== 'security') {
+                throw ValidationException::withMessages([
+                    'responsible_agent_id' => ['Ответственным за контроль может быть только сотрудник СБ.'],
+                ]);
+            }
+        }
         $data['updated_by'] = $authUser->id;
         $this->dealAccess->validateMutationTargets($authUser, array_merge([
             'created_by' => $deal->created_by,
@@ -785,6 +777,7 @@ class DealController extends Controller
     {
         $authUser = $this->authUser();
         $this->dealAccess->ensureVisible($authUser, $deal);
+        $this->dealAccess->ensureCanDelete($authUser, $deal);
 
         $this->auditLogger->log(
             $deal,
@@ -816,10 +809,31 @@ class DealController extends Controller
             'stage_id' => 'required|integer|exists:crm_deal_stages,id',
             'position' => 'nullable|integer|min:0',
             'lost_reason' => 'nullable|string',
+            'comment' => 'nullable|string|max:5000',
+            'updated_at' => 'nullable|date',
         ]);
 
         $targetStage = DealStage::query()->with('pipeline')->findOrFail($validated['stage_id']);
         $this->dealAccess->ensurePipelineVisible($authUser, $targetStage->pipeline);
+
+        if ($this->propertyControlWorkflow->isControlDeal($deal)) {
+            if (
+                ! empty($validated['updated_at'])
+                && ! $deal->updated_at?->equalTo(Carbon::parse($validated['updated_at']))
+            ) {
+                return response()->json([
+                    'message' => 'CRM_DEAL_CONFLICT',
+                    'code' => 'CRM_DEAL_CONFLICT',
+                ], 409);
+            }
+
+            $this->propertyControlWorkflow->ensureCanMove(
+                $authUser,
+                $deal,
+                $targetStage,
+                $validated['comment'] ?? null
+            );
+        }
 
         $oldValues = array_merge($this->stageSnapshot($deal), [
             'board_position' => $deal->board_position,
@@ -846,17 +860,89 @@ class DealController extends Controller
                 'board_position' => $movedDeal->board_position,
                 'lost_reason' => $movedDeal->lost_reason,
             ]),
-            ['deal_id' => $movedDeal->id],
-            'Deal moved on board.'
+            array_filter([
+                'deal_id' => $movedDeal->id,
+                'comment' => $validated['comment'] ?? null,
+            ], fn ($value) => $value !== null && $value !== ''),
+            $validated['comment'] ?? 'Deal moved on board.'
         );
 
-        $this->notifications->handleDealUpdated(
-            $movedDeal->fresh($this->relations()),
-            $authUser,
-            $oldValues,
-            ['stage_id' => $movedDeal->stage_id, 'pipeline_id' => $movedDeal->pipeline_id]
-        );
+        if ($this->propertyControlWorkflow->isControlDeal($movedDeal)) {
+            $this->notifications->handlePropertyControlStageChanged(
+                $movedDeal->fresh($this->relations()),
+                $authUser,
+                $oldValues['stage_slug'] ?? null,
+                (string) $movedDeal->stage?->slug
+            );
+        } else {
+            $this->notifications->handleDealUpdated(
+                $movedDeal->fresh($this->relations()),
+                $authUser,
+                $oldValues,
+                ['stage_id' => $movedDeal->stage_id, 'pipeline_id' => $movedDeal->pipeline_id]
+            );
+        }
 
         return response()->json($movedDeal);
+    }
+
+    public function claim(Deal $deal)
+    {
+        $authUser = $this->authUser();
+        $this->dealAccess->ensureVisible($authUser, $deal);
+
+        if (! $this->dealAccess->isSecurityRole($this->dealAccess->roleSlug($authUser))
+            || ! $this->propertyControlWorkflow->isControlDeal($deal)) {
+            return response()->json([
+                'message' => 'Действие недоступно.',
+                'code' => 'CRM_DEAL_FORBIDDEN',
+            ], 403);
+        }
+
+        $claimed = DB::transaction(function () use ($deal, $authUser) {
+            /** @var Deal $locked */
+            $locked = Deal::query()->with(['pipeline.stages', 'stage'])->lockForUpdate()->findOrFail($deal->id);
+
+            if (! empty($locked->responsible_agent_id) || $locked->stage?->slug !== PropertyControlWorkflow::STAGE_NEW) {
+                return null;
+            }
+
+            $target = $locked->pipeline->stages->firstWhere('slug', PropertyControlWorkflow::STAGE_SECURITY_REVIEW);
+            abort_unless($target, 422, 'CRM_STAGE_TRANSITION_NOT_ALLOWED');
+
+            $oldValues = $this->stageSnapshot($locked);
+            $locked->responsible_agent_id = $authUser->id;
+            $locked->updated_by = $authUser->id;
+            $locked->next_activity_at = now()->addHours((int) config('security-property-control.sla_hours.recheck', 24));
+            $locked->save();
+            $locked = $this->boardService->moveDeal($locked, $target);
+
+            $this->activityService->logAssignment(
+                $locked,
+                $authUser,
+                null,
+                $authUser->id,
+                ['deal_id' => $locked->id, 'source' => 'security_claim']
+            );
+            $this->activityService->logStatusChange(
+                $locked,
+                $authUser,
+                $oldValues,
+                $this->stageSnapshot($locked),
+                ['deal_id' => $locked->id],
+                'Карточка взята в работу сотрудником СБ.'
+            );
+
+            return $locked->fresh($this->relations());
+        });
+
+        if (! $claimed) {
+            return response()->json([
+                'message' => 'Карточка уже взята в работу.',
+                'code' => 'CRM_DEAL_ALREADY_CLAIMED',
+            ], 409);
+        }
+
+        return response()->json($claimed);
     }
 }

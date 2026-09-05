@@ -43,6 +43,8 @@ class Deal extends Model
         'last_contact_result',
         'next_activity_at',
         'source_property_status',
+        'control_kind',
+        'source_event_uuid',
         'updated_by',
     ];
 
@@ -142,5 +144,11 @@ class Deal extends Model
         }
 
         return null;
+    }
+
+    public function isPropertyControl(): bool
+    {
+        return $this->control_kind === 'security_property_closure'
+            || $this->pipeline?->isPropertyControl() === true;
     }
 }

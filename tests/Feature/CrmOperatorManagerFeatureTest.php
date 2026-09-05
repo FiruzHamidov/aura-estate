@@ -235,6 +235,8 @@ class CrmOperatorManagerFeatureTest extends TestCase
             $table->string('last_contact_result', 100)->nullable();
             $table->timestamp('next_activity_at')->nullable();
             $table->string('source_property_status', 40)->nullable();
+            $table->string('control_kind', 64)->nullable();
+            $table->uuid('source_event_uuid')->nullable()->unique();
             $table->unsignedBigInteger('updated_by')->nullable();
             $table->softDeletes();
             $table->timestamps();
@@ -319,7 +321,7 @@ class CrmOperatorManagerFeatureTest extends TestCase
         $this->getJson('/api/leads/'.$leadForeign->id)->assertForbidden();
     }
 
-    public function test_manager_sees_all_branch_deals_and_property_status_reopens_same_card(): void
+    public function test_manager_sees_all_branch_deals_and_repeated_property_status_creates_new_card(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
         $branchB = Branch::create(['name' => 'Branch B']);
@@ -404,14 +406,22 @@ class CrmOperatorManagerFeatureTest extends TestCase
         $property->update(['moderation_status' => 'approved']);
 
         $reactivatedCard = $createdCard->fresh(['stage']);
-        $this->assertSame('reactivated', $reactivatedCard->stage?->slug);
+        $this->assertSame('cancelled', $reactivatedCard->stage?->slug);
 
         $property->update(['moderation_status' => 'deleted']);
 
-        $reopenedCard = $createdCard->fresh(['stage']);
-        $this->assertSame('new', $reopenedCard->stage?->slug);
-        $this->assertSame(1, Deal::query()->where('primary_property_id', $property->id)->count());
-        $this->assertSame($propertyControlPipeline->id, $reopenedCard->pipeline_id);
+        $originalCard = $createdCard->fresh(['stage']);
+        $newCard = Deal::query()
+            ->where('primary_property_id', $property->id)
+            ->whereKeyNot($createdCard->id)
+            ->with('stage')
+            ->firstOrFail();
+
+        $this->assertSame('cancelled', $originalCard->stage?->slug);
+        $this->assertSame('new', $newCard->stage?->slug);
+        $this->assertSame(2, Deal::query()->where('primary_property_id', $property->id)->count());
+        $this->assertSame($propertyControlPipeline->id, $newCard->pipeline_id);
+        $this->assertNotSame($createdCard->source_event_uuid, $newCard->source_event_uuid);
 
         Sanctum::actingAs($manager);
 

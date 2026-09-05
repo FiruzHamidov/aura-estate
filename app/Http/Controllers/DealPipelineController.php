@@ -75,18 +75,7 @@ class DealPipelineController extends Controller
     private function defaultStagesPayload(string $type = DealPipeline::TYPE_SALES): array
     {
         if ($type === DealPipeline::TYPE_PROPERTY_CONTROL) {
-            return [
-                ['name' => 'Новая', 'slug' => 'new', 'color' => '#64748b', 'sort_order' => 10, 'is_default' => true, 'is_closed' => false, 'is_lost' => false, 'is_active' => true],
-                ['name' => 'На проверке', 'slug' => 'in_review', 'color' => '#2563eb', 'sort_order' => 20, 'is_default' => false, 'is_closed' => false, 'is_lost' => false, 'is_active' => true],
-                ['name' => 'Связались', 'slug' => 'contacted', 'color' => '#0891b2', 'sort_order' => 30, 'is_default' => false, 'is_closed' => false, 'is_lost' => false, 'is_active' => true],
-                ['name' => 'Ждём владельца', 'slug' => 'waiting_owner', 'color' => '#f59e0b', 'sort_order' => 40, 'is_default' => false, 'is_closed' => false, 'is_lost' => false, 'is_active' => true],
-                ['name' => 'Возврат в работу', 'slug' => 'reactivation_in_progress', 'color' => '#8b5cf6', 'sort_order' => 50, 'is_default' => false, 'is_closed' => false, 'is_lost' => false, 'is_active' => true],
-                ['name' => 'Реактивирован', 'slug' => 'reactivated', 'color' => '#16a34a', 'sort_order' => 60, 'is_default' => false, 'is_closed' => true, 'is_lost' => false, 'is_active' => true],
-                ['name' => 'Продан владельцем', 'slug' => 'owner_sold_confirmed', 'color' => '#dc2626', 'sort_order' => 70, 'is_default' => false, 'is_closed' => true, 'is_lost' => true, 'is_active' => true],
-                ['name' => 'Нет ответа', 'slug' => 'no_answer', 'color' => '#f97316', 'sort_order' => 80, 'is_default' => false, 'is_closed' => false, 'is_lost' => false, 'is_active' => true],
-                ['name' => 'Неактуально', 'slug' => 'not_relevant', 'color' => '#6b7280', 'sort_order' => 90, 'is_default' => false, 'is_closed' => true, 'is_lost' => true, 'is_active' => true],
-                ['name' => 'Закрыто', 'slug' => 'closed', 'color' => '#111827', 'sort_order' => 100, 'is_default' => false, 'is_closed' => true, 'is_lost' => true, 'is_active' => true],
-            ];
+            return config('security-property-control.stages', []);
         }
 
         return [
@@ -176,6 +165,11 @@ class DealPipelineController extends Controller
             'stages.*.is_active' => 'nullable|boolean',
             'stages.*.meta' => 'nullable|array',
         ]);
+        abort_if(
+            ($validated['type'] ?? null) === DealPipeline::TYPE_PROPERTY_CONTROL,
+            409,
+            'System property-control pipelines are created automatically for branches.'
+        );
 
         $validated = $this->normalizePayload($validated);
         $validated = $this->pipelineAccess->normalizeMutationData($validated, $authUser);
@@ -235,6 +229,11 @@ class DealPipelineController extends Controller
     {
         $authUser = $this->authUser();
         $this->pipelineAccess->ensureManageable($authUser, $dealPipeline);
+        abort_if(
+            $dealPipeline->code === DealPipeline::CODE_PROPERTY_CONTROL,
+            409,
+            'System property-control pipeline is managed by the application.'
+        );
 
         $validated = $request->validate([
             'name' => 'sometimes|string|max:255',
@@ -287,6 +286,11 @@ class DealPipelineController extends Controller
     {
         $authUser = $this->authUser();
         $this->pipelineAccess->ensureManageable($authUser, $dealPipeline);
+        abort_if(
+            $dealPipeline->code === DealPipeline::CODE_PROPERTY_CONTROL,
+            409,
+            'System property-control pipeline cannot be deleted.'
+        );
 
         if ($dealPipeline->deals()->exists()) {
             return response()->json([

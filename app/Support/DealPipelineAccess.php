@@ -29,6 +29,11 @@ class DealPipelineAccess
         return $roleSlug === 'hr';
     }
 
+    public function isSecurityRole(?string $roleSlug): bool
+    {
+        return $roleSlug === 'security';
+    }
+
     public function isBranchManager(?string $roleSlug): bool
     {
         return in_array($roleSlug, ['branch_director', 'rop'], true);
@@ -79,6 +84,12 @@ class DealPipelineAccess
 
         if ($this->isHrRole($roleSlug)) {
             return $query->where('code', DealPipeline::CODE_HR_RECRUITMENT);
+        }
+
+        if ($this->isSecurityRole($roleSlug)) {
+            return $query
+                ->where('code', DealPipeline::CODE_PROPERTY_CONTROL)
+                ->where('is_active', true);
         }
 
         if (! $this->isBranchScopedRole($roleSlug) || empty($authUser->branch_id)) {
