@@ -800,6 +800,23 @@ class PropertyModerationWorkflowTest extends TestCase
         $service->recordUpdateOutcome($property, $actor, $outcome);
     }
 
+    public function test_director_can_view_pending_property_in_own_branch_but_guests_and_other_branches_cannot(): void
+    {
+        [$agent, , $director] = $this->users();
+        $property = Property::create($this->propertyPayload($agent));
+        $this->moderation()->publicOrFail($property, $director);
+        $this->assertTrue(app(PropertyModerationAccess::class)->canModerate($director, $property));
+
+        foreach ([null, tap(clone $director, fn ($user) => $user->branch_id = 2)] as $viewer) {
+            try {
+                $this->moderation()->publicOrFail($property, $viewer);
+                $this->fail('Unpublished listing must not be exposed outside its authorized scope.');
+            } catch (\Symfony\Component\HttpKernel\Exception\HttpException $exception) {
+                $this->assertSame(404, $exception->getStatusCode());
+            }
+        }
+    }
+
     private function users(): array
     {
         $agentRole = Role::firstOrCreate(['slug' => 'agent'], ['name' => 'Agent']);
