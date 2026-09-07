@@ -189,6 +189,30 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertDatabaseCount('property_moderation_cases', 0);
     }
 
+    public function test_one_somoni_tjs_increase_stays_published_and_becomes_the_new_baseline(): void
+    {
+        [$agent] = $this->users();
+        $service = $this->moderation();
+        $property = Property::create($this->propertyPayload($agent, [
+            'moderation_status' => 'approved',
+            'publication_status' => 'published',
+            'approved_price' => 100_000,
+            'approved_effective_price' => 100_000,
+            'approved_currency' => 'TJS',
+            'approved_content_snapshot' => ['price' => 100_000, 'currency' => 'TJS'],
+            'moderation_version' => 1,
+        ]));
+
+        $property->price = 100_001;
+        $outcome = $service->evaluateUpdate($property, $agent);
+        $property->save();
+        $service->recordUpdateOutcome($property, $agent, $outcome);
+
+        $this->assertSame('published', $property->fresh()->publication_status);
+        $this->assertSame('100001.00', $property->fresh()->approved_effective_price);
+        $this->assertDatabaseCount('property_moderation_cases', 0);
+    }
+
     public function test_repeated_price_increases_keep_one_case_and_the_original_approved_baseline(): void
     {
         [$agent] = $this->users();
@@ -203,7 +227,7 @@ class PropertyModerationWorkflowTest extends TestCase
             'moderation_version' => 1,
         ]));
 
-        foreach ([100_001, 102_000, 103_000] as $price) {
+        foreach ([100_002, 102_000, 103_000] as $price) {
             $property = $property->fresh();
             $property->price = $price;
             $outcome = $service->evaluateUpdate($property, $agent);

@@ -1054,7 +1054,10 @@ final class PropertyModerationService
             $reasons[] = 'currency_changed';
         } else {
             $threshold = max(0.0, (float) config('property-moderation.price_increase_review_percent', 0));
-            $limit = (float) $approvedPrice * (1 + $threshold / 100);
+            $absoluteTolerance = $approvedCurrency === 'TJS'
+                ? max(0.0, (float) config('property-moderation.price_increase_tjs_tolerance', 1))
+                : 0.0;
+            $limit = (float) $approvedPrice * (1 + $threshold / 100) + $absoluteTolerance;
             if ($proposed['effective_price'] > $limit) {
                 $reasons[] = 'effective_price_increased';
             }

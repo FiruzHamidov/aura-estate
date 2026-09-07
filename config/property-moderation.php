@@ -5,6 +5,7 @@ return [
     'moderator_roles' => ['rop', 'branch_director', 'admin', 'superadmin'],
     'global_moderator_roles' => ['admin', 'superadmin'],
     'price_increase_review_percent' => (float) env('PROPERTY_PRICE_INCREASE_REVIEW_PERCENT', 0),
+    'price_increase_tjs_tolerance' => (float) env('PROPERTY_PRICE_INCREASE_TJS_TOLERANCE', 1),
     'promotion_default_days' => (int) env('PROPERTY_PROMOTION_DEFAULT_DAYS', 7),
     'promotion_max_days' => (int) env('PROPERTY_PROMOTION_MAX_DAYS', 30),
     'trust_window_days' => (int) env('PROPERTY_TRUST_WINDOW_DAYS', 90),
