@@ -955,6 +955,54 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertCount(2, $property->moderationCases()->open()->get());
     }
 
+    public function test_moderation_http_flow_exposes_case_rights_rejects_stale_version_and_publishes(): void
+    {
+        [$agent, $rop] = $this->users();
+        $service = $this->moderation();
+        $property = $this->publishedProperty($agent);
+        $this->saveChanges($service, $property, $agent, ['price' => 115000, 'address' => 'Адрес для HTTP E2E']);
+        $property->refresh();
+
+        $this->actingAs($rop);
+        $queue = $this->getJson('/api/property-moderation-cases');
+        $queue->assertOk();
+        $queuedCases = collect($queue->json('data'))->where('property_id', $property->id)->values();
+        $this->assertCount(2, $queuedCases);
+        $this->assertTrue($queuedCases->every(fn (array $case): bool => $case['can_decide'] === true && $case['blocked_reason'] === null));
+
+        $headers = ['Idempotency-Key' => 'moderation-http-e2e-stale'];
+        $this->postJson("/api/properties/{$property->id}/moderation/approve-all", [
+            'version' => $property->moderation_version - 1,
+            'comment' => 'Проверка устаревшей версии',
+        ], $headers)->assertStatus(409)->assertJson(['code' => 'MODERATION_VERSION_CONFLICT']);
+
+        $this->postJson("/api/properties/{$property->id}/moderation/approve-all", [
+            'version' => $property->moderation_version,
+            'comment' => 'Полный HTTP E2E пройден',
+        ], ['Idempotency-Key' => 'moderation-http-e2e-success'])
+            ->assertOk()
+            ->assertJsonPath('data.publication_status', 'published');
+
+        $this->assertSame('published', $property->fresh()->publication_status);
+        $this->assertDatabaseMissing('property_moderation_cases', ['property_id' => $property->id, 'status' => 'open']);
+    }
+
+    public function test_property_payload_marks_own_cases_as_not_decidable(): void
+    {
+        [$agent] = $this->users();
+        $service = $this->moderation();
+        $property = $this->publishedProperty($agent);
+        $this->saveChanges($service, $property, $agent, ['price' => 112000]);
+
+        $this->actingAs($agent);
+        $response = $this->getJson("/api/properties/{$property->id}");
+        $response->assertOk()
+            ->assertJsonPath('capabilities.can_approve', false)
+            ->assertJsonPath('capabilities.can_approve_all', false)
+            ->assertJsonPath('open_moderation_cases.0.can_decide', false)
+            ->assertJsonPath('open_moderation_cases.0.blocked_reason', 'outside_moderation_scope');
+    }
+
     private function publishedProperty(User $agent, array $overrides = []): Property
     {
         $service = $this->moderation();
