@@ -39,11 +39,18 @@ final class PropertyModerationController extends Controller
         $user = $request->user();
         abort_unless(in_array($user->role?->slug, config('property-moderation.moderator_roles', []), true), 403);
         $data = $request->validate(['type' => 'nullable|in:initial_review,price_increase,duplicate_review,content_review,appeal', 'per_page' => 'nullable|integer|min:1|max:100']);
-        $query = PropertyModerationCase::query()->open()->with(['property.photos', 'submitter.role', 'duplicateCandidates.candidateProperty.photos'])->oldest('submitted_at');
+        $query = PropertyModerationCase::query()->open()->with(['property.photos', 'parentCase', 'submitter.role', 'duplicateCandidates.candidateProperty.photos'])->oldest('submitted_at');
         $query->whereHas('property', fn ($properties) => $this->access->scopeModeratable($properties, $user));
         $query->when($data['type'] ?? null, fn ($cases, $type) => $cases->where('type', $type));
 
-        return response()->json($query->paginate($data['per_page'] ?? 25));
+        $page = $query->paginate($data['per_page'] ?? 25);
+        $page->getCollection()->each(function (PropertyModerationCase $case) use ($user): void {
+            $blockedReason = $this->access->decisionBlockReason($user, $case);
+            $case->setAttribute('can_decide', $blockedReason === null);
+            $case->setAttribute('blocked_reason', $blockedReason);
+        });
+
+        return response()->json($page);
     }
 
     public function promotionQueue(Request $request)
@@ -94,6 +101,18 @@ final class PropertyModerationController extends Controller
         $data = $request->validate(['comment' => 'nullable|string|max:2000', 'version' => 'required|integer|min:1']);
 
         return response()->json(['data' => $this->moderation->approveCase($case, $request->user(), $data['comment'] ?? null, $data['version'])]);
+    }
+
+    public function approveAll(Request $request, Property $property)
+    {
+        $data = $request->validate(['comment' => 'nullable|string|max:2000', 'version' => 'required|integer|min:0']);
+
+        return response()->json(['data' => $this->moderation->approveAllCases(
+            $property,
+            $request->user(),
+            $data['version'],
+            $data['comment'] ?? null,
+        )]);
     }
 
     public function reject(Request $request, PropertyModerationCase $case)

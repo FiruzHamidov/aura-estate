@@ -410,6 +410,54 @@ final class PropertyModerationService
         });
     }
 
+    public function approveAllCases(Property $property, User $actor, int $expectedVersion, ?string $comment = null): Property
+    {
+        return DB::transaction(function () use ($property, $actor, $expectedVersion, $comment): Property {
+            $lockedProperty = Property::query()->lockForUpdate()->findOrFail($property->id);
+            abort_if((int) $lockedProperty->moderation_version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
+            abort_if($this->hasConfirmedDuplicate($lockedProperty), 409, 'DUPLICATE_BLOCK_ACTIVE');
+
+            $cases = $lockedProperty->moderationCases()->open()->lockForUpdate()->get();
+            abort_if($cases->isEmpty(), 409, 'MODERATION_CASE_NOT_OPEN');
+
+            foreach ($cases as $case) {
+                $case->setRelation('property', $lockedProperty);
+                abort_if($case->type === PropertyModerationCase::TYPE_APPEAL, 409, 'APPEAL_REQUIRES_SEPARATE_DECISION');
+                abort_unless($this->access->canDecideCase($actor, $case), 403, strtoupper($this->access->decisionBlockReason($actor, $case) ?? 'MODERATION_PERMISSION_DENIED'));
+                abort_if(
+                    $case->type === PropertyModerationCase::TYPE_DUPLICATE
+                    && $case->duplicateCandidates()->where('decision', PropertyDuplicateCandidate::DECISION_PENDING)->exists(),
+                    409,
+                    'DUPLICATE_CANDIDATES_NOT_RESOLVED'
+                );
+            }
+
+            foreach ($cases as $case) {
+                $case->update([
+                    'status' => PropertyModerationCase::STATUS_APPROVED,
+                    'blocking' => false,
+                    'decided_by' => $actor->id,
+                    'decided_at' => now(),
+                    'decision_comment' => $comment,
+                    'version' => $case->version + 1,
+                ]);
+                $this->event($lockedProperty, $case, 'moderation_case_approved', $actor, [
+                    'comment' => $comment,
+                    'bulk' => true,
+                ]);
+            }
+
+            $lockedProperty->forceFill(array_merge([
+                'publication_status' => self::PUBLICATION_PUBLISHED,
+                'moderation_status' => Property::PUBLIC_MODERATION_STATUS,
+                'moderation_version' => (int) $lockedProperty->moderation_version + 1,
+                'approved_content_snapshot' => $this->contentSnapshot($lockedProperty),
+            ], $this->approvedPricePayload($lockedProperty->getAttributes(), $actor->id)))->save();
+
+            return $lockedProperty->fresh();
+        });
+    }
+
     public function rejectCase(
         PropertyModerationCase $case,
         User $actor,

@@ -489,6 +489,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         Route::patch('/properties/{property}/moderation-listing', [PropertyController::class, 'updateModerationAndListingType']);
         Route::post('/properties/{property}/moderation/withdraw-changes', [\App\Http\Controllers\PropertyModerationController::class, 'withdrawChanges'])->middleware('moderation.idempotent')->middleware('moderation.payload');
         Route::post('/properties/{property}/moderation/submit', [\App\Http\Controllers\PropertyModerationController::class, 'submit'])->middleware('moderation.idempotent')->middleware('moderation.payload');
+        Route::post('/properties/{property}/moderation/approve-all', [\App\Http\Controllers\PropertyModerationController::class, 'approveAll'])->middleware('moderation.idempotent')->middleware('moderation.payload');
         Route::post('/properties/{property}/moderation/withdraw-listing', [\App\Http\Controllers\PropertyModerationController::class, 'withdrawListing'])->middleware('moderation.idempotent')->middleware('moderation.payload');
         Route::post('/properties/{property}/withdraw', [\App\Http\Controllers\PropertyModerationController::class, 'withdrawListing'])->middleware('moderation.idempotent')->middleware('moderation.payload');
         Route::post('/properties/{property}/transfer', [\App\Http\Controllers\PropertyModerationController::class, 'transfer'])->middleware('moderation.idempotent')->middleware('moderation.payload:agent_id,co_owner_user_id');

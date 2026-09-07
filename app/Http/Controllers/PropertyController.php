@@ -449,9 +449,14 @@ class PropertyController extends Controller
 
         $cases = $property->moderationCases()
             ->open()
-            ->with(['submitter.role', 'duplicateCandidates.candidateProperty.photos'])
+            ->with(['parentCase', 'submitter.role', 'duplicateCandidates.candidateProperty.photos'])
             ->orderBy('submitted_at')
             ->get();
+        $cases->each(function (PropertyModerationCase $case) use ($user): void {
+            $blockedReason = $this->moderationAccess->decisionBlockReason($user, $case);
+            $case->setAttribute('can_decide', $blockedReason === null);
+            $case->setAttribute('blocked_reason', $blockedReason);
+        });
         $priceCase = $cases->firstWhere('type', PropertyModerationCase::TYPE_PRICE_INCREASE);
         $baseline = (array) ($priceCase?->baseline_snapshot ?? []);
         $proposed = (array) ($priceCase?->proposed_snapshot ?? []);
@@ -2182,16 +2187,22 @@ class PropertyController extends Controller
 
     public function duplicateCandidates(Request $request, Property $property)
     {
-        $this->authorizePropertyMutation($property);
+        $user = $this->authorizePropertyMutation($property);
 
         $data = $property->getAttributes();
+        $cases = Schema::hasTable('property_moderation_cases')
+            ? $property->moderationCases()->with(['parentCase', 'submitter.role', 'duplicateCandidates.candidateProperty.photos'])->latest()->get()
+            : collect();
+        $cases->each(function (PropertyModerationCase $case) use ($user): void {
+            $blockedReason = $this->moderationAccess->decisionBlockReason($user, $case);
+            $case->setAttribute('can_decide', $blockedReason === null);
+            $case->setAttribute('blocked_reason', $blockedReason);
+        });
 
         return response()->json([
             'property_id' => (int) $property->id,
             'duplicates' => $this->propertyDuplicateService->find($data, (int) $property->id),
-            'cases' => Schema::hasTable('property_moderation_cases')
-                ? $property->moderationCases()->with(['submitter.role', 'duplicateCandidates.candidateProperty.photos'])->latest()->get()
-                : [],
+            'cases' => $cases,
             'quality_warnings' => $this->propertyQualityService->inspect($data),
         ]);
     }
@@ -2579,14 +2590,14 @@ class PropertyController extends Controller
             'address' => 'nullable|string',
             'contract_type_id' => 'nullable|exists:contract_types,id',
             'document_type_id' => 'nullable|exists:document_types,id',
-            'type_id' => 'required|exists:property_types,id',
+            'type_id' => ($isUpdate ? 'sometimes' : 'required').'|exists:property_types,id',
             'status_id' => 'nullable|exists:property_statuses,id',
             'location_id' => 'nullable|exists:locations,id',
             'repair_type_id' => 'nullable|exists:repair_types,id',
-            'price' => 'required|numeric',
+            'price' => ($isUpdate ? 'sometimes' : 'required').'|numeric',
             'discount_price' => 'nullable|numeric|gt:0',
-            'currency' => 'required|in:TJS,USD',
-            'offer_type' => 'required|in:rent,sale',
+            'currency' => ($isUpdate ? 'sometimes' : 'required').'|in:TJS,USD',
+            'offer_type' => ($isUpdate ? 'sometimes' : 'required').'|in:rent,sale',
             'rooms' => 'nullable|integer|min:1|max:10',
             'youtube_link' => 'nullable|url',
             'instagram_link' => [

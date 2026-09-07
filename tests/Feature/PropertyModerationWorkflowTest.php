@@ -918,6 +918,43 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertSame('100000.00', $property->fresh()->approved_price);
     }
 
+    public function test_independent_moderator_can_approve_all_open_cases_and_publish_once(): void
+    {
+        [$agent, $rop] = $this->users();
+        $service = $this->moderation();
+        $property = $this->publishedProperty($agent);
+        $this->saveChanges($service, $property, $agent, ['price' => 110000, 'address' => 'Новый подтверждённый адрес']);
+        $property->refresh();
+
+        $this->assertSame('pending', $property->publication_status);
+        $this->assertCount(2, $property->moderationCases()->open()->get());
+
+        $approved = $service->approveAllCases($property, $rop, $property->moderation_version, 'Проверено полностью');
+
+        $this->assertSame('published', $approved->publication_status);
+        $this->assertDatabaseMissing('property_moderation_cases', ['property_id' => $property->id, 'status' => 'open']);
+        $this->assertDatabaseCount('property_moderation_cases', 2);
+    }
+
+    public function test_owner_cannot_bulk_approve_own_cases(): void
+    {
+        [$agent] = $this->users();
+        $service = $this->moderation();
+        $property = $this->publishedProperty($agent);
+        $this->saveChanges($service, $property, $agent, ['price' => 110000, 'address' => 'Новый адрес']);
+        $property->refresh();
+
+        try {
+            $service->approveAllCases($property, $agent, $property->moderation_version, 'Самопроверка');
+            $this->fail('Owner must not approve own moderation cases.');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $exception) {
+            $this->assertSame(403, $exception->getStatusCode());
+        }
+
+        $this->assertSame('pending', $property->fresh()->publication_status);
+        $this->assertCount(2, $property->moderationCases()->open()->get());
+    }
+
     private function publishedProperty(User $agent, array $overrides = []): Property
     {
         $service = $this->moderation();

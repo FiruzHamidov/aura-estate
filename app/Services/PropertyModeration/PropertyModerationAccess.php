@@ -3,6 +3,7 @@
 namespace App\Services\PropertyModeration;
 
 use App\Models\Property;
+use App\Models\PropertyDuplicateCandidate;
 use App\Models\PropertyModerationCase;
 use App\Models\PropertyModerationEvent;
 use App\Models\PropertyPromotion;
@@ -97,29 +98,38 @@ final class PropertyModerationAccess
 
     public function canDecideCase(User $user, PropertyModerationCase $case): bool
     {
+        return $this->decisionBlockReason($user, $case) === null;
+    }
+
+    public function decisionBlockReason(User $user, PropertyModerationCase $case): ?string
+    {
         $case->loadMissing(['property', 'parentCase']);
         if (! $this->canModerate($user, $case->property)) {
-            return false;
+            return 'outside_moderation_scope';
         }
 
         if (PropertyModerationEvent::query()->where('moderation_case_id', $case->id)
             ->where('actor_id', $user->id)
             ->whereIn('event_type', ['price_review_opened', 'content_review_opened', 'duplicate_review_opened', 'property_media_changed', 'case_proposal_edited'])
             ->exists()) {
-            return false;
+            return 'reviewer_edited_case';
         }
 
         if ($case->type === PropertyModerationCase::TYPE_APPEAL && $case->parentCase?->duplicateCandidates()->where('decided_by', $user->id)->exists()) {
-            return false;
+            return 'appeal_reviewer_conflict';
         }
 
-        return ! in_array((int) $user->id, array_filter([
+        if (in_array((int) $user->id, array_filter([
             (int) $case->submitted_by,
             (int) $case->property->created_by,
             (int) $case->property->agent_id,
             (int) ($case->property->co_owner_user_id ?? 0),
             (int) ($case->parentCase?->decided_by ?? 0),
-        ]), true);
+        ]), true)) {
+            return 'self_approval_forbidden';
+        }
+
+        return null;
     }
 
     public function capabilities(?User $user, Property $property): array
@@ -130,6 +140,7 @@ final class PropertyModerationAccess
                 'can_submit' => false,
                 'can_moderate' => false,
                 'can_approve' => false,
+                'can_approve_all' => false,
                 'can_resolve_duplicate' => false,
                 'can_appeal' => false,
                 'can_resolve_appeal' => false,
@@ -138,13 +149,14 @@ final class PropertyModerationAccess
                 'can_approve_promotion' => false,
                 'can_withdraw_changes' => false,
                 'can_withdraw_listing' => false,
+                'submit_requires_review' => false,
             ];
         }
 
         $canEdit = $this->canEdit($user, $property);
         $canModerate = $this->canModerate($user, $property);
         $openCases = Schema::hasTable('property_moderation_cases')
-            ? $property->moderationCases()->open()->with('parentCase')->get()
+            ? $property->moderationCases()->open()->with(['parentCase', 'duplicateCandidates'])->get()
             : collect();
         $decidableCases = $openCases->filter(fn (PropertyModerationCase $case) => $this->canDecideCase($user, $case));
         $ownsProperty = in_array((int) $user->id, array_filter([
@@ -165,6 +177,12 @@ final class PropertyModerationAccess
             'can_submit' => $canEdit,
             'can_moderate' => $canEdit || $canModerate,
             'can_approve' => $decidableCases->isNotEmpty(),
+            'can_approve_all' => $openCases->isNotEmpty()
+                && $decidableCases->count() === $openCases->count()
+                && ! $openCases->contains('type', PropertyModerationCase::TYPE_APPEAL)
+                && ! $openCases->contains(fn (PropertyModerationCase $case) => $case->type === PropertyModerationCase::TYPE_DUPLICATE
+                    && $case->duplicateCandidates->contains('decision', PropertyDuplicateCandidate::DECISION_PENDING)
+                ),
             'can_resolve_duplicate' => $decidableCases->contains('type', PropertyModerationCase::TYPE_DUPLICATE),
             'can_appeal' => $canEdit && Schema::hasTable('property_moderation_cases') && $property->moderationCases()
                 ->whereIn('status', [PropertyModerationCase::STATUS_REJECTED, PropertyModerationCase::STATUS_MERGED])
@@ -176,6 +194,7 @@ final class PropertyModerationAccess
                 ->contains(fn (PropertyPromotion $promotion) => (int) $promotion->requested_by !== (int) $user->id),
             'can_withdraw_changes' => $canEdit,
             'can_withdraw_listing' => $canEdit,
+            'submit_requires_review' => $canEdit && (array) $property->approved_content_snapshot !== [],
         ];
     }
 
