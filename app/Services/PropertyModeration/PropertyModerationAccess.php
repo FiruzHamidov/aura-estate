@@ -128,6 +128,7 @@ final class PropertyModerationAccess
             return [
                 'can_edit' => false,
                 'can_submit' => false,
+                'can_moderate' => false,
                 'can_approve' => false,
                 'can_resolve_duplicate' => false,
                 'can_appeal' => false,
@@ -162,6 +163,7 @@ final class PropertyModerationAccess
         return [
             'can_edit' => $canEdit,
             'can_submit' => $canEdit,
+            'can_moderate' => $canEdit || $canModerate,
             'can_approve' => $decidableCases->isNotEmpty(),
             'can_resolve_duplicate' => $decidableCases->contains('type', PropertyModerationCase::TYPE_DUPLICATE),
             'can_appeal' => $canEdit && Schema::hasTable('property_moderation_cases') && $property->moderationCases()

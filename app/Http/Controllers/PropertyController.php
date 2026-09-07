@@ -228,7 +228,7 @@ class PropertyController extends Controller
         return array_merge($workflow, [
             'can_refresh_listing_date' => $canMutate && $refreshState['available'],
             'can_view_history' => $canMutate,
-            'can_moderate' => $workflow['can_approve'],
+            'can_moderate' => $workflow['can_moderate'],
             'can_manage_co_owner' => $canMutate,
         ]);
     }
@@ -2554,6 +2554,7 @@ class PropertyController extends Controller
     {
         $actor = $this->authorizePropertyMutation($property);
         $this->moderation->assertNoProtectedFields($request, [], $actor, $property);
+
         return response()->json([
             'code' => 'MODERATION_ENDPOINT_RETIRED',
             'message' => 'Используйте отдельные действия модерации и endpoint /properties/{id}/deal.',

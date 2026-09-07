@@ -665,6 +665,7 @@ class PropertyModerationWorkflowTest extends TestCase
         $middleware = new EnsurePropertyModerationIdempotency;
         $failed = $middleware->handle($request, function () use ($agent) {
             Property::create($this->propertyPayload($agent));
+
             // Laravel's routing pipeline can render an exception before it reaches this middleware.
             return response()->json(['message' => 'Server Error.'], 500);
         });
@@ -675,6 +676,7 @@ class PropertyModerationWorkflowTest extends TestCase
         $calls = 0;
         $action = function () use ($agent, &$calls) {
             $calls++;
+
             return response()->json(['id' => Property::create($this->propertyPayload($agent))->id], 201);
         };
         $retried = $middleware->handle($request, $action);
@@ -843,6 +845,21 @@ class PropertyModerationWorkflowTest extends TestCase
 
         $this->assertSame('900111111', $restored->owner_phone);
         $this->assertSame('published', $restored->publication_status);
+    }
+
+    public function test_editor_can_open_moderation_controls_without_self_approval(): void
+    {
+        [$agent] = $this->users();
+        $service = $this->moderation();
+        $property = $this->publishedProperty($agent);
+        $this->saveChanges($service, $property, $agent, ['price' => 110000]);
+
+        $capabilities = app(PropertyModerationAccess::class)->capabilities($agent, $property->fresh());
+
+        $this->assertTrue($capabilities['can_moderate']);
+        $this->assertFalse($capabilities['can_approve']);
+        $this->assertTrue($capabilities['can_withdraw_changes']);
+        $this->assertTrue($capabilities['can_withdraw_listing']);
     }
 
     public function test_queue_scope_does_not_follow_creator_into_another_branch(): void
