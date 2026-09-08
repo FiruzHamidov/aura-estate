@@ -396,6 +396,37 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertSame('regular', $property->fresh()->listing_type);
     }
 
+    public function test_duplicate_confirmation_without_comment_deletes_only_duplicate_on_both_routes(): void
+    {
+        [$agent, $rop] = $this->users();
+        $this->actingAs($rop);
+        foreach (['generic', 'property'] as $route) {
+            $original = $this->publishedProperty($rop);
+            $duplicate = $this->publishedProperty($agent);
+            $case = PropertyModerationCase::create([
+                'property_id' => $duplicate->id, 'type' => PropertyModerationCase::TYPE_DUPLICATE,
+                'status' => PropertyModerationCase::STATUS_OPEN, 'blocking' => true,
+                'submitted_by' => $agent->id, 'submitted_at' => now(), 'version' => 1,
+            ]);
+            $candidate = PropertyDuplicateCandidate::create([
+                'moderation_case_id' => $case->id, 'candidate_property_id' => $original->id, 'score' => 99,
+            ]);
+            $url = $route === 'generic'
+                ? "/api/property-duplicate-candidates/{$candidate->id}/decision"
+                : "/api/properties/{$duplicate->id}/duplicates/{$candidate->id}/confirm";
+            $payload = ['version' => 1, 'decision' => 'confirmed_duplicate'];
+            if ($route === 'property') unset($payload['decision']);
+            $this->postJson($url, $payload, ['Idempotency-Key' => "duplicate-no-comment-{$route}"])
+                ->assertOk()->assertJsonPath('data.moderation_status', 'deleted')
+                ->assertJsonPath('data.publication_status', 'archived');
+            $this->assertDatabaseHas('properties', ['id' => $duplicate->id, 'duplicate_of_property_id' => $original->id]);
+            $this->assertFalse(Property::query()->publicSearchable()->whereKey($duplicate->id)->exists());
+            $this->assertSame('published', $original->fresh()->publication_status);
+            $this->assertSame('approved', $original->fresh()->moderation_status);
+            $this->assertSame(PropertyDuplicateCandidate::DECISION_CONFIRMED, $candidate->fresh()->decision);
+        }
+    }
+
     public function test_confirmed_duplicate_blocks_withdraw_and_publication(): void
     {
         [$agent, $rop] = $this->users();
@@ -418,7 +449,8 @@ class PropertyModerationWorkflowTest extends TestCase
         ]);
 
         $service->decideDuplicate($candidate, $rop, PropertyDuplicateCandidate::DECISION_CONFIRMED, 'Один владелец и адрес');
-        $this->assertSame('rejected', $duplicate->fresh()->publication_status);
+        $this->assertSame('archived', $duplicate->fresh()->publication_status);
+        $this->assertSame('deleted', $duplicate->fresh()->moderation_status);
         $this->assertSame($original->id, $duplicate->fresh()->duplicate_of_property_id);
 
         $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);

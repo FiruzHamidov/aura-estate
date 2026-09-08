@@ -832,8 +832,8 @@ final class PropertyModerationService
 
             if ($decision === PropertyDuplicateCandidate::DECISION_CONFIRMED) {
                 $property->forceFill([
-                    'publication_status' => self::PUBLICATION_REJECTED,
-                    'moderation_status' => 'rejected',
+                    'publication_status' => self::PUBLICATION_ARCHIVED,
+                    'moderation_status' => 'deleted',
                     'duplicate_of_property_id' => $candidate->candidate_property_id,
                     'moderation_version' => (int) $property->moderation_version + 1,
                 ])->save();

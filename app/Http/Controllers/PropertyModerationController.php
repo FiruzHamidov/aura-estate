@@ -165,11 +165,11 @@ final class PropertyModerationController extends Controller
     {
         $data = $request->validate([
             'decision' => 'required|in:not_duplicate,confirmed_duplicate',
-            'comment' => 'required|string|max:2000',
+            'comment' => 'required_if:decision,not_duplicate|nullable|string|max:2000',
             'version' => 'required|integer|min:1',
         ]);
 
-        return response()->json(['data' => $this->mutationData($this->moderation->decideDuplicate($candidate, $request->user(), $data['decision'], $data['comment'], $data['version']))]);
+        return response()->json(['data' => $this->mutationData($this->moderation->decideDuplicate($candidate, $request->user(), $data['decision'], $data['comment'] ?? '', $data['version']))]);
     }
 
     public function appeal(Request $request, PropertyModerationCase $case)
@@ -246,13 +246,13 @@ final class PropertyModerationController extends Controller
     {
         $candidate->loadMissing('moderationCase');
         abort_unless((int) $candidate->moderationCase?->property_id === (int) $property->id, 404);
-        $data = $request->validate(['comment' => 'required|string|max:2000', 'version' => 'required|integer|min:1']);
+        $data = $request->validate(['comment' => ($decision === PropertyDuplicateCandidate::DECISION_CONFIRMED ? 'nullable' : 'required').'|string|max:2000', 'version' => 'required|integer|min:1']);
 
         return response()->json(['data' => $this->mutationData($this->moderation->decideDuplicate(
             $candidate,
             $request->user(),
             $decision,
-            $data['comment'],
+            $data['comment'] ?? '',
             $data['version'],
         ))]);
     }
