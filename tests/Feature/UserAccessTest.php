@@ -903,6 +903,44 @@ class UserAccessTest extends TestCase
         $this->deleteJson('/api/user/'.$client->id, ['distribute_to_agents' => true])->assertStatus(403);
     }
 
+    public function test_hr_can_edit_and_transfer_employees_through_director_but_not_admins(): void
+    {
+        $branchA = Branch::create(['name' => 'A']);
+        $branchB = Branch::create(['name' => 'B']);
+        $groupA = BranchGroup::create(['name' => 'A', 'branch_id' => $branchA->id]);
+        $groupB = BranchGroup::create(['name' => 'B', 'branch_id' => $branchB->id]);
+        $hrRole = Role::create(['name' => 'HR', 'slug' => 'hr']);
+        $hr = User::create(['name' => 'HR', 'phone' => '900009000', 'role_id' => $hrRole->id, 'branch_id' => $branchA->id, 'status' => 'active']);
+        Sanctum::actingAs($hr);
+
+        $protected = [];
+        foreach (['admin', 'superadmin', 'owner', 'marketing', 'accountant'] as $index => $slug) {
+            $role = Role::create(['name' => $slug, 'slug' => $slug]);
+            $protected[] = $role;
+            $user = User::create(['name' => $slug, 'phone' => '90000901'.$index, 'role_id' => $role->id, 'status' => 'active']);
+            $this->patchJson('/api/user/'.$user->id, ['name' => 'Blocked', 'branch_id' => $branchB->id])->assertForbidden();
+            $this->assertSame($slug, $user->fresh()->name);
+        }
+        $protected[] = $hrRole;
+        foreach (['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'external_agent', 'rop', 'branch_director'] as $index => $slug) {
+            $role = Role::create(['name' => $slug, 'slug' => $slug]);
+            $user = User::create(['name' => $slug, 'phone' => '90000902'.$index, 'role_id' => $role->id, 'branch_id' => $branchA->id, 'branch_group_id' => $groupA->id, 'status' => 'active']);
+            if ($slug !== 'reels_manager') {
+                $this->patchJson('/api/user/'.$user->id, ['branch_id' => $branchB->id])->assertStatus(422);
+            }
+            $this->patchJson('/api/user/'.$user->id, [
+                'name' => 'Updated '.$slug, 'role_id' => $role->id,
+                'branch_id' => $branchB->id, 'branch_group_id' => $groupB->id,
+            ])->assertOk()->assertJsonPath('name', 'Updated '.$slug)
+                ->assertJsonPath('role.slug', $slug)->assertJsonPath('branch_id', $branchB->id)
+                ->assertJsonPath('branch_group_id', $slug === 'reels_manager' ? null : $groupB->id);
+            $this->assertEquals($branchB->id, $user->fresh()->branch_id);
+            foreach ($protected as $forbiddenRole) {
+                $this->patchJson('/api/user/'.$user->id, ['role_id' => $forbiddenRole->id])->assertStatus(422);
+            }
+        }
+    }
+
     public function test_hr_and_branch_director_can_save_client_details_without_email(): void
     {
         $branch = Branch::create(['name' => 'Client branch']);

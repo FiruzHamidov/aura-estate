@@ -22,7 +22,7 @@ class UserController extends Controller
     private const REPORT_AGENT_ROLE_SLUGS = ['agent', 'intern', 'rop', 'mop'];
     private const PUBLIC_AGENT_ROLE_SLUGS = ['agent', 'mop'];
     private const HR_EMPLOYEE_ROLE_SLUGS = ['agent', 'rop', 'mop', 'branch_director'];
-    private const HR_EDITABLE_ROLE_SLUGS = ['agent', 'rop', 'mop', 'branch_director', 'client'];
+    private const HR_EDITABLE_ROLE_SLUGS = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'external_agent', 'rop', 'branch_director', 'client'];
     private const HR_CREATABLE_ROLE_SLUGS = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop'];
     private const ROP_EDITABLE_ROLE_SLUGS = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'external_agent', 'rop', 'client'];
 
@@ -331,6 +331,14 @@ class UserController extends Controller
             $targetUser->loadMissing('role');
             if ($this->roleSlug($targetUser) === $targetRole->slug
                 && in_array($targetRole->slug, self::ROP_EDITABLE_ROLE_SLUGS, true)) {
+                return;
+            }
+        }
+
+        if ($targetUser && $this->roleSlug($authUser) === 'hr') {
+            $targetUser->loadMissing('role');
+            if ($this->roleSlug($targetUser) === $targetRole->slug
+                && in_array($targetRole->slug, self::HR_EDITABLE_ROLE_SLUGS, true)) {
                 return;
             }
         }
