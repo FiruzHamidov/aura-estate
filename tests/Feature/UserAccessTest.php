@@ -1915,6 +1915,64 @@ class UserAccessTest extends TestCase
         $inactiveResponse->assertJsonMissing(['phone' => '900000109']);
     }
 
+    public static function hrLifecycleRoles(): array
+    {
+        $cases = [];
+        foreach (['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'branch_director'] as $slug) {
+            $cases[$slug] = [$slug, true];
+        }
+        foreach (['client', 'external_agent', 'admin', 'superadmin', 'owner', 'hr', 'marketing', 'accountant', 'custom_role'] as $slug) {
+            $cases[$slug] = [$slug, false];
+        }
+
+        return $cases;
+    }
+
+    #[DataProvider('hrLifecycleRoles')]
+    public function test_hr_employee_dismissal_and_restoration_permissions(string $slug, bool $allowed): void
+    {
+        $branch = Branch::create(['name' => 'HR Branch']);
+        $otherBranch = Branch::create(['name' => 'Employee Branch']);
+        $hrRole = Role::create(['name' => 'HR', 'slug' => 'hr']);
+        $role = Role::firstOrCreate(['slug' => $slug], ['name' => $slug]);
+        $hr = User::create([
+            'name' => 'HR', 'phone' => '901170001', 'role_id' => $hrRole->id,
+            'branch_id' => $branch->id, 'status' => 'active',
+        ]);
+        $employee = User::create([
+            'name' => 'Employee', 'phone' => '901170002', 'role_id' => $role->id,
+            'branch_id' => $otherBranch->id, 'status' => 'active',
+        ]);
+        $employee->createToken('session');
+        Sanctum::actingAs($hr);
+
+        $response = $this->deleteJson('/api/user/'.$employee->id, ['distribute_to_agents' => true]);
+        if (! $allowed) {
+            $response->assertForbidden();
+            $this->assertSame('active', $employee->fresh()->status);
+            $this->assertSame(1, $employee->tokens()->count());
+            $this->postJson('/api/user/'.$employee->id.'/restore')->assertForbidden();
+            $employee->update(['status' => 'inactive']);
+            $this->postJson('/api/user/'.$employee->id.'/restore')->assertForbidden();
+            $this->assertSame('inactive', $employee->fresh()->status);
+
+            return;
+        }
+
+        $response->assertOk()->assertJsonPath('dismissed_user_id', $employee->id);
+        $this->assertSame('inactive', $employee->fresh()->status);
+        $this->assertSame(0, $employee->tokens()->count());
+        $this->getJson('/api/user?status=inactive')->assertOk()->assertJsonFragment(['id' => $employee->id]);
+        $this->postJson('/api/user/'.$employee->id.'/restore')->assertOk();
+        $this->assertSame('active', $employee->fresh()->status);
+        $this->assertDatabaseHas('crm_audit_logs', [
+            'auditable_id' => $employee->id, 'actor_id' => $hr->id, 'event' => 'user_restored',
+        ]);
+        $this->postJson('/api/user/'.$employee->id.'/restore')
+            ->assertOk()->assertJsonPath('message', 'Пользователь уже активен');
+        $this->assertSame(1, DB::table('crm_audit_logs')->where('event', 'user_restored')->where('auditable_id', $employee->id)->count());
+    }
+
     public function test_restore_user_reactivates_inactive_user_and_writes_audit_log(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);

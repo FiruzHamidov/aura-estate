@@ -21,7 +21,7 @@ class UserController extends Controller
 {
     private const REPORT_AGENT_ROLE_SLUGS = ['agent', 'intern', 'rop', 'mop'];
     private const PUBLIC_AGENT_ROLE_SLUGS = ['agent', 'mop'];
-    private const HR_EMPLOYEE_ROLE_SLUGS = ['agent', 'rop', 'mop', 'branch_director'];
+    private const HR_EMPLOYEE_ROLE_SLUGS = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'branch_director'];
     private const HR_EDITABLE_ROLE_SLUGS = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'external_agent', 'rop', 'branch_director', 'client'];
     private const HR_CREATABLE_ROLE_SLUGS = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop'];
     private const ROP_EDITABLE_ROLE_SLUGS = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'external_agent', 'rop', 'client'];
@@ -276,7 +276,7 @@ class UserController extends Controller
         }
 
         $targetUser->loadMissing('role');
-        $allowedRoles = $operation === 'dismiss'
+        $allowedRoles = in_array($operation, ['dismiss', 'restore'], true)
             ? self::HR_EMPLOYEE_ROLE_SLUGS
             : self::HR_EDITABLE_ROLE_SLUGS;
 
@@ -898,11 +898,16 @@ class UserController extends Controller
         $authUser = $this->authUser();
         $authRole = $this->roleSlug($authUser);
 
-        $canRestore = in_array($authRole, ['superadmin', 'admin', 'rop', 'branch_director'], true);
+        $canRestore = in_array($authRole, ['superadmin', 'admin', 'rop', 'branch_director', 'hr'], true);
         abort_unless($canRestore, 403, 'Forbidden');
 
         if ($this->isBranchScopedManager($authRole)) {
             abort_unless((int) $user->branch_id === (int) $authUser->branch_id, 403, 'Forbidden');
+        }
+
+        if ($authRole === 'hr') {
+            $this->ensureUserIsVisible($authUser, $user, false);
+            $this->authorizeUserMutation($authUser, $user, 'restore');
         }
 
         if ($user->status === User::STATUS_ACTIVE) {
