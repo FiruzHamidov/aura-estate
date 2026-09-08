@@ -2577,6 +2577,14 @@ class PropertyController extends Controller
      */
     public function validateProperty(Request $request, bool $isUpdate = false, ?Property $property = null)
     {
+        // Older multipart clients encode an empty selection as the JSON string "[]".
+        // Keep missing fields absent (PATCH semantics), but accept explicit clearing.
+        foreach (['features', 'tags'] as $field) {
+            if (is_string($request->input($field)) && in_array(trim($request->input($field)), ['', '[]'], true)) {
+                $request->merge([$field => []]);
+            }
+        }
+
         if (is_string($request->input('instagram_link'))) {
             $request->merge([
                 'instagram_link' => trim($request->input('instagram_link')),
