@@ -151,7 +151,7 @@ return Application::configure(basePath: dirname(__DIR__))
                     500 => 'INTERNAL_ERROR',
                     default => 'REQUEST_FAILED',
                 },
-                'message' => $message,
+                'message' => config('moderation-messages.'.($domainCode ?? ''), $message),
                 'details' => (object) [],
                 'trace_id' => $request->attributes->get('trace_id'),
             ], $status);

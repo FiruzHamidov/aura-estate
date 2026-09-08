@@ -17,6 +17,24 @@ final class PropertyPromotionService
         private readonly PropertyModerationService $moderation,
     ) {}
 
+    public function setType(Property $property, User $actor, string $type, int $days, string $comment, int $expectedVersion): Property
+    {
+        return DB::transaction(function () use ($property, $actor, $type, $days, $comment, $expectedVersion): Property {
+            $locked = Property::query()->lockForUpdate()->findOrFail($property->id);
+            abort_unless($this->access->canModerate($actor, $locked), 403, 'PROMOTION_PERMISSION_DENIED');
+            abort_if((int) $locked->moderation_version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
+            abort_unless($this->moderation->isPublic($locked), 409, 'PROMOTION_BLOCKED_BY_MODERATION');
+            abort_unless(in_array($type, ['regular', 'vip', 'urgent'], true) && $days >= 1 && $days <= 30, 422);
+            foreach ($locked->promotions()->whereIn('status', [PropertyPromotion::STATUS_REQUESTED, PropertyPromotion::STATUS_ACTIVE])->get() as $promotion) {
+                $this->revoke($promotion, $actor, $comment ?: 'Изменён тип продвижения', $promotion->version);
+            }
+            if ($type !== 'regular') {
+                $this->request($locked->fresh(), $actor, $type, $comment ?: 'Продвижение включено руководителем', $days, (int) $locked->fresh()->moderation_version);
+            }
+            return $locked->fresh();
+        });
+    }
+
     public function request(Property $property, User $actor, string $type, string $comment, int $requestedDays, int $expectedVersion): PropertyPromotion
     {
         abort_unless(in_array($type, [PropertyPromotion::TYPE_VIP, PropertyPromotion::TYPE_URGENT], true), 422);
@@ -43,6 +61,9 @@ final class PropertyPromotionService
             $lockedProperty->forceFill([
                 'moderation_version' => (int) $lockedProperty->moderation_version + 1,
             ])->save();
+            if ($this->access->canModerate($actor, $lockedProperty) && $this->moderation->isPublic($lockedProperty)) {
+                return $this->approve($promotion, $actor, $requestedDays, $comment, 1);
+            }
             app(PropertyModerationNotifier::class)->promotionEvent($promotion, 'requested', $actor);
             $this->moderation->auditPromotionEvent($lockedProperty, $actor, 'property_promotion_requested', ['promotion_id' => $promotion->id, 'type' => $type, 'requested_days' => $requestedDays]);
 
@@ -59,13 +80,6 @@ final class PropertyPromotionService
             abort_unless($promotion->status === PropertyPromotion::STATUS_REQUESTED, 409, 'PROMOTION_NOT_REQUESTED');
             abort_if($expectedVersion !== null && $promotion->version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
             abort_unless($this->access->canModerate($actor, $promotion->property), 403, 'PROMOTION_PERMISSION_DENIED');
-            abort_if(in_array((int) $actor->id, array_filter([
-                (int) $promotion->requested_by,
-                (int) $promotion->property->created_by,
-                (int) $promotion->property->agent_id,
-                (int) ($promotion->property->co_owner_user_id ?? 0),
-            ]), true), 403, 'SELF_APPROVAL_FORBIDDEN');
-            abort_if($this->lastSubstantialEditorId($promotion->property) === (int) $actor->id, 403, 'SELF_APPROVAL_FORBIDDEN');
             abort_unless($this->moderation->isPublic($promotion->property), 409, 'PROMOTION_BLOCKED_BY_MODERATION');
 
             $days = min(max(1, $days), (int) config('property-moderation.promotion_max_days', 30));
@@ -101,12 +115,6 @@ final class PropertyPromotionService
             abort_unless($promotion->status === PropertyPromotion::STATUS_REQUESTED, 409, 'PROMOTION_NOT_REQUESTED');
             abort_if($expectedVersion !== null && $promotion->version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
             abort_unless($this->access->canModerate($actor, $property), 403, 'PROMOTION_PERMISSION_DENIED');
-            abort_if(in_array((int) $actor->id, array_filter([
-                (int) $promotion->requested_by,
-                (int) $property->created_by,
-                (int) $property->agent_id,
-                (int) ($property->co_owner_user_id ?? 0),
-            ]), true), 403, 'SELF_APPROVAL_FORBIDDEN');
             $promotion->update([
                 'status' => PropertyPromotion::STATUS_REJECTED,
                 'decided_by' => $actor->id,

@@ -807,7 +807,7 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertSame('open', $case->fresh()->status);
     }
 
-    public function test_moderator_cannot_approve_a_case_they_subsequently_edited(): void
+    public function test_rop_can_approve_a_case_they_subsequently_edited(): void
     {
         [$agent, $rop] = $this->users();
         $service = $this->moderation();
@@ -816,7 +816,8 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->saveChanges($service, $property, $rop, ['price' => 120_000]);
         $case = $property->moderationCases()->firstOrFail();
 
-        $this->assertFalse(app(PropertyModerationAccess::class)->canDecideCase($rop, $case));
+        $this->assertTrue(app(PropertyModerationAccess::class)->canDecideCase($rop, $case));
+        $this->assertSame("published", $service->approveAllCases($property->fresh(), $rop, $property->fresh()->moderation_version)->publication_status);
         $this->assertSame($agent->id, $case->submitted_by);
     }
 
@@ -981,7 +982,8 @@ class PropertyModerationWorkflowTest extends TestCase
             'comment' => 'Полный HTTP E2E пройден',
         ], ['Idempotency-Key' => 'moderation-http-e2e-success'])
             ->assertOk()
-            ->assertJsonPath('data.publication_status', 'published');
+            ->assertJsonPath('data.publication_status', 'published')
+            ->assertJsonPath('data.moderation_version', $property->fresh()->moderation_version);
 
         $this->assertSame('published', $property->fresh()->publication_status);
         $this->assertDatabaseMissing('property_moderation_cases', ['property_id' => $property->id, 'status' => 'open']);
@@ -1001,6 +1003,67 @@ class PropertyModerationWorkflowTest extends TestCase
             ->assertJsonPath('capabilities.can_approve_all', false)
             ->assertJsonPath('open_moderation_cases.0.can_decide', false)
             ->assertJsonPath('open_moderation_cases.0.blocked_reason', 'outside_moderation_scope');
+    }
+
+    public function test_reject_and_restore_discards_multiple_proposals_and_preserves_comments(): void
+    {
+        [$agent, $rop] = $this->users();
+        $service = $this->moderation();
+        $property = $this->publishedProperty($agent);
+        $oldAddress = $property->address;
+        $this->saveChanges($service, $property, $agent, ['price' => 150000, 'address' => 'Изменённый адрес']);
+        $price = $property->moderationCases()->where('type', 'price_increase')->firstOrFail();
+        $content = $property->moderationCases()->where('type', 'content_review')->firstOrFail();
+        $service->rejectCase($content, $rop, 'Адрес не подтверждён', $content->version);
+        $restored = $service->rejectCase($price, $rop, 'Цена не подтверждена', $price->version, 'restore_and_publish');
+        $this->assertSame('published', $restored->publication_status);
+        $this->assertSame(100000.0, (float) $restored->price);
+        $this->assertSame($oldAddress, $restored->address);
+        $this->assertSame('Адрес не подтверждён', $content->fresh()->decision_comment);
+        $this->assertSame('Цена не подтверждена', $price->fresh()->decision_comment);
+        $this->assertSame(0, $property->moderationCases()->where('blocking', true)->count());
+    }
+
+    public function test_rop_direct_promotion_returns_current_version_and_agent_cannot_use_it(): void
+    {
+        [$agent, $rop] = $this->users();
+        $property = $this->publishedProperty($rop);
+        $this->actingAs($rop);
+        $response = $this->postJson("/api/properties/{$property->id}/promotion-settings", [
+            'version' => $property->moderation_version, 'type' => 'vip', 'days' => 14,
+        ], ['Idempotency-Key' => 'direct-vip-regression']);
+        $response->assertOk()->assertJsonPath('data.listing_type', 'vip')
+            ->assertJsonPath('data.capabilities.can_manage_promotion_directly', true);
+        $this->assertSame($property->fresh()->moderation_version, $response->json('data.moderation_version'));
+        $this->postJson("/api/properties/{$property->id}/promotion-settings", [
+            'version' => $response->json('data.moderation_version'), 'type' => 'regular', 'days' => 7,
+        ], ['Idempotency-Key' => 'direct-regular-regression'])->assertOk()->assertJsonPath('data.listing_type', 'regular');
+        $this->actingAs($agent);
+        $this->postJson("/api/properties/{$property->id}/promotion-settings", [
+            'version' => $property->fresh()->moderation_version, 'type' => 'urgent', 'days' => 7,
+        ], ['Idempotency-Key' => 'agent-direct-denied'])->assertForbidden();
+        $rop->update(['branch_id' => 99]);
+        $this->actingAs($rop);
+        $this->postJson("/api/properties/{$property->id}/promotion-settings", [
+            'version' => $property->fresh()->moderation_version, 'type' => 'urgent', 'days' => 7,
+        ], ['Idempotency-Key' => 'foreign-branch-denied'])->assertForbidden();
+    }
+
+    public function test_all_four_leadership_roles_can_approve_their_own_proposals(): void
+    {
+        [, $leader] = $this->users();
+        foreach (['rop', 'branch_director', 'admin', 'superadmin'] as $slug) {
+            $role = Role::firstOrCreate(['slug' => $slug], ['name' => $slug]);
+            $leader->update(['role_id' => $role->id]);
+            $leader->unsetRelation('role');
+            $property = $this->publishedProperty($leader);
+            $service = $this->moderation();
+            $this->saveChanges($service, $property, $leader, ['price' => 150000, 'address' => 'Новый адрес']);
+            $approved = $service->approveAllCases($property->fresh(), $leader, $property->fresh()->moderation_version);
+            $this->assertSame('published', $approved->publication_status, $slug);
+            $promotion = app(PropertyPromotionService::class)->request($approved, $leader, 'urgent', 'Продвижение руководителем', 7, $approved->moderation_version);
+            $this->assertSame('active', $promotion->status, $slug);
+        }
     }
 
     private function publishedProperty(User $agent, array $overrides = []): Property

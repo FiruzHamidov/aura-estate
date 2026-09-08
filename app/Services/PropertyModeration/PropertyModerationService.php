@@ -493,6 +493,20 @@ final class PropertyModerationService
                 abort_if($this->hasConfirmedDuplicate($property), 409, 'DUPLICATE_BLOCK_ACTIVE');
                 $snapshot = (array) $property->approved_content_snapshot;
                 abort_if($snapshot === [], 409, 'APPROVED_SNAPSHOT_MISSING');
+                // Restoring the whole snapshot discards all price/content proposals.
+                // Keep the rejected decision and comment as history; never dismiss duplicates.
+                $property->moderationCases()
+                    ->whereKeyNot($lockedCase->id)
+                    ->whereIn('type', [PropertyModerationCase::TYPE_PRICE_INCREASE, PropertyModerationCase::TYPE_CONTENT])
+                    ->whereIn('status', [PropertyModerationCase::STATUS_OPEN, PropertyModerationCase::STATUS_REJECTED])
+                    ->get()->each(function (PropertyModerationCase $other) use ($actor): void {
+                        $other->update([
+                            'status' => $other->status === PropertyModerationCase::STATUS_REJECTED ? $other->status : PropertyModerationCase::STATUS_WITHDRAWN,
+                            'blocking' => false,
+                            'version' => $other->version + 1,
+                        ]);
+                        $this->event($other->property, $other, 'proposal_discarded_on_restore', $actor);
+                    });
                 abort_if($this->hasOpenBlockingCases($property), 409, 'OPEN_BLOCKING_CASES');
                 $property->fill(array_intersect_key($snapshot, array_flip(Property::LISTING_CONTENT_FIELDS)));
                 $this->restoreApprovedPhotos($property, $snapshot);
@@ -1058,7 +1072,8 @@ final class PropertyModerationService
         $fields = array_values(array_unique(array_merge(Property::LISTING_CONTENT_FIELDS, [
             'owner_phone', 'owner_name', 'owner_client_id',
         ])));
-        $snapshot = array_intersect_key($property->getAttributes(), array_flip($fields));
+        $attributes = array_replace($property->fresh()?->getAttributes() ?? [], $property->getAttributes());
+        $snapshot = array_intersect_key($attributes, array_flip($fields));
         $snapshot['effective_price'] = $this->effectivePrice($property->getAttributes());
         $snapshot['photos'] = $this->photoSnapshot($property);
         $snapshot['photo_ids'] = array_column($snapshot['photos'], 'id');
@@ -1354,15 +1369,16 @@ final class PropertyModerationService
             ->whereIn('status', [PropertyModerationCase::STATUS_OPEN, PropertyModerationCase::STATUS_REJECTED])
             ->when($changesOnly, fn ($query) => $query->whereIn('type', [PropertyModerationCase::TYPE_PRICE_INCREASE, PropertyModerationCase::TYPE_CONTENT]))
             ->whereDoesntHave('duplicateCandidates', fn ($query) => $query->where('decision', PropertyDuplicateCandidate::DECISION_CONFIRMED))
-            ->update([
-                'status' => $status,
-                'blocking' => false,
-                'decided_by' => $actor->id,
-                'decided_at' => now(),
-                'decision_comment' => 'Отозвано автором объявления.',
-                'updated_at' => now(),
-                'version' => DB::raw('version + 1'),
-            ]);
+            ->get()->each(function (PropertyModerationCase $case) use ($actor, $status): void {
+                // A rejected decision remains in history after its proposal is discarded.
+                $decision = $case->status === PropertyModerationCase::STATUS_REJECTED ? [] : [
+                    'status' => $status,
+                    'decided_by' => $actor->id,
+                    'decided_at' => now(),
+                    'decision_comment' => 'Отозвано автором объявления.',
+                ];
+                $case->update([...$decision, 'blocking' => false, 'version' => $case->version + 1]);
+            });
     }
 
     /**

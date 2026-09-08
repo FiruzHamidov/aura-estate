@@ -22,16 +22,36 @@ final class PropertyModerationController extends Controller
         private readonly PropertyModerationAccess $access,
     ) {}
 
+    private function mutationData(mixed $result): mixed
+    {
+        return $result instanceof Property
+            ? app(PropertyController::class)->moderationMutationPayload($result, request()->user())
+            : $result;
+    }
+
+    public function setPromotion(Request $request, Property $property)
+    {
+        $data = $request->validate([
+            'type' => 'required|in:regular,vip,urgent',
+            'comment' => 'nullable|string|max:2000',
+            'days' => 'required|integer|min:1|max:30',
+            'version' => 'required|integer|min:0',
+        ]);
+        return response()->json(['data' => $this->mutationData($this->promotions->setType(
+            $property, $request->user(), $data['type'], $data['days'], $data['comment'] ?? '', $data['version']
+        ))]);
+    }
+
     public function submit(Request $request, Property $property)
     {
         $data = $request->validate(['version' => 'required|integer|min:0']);
 
-        return response()->json(['data' => $this->moderation->submit(
+        return response()->json(['data' => $this->mutationData($this->moderation->submit(
             $property,
             $request->user(),
             $this->quality->inspect($property->getAttributes()),
             $data['version'],
-        )]);
+        ))]);
     }
 
     public function queue(Request $request)
@@ -100,19 +120,19 @@ final class PropertyModerationController extends Controller
     {
         $data = $request->validate(['comment' => 'nullable|string|max:2000', 'version' => 'required|integer|min:1']);
 
-        return response()->json(['data' => $this->moderation->approveCase($case, $request->user(), $data['comment'] ?? null, $data['version'])]);
+        return response()->json(['data' => $this->mutationData($this->moderation->approveCase($case, $request->user(), $data['comment'] ?? null, $data['version']))]);
     }
 
     public function approveAll(Request $request, Property $property)
     {
         $data = $request->validate(['comment' => 'nullable|string|max:2000', 'version' => 'required|integer|min:0']);
 
-        return response()->json(['data' => $this->moderation->approveAllCases(
+        return response()->json(['data' => $this->mutationData($this->moderation->approveAllCases(
             $property,
             $request->user(),
             $data['version'],
             $data['comment'] ?? null,
-        )]);
+        ))]);
     }
 
     public function reject(Request $request, PropertyModerationCase $case)
@@ -124,21 +144,21 @@ final class PropertyModerationController extends Controller
             'confirmed_violation' => 'nullable|boolean',
         ]);
 
-        return response()->json(['data' => $this->moderation->rejectCase(
+        return response()->json(['data' => $this->mutationData($this->moderation->rejectCase(
             $case,
             $request->user(),
             $data['comment'],
             $data['version'],
             $data['action'] ?? 'keep_hidden',
             (bool) ($data['confirmed_violation'] ?? false),
-        )]);
+        ))]);
     }
 
     public function breakGlassApprove(Request $request, PropertyModerationCase $case)
     {
         $data = $request->validate(['reason' => 'required|string|min:10|max:2000', 'version' => 'required|integer|min:1']);
 
-        return response()->json(['data' => $this->moderation->breakGlassApprove($case, $request->user(), $data['reason'], $data['version'])]);
+        return response()->json(['data' => $this->mutationData($this->moderation->breakGlassApprove($case, $request->user(), $data['reason'], $data['version']))]);
     }
 
     public function decideDuplicate(Request $request, PropertyDuplicateCandidate $candidate)
@@ -149,33 +169,33 @@ final class PropertyModerationController extends Controller
             'version' => 'required|integer|min:1',
         ]);
 
-        return response()->json(['data' => $this->moderation->decideDuplicate($candidate, $request->user(), $data['decision'], $data['comment'], $data['version'])]);
+        return response()->json(['data' => $this->mutationData($this->moderation->decideDuplicate($candidate, $request->user(), $data['decision'], $data['comment'], $data['version']))]);
     }
 
     public function appeal(Request $request, PropertyModerationCase $case)
     {
         $data = $request->validate(['comment' => 'required|string|max:2000', 'version' => 'required|integer|min:1']);
 
-        return response()->json(['data' => $this->moderation->appeal($case, $request->user(), $data['comment'], $data['version'])], 201);
+        return response()->json(['data' => $this->mutationData($this->moderation->appeal($case, $request->user(), $data['comment'], $data['version']))], 201);
     }
 
     public function mergeDuplicate(Request $request, PropertyDuplicateCandidate $candidate)
     {
         $data = $request->validate(['comment' => 'required|string|max:2000', 'version' => 'required|integer|min:1']);
 
-        return response()->json(['data' => $this->moderation->mergeDuplicate($candidate, $request->user(), $data['comment'], $data['version'])]);
+        return response()->json(['data' => $this->mutationData($this->moderation->mergeDuplicate($candidate, $request->user(), $data['comment'], $data['version']))]);
     }
 
     public function rejectDuplicate(Request $request, PropertyDuplicateCandidate $candidate)
     {
         $data = $request->validate(['comment' => 'required|string|max:2000', 'version' => 'required|integer|min:1']);
 
-        return response()->json(['data' => $this->moderation->rejectDuplicate(
+        return response()->json(['data' => $this->mutationData($this->moderation->rejectDuplicate(
             $candidate,
             $request->user(),
             $data['comment'],
             $data['version'],
-        )]);
+        ))]);
     }
 
     public function approveForProperty(Request $request, Property $property, PropertyModerationCase $case)
@@ -219,7 +239,7 @@ final class PropertyModerationController extends Controller
             ? $this->moderation->approveCase($case, $request->user(), $data['comment'], $data['version'])
             : $this->moderation->rejectCase($case, $request->user(), $data['comment'], $data['version']);
 
-        return response()->json(['data' => $resolved]);
+        return response()->json(['data' => $this->mutationData($resolved)]);
     }
 
     public function decideDuplicateForProperty(Request $request, Property $property, PropertyDuplicateCandidate $candidate, string $decision)
@@ -228,13 +248,13 @@ final class PropertyModerationController extends Controller
         abort_unless((int) $candidate->moderationCase?->property_id === (int) $property->id, 404);
         $data = $request->validate(['comment' => 'required|string|max:2000', 'version' => 'required|integer|min:1']);
 
-        return response()->json(['data' => $this->moderation->decideDuplicate(
+        return response()->json(['data' => $this->mutationData($this->moderation->decideDuplicate(
             $candidate,
             $request->user(),
             $decision,
             $data['comment'],
             $data['version'],
-        )]);
+        ))]);
     }
 
     public function confirmDuplicateForProperty(Request $request, Property $property, PropertyDuplicateCandidate $candidate)
@@ -267,25 +287,25 @@ final class PropertyModerationController extends Controller
     {
         $data = $request->validate(['version' => 'required|integer|min:0']);
 
-        return response()->json(['data' => $this->moderation->withdrawChanges($property, $request->user(), $data['version'])]);
+        return response()->json(['data' => $this->mutationData($this->moderation->withdrawChanges($property, $request->user(), $data['version']))]);
     }
 
     public function withdrawCase(Request $request, PropertyModerationCase $case)
     {
         $data = $request->validate(['version' => 'required|integer|min:1']);
 
-        return response()->json(['data' => $this->moderation->withdrawCase(
+        return response()->json(['data' => $this->mutationData($this->moderation->withdrawCase(
             $case,
             $request->user(),
             $data['version'],
-        )]);
+        ))]);
     }
 
     public function withdrawListing(Request $request, Property $property)
     {
         $data = $request->validate(['target' => 'required|in:draft,archived', 'version' => 'required|integer|min:0']);
 
-        return response()->json(['data' => $this->moderation->withdrawListing($property, $request->user(), $data['target'], $data['version'])]);
+        return response()->json(['data' => $this->mutationData($this->moderation->withdrawListing($property, $request->user(), $data['target'], $data['version']))]);
     }
 
     public function transfer(Request $request, Property $property)
@@ -298,13 +318,13 @@ final class PropertyModerationController extends Controller
         ]);
         $changes = array_intersect_key($data, array_flip(['agent_id', 'co_owner_user_id']));
 
-        return response()->json(['data' => $this->moderation->transfer(
+        return response()->json(['data' => $this->mutationData($this->moderation->transfer(
             $property,
             $request->user(),
             $changes,
             $data['reason'],
             $data['version'],
-        )]);
+        ))]);
     }
 
     public function requestPromotion(Request $request, Property $property)

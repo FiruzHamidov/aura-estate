@@ -108,25 +108,13 @@ final class PropertyModerationAccess
             return 'outside_moderation_scope';
         }
 
-        if (PropertyModerationEvent::query()->where('moderation_case_id', $case->id)
-            ->where('actor_id', $user->id)
-            ->whereIn('event_type', ['price_review_opened', 'content_review_opened', 'duplicate_review_opened', 'property_media_changed', 'case_proposal_edited'])
-            ->exists()) {
-            return 'reviewer_edited_case';
-        }
-
-        if ($case->type === PropertyModerationCase::TYPE_APPEAL && $case->parentCase?->duplicateCandidates()->where('decided_by', $user->id)->exists()) {
+        // ROP+ may review their own proposals, within their existing branch scope.
+        // Appeals still require someone other than the original decision maker.
+        if ($case->type === PropertyModerationCase::TYPE_APPEAL && (
+            (int) $case->parentCase?->decided_by === (int) $user->id
+            || $case->parentCase?->duplicateCandidates()->where('decided_by', $user->id)->exists()
+        )) {
             return 'appeal_reviewer_conflict';
-        }
-
-        if (in_array((int) $user->id, array_filter([
-            (int) $case->submitted_by,
-            (int) $case->property->created_by,
-            (int) $case->property->agent_id,
-            (int) ($case->property->co_owner_user_id ?? 0),
-            (int) ($case->parentCase?->decided_by ?? 0),
-        ]), true)) {
-            return 'self_approval_forbidden';
         }
 
         return null;
@@ -147,6 +135,7 @@ final class PropertyModerationAccess
                 'can_manage_deal' => false,
                 'can_request_promotion' => false,
                 'can_approve_promotion' => false,
+                'can_manage_promotion_directly' => false,
                 'can_withdraw_changes' => false,
                 'can_withdraw_listing' => false,
                 'submit_requires_review' => false,
@@ -190,8 +179,8 @@ final class PropertyModerationAccess
             'can_resolve_appeal' => $decidableCases->contains('type', PropertyModerationCase::TYPE_APPEAL),
             'can_manage_deal' => $this->canManageDeal($user, $property),
             'can_request_promotion' => $canEdit && in_array($property->publication_status, ['published', 'pending'], true) && $requestedPromotions->isEmpty(),
-            'can_approve_promotion' => $canModerate && ! $ownsProperty && $requestedPromotions
-                ->contains(fn (PropertyPromotion $promotion) => (int) $promotion->requested_by !== (int) $user->id),
+            'can_approve_promotion' => $canModerate && $isPublished && $requestedPromotions->isNotEmpty(),
+            'can_manage_promotion_directly' => $canModerate && $isPublished,
             'can_withdraw_changes' => $canEdit,
             'can_withdraw_listing' => $canEdit,
             'submit_requires_review' => $canEdit && (array) $property->approved_content_snapshot !== [],

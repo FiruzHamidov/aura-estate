@@ -435,6 +435,11 @@ class PropertyController extends Controller
         return $payload;
     }
 
+    public function moderationMutationPayload(Property $property, User $user): array
+    {
+        return $this->withModerationWorkflow($property->fresh(['moderationCases', 'promotions']), $user);
+    }
+
     private function withModerationWorkflow(Property $property, User $user, ?array $payload = null): array
     {
         $payload ??= $property->toArray();
@@ -477,6 +482,7 @@ class PropertyController extends Controller
             'submitted_at' => $priceCase->submitted_at?->toJSON(),
             'reason_codes' => $priceCase->reason_codes ?? [],
         ] : null;
+        $payload['rejection_comment'] = $property->moderationCases()->where('status', PropertyModerationCase::STATUS_REJECTED)->latest('decided_at')->value('decision_comment');
         $payload['moderation_version'] = (int) $property->moderation_version;
         $payload['capabilities'] = $this->propertyCapabilities($user, $property);
 
@@ -2143,7 +2149,6 @@ class PropertyController extends Controller
 
         $promotionInput = $request->validate(['requested_listing_type' => 'nullable|in:regular,vip,urgent']);
         $requestedType = $promotionInput['requested_listing_type'] ?? 'regular';
-        $requiresReview = $requestedType !== 'regular';
         $validated = $this->validateProperty($request);
         $featureIds = $validated['features'] ?? [];
         $tagIds = $validated['tags'] ?? [];
@@ -2156,6 +2161,7 @@ class PropertyController extends Controller
         $dups = $this->propertyDuplicateService->find($validated);
         $qualityWarnings = $this->propertyQualityService->inspect($validated);
         $validated['created_by'] = $user->id;
+        $requiresReview = $requestedType !== 'regular' && ! $this->moderationAccess->canModerate($user, new Property($validated));
         $validated = $this->moderation->creationState($validated, $dups, $qualityWarnings, $requiresReview);
 
         $property = DB::transaction(function () use ($request, $validated, $featureIds, $tagIds, $dups, $qualityWarnings, $user, $requiresReview, $requestedType) {
@@ -2168,7 +2174,7 @@ class PropertyController extends Controller
             }
             $this->storePhotosFromRequest($request, $property);
             $this->moderation->recordCreation($property, $user, $dups, $qualityWarnings, $requiresReview);
-            if ($requiresReview) {
+            if ($requestedType !== 'regular') {
                 app(\App\Services\PropertyModeration\PropertyPromotionService::class)->request(
                     $property, $user, $requestedType, 'Тип выбран при добавлении объявления',
                     (int) config('property-moderation.promotion_default_days', 7), (int) $property->moderation_version,
