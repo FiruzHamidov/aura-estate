@@ -106,7 +106,7 @@ final class PropertyDuplicateService
         $signals = [];
         $score = 0.0;
         $passportMatches = 0;
-        $physicalMatches = 0;
+        $coreMatches = [];
 
         $phoneMatch = $this->samePhone($source['owner_phone'] ?? null, $candidate->owner_phone);
         $ownerClientMatch = $this->sameNullableId($source['owner_client_id'] ?? null, $candidate->owner_client_id);
@@ -115,8 +115,9 @@ final class PropertyDuplicateService
             $signals[] = $this->signal('phone', 'Телефон владельца', true, 'совпадает', 40);
         }
         if ($ownerClientMatch) {
-            $score += 45;
-            $signals[] = $this->signal('owner_client', 'Карточка владельца', true, 'совпадает', 45);
+            $ownerWeight = $phoneMatch ? 5 : 45;
+            $score += $ownerWeight;
+            $signals[] = $this->signal('owner_client', 'Карточка владельца', true, 'совпадает', $ownerWeight);
         }
 
         $passportRules = [
@@ -142,12 +143,13 @@ final class PropertyDuplicateService
             if ($match === null) {
                 continue;
             }
+            if ($match === false && in_array($field, ['type_id', 'location_id', 'rooms', 'total_area', 'floor', 'total_floors'], true)) {
+                return null;
+            }
             if ($match) {
                 $score += $weight;
                 $passportMatches++;
-                if (in_array($field, ['rooms', 'total_area', 'floor', 'total_floors', 'repair_type_id', 'developer_id', 'year_built'], true)) {
-                    $physicalMatches++;
-                }
+                $coreMatches[$field] = true;
                 $signals[] = $this->signal($field, $label, true, $this->fieldDetail($field, $source[$field]), $weight);
                 $seenLabels[$label] = true;
             }
@@ -170,8 +172,8 @@ final class PropertyDuplicateService
         }
 
         $distanceKm = $this->distanceKm($source, $candidate->getAttributes());
-        $geoNear = $distanceKm !== null && $distanceKm <= 0.2;
-        $geoConflict = $distanceKm !== null && $distanceKm >= 2.0 && $passportMatches >= 4;
+        $geoNear = $distanceKm !== null && $distanceKm <= 0.03;
+        $geoConflict = $distanceKm !== null && $distanceKm >= 2.0;
         if ($geoNear) {
             $score += 20;
             $signals[] = $this->signal('geo', 'Точка на карте', true, round($distanceKm * 1000).' м', 20);
@@ -186,13 +188,40 @@ final class PropertyDuplicateService
             $signals[] = $this->signal('price', 'Цена', true, 'разница '.round($priceDelta, 1).'%', 8);
         }
 
-        $unitConflict = $this->explicitUnitConflict($this->searchableText($source), $this->searchableText($candidate->getAttributes()));
-        if ($unitConflict && ! $phoneMatch && ! $ownerClientMatch) {
+        // A shared owner, building or template description does not identify a unit.
+        // Contradictory physical data must not be outweighed by positive signals.
+        $sourceAddress = (string) ($source['address'] ?? '');
+        $candidateAddress = (string) ($candidate->address ?? '');
+        $sourceBuilding = $this->buildingNumber($sourceAddress);
+        $candidateBuilding = $this->buildingNumber($candidateAddress);
+        $buildingConflict = $sourceBuilding !== null && $candidateBuilding !== null
+            && $sourceBuilding !== $candidateBuilding;
+        if ($geoConflict || $buildingConflict || $this->explicitUnitConflict(
+            $this->searchableText($source), $this->searchableText($candidate->getAttributes())
+        )) {
             return null;
         }
 
-        // Only very high-confidence matches are treated as duplicates. Lower
-        // similarity must not block creation or send the property to moderation.
+        $exactAddress = $this->sameNumberedAddress($sourceAddress, $candidateAddress);
+        $sourceUnit = $this->extractUnitNumber($sourceAddress);
+        $sameUnit = $sourceUnit !== null && $sourceUnit === $this->extractUnitNumber($candidateAddress);
+        $coreMatch = isset($coreMatches['type_id'], $coreMatches['total_area'])
+            && (isset($coreMatches['rooms']) || isset($coreMatches['floor']));
+        $identityMatch = (($phoneMatch || $ownerClientMatch) && ($exactAddress || $geoNear))
+            || ($exactAddress && $sameUnit);
+
+        if (! $coreMatch || ! $identityMatch) {
+            return null;
+        }
+        if ($exactAddress) {
+            $score += 20;
+            $signals[] = $this->signal('exact_address', 'Точный адрес', true, 'совпадает адрес с номером дома', 20);
+        }
+        if ($exactAddress && $sameUnit) {
+            $score += 35;
+            $signals[] = $this->signal('unit', 'Номер квартиры', true, $sourceUnit, 35);
+        }
+
         $qualified = $score > self::DUPLICATE_SCORE_THRESHOLD;
 
         if (! $qualified) {
@@ -375,6 +404,31 @@ final class PropertyDuplicateService
         return $discount > 0 ? $discount : (float) ($data['price'] ?? 0);
     }
 
+    private function buildingNumber(string $address): ?string
+    {
+        // Only explicit house markers are unambiguous (districts and streets may contain numbers).
+        if (preg_match('/(?<!\p{L})(?:дом\s*|д\.\s*)[№#]?\s*(\d+[\p{L}]?(?:[\/-]\d+[\p{L}]?)?)(?![\p{L}\p{N}])/iu', $address, $match)) {
+            return mb_strtolower($match[1], 'UTF-8');
+        }
+
+        return null;
+    }
+
+    private function sameNumberedAddress(string $first, string $second): bool
+    {
+        $normalize = function (string $address): string {
+            $address = strtr(mb_strtolower($address, 'UTF-8'), ['ё' => 'е']);
+
+            return trim(preg_replace('/[^\p{L}\p{N}]+/u', ' ', $address) ?? '');
+        };
+        // Remove explicit apartment numbers before checking for a building number.
+        $building = preg_replace('/(?<!\p{L})(?:кв\.?|квартира|апартаменты?|unit)\s*[№#-]?\s*\d{1,5}[\p{L}]?/iu', '', $first) ?? '';
+
+        return preg_match('/\d/u', $building) === 1
+            && preg_match('/\p{L}/u', $building) === 1
+            && $normalize($first) === $normalize($second);
+    }
+
     private function explicitUnitConflict(string $first, string $second): bool
     {
         $firstUnit = $this->extractUnitNumber($first);
@@ -385,8 +439,8 @@ final class PropertyDuplicateService
 
     private function extractUnitNumber(string $text): ?string
     {
-        if (preg_match('/(?:кв(?:артира)?\.?|апартамент(?:ы)?|unit)\s*[№#-]?\s*(\d{1,5})/iu', $text, $match)) {
-            return ltrim($match[1], '0') ?: '0';
+        if (preg_match('/(?<!\p{L})(?:кв\.?\s*[№#-]?|квартира\s*[№#]|апартаменты?\s*[№#]|unit\s*[№#-]?)\s*(\d{1,5}[\p{L}]?)(?![\p{L}\p{N}])/iu', $text, $match)) {
+            return mb_strtolower(ltrim($match[1], '0') ?: '0', 'UTF-8');
         }
 
         return null;
