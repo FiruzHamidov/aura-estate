@@ -461,7 +461,7 @@ class AttendanceModuleFeatureTest extends TestCase
             ['POST', '/api/roles'], ['PUT', '/api/roles/'.$context['agent']->role_id],
             ['DELETE', '/api/roles/'.$context['agent']->role_id], ['POST', '/api/branch-groups'],
             ['PUT', '/api/branch-groups/'.$context['group']->id], ['DELETE', '/api/branch-groups/'.$context['group']->id],
-            ['POST', '/api/properties'], ['GET', '/api/my-properties'], ['GET', '/api/user'],
+            ['POST', '/api/properties'], ['GET', '/api/user'],
         ] as [$method, $path]) {
             $this->json($method, $path)->assertForbidden();
         }

@@ -493,7 +493,9 @@ class UserController extends Controller
         $includeUnassigned = $this->isBranchScopedManager($this->roleSlug($authUser))
             && $this->parseBooleanQueryFlag($request, 'include_unassigned');
 
-        $query = $this->visibleUsersQuery($authUser, $includeUnassigned);
+        $query = $this->roleSlug($authUser) === 'accountant' && ! empty($validated['report_agents'])
+            ? User::query()->select(['id', 'name', 'role_id', 'branch_id', 'branch_group_id', 'status'])->with('role:id,name,slug')
+            : $this->visibleUsersQuery($authUser, $includeUnassigned);
         $baseQuery = $this->applyIndexFilters($query, $validated, $authUser, false, $includeUnassigned);
         $tabCounts = $this->statusCountsForIndex(clone $baseQuery);
         $query = clone $baseQuery;

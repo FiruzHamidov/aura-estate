@@ -20,10 +20,11 @@ class EnsureUserIsNotClient
             return response()->json(['message' => 'Forbidden'], 403);
         }
 
-        // Attendance filters need these dictionaries, not access to their management APIs.
+        // Accountants can read the objects report and its filters, not modify properties or dictionaries.
         if ($user?->role?->slug === 'accountant') {
             if (in_array($request->method(), ['GET', 'HEAD'], true)
-                && in_array($request->path(), ['api/roles', 'api/branch-groups'], true)) {
+                && (in_array($request->path(), ['api/roles', 'api/branch-groups', 'api/my-properties', 'api/branches', 'api/contract-types', 'api/document-types'], true)
+                    || ($request->path() === 'api/user' && $request->boolean('report_agents')))) {
                 return $next($request);
             }
 

@@ -766,7 +766,13 @@ class PropertyController extends Controller
         $this->applySorts($query, $request->input('sort'), $request->input('dir'));
         $perPage = (int) $request->input('per_page', 20);
 
-        return response()->json($query->latest()->paginate($perPage));
+        // A deterministic tie-breaker keeps page-by-page report exports stable.
+        $result = $query->latest()->orderByDesc('properties.id')->paginate($perPage);
+        if (in_array($request->user()?->role?->slug, ['superadmin', 'accountant'], true)) {
+            app(\App\Services\PropertyReportStaff::class)->attach($result->getCollection());
+        }
+
+        return response()->json($result);
     }
 
     private function propertyListRelations(): array

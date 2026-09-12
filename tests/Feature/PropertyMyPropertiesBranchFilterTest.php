@@ -284,4 +284,42 @@ class PropertyMyPropertiesBranchFilterTest extends TestCase
         $response->assertJsonCount(1, 'data');
         $response->assertJsonFragment(['id' => $expected->id]);
     }
+
+    public function test_accounting_report_resolves_seller_and_leaders_without_cross_group_names(): void
+    {
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedBigInteger('sale_user_id')->nullable());
+        $users = [];
+        foreach (['accountant', 'superadmin', 'agent', 'rop', 'mop'] as $index => $slug) {
+            $role = Role::create(['name' => $slug, 'slug' => $slug]);
+            $users[$slug] = User::create(['name' => $slug, 'phone' => '91000000'.$index,
+                'role_id' => $role->id, 'branch_id' => 2, 'branch_group_id' => 20]);
+        }
+        $other = User::create(['name' => 'Other group MOP', 'phone' => '910000009',
+            'role_id' => $users['mop']->role_id, 'branch_id' => 2, 'branch_group_id' => 21]);
+        $type = PropertyType::create(['name' => 'Apartment']);
+        $status = PropertyStatus::create(['name' => 'Available']);
+        $property = Property::create(['title' => 'Report test', 'type_id' => $type->id,
+            'status_id' => $status->id, 'price' => 100, 'created_by' => $users['accountant']->id,
+            'agent_id' => $users['agent']->id, 'sale_user_id' => $users['agent']->id,
+            'moderation_status' => 'sold']);
+        $property->saleAgents()->attach($users['rop']->id, ['role' => 'partner', 'agent_commission_amount' => 250, 'agent_commission_currency' => 'TJS']);
+        foreach (['accountant', 'superadmin'] as $slug) {
+            Sanctum::actingAs($users[$slug]);
+            $this->getJson('/api/my-properties?moderation_status=sold')->assertOk()
+                ->assertJsonPath('data.0.report_seller.name', 'agent')
+                ->assertJsonPath('data.0.report_rop.0.name', 'rop')
+                ->assertJsonPath('data.0.report_rop.0.amount', 250)
+                ->assertJsonPath('data.0.report_mop.0.amount', null)
+                ->assertJsonPath('data.0.report_mop.0.name', 'mop')
+                ->assertJsonCount(1, 'data.0.report_mop');
+        }
+        Sanctum::actingAs($users['accountant']);
+        $this->getJson('/api/user?report_agents=1')->assertOk()->assertJsonMissingPath('data.0.phone');
+        $this->postJson('/api/properties', [])->assertForbidden();
+        $this->getJson('/api/user')->assertForbidden();
+        Sanctum::actingAs($users['agent']);
+        $property->updateQuietly(['created_by' => $users['agent']->id]);
+        $this->getJson('/api/my-properties?moderation_status=sold')->assertOk()
+            ->assertJsonMissingPath('data.0.report_rop');
+    }
 }
