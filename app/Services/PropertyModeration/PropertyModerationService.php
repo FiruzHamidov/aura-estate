@@ -980,7 +980,8 @@ final class PropertyModerationService
             return;
         }
 
-        if ($viewer && $this->access->canEdit($viewer, $property)) {
+        if ($viewer && ($this->access->canEdit($viewer, $property)
+            || $this->access->canViewSecurityReportProperty($viewer, $property))) {
             return;
         }
 

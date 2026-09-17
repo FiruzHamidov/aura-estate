@@ -18,6 +18,13 @@ final class PropertyModerationAccess
         return in_array($this->role($user), config('property-moderation.creator_roles', []), true);
     }
 
+    /** Read-only access to the same closed stages exposed by the SB report. */
+    public function canViewSecurityReportProperty(User $user, Property $property): bool
+    {
+        return $this->role($user) === 'security'
+            && in_array($property->moderation_status, config('security-property-control.trigger_statuses', []), true);
+    }
+
     public function canEdit(User $user, Property $property): bool
     {
         $role = $this->role($user);

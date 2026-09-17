@@ -196,6 +196,28 @@ class PropertyShowAuthContactsTest extends TestCase
         });
     }
 
+    public function test_security_can_read_closed_report_cards_and_history_but_cannot_edit(): void
+    {
+        $role = Role::create(['name' => 'Security', 'slug' => 'security']);
+        $user = User::create(['name' => 'Security reader', 'phone' => '930000559', 'role_id' => $role->id, 'status' => 'active']);
+        $type = PropertyType::create(['name' => 'Apartment']);
+        $status = PropertyStatus::create(['name' => 'Closed']);
+        $token = $user->createToken('test')->plainTextToken;
+        foreach (['deposit', 'sold', 'sold_by_owner', 'rented', 'deleted', 'pending', 'denied'] as $state) {
+            $property = Property::create(['title' => 'Access test', 'type_id' => $type->id, 'status_id' => $status->id,
+                'price' => 100, 'moderation_status' => $state, 'created_by' => $user->id]);
+            $allowed = in_array($state, ['deposit', 'sold', 'sold_by_owner', 'rented', 'deleted'], true);
+            $this->withToken($token)->getJson('/api/properties/'.$property->id)->assertStatus($allowed ? 200 : 404);
+            $this->withToken($token)->getJson('/api/properties/'.$property->id.'/logs')->assertStatus($allowed ? 200 : 403);
+            $access = app(\App\Services\PropertyModeration\PropertyModerationAccess::class);
+            $this->assertFalse($access->canEdit($user, $property));
+            $this->assertFalse($access->canModerate($user, $property));
+            $this->withToken($token)->deleteJson('/api/properties/'.$property->id)->assertForbidden();
+            $this->app['auth']->forgetGuards();
+            $this->withHeader('Authorization', '')->getJson('/api/properties/'.$property->id)->assertNotFound();
+        }
+    }
+
     public function test_public_property_show_with_bearer_token_includes_owner_and_buyer_contacts(): void
     {
         $agentRole = Role::create([

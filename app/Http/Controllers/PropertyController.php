@@ -2970,7 +2970,10 @@ class PropertyController extends Controller
      */
     public function logs(Request $request, Property $property)
     {
-        $this->authorizePropertyMutation($property);
+        $viewer = $this->propertyShowAuthUser($request);
+        if (! $viewer || ! $this->moderationAccess->canViewSecurityReportProperty($viewer, $property)) {
+            $this->authorizePropertyMutation($property);
+        }
         $perPage = (int) $request->input('per_page', 50);
 
         $logs = $property->logs()->with('user')->paginate($perPage);
