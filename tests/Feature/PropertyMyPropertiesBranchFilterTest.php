@@ -113,6 +113,37 @@ class PropertyMyPropertiesBranchFilterTest extends TestCase
         });
     }
 
+    public function test_security_report_only_returns_control_stages_and_scoped_totals(): void
+    {
+        $role = Role::create(['name' => 'СБ', 'slug' => 'security']);
+        $sb = User::create(['name' => 'SB', 'phone' => '900000099', 'role_id' => $role->id, 'status' => 'active']);
+        $type = PropertyType::create(['name' => 'Apartment']);
+        $status = PropertyStatus::create(['name' => 'Available']);
+        foreach (['approved', 'pending', 'draft', 'deposit', 'sold', 'sold_by_owner', 'rented', 'deleted'] as $stage) {
+            Property::create(['title' => $stage, 'type_id' => $type->id, 'status_id' => $status->id,
+                'price' => 100, 'currency' => 'TJS', 'created_by' => $sb->id, 'moderation_status' => $stage, 'branch_id' => 2]);
+        }
+        Sanctum::actingAs($sb);
+        $response = $this->getJson('/api/my-properties?per_page=2')->assertOk()->assertJsonPath('total', 5)->assertJsonCount(2, 'data');
+        $this->assertEquals(500, $response->json('security_summary.by_currency.0.sum_price'));
+        $this->assertEquals(5, collect($response->json('security_summary.by_status'))->sum('total'));
+        $this->getJson('/api/my-properties?moderation_status=approved')->assertOk()->assertJsonPath('total', 0);
+        $this->getJson('/api/my-properties?moderation_status=approved,sold_by_owner')->assertOk()->assertJsonPath('total', 1)
+            ->assertJsonPath('data.0.moderation_status', 'sold_by_owner');
+        $this->getJson('/api/my-properties?moderation_status=sold_by_owner')->assertOk()->assertJsonPath('total', 1)
+            ->assertJsonCount(1, 'security_summary.by_status');
+        $this->getJson('/api/my-properties?branch_id=3')->assertOk()->assertJsonPath('total', 0);
+        $ids = [];
+        for ($page = 1; $page <= 3; $page++) {
+            $rows = $this->getJson('/api/my-properties?per_page=2&page='.$page)->assertOk()->json('data');
+            foreach ($rows as $row) {
+                $this->assertContains($row['moderation_status'], ['deposit', 'sold', 'sold_by_owner', 'rented', 'deleted']);
+                $ids[] = $row['id'];
+            }
+        }
+        $this->assertCount(5, array_unique($ids));
+    }
+
     public function test_my_properties_filters_by_branch_id_and_excludes_other_branches(): void
     {
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);

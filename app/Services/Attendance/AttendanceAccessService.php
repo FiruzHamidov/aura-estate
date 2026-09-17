@@ -89,6 +89,13 @@ final class AttendanceAccessService
         ];
     }
 
+    /** An explicit empty list grants nothing; legacy accounts retain their primary branch. */
+    public function securityBranchIds(User $viewer): array
+    {
+        $ids = $viewer->security_attendance_branch_ids;
+        return array_values(array_unique(array_map('intval', $ids ?? ($viewer->branch_id ? [$viewer->branch_id] : []))));
+    }
+
     public function visibleUsersQuery(User $viewer): Builder
     {
         $this->assertCanViewModule($viewer);
@@ -103,6 +110,7 @@ final class AttendanceAccessService
         }
 
         return match ($this->role($viewer)) {
+            'security' => $query->whereIn('users.branch_id', $this->securityBranchIds($viewer)),
             'agent', 'intern' => $query->whereKey($viewer->id),
             'mop' => $query->where(function (Builder $scope) use ($viewer) {
                 $scope->whereKey($viewer->id);

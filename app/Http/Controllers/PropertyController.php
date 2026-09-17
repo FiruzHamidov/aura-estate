@@ -766,13 +766,28 @@ class PropertyController extends Controller
         $this->applySorts($query, $request->input('sort'), $request->input('dir'));
         $perPage = (int) $request->input('per_page', 20);
 
+        $summary = null;
+        if ($request->user()?->hasRole('security')) {
+            $reportProperties = Property::query()->whereIn('moderation_status', config('security-property-control.trigger_statuses', []));
+            $reportUsers = User::query()->select(['id', 'name', 'status', 'branch_id', 'branch_group_id'])->where(function ($users) use ($reportProperties) {
+                $users->whereIn('id', (clone $reportProperties)->select('created_by'))
+                    ->orWhereIn('id', (clone $reportProperties)->select('agent_id'));
+                if (Schema::hasColumn('properties', 'sale_user_id')) $users->orWhereIn('id', (clone $reportProperties)->select('sale_user_id'));
+            })->orderBy('name')->get();
+            $summary = [
+                'agents' => $reportUsers,
+                'by_status' => (clone $query)->withoutEagerLoads()->reorder()->selectRaw('moderation_status, COUNT(*) as total')->groupBy('moderation_status')->get()->map->only(['moderation_status', 'total']),
+                'by_currency' => (clone $query)->withoutEagerLoads()->reorder()->selectRaw('currency, SUM(price) as sum_price, AVG(price) as avg_price')->groupBy('currency')->get()->map->only(['currency', 'sum_price', 'avg_price']),
+            ];
+        }
+
         // A deterministic tie-breaker keeps page-by-page report exports stable.
         $result = $query->latest()->orderByDesc('properties.id')->paginate($perPage);
         if (in_array($request->user()?->role?->slug, ['superadmin', 'accountant'], true)) {
             app(\App\Services\PropertyReportStaff::class)->attach($result->getCollection());
         }
 
-        return response()->json($result);
+        return response()->json($summary === null ? $result : array_merge($result->toArray(), ['security_summary' => $summary]));
     }
 
     private function propertyListRelations(): array
@@ -866,6 +881,9 @@ class PropertyController extends Controller
     {
         $user = auth()->user();
         $query = Property::query()->with(array_merge($this->propertyListRelations(), ['saleAgents']));
+        if ($user?->hasRole('security')) {
+            $query->whereIn('properties.moderation_status', config('security-property-control.trigger_statuses', []));
+        }
 
         $hasStatusFilter = $request->filled('moderation_status');
 

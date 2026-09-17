@@ -68,6 +68,8 @@ final class AttendanceWebController extends Controller
                 'date_from' => $from->toDateString(),
                 'date_to' => $to->toDateString(),
                 'permissions' => $this->access->permissions($request->user()),
+                'selectable_branches' => $request->user()->hasRole('security')
+                    ? \App\Models\Branch::query()->whereIn('id', $this->access->securityBranchIds($request->user()))->orderBy('name')->get(['id', 'name']) : null,
                 'summary' => $this->summary($request->user(), $activeUsersCount, $from, $to),
                 'pagination' => $pagination,
                 'last_updated_at' => AttendanceDailySummary::query()->max('updated_at'),
@@ -138,6 +140,8 @@ final class AttendanceWebController extends Controller
             'date_to' => ['nullable', 'date_format:Y-m-d', 'after_or_equal:date_from'],
             'view' => ['nullable', Rule::in(['users', 'branches'])],
             'branch_id' => ['nullable', 'integer', 'exists:branches,id'],
+            'branch_ids' => ['nullable', 'array', 'max:100'],
+            'branch_ids.*' => ['required', 'integer', 'distinct', 'exists:branches,id'],
             'branch_group_id' => ['nullable', 'integer', 'exists:branch_groups,id'],
             'role' => ['nullable', 'string', 'max:100'],
             'user_id' => ['nullable', 'integer', 'exists:users,id'],
@@ -164,6 +168,7 @@ final class AttendanceWebController extends Controller
 
     private function applyUserFilters(Builder $query, array $filters, CarbonImmutable $from, CarbonImmutable $to): void
     {
+        if (isset($filters['branch_ids'])) $query->whereIn('users.branch_id', $filters['branch_ids']);
         foreach (['branch_id', 'branch_group_id'] as $field) {
             if (isset($filters[$field])) {
                 $query->where('users.'.$field, $filters[$field]);

@@ -534,6 +534,8 @@ class UserController extends Controller
             'auth_method' => 'nullable|in:password,sms',
             'status' => ['nullable', Rule::in(['active', 'inactive'])],
             'password' => 'nullable|string|min:6',
+            'security_attendance_branch_ids' => 'sometimes|array|max:100',
+            'security_attendance_branch_ids.*' => 'required|integer|distinct|exists:branches,id',
         ]);
 
         $targetRole = $this->resolveRequestedRole($request);
@@ -543,6 +545,11 @@ class UserController extends Controller
         $data = $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'birthday', 'description']);
         $data = $this->normalizeBranchIdForMutation($data, $authUser, $targetRole);
         $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
+        if ($request->exists('security_attendance_branch_ids')) {
+            abort_unless(in_array($this->roleSlug($authUser), ['admin', 'superadmin'], true), 403, 'Только администратор может назначать филиалы посещаемости СБ.');
+            abort_unless($targetRole->slug === 'security', 422, 'Филиалы посещаемости назначаются только сотрудникам СБ.');
+            $data['security_attendance_branch_ids'] = array_values(array_map('intval', $request->input('security_attendance_branch_ids')));
+        }
 
         if (! $request->filled('auth_method')) {
             unset($data['auth_method']);
@@ -610,6 +617,8 @@ class UserController extends Controller
             'auth_method' => 'sometimes|nullable|in:password,sms',
             'status' => ['sometimes', Rule::in(['active', 'inactive'])],
             'password' => 'nullable|string|min:6',
+            'security_attendance_branch_ids' => 'sometimes|array|max:100',
+            'security_attendance_branch_ids.*' => 'required|integer|distinct|exists:branches,id',
         ]);
 
         $targetRole = $this->resolveRequestedRole($request, $user);
@@ -629,6 +638,11 @@ class UserController extends Controller
         ], $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'description', 'birthday']));
         $data = $this->normalizeBranchIdForMutation($data, $authUser, $targetRole);
         $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
+        if ($request->exists('security_attendance_branch_ids')) {
+            abort_unless(in_array($this->roleSlug($authUser), ['admin', 'superadmin'], true), 403, 'Только администратор может назначать филиалы посещаемости СБ.');
+            abort_unless($targetRole->slug === 'security', 422, 'Филиалы посещаемости назначаются только сотрудникам СБ.');
+            $data['security_attendance_branch_ids'] = array_values(array_map('intval', $request->input('security_attendance_branch_ids')));
+        }
 
         if ($request->filled('password')) {
             $data['password'] = Hash::make($request->password);

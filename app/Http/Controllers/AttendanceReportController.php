@@ -160,6 +160,7 @@ final class AttendanceReportController extends Controller
     private function attendanceUsersQuery(Request $request): Builder
     {
         $query = $this->access->visibleUsersQuery($request->user());
+        if ($request->has('branch_ids')) $query->whereIn('users.branch_id', $request->input('branch_ids', []));
         foreach (['branch_id', 'branch_group_id'] as $field) {
             if ($request->filled($field)) $query->where('users.'.$field, $request->integer($field));
         }
@@ -192,6 +193,8 @@ final class AttendanceReportController extends Controller
             'date_to' => ['nullable', 'date_format:Y-m-d', 'after_or_equal:date_from'],
             'user_id' => ['nullable', 'integer', 'exists:users,id'],
             'branch_id' => ['nullable', 'integer', 'exists:branches,id'],
+            'branch_ids' => ['nullable', 'array', 'max:100'],
+            'branch_ids.*' => ['required', 'integer', 'distinct', 'exists:branches,id'],
             'branch_group_id' => ['nullable', 'integer', 'exists:branch_groups,id'],
             'device_id' => ['nullable', 'integer', 'exists:attendance_devices,id'],
             'status' => ['nullable', 'in:present,late,absent,incomplete'],
@@ -213,6 +216,7 @@ final class AttendanceReportController extends Controller
 
     private function applyEventFilters(Builder $query, array $filters): void
     {
+        if (isset($filters['branch_ids'])) $query->whereIn('branch_id', $filters['branch_ids']);
         if (isset($filters['date_from'])) {
             $query->where('occurred_at', '>=', \Carbon\CarbonImmutable::parse($filters['date_from'], config('attendance.timezone'))->startOfDay()->utc());
         }
@@ -228,6 +232,7 @@ final class AttendanceReportController extends Controller
 
     private function applySummaryFilters(Builder $query, array $filters): void
     {
+        if (isset($filters['branch_ids'])) $query->whereHas('user', fn (Builder $users) => $users->whereIn('branch_id', $filters['branch_ids']));
         if (isset($filters['date_from'])) {
             $query->whereDate('work_date', '>=', $filters['date_from']);
         }
