@@ -183,6 +183,8 @@ class PaymentProgramsTest extends TestCase
             $this->postJson('/api/admin/new-buildings/'.$foreign->id.'/payment-programs', $this->terms())->assertForbidden();
         }
         Sanctum::actingAs($this->actor('rop', $a));
+        $this->postJson('/api/admin/new-buildings/'.$building->id.'/payment-programs', $this->terms())->assertForbidden();
+        Sanctum::actingAs($this->actor('branch_director', $a));
         $this->postJson('/api/admin/new-buildings/'.$building->id.'/payment-programs', $this->terms())->assertCreated();
     }
 

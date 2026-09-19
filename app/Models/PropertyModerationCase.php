@@ -6,6 +6,8 @@ use Illuminate\Database\Eloquent\Model;
 
 class PropertyModerationCase extends Model
 {
+    use \App\Models\Concerns\ProjectsRopRelations;
+
     public const TYPE_INITIAL = 'initial_review';
     public const TYPE_PRICE_INCREASE = 'price_increase';
     public const TYPE_DUPLICATE = 'duplicate_review';

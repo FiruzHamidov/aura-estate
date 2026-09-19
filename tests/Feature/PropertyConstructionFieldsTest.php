@@ -1765,15 +1765,15 @@ class PropertyConstructionFieldsTest extends TestCase
 
     public function test_legacy_moderation_listing_endpoint_is_retired(): void
     {
-        $ropRole = Role::create([
-            'name' => 'ROP',
-            'slug' => 'rop',
+        $adminRole = Role::create([
+            'name' => 'Admin',
+            'slug' => 'admin',
         ]);
-        $rop = User::create([
-            'name' => 'Rop User',
+        $admin = User::create([
+            'name' => 'Admin User',
             'phone' => '930000230',
             'password' => bcrypt('password'),
-            'role_id' => $ropRole->id,
+            'role_id' => $adminRole->id,
             'status' => 'active',
         ]);
         $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
@@ -1788,11 +1788,11 @@ class PropertyConstructionFieldsTest extends TestCase
             'offer_type' => 'sale',
             'moderation_status' => 'approved',
             'listing_type' => 'regular',
-            'created_by' => $rop->id,
-            'agent_id' => $rop->id,
+            'created_by' => $admin->id,
+            'agent_id' => $admin->id,
         ]);
 
-        Sanctum::actingAs($rop);
+        Sanctum::actingAs($admin);
 
         $response = $this->patchJson("/api/properties/{$property->id}/moderation-listing", [
             'moderation_status' => 'approved',
@@ -1942,11 +1942,11 @@ class PropertyConstructionFieldsTest extends TestCase
         $id = $created->json('id');
         $version = $created->json('moderation_version');
         $key = ['Idempotency-Key' => 'moderation-price-change-001'];
-        $changed = $this->putJson("/api/properties/{$id}", ['price' => 100001, 'version' => $version] + $payload, $key)
+        $changed = $this->putJson("/api/properties/{$id}", ['price' => 100100, 'version' => $version] + $payload, $key)
             ->assertOk()->assertJsonPath('publication_status', 'pending');
-        $this->putJson("/api/properties/{$id}", ['price' => 100001, 'version' => $version] + $payload, $key)
+        $this->putJson("/api/properties/{$id}", ['price' => 100100, 'version' => $version] + $payload, $key)
             ->assertOk()->assertHeader('Idempotent-Replayed', 'true');
-        $this->putJson("/api/properties/{$id}", ['price' => 100002, 'version' => $version] + $payload)
+        $this->putJson("/api/properties/{$id}", ['price' => 100101, 'version' => $version] + $payload)
             ->assertConflict()->assertJsonPath('code', 'MODERATION_VERSION_CONFLICT');
         $case = \App\Models\PropertyModerationCase::where('property_id', $id)->firstOrFail();
         $this->postJson("/api/property-moderation-cases/{$case->id}/approve", ['version' => $case->version])

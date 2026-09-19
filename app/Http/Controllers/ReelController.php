@@ -12,6 +12,8 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\DB;
+use App\Services\GroupAccess\ReelWriteLock;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use RuntimeException;
@@ -62,6 +64,10 @@ class ReelController extends Controller
             return false;
         }
 
+        if ($user->hasRole('rop')) {
+            return app(\App\Support\RopGroupAccess::class)->allows($user, $property);
+        }
+
         if ($this->userHasAnyRole($user, self::GLOBAL_REEL_MANAGER_ROLES)) {
             return true;
         }
@@ -85,6 +91,12 @@ class ReelController extends Controller
             return false;
         }
 
+        if ($user->hasRole('rop')) {
+            $access = app(\App\Support\RopGroupAccess::class);
+
+            return $reel ? $access->allows($user, $reel) : $access->groupIds($user) !== [];
+        }
+
         if ($this->userHasAnyRole($user, self::GLOBAL_REEL_MANAGER_ROLES)) {
             return true;
         }
@@ -102,6 +114,26 @@ class ReelController extends Controller
         }
 
         return false;
+    }
+
+    private function creationGroup(User $user, ?Property $property, ?int $requested): ?int
+    {
+        if ($property) {
+            abort_if($requested !== null && $requested !== (int) $property->branch_group_id, 422, 'REEL_MUST_FOLLOW_PROPERTY_GROUP');
+
+            return $property->branch_group_id;
+        }
+        if ($user->hasRole('rop')) {
+            return app(\App\Support\RopGroupAccess::class)->creationGroup($user, $requested);
+        }
+        $groupId = $requested ?? $user->branch_group_id;
+        if ($groupId !== null) {
+            $group = \App\Models\BranchGroup::query()->findOrFail($groupId);
+            abort_unless($this->userHasAnyRole($user, self::GLOBAL_REEL_MANAGER_ROLES)
+                || (int) $group->branch_id === (int) $user->branch_id, 403, 'Forbidden');
+        }
+
+        return $groupId;
     }
 
     private function userHasAnyRole(User $user, array $slugs): bool
@@ -165,10 +197,20 @@ class ReelController extends Controller
             ->published();
     }
 
-    private function serializeReel(Reel $reel): array
+    private function serializeReel(Reel $reel, bool $private = true): array
     {
-        $payload = $reel->toArray();
-        $payload['can_publish'] = $reel->canBePublished();
+        $payload = $private ? $reel->toArray() : $reel->only([
+            'id', 'property_id', 'title', 'description', 'video_url', 'hls_url', 'mp4_url',
+            'preview_image', 'thumbnail_url', 'duration', 'aspect_ratio', 'status', 'sort_order',
+            'is_featured', 'views_count', 'likes_count', 'published_at',
+        ]);
+        if (! $private) {
+            $payload['property'] = $reel->property?->only([
+                'id', 'title', 'price', 'currency', 'district', 'address', 'rooms', 'total_area', 'offer_type', 'moderation_status',
+            ]);
+        } else {
+            $payload['can_publish'] = $reel->canBePublished();
+        }
         $payload['is_liked'] = $this->isLikedByAuthUser($reel);
         $payload['playback'] = [
             'hls_url' => $reel->hls_url,
@@ -209,7 +251,7 @@ class ReelController extends Controller
     private function ensureLikeableReel(Reel $reel): void
     {
         abort_unless(
-            Reel::query()->published()->whereKey($reel->id)->exists(),
+            $this->publicQuery()->whereKey($reel->id)->exists(),
             404
         );
     }
@@ -294,7 +336,7 @@ class ReelController extends Controller
 
         $reels = $query->ordered()
             ->paginate((int) ($validated['per_page'] ?? 15))
-            ->through(fn (Reel $reel) => $this->serializeReel($reel));
+            ->through(fn (Reel $reel) => $this->serializeReel($reel, false));
 
         return response()->json($reels);
     }
@@ -337,7 +379,7 @@ class ReelController extends Controller
 
         $reels = $query->ordered()
             ->get()
-            ->map(fn (Reel $reel) => $this->serializeReel($reel));
+            ->map(fn (Reel $reel) => $this->serializeReel($reel, $canIncludeUnpublished));
 
         return response()->json($reels);
     }
@@ -345,322 +387,348 @@ class ReelController extends Controller
     public function show(Request $request, int $id): JsonResponse
     {
         $user = $this->authUser();
-
-        $query = Reel::query()->with('property');
-
-        if (!$user) {
-            $query->published()->where(function ($builder) {
-                $builder->whereNull('property_id')
-                    ->orWhereHas('property', fn ($propertyQuery) => $propertyQuery->publicSearchable());
-            });
+        $reel = Reel::query()->with('property')->findOrFail($id);
+        $private = $reel->property
+            ? $this->canManageProperty($user, $reel->property)
+            : $this->canManageStandaloneReel($user, $reel);
+        if (! $private) {
+            $reel = $this->publicQuery()->findOrFail($id);
         }
 
-        /** @var Reel $reel */
-        $reel = $query->findOrFail($id);
-
-        if (
-            $user
-            && $reel->status !== Reel::STATUS_PUBLISHED
-            && !(
-                ($reel->property && $this->canManageProperty($user, $reel->property))
-                || (!$reel->property && $this->canManageStandaloneReel($user, $reel))
-            )
-        ) {
-            abort(403, 'Forbidden');
-        }
-
-        return response()->json($this->serializeReel($reel));
+        return response()->json($this->serializeReel($reel, $private));
     }
 
     public function store(Request $request): JsonResponse
     {
-        $validated = $request->validate([
-            'property_id' => 'nullable|integer|exists:properties,id',
-            'title' => 'nullable|string|max:255',
-            'description' => 'nullable|string',
-            'sort_order' => 'nullable|integer|min:0',
-            'is_featured' => 'nullable|boolean',
-            'poster_second' => 'nullable|integer|min:0|max:300',
-            'duration' => 'nullable|integer|min:0|max:300',
-            'aspect_ratio' => 'nullable|string|max:16',
-            'video' => 'required|file|mimetypes:video/mp4,video/quicktime|max:102400',
-            'preview_image' => 'nullable|image|mimes:jpg,jpeg,png,webp|max:8192',
-            'thumbnail' => 'nullable|image|mimes:jpg,jpeg,png,webp|max:4096',
-        ]);
+        return DB::transaction(function () use ($request) {
+            [, , $lockedProperty] = app(ReelWriteLock::class)->acquire(
+                $this->authUser(), null, $request->integer('property_id') ?: null, $request->integer('branch_group_id') ?: null
+            );
+            $validated = $request->validate([
+                'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
+                'property_id' => 'nullable|integer|exists:properties,id',
+                'title' => 'nullable|string|max:255',
+                'description' => 'nullable|string',
+                'sort_order' => 'nullable|integer|min:0',
+                'is_featured' => 'nullable|boolean',
+                'poster_second' => 'nullable|integer|min:0|max:300',
+                'duration' => 'nullable|integer|min:0|max:300',
+                'aspect_ratio' => 'nullable|string|max:16',
+                'video' => 'required|file|mimetypes:video/mp4,video/quicktime|max:102400',
+                'preview_image' => 'nullable|image|mimes:jpg,jpeg,png,webp|max:8192',
+                'thumbnail' => 'nullable|image|mimes:jpg,jpeg,png,webp|max:4096',
+            ]);
 
-        $property = !empty($validated['property_id'])
-            ? Property::query()->findOrFail($validated['property_id'])
-            : null;
-        $user = $property
-            ? $this->ensureCanManageProperty($property)
-            : tap($this->authUser(), fn ($authUser) => abort_unless($this->canManageStandaloneReel($authUser), 403, 'Forbidden'));
+            $property = $lockedProperty;
+            $user = $property
+                ? $this->ensureCanManageProperty($property)
+                : tap($this->authUser(), fn ($authUser) => abort_unless($this->canManageStandaloneReel($authUser), 403, 'Forbidden'));
 
-        $videoPath = $this->storeMediaFile($request->file('video'), 'reels/originals');
-        $previewPath = $request->hasFile('preview_image')
-            ? $this->storeMediaFile($request->file('preview_image'), 'reels/previews')
-            : null;
-        $thumbnailPath = $request->hasFile('thumbnail')
-            ? $this->storeMediaFile($request->file('thumbnail'), 'reels/thumbnails')
-            : null;
+            $groupId = $this->creationGroup($user, $property, $validated['branch_group_id'] ?? null);
 
-        $reel = Reel::query()->create([
-            'property_id' => $property?->id,
-            'created_by' => $user->id,
-            'title' => $validated['title'] ?? null,
-            'description' => $validated['description'] ?? null,
-            'video_url' => $videoPath,
-            'preview_image' => $previewPath,
-            'thumbnail_url' => $thumbnailPath,
-            'duration' => $validated['duration'] ?? null,
-            'aspect_ratio' => $validated['aspect_ratio'] ?? '9:16',
-            'status' => Reel::STATUS_PROCESSING,
-            'sort_order' => (int) ($validated['sort_order'] ?? 0),
-            'is_featured' => (bool) ($validated['is_featured'] ?? false),
-            'video_size' => $request->file('video')->getSize(),
-            'mime_type' => $request->file('video')->getMimeType(),
-            'transcode_status' => Reel::TRANSCODE_QUEUED,
-            'poster_second' => $validated['poster_second'] ?? null,
-            'processing_meta' => [
-                'original_name' => $request->file('video')->getClientOriginalName(),
-                'queued_at' => now()->toIso8601String(),
-            ],
-        ]);
+            $videoPath = $this->storeMediaFile($request->file('video'), 'reels/originals');
+            $previewPath = $request->hasFile('preview_image')
+                ? $this->storeMediaFile($request->file('preview_image'), 'reels/previews')
+                : null;
+            $thumbnailPath = $request->hasFile('thumbnail')
+                ? $this->storeMediaFile($request->file('thumbnail'), 'reels/thumbnails')
+                : null;
 
-        ProcessReelVideo::dispatchAfterResponse($reel->id);
+            $reel = Reel::query()->create([
+                'branch_group_id' => $groupId,
+                'property_id' => $property?->id,
+                'created_by' => $user->id,
+                'title' => $validated['title'] ?? null,
+                'description' => $validated['description'] ?? null,
+                'video_url' => $videoPath,
+                'preview_image' => $previewPath,
+                'thumbnail_url' => $thumbnailPath,
+                'duration' => $validated['duration'] ?? null,
+                'aspect_ratio' => $validated['aspect_ratio'] ?? '9:16',
+                'status' => Reel::STATUS_PROCESSING,
+                'sort_order' => (int) ($validated['sort_order'] ?? 0),
+                'is_featured' => (bool) ($validated['is_featured'] ?? false),
+                'video_size' => $request->file('video')->getSize(),
+                'mime_type' => $request->file('video')->getMimeType(),
+                'transcode_status' => Reel::TRANSCODE_QUEUED,
+                'poster_second' => $validated['poster_second'] ?? null,
+                'processing_meta' => [
+                    'original_name' => $request->file('video')->getClientOriginalName(),
+                    'queued_at' => now()->toIso8601String(),
+                ],
+            ]);
 
-        return response()->json(
-            $this->serializeReel($reel->load('property')),
-            201
-        );
+            ProcessReelVideo::dispatchAfterResponse($reel->id);
+
+            return response()->json(
+                $this->serializeReel($reel->load('property')),
+                201
+            );
+        });
     }
 
     public function initDirectUpload(Request $request): JsonResponse
     {
-        $validated = $request->validate([
-            'property_id' => 'nullable|integer|exists:properties,id',
-            'title' => 'nullable|string|max:255',
-            'description' => 'nullable|string',
-            'sort_order' => 'nullable|integer|min:0',
-            'is_featured' => 'nullable|boolean',
-            'poster_second' => 'nullable|integer|min:0|max:300',
-            'duration' => 'nullable|integer|min:0|max:300',
-            'aspect_ratio' => 'nullable|string|max:16',
-            'mime_type' => 'required|string|in:video/mp4,video/quicktime',
-            'extension' => 'nullable|string|max:8',
-            'file_size' => 'nullable|integer|min:1|max:104857600',
-            'original_name' => 'nullable|string|max:255',
-        ]);
-
-        $property = !empty($validated['property_id'])
-            ? Property::query()->findOrFail($validated['property_id'])
-            : null;
-        $user = $property
-            ? $this->ensureCanManageProperty($property)
-            : tap($this->authUser(), fn ($authUser) => abort_unless($this->canManageStandaloneReel($authUser), 403, 'Forbidden'));
-
-        $path = $this->uploadService->directUploadPath($validated['extension'] ?? 'mp4');
-
-        $reel = Reel::query()->create([
-            'property_id' => $property?->id,
-            'created_by' => $user->id,
-            'title' => $validated['title'] ?? null,
-            'description' => $validated['description'] ?? null,
-            'video_url' => $path,
-            'duration' => $validated['duration'] ?? null,
-            'aspect_ratio' => $validated['aspect_ratio'] ?? '9:16',
-            'status' => Reel::STATUS_UPLOADING,
-            'sort_order' => (int) ($validated['sort_order'] ?? 0),
-            'is_featured' => (bool) ($validated['is_featured'] ?? false),
-            'video_size' => $validated['file_size'] ?? null,
-            'mime_type' => $validated['mime_type'],
-            'transcode_status' => Reel::TRANSCODE_PENDING,
-            'poster_second' => $validated['poster_second'] ?? null,
-            'processing_meta' => [
-                'upload' => [
-                    'mode' => 'direct',
-                    'disk' => $this->uploadService->diskName(),
-                    'status' => 'initialized',
-                    'original_name' => $validated['original_name'] ?? null,
-                    'requested_at' => now()->toIso8601String(),
-                ],
-            ],
-        ]);
-
-        try {
-            $upload = $this->uploadService->createTemporaryUpload(
-                $reel,
-                $path,
-                $validated['mime_type']
+        return DB::transaction(function () use ($request) {
+            [, , $lockedProperty] = app(ReelWriteLock::class)->acquire(
+                $this->authUser(), null, $request->integer('property_id') ?: null, $request->integer('branch_group_id') ?: null
             );
-        } catch (RuntimeException $exception) {
-            $reel->delete();
-            abort(422, $exception->getMessage());
-        }
+            $validated = $request->validate([
+                'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
+                'property_id' => 'nullable|integer|exists:properties,id',
+                'title' => 'nullable|string|max:255',
+                'description' => 'nullable|string',
+                'sort_order' => 'nullable|integer|min:0',
+                'is_featured' => 'nullable|boolean',
+                'poster_second' => 'nullable|integer|min:0|max:300',
+                'duration' => 'nullable|integer|min:0|max:300',
+                'aspect_ratio' => 'nullable|string|max:16',
+                'mime_type' => 'required|string|in:video/mp4,video/quicktime',
+                'extension' => 'nullable|string|max:8',
+                'file_size' => 'nullable|integer|min:1|max:104857600',
+                'original_name' => 'nullable|string|max:255',
+            ]);
 
-        return response()->json([
-            'reel' => $this->serializeReel($reel->load('property')),
-            'upload' => $upload,
-        ], 201);
+            $property = $lockedProperty;
+            $user = $property
+                ? $this->ensureCanManageProperty($property)
+                : tap($this->authUser(), fn ($authUser) => abort_unless($this->canManageStandaloneReel($authUser), 403, 'Forbidden'));
+
+            $groupId = $this->creationGroup($user, $property, $validated['branch_group_id'] ?? null);
+
+            $path = $this->uploadService->directUploadPath($validated['extension'] ?? 'mp4');
+
+            $reel = Reel::query()->create([
+                'branch_group_id' => $groupId,
+                'property_id' => $property?->id,
+                'created_by' => $user->id,
+                'title' => $validated['title'] ?? null,
+                'description' => $validated['description'] ?? null,
+                'video_url' => $path,
+                'duration' => $validated['duration'] ?? null,
+                'aspect_ratio' => $validated['aspect_ratio'] ?? '9:16',
+                'status' => Reel::STATUS_UPLOADING,
+                'sort_order' => (int) ($validated['sort_order'] ?? 0),
+                'is_featured' => (bool) ($validated['is_featured'] ?? false),
+                'video_size' => $validated['file_size'] ?? null,
+                'mime_type' => $validated['mime_type'],
+                'transcode_status' => Reel::TRANSCODE_PENDING,
+                'poster_second' => $validated['poster_second'] ?? null,
+                'processing_meta' => [
+                    'upload' => [
+                        'mode' => 'direct',
+                        'disk' => $this->uploadService->diskName(),
+                        'status' => 'initialized',
+                        'original_name' => $validated['original_name'] ?? null,
+                        'requested_at' => now()->toIso8601String(),
+                    ],
+                ],
+            ]);
+
+            try {
+                $upload = $this->uploadService->createTemporaryUpload(
+                    $reel,
+                    $path,
+                    $validated['mime_type']
+                );
+            } catch (RuntimeException $exception) {
+                $reel->delete();
+                abort(422, $exception->getMessage());
+            }
+
+            return response()->json([
+                'reel' => $this->serializeReel($reel->load('property')),
+                'upload' => $upload,
+            ], 201);
+        });
     }
 
     public function completeDirectUpload(Request $request, Reel $reel): JsonResponse
     {
-        $this->ensureCanManageReel($reel);
+        return DB::transaction(function () use ($request, $reel) {
+            [, $reel, $lockedProperty] = app(ReelWriteLock::class)->acquire(
+                $this->authUser(), $reel, $request->integer('property_id') ?: null, $request->integer('branch_group_id') ?: null
+            );
+            $this->ensureCanManageReel($reel);
 
-        $request->validate([
-            'video_size' => 'nullable|integer|min:1|max:104857600',
-        ]);
+            $request->validate([
+                'video_size' => 'nullable|integer|min:1|max:104857600',
+            ]);
 
-        abort_unless($reel->status === Reel::STATUS_UPLOADING, 422, 'Reel is not awaiting upload completion.');
-        abort_unless($this->uploadService->fileExists($reel->video_url), 422, 'Uploaded file was not found in storage.');
+            abort_unless($reel->status === Reel::STATUS_UPLOADING, 422, 'Reel is not awaiting upload completion.');
+            abort_unless($this->uploadService->fileExists($reel->video_url), 422, 'Uploaded file was not found in storage.');
 
-        $meta = $reel->processing_meta ?? [];
-        $meta['upload'] = array_merge($meta['upload'] ?? [], [
-            'status' => 'completed',
-            'completed_at' => now()->toIso8601String(),
-        ]);
+            $meta = $reel->processing_meta ?? [];
+            $meta['upload'] = array_merge($meta['upload'] ?? [], [
+                'status' => 'completed',
+                'completed_at' => now()->toIso8601String(),
+            ]);
 
-        $reel->update([
-            'status' => Reel::STATUS_PROCESSING,
-            'transcode_status' => Reel::TRANSCODE_QUEUED,
-            'video_size' => $request->integer('video_size') ?: ($this->uploadService->fileSize($reel->video_url) ?? $reel->video_size),
-            'processing_meta' => $meta,
-        ]);
+            $reel->update([
+                'status' => Reel::STATUS_PROCESSING,
+                'transcode_status' => Reel::TRANSCODE_QUEUED,
+                'video_size' => $request->integer('video_size') ?: ($this->uploadService->fileSize($reel->video_url) ?? $reel->video_size),
+                'processing_meta' => $meta,
+            ]);
 
-        ProcessReelVideo::dispatchAfterResponse($reel->id);
+            ProcessReelVideo::dispatchAfterResponse($reel->id);
 
-        return response()->json($this->serializeReel($reel->fresh('property')));
+            return response()->json($this->serializeReel($reel->fresh('property')));
+        });
     }
 
     public function update(Request $request, Reel $reel): JsonResponse
     {
-        $this->ensureCanManageReel($reel);
+        return DB::transaction(function () use ($request, $reel) {
+            [, $reel, $lockedProperty] = app(ReelWriteLock::class)->acquire(
+                $this->authUser(), $reel, $request->integer('property_id') ?: null, $request->integer('branch_group_id') ?: null
+            );
+            $this->ensureCanManageReel($reel);
 
-        $validated = $request->validate([
-            'property_id' => 'sometimes|nullable|integer|exists:properties,id',
-            'title' => 'sometimes|nullable|string|max:255',
-            'description' => 'sometimes|nullable|string',
-            'sort_order' => 'sometimes|integer|min:0',
-            'is_featured' => 'sometimes|boolean',
-            'poster_second' => 'sometimes|nullable|integer|min:0|max:300',
-            'duration' => 'sometimes|nullable|integer|min:0|max:300',
-            'aspect_ratio' => 'sometimes|nullable|string|max:16',
-            'status' => ['sometimes', Rule::in([Reel::STATUS_DRAFT, Reel::STATUS_ARCHIVED, Reel::STATUS_PROCESSING, Reel::STATUS_PUBLISHED])],
-            'video' => 'sometimes|file|mimetypes:video/mp4,video/quicktime|max:102400',
-            'preview_image' => 'sometimes|nullable|image|mimes:jpg,jpeg,png,webp|max:8192',
-            'thumbnail' => 'sometimes|nullable|image|mimes:jpg,jpeg,png,webp|max:4096',
-        ]);
+            $validated = $request->validate([
+                'property_id' => 'sometimes|nullable|integer|exists:properties,id',
+                'title' => 'sometimes|nullable|string|max:255',
+                'description' => 'sometimes|nullable|string',
+                'sort_order' => 'sometimes|integer|min:0',
+                'is_featured' => 'sometimes|boolean',
+                'poster_second' => 'sometimes|nullable|integer|min:0|max:300',
+                'duration' => 'sometimes|nullable|integer|min:0|max:300',
+                'aspect_ratio' => 'sometimes|nullable|string|max:16',
+                'status' => ['sometimes', Rule::in([Reel::STATUS_DRAFT, Reel::STATUS_ARCHIVED, Reel::STATUS_PROCESSING, Reel::STATUS_PUBLISHED])],
+                'video' => 'sometimes|file|mimetypes:video/mp4,video/quicktime|max:102400',
+                'preview_image' => 'sometimes|nullable|image|mimes:jpg,jpeg,png,webp|max:8192',
+                'thumbnail' => 'sometimes|nullable|image|mimes:jpg,jpeg,png,webp|max:4096',
+            ]);
 
-        if (array_key_exists('property_id', $validated)) {
-            if ($validated['property_id']) {
-                $targetProperty = Property::query()->findOrFail($validated['property_id']);
-                $this->ensureCanManageProperty($targetProperty);
-            } else {
-                abort_unless(
-                    $this->canManageStandaloneReel($this->authUser(), $reel),
-                    403,
-                    'Forbidden'
-                );
+            if (array_key_exists('property_id', $validated)) {
+                $sourceGroup = $reel->property ? $reel->property->branch_group_id : $reel->branch_group_id;
+                if ($validated['property_id']) {
+                    $targetProperty = $lockedProperty;
+                    $this->ensureCanManageProperty($targetProperty);
+                    abort_if($this->authUser()?->hasRole('rop') && (int) $sourceGroup !== (int) $targetProperty->branch_group_id,
+                        403, 'GROUP_TRANSFER_REQUIRED');
+                    $validated['branch_group_id'] = $targetProperty->branch_group_id;
+                } else {
+                    abort_unless(
+                        $this->canManageStandaloneReel($this->authUser()),
+                        403,
+                        'Forbidden'
+                    );
+                    $validated['branch_group_id'] = $sourceGroup;
+                    if ($this->authUser()?->hasRole('rop')) {
+                        app(\App\Support\RopGroupAccess::class)->ensureGroup($this->authUser(), $sourceGroup);
+                    }
+                }
             }
-        }
 
-        $filesToDelete = [];
-        $data = collect($validated)
-            ->except(['video', 'preview_image', 'thumbnail'])
-            ->all();
+            $filesToDelete = [];
+            $data = collect($validated)
+                ->except(['video', 'preview_image', 'thumbnail'])
+                ->all();
 
-        if ($request->hasFile('video')) {
-            /** @var UploadedFile $video */
-            $video = $request->file('video');
-            $data['video_url'] = $this->storeMediaFile($video, 'reels/originals');
-            $data['mp4_url'] = null;
-            $data['hls_url'] = null;
-            $data['preview_image'] = null;
-            $data['thumbnail_url'] = null;
-            $data['video_size'] = $video->getSize();
-            $data['mime_type'] = $video->getMimeType();
-            $data['status'] = Reel::STATUS_PROCESSING;
-            $data['transcode_status'] = Reel::TRANSCODE_QUEUED;
-            $data['published_at'] = null;
+            if ($request->hasFile('video')) {
+                /** @var UploadedFile $video */
+                $video = $request->file('video');
+                $data['video_url'] = $this->storeMediaFile($video, 'reels/originals');
+                $data['mp4_url'] = null;
+                $data['hls_url'] = null;
+                $data['preview_image'] = null;
+                $data['thumbnail_url'] = null;
+                $data['video_size'] = $video->getSize();
+                $data['mime_type'] = $video->getMimeType();
+                $data['status'] = Reel::STATUS_PROCESSING;
+                $data['transcode_status'] = Reel::TRANSCODE_QUEUED;
+                $data['published_at'] = null;
 
-            $processingMeta = $reel->processing_meta ?? [];
-            $processingMeta['original_name'] = $video->getClientOriginalName();
-            $processingMeta['queued_at'] = now()->toIso8601String();
-            unset($processingMeta['processed_at'], $processingMeta['preview_generation']);
-            $data['processing_meta'] = $processingMeta;
+                $processingMeta = $reel->processing_meta ?? [];
+                $processingMeta['original_name'] = $video->getClientOriginalName();
+                $processingMeta['queued_at'] = now()->toIso8601String();
+                unset($processingMeta['processed_at'], $processingMeta['preview_generation']);
+                $data['processing_meta'] = $processingMeta;
 
-            $filesToDelete = array_merge($filesToDelete, [
+                $filesToDelete = array_merge($filesToDelete, [
+                    $reel->video_url,
+                    $reel->mp4_url,
+                    $reel->hls_url,
+                    $reel->preview_image,
+                    $reel->thumbnail_url,
+                ]);
+            }
+
+            if ($request->hasFile('preview_image')) {
+                $data['preview_image'] = $this->storeMediaFile($request->file('preview_image'), 'reels/previews');
+                $filesToDelete[] = $reel->preview_image;
+            }
+
+            if ($request->hasFile('thumbnail')) {
+                $data['thumbnail_url'] = $this->storeMediaFile($request->file('thumbnail'), 'reels/thumbnails');
+                $filesToDelete[] = $reel->thumbnail_url;
+            }
+
+            if (($data['status'] ?? null) !== Reel::STATUS_PUBLISHED && array_key_exists('status', $data)) {
+                $data['published_at'] = null;
+            }
+
+            $reel->update($data);
+
+            DB::afterCommit(fn () => $this->deleteMediaFiles($filesToDelete));
+
+            if ($request->hasFile('video')) {
+                ProcessReelVideo::dispatchAfterResponse($reel->id);
+            }
+
+            return response()->json($this->serializeReel($reel->fresh('property')));
+        });
+    }
+
+    public function publish(Request $request, Reel $reel): JsonResponse
+    {
+        return DB::transaction(function () use ($request, $reel) {
+            [, $reel, $lockedProperty] = app(ReelWriteLock::class)->acquire(
+                $this->authUser(), $reel, $request->integer('property_id') ?: null, $request->integer('branch_group_id') ?: null
+            );
+            $this->ensureCanManageReel($reel);
+
+            $request->validate([
+                'status' => ['required', Rule::in([Reel::STATUS_PUBLISHED, Reel::STATUS_ARCHIVED, Reel::STATUS_DRAFT])],
+            ]);
+
+            $status = $request->string('status')->toString();
+
+            if ($status === Reel::STATUS_PUBLISHED && !$reel->canBePublished()) {
+                abort(422, 'Reel is not ready for publication.');
+            }
+
+            $reel->update([
+                'status' => $status,
+                'published_at' => $status === Reel::STATUS_PUBLISHED ? ($reel->published_at ?? now()) : null,
+            ]);
+
+            return response()->json($this->serializeReel($reel->fresh('property')));
+        });
+    }
+
+    public function destroy(Reel $reel): JsonResponse
+    {
+        return DB::transaction(function () use ($reel) {
+            [, $reel, $lockedProperty] = app(ReelWriteLock::class)->acquire(
+                $this->authUser(), $reel, null, null
+            );
+            $this->ensureCanManageReel($reel);
+
+            $filesToDelete = [
                 $reel->video_url,
                 $reel->mp4_url,
                 $reel->hls_url,
                 $reel->preview_image,
                 $reel->thumbnail_url,
-            ]);
-        }
+            ];
 
-        if ($request->hasFile('preview_image')) {
-            $data['preview_image'] = $this->storeMediaFile($request->file('preview_image'), 'reels/previews');
-            $filesToDelete[] = $reel->preview_image;
-        }
+            $reel->delete();
+            DB::afterCommit(fn () => $this->deleteMediaFiles($filesToDelete));
 
-        if ($request->hasFile('thumbnail')) {
-            $data['thumbnail_url'] = $this->storeMediaFile($request->file('thumbnail'), 'reels/thumbnails');
-            $filesToDelete[] = $reel->thumbnail_url;
-        }
-
-        if (($data['status'] ?? null) !== Reel::STATUS_PUBLISHED && array_key_exists('status', $data)) {
-            $data['published_at'] = null;
-        }
-
-        $reel->update($data);
-
-        $this->deleteMediaFiles($filesToDelete);
-
-        if ($request->hasFile('video')) {
-            ProcessReelVideo::dispatchAfterResponse($reel->id);
-        }
-
-        return response()->json($this->serializeReel($reel->fresh('property')));
-    }
-
-    public function publish(Request $request, Reel $reel): JsonResponse
-    {
-        $this->ensureCanManageReel($reel);
-
-        $request->validate([
-            'status' => ['required', Rule::in([Reel::STATUS_PUBLISHED, Reel::STATUS_ARCHIVED, Reel::STATUS_DRAFT])],
-        ]);
-
-        $status = $request->string('status')->toString();
-
-        if ($status === Reel::STATUS_PUBLISHED && !$reel->fresh()->canBePublished()) {
-            abort(422, 'Reel is not ready for publication.');
-        }
-
-        $reel->update([
-            'status' => $status,
-            'published_at' => $status === Reel::STATUS_PUBLISHED ? ($reel->published_at ?? now()) : null,
-        ]);
-
-        return response()->json($this->serializeReel($reel->fresh('property')));
-    }
-
-    public function destroy(Reel $reel): JsonResponse
-    {
-        $this->ensureCanManageReel($reel);
-
-        $filesToDelete = [
-            $reel->video_url,
-            $reel->mp4_url,
-            $reel->hls_url,
-            $reel->preview_image,
-            $reel->thumbnail_url,
-        ];
-
-        $reel->delete();
-        $this->deleteMediaFiles($filesToDelete);
-
-        return response()->json(['message' => 'Reel deleted.']);
+            return response()->json(['message' => 'Reel deleted.']);
+        });
     }
 
     public function trackView(Reel $reel): JsonResponse

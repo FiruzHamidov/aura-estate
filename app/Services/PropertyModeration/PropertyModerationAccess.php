@@ -8,6 +8,7 @@ use App\Models\PropertyModerationCase;
 use App\Models\PropertyModerationEvent;
 use App\Models\PropertyPromotion;
 use App\Models\User;
+use App\Support\RopGroupAccess;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Schema;
 
@@ -27,6 +28,9 @@ final class PropertyModerationAccess
 
     public function canEdit(User $user, Property $property): bool
     {
+        if ($user->hasRole('rop') && ! app(RopGroupAccess::class)->allows($user, $property)) {
+            return false;
+        }
         $role = $this->role($user);
         if (! in_array($role, config('property-moderation.creator_roles', []), true)) {
             return false;
@@ -67,6 +71,9 @@ final class PropertyModerationAccess
 
     public function canModerate(User $user, Property $property): bool
     {
+        if ($user->hasRole('rop') && ! app(RopGroupAccess::class)->allows($user, $property)) {
+            return false;
+        }
         $role = $this->role($user);
         if (! in_array($role, config('property-moderation.moderator_roles', []), true)) {
             return false;
@@ -87,6 +94,10 @@ final class PropertyModerationAccess
         }
         if (! $user->branch_id || ! in_array($this->role($user), config('property-moderation.moderator_roles', []), true)) {
             return $query->whereRaw('1 = 0');
+        }
+
+        if ($user->hasRole('rop')) {
+            return app(RopGroupAccess::class)->scope($query, $user, 'properties.branch_group_id', 'properties.branch_id');
         }
 
         return $query->where(function (Builder $properties) use ($user): void {
@@ -140,6 +151,7 @@ final class PropertyModerationAccess
                 'can_appeal' => false,
                 'can_resolve_appeal' => false,
                 'can_manage_deal' => false,
+                'can_reopen_listing' => false,
                 'can_request_promotion' => false,
                 'can_approve_promotion' => false,
                 'can_manage_promotion_directly' => false,

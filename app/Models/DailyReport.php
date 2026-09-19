@@ -8,8 +8,10 @@ use Illuminate\Database\Eloquent\Model;
 class DailyReport extends Model
 {
     use HasFactory;
+    use \App\Models\Concerns\ProjectsRopRelations;
 
     protected $fillable = [
+        'branch_group_id',
         'user_id',
         'role_slug',
         'report_date',
@@ -49,6 +51,16 @@ class DailyReport extends Model
         'is_finalized' => 'boolean',
         'finalized_at' => 'datetime',
     ];
+
+    public function branchGroup()
+    {
+        return $this->belongsTo(BranchGroup::class);
+    }
+
+    public function historicalRole()
+    {
+        return $this->belongsTo(Role::class, 'role_slug', 'slug');
+    }
 
     public function user()
     {

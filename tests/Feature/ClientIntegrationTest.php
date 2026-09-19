@@ -2,6 +2,8 @@
 
 namespace Tests\Feature;
 
+use App\Models\BranchGroup;
+
 use App\Models\Branch;
 use App\Models\Client;
 use App\Models\ClientType;
@@ -306,6 +308,11 @@ class ClientIntegrationTest extends TestCase
             ['id' => 3, 'name' => 'Продажа', 'slug' => 'sell', 'created_at' => now(), 'updated_at' => now()],
             ['id' => 4, 'name' => 'Инвестиция', 'slug' => 'invest', 'created_at' => now(), 'updated_at' => now()],
         ]);
+        (require database_path('migrations/2026_03_09_120000_create_branch_groups_table.php'))->up();
+        Schema::table('users', fn (Blueprint $table) => $table->unsignedBigInteger('branch_group_id')->nullable());
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedBigInteger('branch_group_id')->nullable());
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
+
     }
 
     public function test_booking_store_uses_new_client_entity_and_fills_snapshot_fields(): void
@@ -538,6 +545,150 @@ class ClientIntegrationTest extends TestCase
         $response->assertOk();
         $response->assertJsonPath('unique_clients', 2);
         $response->assertJsonPath('business_clients', 2);
+    }
+
+    public function test_rop_buyer_aggregates_exclude_foreign_linked_clients_and_their_copied_fields(): void
+    {
+        [$agent, $client, $property] = $this->seedClientContext();
+        $group = BranchGroup::create(['name' => 'Own', 'branch_id' => $agent->branch_id]);
+        $foreignGroup = BranchGroup::create(['name' => 'Foreign', 'branch_id' => $agent->branch_id]);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $rop = User::create(['name' => 'ROP', 'phone' => (string) ++$this->phoneCounter,
+            'password' => bcrypt('password'), 'role_id' => $ropRole->id, 'branch_id' => $agent->branch_id, 'status' => 'active']);
+        $rop->supervisedGroups()->attach($group->id);
+        $client->forceFill(['branch_group_id' => $foreignGroup->id, 'client_type_id' => 2])->saveQuietly();
+        $property->forceFill(['branch_group_id' => $group->id, 'branch_id' => $agent->branch_id,
+            'buyer_client_id' => $client->id, 'buyer_full_name' => 'Copied foreign buyer',
+            'buyer_phone' => '+992905550001', 'is_business_owner' => true])->saveQuietly();
+
+        Sanctum::actingAs($rop);
+        $this->getJson('/api/reports/agent/clients')->assertOk()
+            ->assertJsonPath('unique_clients', 0)->assertJsonPath('business_clients', 0);
+
+        $client->forceFill(['branch_group_id' => $group->id])->saveQuietly();
+        $this->getJson('/api/reports/agent/clients')->assertOk()
+            ->assertJsonPath('unique_clients', 1)->assertJsonPath('business_clients', 1);
+        $this->getJson('/api/reports/agent/clients?date_from=2000-01-01&date_to=2037-12-31')->assertOk()
+            ->assertJsonPath('unique_clients', 1)->assertJsonPath('business_clients', 1);
+        $this->getJson('/api/reports/agent/clients?date_from=2099-01-01')->assertOk()
+            ->assertJsonPath('unique_clients', 0)->assertJsonPath('business_clients', 0);
+
+        $rop->supervisedGroups()->detach();
+        $this->getJson('/api/reports/agent/clients')->assertOk()
+            ->assertJsonPath('unique_clients', 0)->assertJsonPath('business_clients', 0);
+
+        Sanctum::actingAs($agent);
+        $this->getJson('/api/reports/agent/clients')->assertOk()
+            ->assertJsonPath('unique_clients', 1)->assertJsonPath('business_clients', 1);
+    }
+
+    public function test_rop_show_count_uses_booking_group_and_does_not_filter_on_hidden_property_details(): void
+    {
+        $ctx = $this->seedReportBranchScopeContext();
+        $ownAgent = $ctx['users']['agentA'];
+        $foreignAgent = $ctx['users']['agentB'];
+        $ownProperty = Property::where('agent_id', $ownAgent->id)->firstOrFail();
+        $foreignProperty = Property::where('agent_id', $foreignAgent->id)->firstOrFail();
+        DB::table('bookings')->delete();
+        // Opposite roots: the property must neither grant nor remove booking access.
+        DB::table('bookings')->insert([
+            ['property_id' => $foreignProperty->id, 'agent_id' => $ownAgent->id, 'branch_group_id' => $ownAgent->branch_group_id,
+                'start_time' => now(), 'end_time' => now(), 'created_at' => now(), 'updated_at' => now()],
+            ['property_id' => $ownProperty->id, 'agent_id' => $foreignAgent->id, 'branch_group_id' => $foreignAgent->branch_group_id,
+                'start_time' => now(), 'end_time' => now(), 'created_at' => now(), 'updated_at' => now()],
+        ]);
+        Sanctum::actingAs($ctx['users']['rop']);
+        $this->getJson('/api/reports/agent/shows')->assertOk()->assertJsonPath('shows_count', 1);
+        $this->getJson('/api/reports/agent/shows?agent_id='.$ownAgent->id)->assertOk()->assertJsonPath('shows_count', 1);
+        $this->getJson('/api/reports/agent/shows?priceFrom=0')->assertOk()->assertJsonPath('shows_count', 0);
+        $ctx['users']['rop']->supervisedGroups()->detach();
+        $this->getJson('/api/reports/agent/shows')->assertOk()->assertJsonPath('shows_count', 0);
+    }
+
+    public function test_rop_property_reports_do_not_count_foreign_bookings_of_visible_properties(): void
+    {
+        $ctx = $this->seedReportBranchScopeContext();
+        $agent = $ctx['users']['agentA'];
+        $property = Property::where('agent_id', $agent->id)->firstOrFail();
+        DB::table('bookings')->where('agent_id', $ctx['users']['agentB']->id)->update([
+            'property_id' => $property->id, 'start_time' => '2020-01-01 10:00:00',
+        ]);
+        $ownDate = DB::table('bookings')->where('agent_id', $agent->id)->value('start_time');
+        Sanctum::actingAs($ctx['users']['rop']);
+        $this->getJson('/api/reports/agents/'.$agent->id.'/properties')->assertOk()
+            ->assertJsonPath('summary.total_shows', 1)
+            ->assertJsonPath('properties.0.shows_count', 1)
+            ->assertJsonPath('properties.0.first_show', $ownDate)
+            ->assertJsonPath('properties.0.last_show', $ownDate);
+        $this->getJson('/api/reports/agents/properties')->assertOk()
+            ->assertJsonPath('0.summary.total_shows', 1);
+
+        Sanctum::actingAs($ctx['users']['admin']);
+        $this->getJson('/api/reports/agents/'.$agent->id.'/properties')->assertOk()
+            ->assertJsonPath('summary.total_shows', 2)
+            ->assertJsonPath('properties.0.first_show', '2020-01-01 10:00:00');
+    }
+
+    public function test_missing_phone_report_keeps_foreign_author_signature_without_email(): void
+    {
+        $ctx = $this->seedReportBranchScopeContext();
+        $ownAgent = $ctx['users']['agentA'];
+        $foreignAgent = $ctx['users']['agentB'];
+        $foreignAgent->forceFill(['email' => 'foreign-report@example.test'])->saveQuietly();
+        $property = Property::where('agent_id', $ownAgent->id)->firstOrFail();
+        $property->forceFill(['created_by' => $foreignAgent->id, 'owner_phone' => null])->saveQuietly();
+        Sanctum::actingAs($ctx['users']['rop']);
+        $response = $this->getJson('/api/reports/missing-phone/agents-by-status');
+        $response->assertOk()->assertJsonCount(1)->assertJsonPath('0.agent_id', $foreignAgent->id)
+            ->assertJsonPath('0.agent_name', $foreignAgent->name)->assertJsonPath('0.agent_email', null);
+        $this->assertStringNotContainsString('foreign-report@example.test', $response->getContent());
+
+        $ownAgent->forceFill(['email' => 'own-report@example.test'])->saveQuietly();
+        $property->forceFill(['created_by' => $ownAgent->id])->saveQuietly();
+        $this->getJson('/api/reports/missing-phone/agents-by-status')->assertOk()
+            ->assertJsonPath('0.agent_email', 'own-report@example.test');
+    }
+
+    public function test_missing_phone_reports_do_not_classify_foreign_owner_contact_snapshots(): void
+    {
+        [$agent, $client, $property] = $this->seedClientContext();
+        $own = BranchGroup::create(['name' => 'Own', 'branch_id' => $agent->branch_id]);
+        $foreign = BranchGroup::create(['name' => 'Foreign', 'branch_id' => $agent->branch_id]);
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $rop = User::create(['name' => 'ROP', 'phone' => (string) ++$this->phoneCounter, 'password' => bcrypt('password'),
+            'role_id' => $role->id, 'branch_id' => $agent->branch_id, 'status' => 'active']);
+        $rop->supervisedGroups()->attach($own->id);
+        $property->forceFill(['branch_group_id' => $own->id, 'branch_id' => $agent->branch_id,
+            'owner_client_id' => $client->id, 'owner_name' => null, 'owner_phone' => null])->saveQuietly();
+        Sanctum::actingAs($rop);
+        foreach ([$foreign->id => 0, $own->id => 1] as $groupId => $count) {
+            $client->forceFill(['branch_group_id' => $groupId])->saveQuietly();
+            $this->getJson('/api/reports/missing-phone/list')->assertOk()->assertJsonPath('total', $count)->assertJsonCount($count, 'data');
+            $this->getJson('/api/reports/missing-phone/agents-by-status')->assertOk()->assertJsonCount($count);
+        }
+    }
+
+    public function test_booking_report_counts_only_visible_related_cards_without_losing_the_show(): void
+    {
+        $ctx = $this->seedReportBranchScopeContext();
+        $agent = $ctx['users']['agentA'];
+        $foreignAgent = $ctx['users']['agentB'];
+        $property = Property::where('agent_id', $foreignAgent->id)->firstOrFail();
+        $client = Client::create(['full_name' => 'Foreign buyer', 'phone' => '+992900009991',
+            'phone_normalized' => '992900009991', 'branch_id' => $foreignAgent->branch_id,
+            'branch_group_id' => $foreignAgent->branch_group_id, 'created_by' => $foreignAgent->id,
+            'responsible_agent_id' => $foreignAgent->id, 'status' => 'active']);
+        DB::table('bookings')->delete();
+        DB::table('bookings')->insert(['property_id' => $property->id, 'agent_id' => $agent->id,
+            'branch_group_id' => $agent->branch_group_id, 'crm_client_id' => $client->id, 'client_id' => $agent->id,
+            'start_time' => now(), 'end_time' => now()->addHour(), 'created_at' => now(), 'updated_at' => now()]);
+        Sanctum::actingAs($ctx['users']['rop']);
+        $this->getJson('/api/bookings/agents-report')->assertOk()->assertJsonPath('0.shows_count', 1)
+            ->assertJsonPath('0.unique_clients', 0)->assertJsonPath('0.unique_properties', 0);
+        $client->forceFill(['branch_group_id' => $agent->branch_group_id, 'branch_id' => $agent->branch_id])->saveQuietly();
+        $property->forceFill(['branch_group_id' => $agent->branch_group_id, 'branch_id' => $agent->branch_id])->saveQuietly();
+        $this->getJson('/api/bookings/agents-report')->assertOk()->assertJsonPath('0.shows_count', 1)
+            ->assertJsonPath('0.unique_clients', 1)->assertJsonPath('0.unique_properties', 1);
     }
 
     public static function clientReportPeriods(): array
@@ -1234,7 +1385,7 @@ class ClientIntegrationTest extends TestCase
 
         $this->getJson('/api/bookings/agents-report?branch_id=' . $ctx['branches']['b']->id)
             ->assertStatus(403)
-            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+            ->assertJsonPath('code', 'RBAC_GROUP_SCOPE_VIOLATION');
 
         $fallback = $this->getJson('/api/bookings/agents-report');
         $fallback->assertOk();
@@ -1290,6 +1441,24 @@ class ClientIntegrationTest extends TestCase
             ->assertJsonPath('0.unique_properties', 1);
     }
 
+    public function test_manager_efficiency_preserves_group_history_after_employee_transfer_without_profile_leak(): void
+    {
+        $ctx = $this->seedReportBranchScopeContext();
+        $agent = $ctx['users']['agentA'];
+        Sanctum::actingAs($ctx['users']['rop']);
+        $url = '/api/reports/properties/manager-efficiency?date_from=2026-03-01&date_to=2026-03-31';
+        $before = collect($this->getJson($url)->assertOk()->json())->firstWhere('agent_id', $agent->id);
+        $this->assertNotNull($before);
+        DB::table('users')->where('id', $agent->id)->update(['branch_id' => $ctx['branches']['b']->id, 'branch_group_id' => $ctx['users']['agentB']->branch_group_id, 'role_id' => $ctx['users']['admin']->role_id, 'email' => 'private-moved@example.test']);
+        $response = $this->getJson($url)->assertOk()->assertDontSee('private-moved@example.test');
+        $after = collect($response->json())->firstWhere('agent_id', $agent->id);
+        $this->assertNotNull($after);
+        $this->assertSame($before['total'], $after['total']);
+        $this->assertSame($before['sold'], $after['sold']);
+        $this->assertSame($before['name'], $after['name']);
+        $this->assertNull($after['email']);
+    }
+
     public function test_manager_efficiency_enforces_branch_filter_for_branch_director_and_rop_with_fallback(): void
     {
         $ctx = $this->seedReportBranchScopeContext();
@@ -1315,7 +1484,7 @@ class ClientIntegrationTest extends TestCase
         Sanctum::actingAs($ctx['users']['rop']);
         $this->getJson('/api/reports/properties/manager-efficiency?date_from=2026-03-01&date_to=2026-03-31&branch_id=' . $ctx['branches']['b']->id)
             ->assertStatus(403)
-            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+            ->assertJsonPath('code', 'RBAC_GROUP_SCOPE_VIOLATION');
 
         $fallback = $this->getJson('/api/reports/properties/manager-efficiency?date_from=2026-03-01&date_to=2026-03-31');
         $fallback->assertOk();
@@ -1469,6 +1638,12 @@ class ClientIntegrationTest extends TestCase
             'status' => 'active',
         ]);
 
+        $groupA = \App\Models\BranchGroup::create(['branch_id' => $branchA->id, 'name' => 'A']);
+        $groupB = \App\Models\BranchGroup::create(['branch_id' => $branchB->id, 'name' => 'B']);
+        $agentA->update(['branch_group_id' => $groupA->id]);
+        $agentB->update(['branch_group_id' => $groupB->id]);
+        $rop->supervisedGroups()->attach($groupA->id);
+
         $propertyA = Property::forceCreate([
             'title' => 'Branch A Property',
             'type_id' => 1,
@@ -1503,7 +1678,7 @@ class ClientIntegrationTest extends TestCase
 
         DB::table('bookings')->insert([
             [
-                'property_id' => $propertyA->id,
+                'property_id' => $propertyA->id, 'branch_group_id' => $groupA->id,
                 'agent_id' => $agentA->id,
                 'client_id' => null,
                 'crm_client_id' => null,
@@ -1516,7 +1691,7 @@ class ClientIntegrationTest extends TestCase
                 'updated_at' => now(),
             ],
             [
-                'property_id' => $propertyB->id,
+                'property_id' => $propertyB->id, 'branch_group_id' => $groupB->id,
                 'agent_id' => $agentB->id,
                 'client_id' => null,
                 'crm_client_id' => null,

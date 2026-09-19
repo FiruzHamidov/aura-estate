@@ -359,6 +359,7 @@ class ClientAccessTest extends TestCase
             'created_at' => now(),
             'updated_at' => now(),
         ]);
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
     }
 
     public function test_agent_sees_all_clients_from_own_branch_in_all_branch_mode(): void
@@ -541,7 +542,7 @@ class ClientAccessTest extends TestCase
         ])->assertForbidden();
     }
 
-    public function test_rop_can_update_agent_property_from_own_branch_but_not_foreign_branch(): void
+    public function test_rop_can_update_agent_property_from_assigned_group_but_not_foreign_branch(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
         $branchB = Branch::create(['name' => 'Branch B']);
@@ -552,6 +553,9 @@ class ClientAccessTest extends TestCase
         $rop = $this->createUser($ropRole, $branchA, 'ROP A');
         $agentA = $this->createUser($agentRole, $branchA, 'Agent A');
         $agentB = $this->createUser($agentRole, $branchB, 'Agent B');
+        $group = $this->createBranchGroup($branchA, 'Assigned');
+        $agentA->update(['branch_group_id' => $group->id]);
+        $rop->supervisedGroups()->attach($group->id);
 
         $propertyType = PropertyType::create(['name' => 'Apartment']);
         $propertyStatus = PropertyStatus::create(['name' => 'Available']);
@@ -578,7 +582,7 @@ class ClientAccessTest extends TestCase
             'price' => 280000,
             'currency' => 'TJS',
             'offer_type' => 'sale',
-        ])->assertForbidden();
+        ])->assertNotFound();
     }
 
     public function test_branch_director_can_update_client_from_own_branch_but_not_foreign_branch(): void
@@ -613,7 +617,7 @@ class ClientAccessTest extends TestCase
         ])->assertForbidden();
     }
 
-    public function test_rop_can_update_client_from_own_branch_but_not_foreign_branch(): void
+    public function test_rop_can_update_client_from_assigned_group_but_not_foreign_branch(): void
     {
         Setting::create([
             'key' => ClientAccess::VISIBILITY_SETTING_KEY,
@@ -629,6 +633,9 @@ class ClientAccessTest extends TestCase
         $rop = $this->createUser($ropRole, $branchA, 'ROP A');
         $agentA = $this->createUser($agentRole, $branchA, 'Agent A');
         $agentB = $this->createUser($agentRole, $branchB, 'Agent B');
+        $group = $this->createBranchGroup($branchA, 'Assigned');
+        $agentA->update(['branch_group_id' => $group->id]);
+        $rop->supervisedGroups()->attach($group->id);
 
         $clientA = $this->createClient($branchA, $agentA, $agentA, 'Client A');
         $clientB = $this->createClient($branchB, $agentB, $agentB, 'Client B');
@@ -642,7 +649,7 @@ class ClientAccessTest extends TestCase
 
         $this->putJson('/api/clients/'.$clientB->id, [
             'full_name' => 'Foreign client',
-        ])->assertForbidden();
+        ])->assertNotFound();
     }
 
     public function test_agent_sees_branch_buyers_but_only_own_sellers_in_all_branch_mode(): void
@@ -773,7 +780,7 @@ class ClientAccessTest extends TestCase
             ->assertJsonMissing(['full_name' => 'Seller B']);
     }
 
-    public function test_rop_can_filter_sellers_and_see_entire_branch_even_when_agent_seller_visibility_is_disabled(): void
+    public function test_rop_can_filter_sellers_and_see_assigned_group_even_when_agent_seller_visibility_is_disabled(): void
     {
         Setting::create([
             'key' => ClientAccess::VISIBILITY_SETTING_KEY,
@@ -793,6 +800,9 @@ class ClientAccessTest extends TestCase
         $rop = $this->createUser($ropRole, $branchA, 'ROP A');
         $agentA = $this->createUser($agentRole, $branchA, 'Agent A');
         $agentB = $this->createUser($agentRole, $branchB, 'Agent B');
+        $group = $this->createBranchGroup($branchA, 'Assigned');
+        $agentA->update(['branch_group_id' => $group->id]);
+        $rop->supervisedGroups()->attach($group->id);
 
         $sellerA = $this->createClient($branchA, $agentA, $agentA, 'Seller A', 1, Client::CONTACT_KIND_SELLER);
         $this->createClient($branchA, $agentA, $agentA, 'Buyer A', 1, Client::CONTACT_KIND_BUYER);
@@ -890,6 +900,33 @@ class ClientAccessTest extends TestCase
         $response->assertJsonPath('branch_group_id', $group->id);
         $response->assertJsonPath('created_by', $intern->id);
         $response->assertJsonPath('responsible_agent_id', $intern->id);
+    }
+
+    public function test_rop_assignments_do_not_grant_global_settings_or_security_report_permissions(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $group = BranchGroup::create(['name' => 'Group A', 'branch_id' => $branch->id]);
+        $rop = $this->createUser($role, $branch, 'ROP', $group);
+        $access = app(ClientAccess::class);
+        $access->updateSettings(['agent_visibility_mode' => ClientAccess::VISIBILITY_OWN_ONLY, 'agent_can_view_sellers' => false]);
+        $before = $access->settings();
+        Sanctum::actingAs($rop);
+
+        foreach ([true, false] as $assigned) {
+            $rop->supervisedGroups()->sync($assigned ? [$group->id] : []);
+            $this->getJson('/api/clients/settings')->assertOk();
+            foreach (['PUT', 'PATCH'] as $method) {
+                $this->json($method, '/api/clients/settings', [
+                    'agent_visibility_mode' => ClientAccess::VISIBILITY_ALL_BRANCH,
+                    'agent_can_view_sellers' => true,
+                ])->assertForbidden();
+                $this->assertSame($before, $access->settings());
+            }
+            foreach (['/api/crm/property-control/report', '/api/crm/property-control/export', '/api/crm/property-control/meta'] as $url) {
+                $this->getJson($url)->assertForbidden();
+            }
+        }
     }
 
     public function test_admin_can_update_client_settings_independently(): void
@@ -1924,6 +1961,38 @@ class ClientAccessTest extends TestCase
         $this->assertSame('Existing Buyer', $property->owner_name);
         $this->assertSame('+992 90 777 1111', $property->owner_phone);
         $this->assertSame(Client::CONTACT_KIND_BOTH, $existingClient->contact_kind);
+    }
+
+    public function test_rop_collaborators_hide_foreign_profiles_and_reject_cross_group_assignment_atomically(): void
+    {
+        if (!Schema::hasColumn('users', 'deleted_at')) Schema::table('users', fn (Blueprint $table) => $table->timestamp('deleted_at')->nullable());
+        $branch = Branch::create(['name' => 'Branch']);
+        $a = $this->createBranchGroup($branch, 'A');
+        $b = $this->createBranchGroup($branch, 'B');
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $owner = $this->createUser($agentRole, $branch, 'Owner', $a);
+        $colleague = $this->createUser($agentRole, $branch, 'Same group', $a);
+        $foreign = $this->createUser($agentRole, $branch, 'Historical collaborator', $b);
+        $rop = $this->createUser($ropRole, $branch, 'ROP');
+        $rop->supervisedGroups()->attach($a->id);
+        $client = $this->createClient($branch, $owner, $owner, 'Client', 1, Client::CONTACT_KIND_BUYER, $a);
+        $client->collaborators()->attach($foreign->id, ['role' => Client::COLLABORATOR_ROLE_VIEWER]);
+        Sanctum::actingAs($rop);
+        $url = '/api/clients/'.$client->id.'/collaborators';
+        $data = $this->getJson($url)->assertOk()->json();
+        $row = collect($data)->firstWhere('user_id', $foreign->id);
+        $this->assertSame('Historical collaborator', $row['name']);
+        $this->assertArrayNotHasKey('phone', $row);
+        $this->assertArrayNotHasKey('role_slug', $row);
+        $this->assertSame($owner->phone, collect($data)->firstWhere('user_id', $owner->id)['phone']);
+        // Even supervising both groups must not assign B to a client in A.
+        $rop->supervisedGroups()->attach($b->id);
+        $before = DB::table('client_collaborators')->get()->toArray();
+        $this->postJson($url, ['user_id' => $foreign->id])->assertForbidden();
+        $this->assertEquals($before, DB::table('client_collaborators')->get()->toArray());
+        $this->postJson($url, ['user_id' => $colleague->id])->assertOk();
+        $this->assertDatabaseHas('client_collaborators', ['client_id' => $client->id, 'user_id' => $colleague->id]);
     }
 
     private function createUser(Role $role, Branch $branch, string $name, ?BranchGroup $branchGroup = null): User

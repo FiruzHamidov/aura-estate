@@ -36,6 +36,9 @@ class FirebasePushService
 
     public function send(AppNotification $notification): void
     {
+        $recipient = $notification->recipient()->first();
+        if (! $recipient || ! app(\App\Services\GroupAccess\NotificationGroupAccess::class)->allows($notification, $recipient)) return;
+
         $credentials = $this->credentialsPath();
 
         if (! $this->isConfigured()) {

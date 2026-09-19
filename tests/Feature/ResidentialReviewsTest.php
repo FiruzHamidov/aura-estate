@@ -75,7 +75,7 @@ class ResidentialReviewsTest extends TestCase
         $building = $this->building(['branch_id' => $branch]);
         $other = $this->building(['branch_id' => $foreign]);
         $id = $this->submit($this->actor(), $building);
-        foreach (['client', 'agent', 'mop', 'hr', 'accountant'] as $role) {
+        foreach (['client', 'agent', 'mop', 'hr', 'accountant', 'rop'] as $role) {
             Sanctum::actingAs($this->actor($role, $branch));
             $this->getJson('/api/admin/new-buildings/'.$building->id.'/reviews')->assertForbidden();
             $this->patchJson('/api/admin/new-buildings/'.$building->id.'/reviews/'.$id.'/moderation', ['version' => 1, 'status' => 'approved', 'reason' => 'Проверено'])->assertForbidden();
@@ -85,7 +85,7 @@ class ResidentialReviewsTest extends TestCase
             Sanctum::actingAs($this->actor($role, $foreign));
             $this->getJson('/api/admin/new-buildings/'.$building->id.'/reviews')->assertForbidden();
         }
-        Sanctum::actingAs($this->actor('rop', $branch));
+        Sanctum::actingAs($this->actor('branch_director', $branch));
         $this->patchJson('/api/admin/new-buildings/'.$building->id.'/reviews/'.$id.'/moderation', ['version' => 1, 'status' => 'approved', 'reason' => 'Проверено'])->assertOk();
         Sanctum::actingAs($this->actor('admin'));
         $this->patchJson('/api/admin/new-buildings/'.$other->id.'/reviews/'.$id.'/moderation', ['version' => 2, 'status' => 'approved', 'reason' => 'Проверено'])->assertNotFound();

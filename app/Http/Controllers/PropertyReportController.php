@@ -54,6 +54,29 @@ class PropertyReportController extends Controller
         $authUser = auth()->user();
         $authUser?->loadMissing('role');
         $roleSlug = $authUser->role->slug ?? null;
+        if ($roleSlug === 'rop') {
+            $access = app(\App\Support\RopGroupAccess::class);
+            $isBooking = $query->getModel() instanceof Booking;
+            $groupColumn = $isBooking ? 'bookings.branch_group_id' : 'properties.branch_group_id';
+            $access->scope($query, $authUser, $groupColumn, $isBooking ? null : 'properties.branch_id');
+            if ($request->filled('branch_group_id')) {
+                $query->whereIn($groupColumn, $this->toArray($request->input('branch_group_id')));
+            }
+            if ($isBooking && $request->hasAny([
+                'type_id', 'status_id', 'location_id', 'repair_type_id', 'currency', 'offer_type',
+                'listing_type', 'contract_type_id', 'moderation_status', 'district',
+                'sold_at_from', 'sold_at_to', 'deposit_received_at_from', 'deposit_received_at_to',
+                'priceFrom', 'priceTo', 'roomsFrom', 'roomsTo', 'total_areaFrom', 'total_areaTo',
+                'living_areaFrom', 'living_areaTo', 'floorFrom', 'floorTo', 'total_floorsFrom',
+                'total_floorsTo', 'year_builtFrom', 'year_builtTo',
+            ])) {
+                // Filtering by a related property's private attributes must not reveal a foreign property.
+                $query->whereIn('properties.id', $access->scope(Property::query(), $authUser,
+                    'properties.branch_group_id', 'properties.branch_id')->select('properties.id'));
+            }
+            return;
+        }
+
 
         if ($request->filled('branch_group_id')) {
             $branchGroupIds = array_values(array_filter(
@@ -100,6 +123,19 @@ class PropertyReportController extends Controller
         $authUser = auth()->user();
         $authUser?->loadMissing('role');
         $roleSlug = $authUser->role->slug ?? null;
+        if ($roleSlug === 'rop') {
+            $table = $query instanceof \Illuminate\Database\Eloquent\Builder ? $query->getModel()->getTable() : $query->from;
+            abort_unless(in_array($table, ['users', 'clients', 'bookings'], true), 403, 'GROUP_SCOPE_UNAVAILABLE');
+            app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, $table.'.branch_group_id', $table === 'bookings' ? null : $table.'.branch_id');
+            if ($table === 'users') {
+                $query->whereIn('users.id', app(\App\Support\RopGroupAccess::class)->employees($authUser)->select('users.id'));
+            }
+            if ($request->filled('branch_group_id')) {
+                $query->whereIn($table.'.branch_group_id', $this->toArray($request->input('branch_group_id')));
+            }
+            return;
+        }
+
 
         if ($request->filled('branch_group_id')) {
             $branchGroupIds = $this->toArray($request->input('branch_group_id'));
@@ -258,18 +294,17 @@ class PropertyReportController extends Controller
             $showsQ->whereIn('bookings.agent_id', $this->toArray($request->input('agent_id')));
         }
 
-        $topShowsRows = (clone $showsQ)
+        $topShowsQuery = (clone $showsQ)
             ->select([
                 'bookings.agent_id',
                 DB::raw('COUNT(*) as shows_count'),
-                DB::raw('COUNT(DISTINCT bookings.property_id) as unique_properties'),
-                DB::raw('COUNT(DISTINCT COALESCE(bookings.crm_client_id, bookings.client_id)) as unique_clients'),
             ])
             ->whereNotNull('bookings.agent_id')
             ->groupBy('bookings.agent_id')
             ->orderByDesc('shows_count')
-            ->limit(10)
-            ->get();
+            ->limit(10);
+        app(\App\Services\GroupAccess\BookingReportCounts::class)->select($topShowsQuery, $request->user());
+        $topShowsRows = $topShowsQuery->get();
 
         $addedByAgentRows = (clone $addedQ)
             ->select([
@@ -479,29 +514,30 @@ class PropertyReportController extends Controller
         if (!in_array($dateField, $allowedDateFields, true)) {
             $dateField = 'created_at';
         }
+        $qualifiedDateField = str_contains($dateField, '.') ? $dateField : 'properties.'.$dateField;
 
         $dateFrom = $request->input('date_from'); // '2025-01-01'
         $dateTo   = $request->input('date_to');   // '2025-01-31'
 
         $soldFrom = $request->input('sold_at_from');
         $soldTo   = $request->input('sold_at_to');
-        if ($dateFrom) $query->whereDate($dateField, '>=', $dateFrom);
-        if ($dateTo)   $query->whereDate($dateField, '<=', $dateTo);
+        if ($dateFrom) $query->whereDate($qualifiedDateField, '>=', $dateFrom);
+        if ($dateTo)   $query->whereDate($qualifiedDateField, '<=', $dateTo);
 
         if ($soldFrom || $soldTo) {
 //            $query->whereIn('moderation_status', ['sold','rented','sold_by_owner']);
 
-            if ($soldFrom) $query->whereDate('sold_at', '>=', $soldFrom);
-            if ($soldTo)   $query->whereDate('sold_at', '<=', $soldTo);
+            if ($soldFrom) $query->whereDate('properties.sold_at', '>=', $soldFrom);
+            if ($soldTo)   $query->whereDate('properties.sold_at', '<=', $soldTo);
         }
 
         $depositFrom = $request->input('deposit_received_at_from');
         $depositTo   = $request->input('deposit_received_at_to');
         if ($depositFrom) {
-            $query->whereDate('deposit_received_at', '>=', $depositFrom);
+            $query->whereDate('properties.deposit_received_at', '>=', $depositFrom);
         }
         if ($depositTo) {
-            $query->whereDate('deposit_received_at', '<=', $depositTo);
+            $query->whereDate('properties.deposit_received_at', '<=', $depositTo);
         }
 
         // Мультиселекты (включая agent_id для отчётов по агентам)
@@ -528,40 +564,59 @@ class PropertyReportController extends Controller
             if (!empty($agentIds)) {
                 $closedStatuses = ['sold', 'rented', 'sold_by_owner'];
                 $statusVals = $this->toArray($request->input('moderation_status'));
-                $isClosedScope = !empty(array_intersect($statusVals, $closedStatuses));
                 $isSalesColumn = in_array($creatorColumn, ['sale_user_id', 'sale_agent_id'], true);
 
-                if ($isClosedScope || $isSalesColumn) {
-                    $saleAgentColumn = $this->resolveSaleAgentColumn();
-                    if ($saleAgentColumn) {
-                        $query->where(function ($salesFilter) use ($agentIds, $saleAgentColumn) {
-                            $salesFilter->whereIn($saleAgentColumn, $agentIds)
-                                ->orWhere(function ($legacyByAgent) use ($agentIds, $saleAgentColumn) {
-                                    $legacyByAgent->whereNull($saleAgentColumn)
-                                        ->whereIn('agent_id', $agentIds);
-                                })
-                                ->orWhere(function ($legacyByCreator) use ($agentIds, $saleAgentColumn) {
-                                    $legacyByCreator->whereNull($saleAgentColumn)
-                                        ->where(function ($missingAgent) {
-                                            $missingAgent->whereNull('agent_id')->orWhere('agent_id', 0);
-                                        })
-                                        ->whereIn('created_by', $agentIds);
-                                });
-                        });
-                    } else {
-                        $query->where(function ($legacySalesFilter) use ($agentIds) {
-                            $legacySalesFilter->whereIn('agent_id', $agentIds)
-                                ->orWhere(function ($legacyByCreator) use ($agentIds) {
-                                    $legacyByCreator
-                                        ->where(function ($missingAgent) {
-                                            $missingAgent->whereNull('agent_id')->orWhere('agent_id', 0);
-                                        })
-                                        ->whereIn('created_by', $agentIds);
-                                });
-                        });
+                $saleAgentColumn = $this->resolveSaleAgentColumn();
+                $qualifiedCreatorColumn = str_contains($creatorColumn, '.') ? $creatorColumn : 'properties.'.$creatorColumn;
+                $qualifiedSaleAgentColumn = $saleAgentColumn ? 'properties.'.$saleAgentColumn : null;
+                $applySalesFilter = function ($salesFilter) use ($agentIds, $qualifiedSaleAgentColumn) {
+                    if ($qualifiedSaleAgentColumn) {
+                        $salesFilter->whereIn($qualifiedSaleAgentColumn, $agentIds)
+                            ->orWhere(function ($legacyByAgent) use ($agentIds, $qualifiedSaleAgentColumn) {
+                                $legacyByAgent->whereNull($qualifiedSaleAgentColumn)
+                                    ->whereIn('properties.agent_id', $agentIds);
+                            })
+                            ->orWhere(function ($legacyByCreator) use ($agentIds, $qualifiedSaleAgentColumn) {
+                                $legacyByCreator->whereNull($qualifiedSaleAgentColumn)
+                                    ->where(function ($missingAgent) {
+                                        $missingAgent->whereNull('properties.agent_id')->orWhere('properties.agent_id', 0);
+                                    })
+                                    ->whereIn('properties.created_by', $agentIds);
+                            });
+                        return;
                     }
+
+                    $salesFilter->whereIn('properties.agent_id', $agentIds)
+                        ->orWhere(function ($legacyByCreator) use ($agentIds) {
+                            $legacyByCreator
+                                ->where(function ($missingAgent) {
+                                    $missingAgent->whereNull('properties.agent_id')->orWhere('properties.agent_id', 0);
+                                })
+                                ->whereIn('properties.created_by', $agentIds);
+                        });
+                };
+
+                $containsClosed = $statusVals === [] || array_intersect($statusVals, $closedStatuses) !== [];
+                $containsOpen = $statusVals === [] || array_diff($statusVals, $closedStatuses) !== [];
+
+                if ($creatorColumn === 'bookings.agent_id') {
+                    $query->whereIn('bookings.agent_id', $agentIds);
+                } elseif ($isSalesColumn || ($containsClosed && !$containsOpen)) {
+                    $query->where($applySalesFilter);
+                } elseif ($containsClosed && $containsOpen) {
+                    $query->where(function ($mixedAgentFilter) use ($agentIds, $closedStatuses, $qualifiedCreatorColumn, $applySalesFilter) {
+                        $mixedAgentFilter
+                            ->where(function ($openAgentFilter) use ($agentIds, $closedStatuses, $qualifiedCreatorColumn) {
+                                $openAgentFilter->whereNotIn('properties.moderation_status', $closedStatuses)
+                                    ->whereIn($qualifiedCreatorColumn, $agentIds);
+                            })
+                            ->orWhere(function ($closedAgentFilter) use ($closedStatuses, $applySalesFilter) {
+                                $closedAgentFilter->whereIn('properties.moderation_status', $closedStatuses)
+                                    ->where($applySalesFilter);
+                            });
+                    });
                 } else {
-                    $query->whereIn($creatorColumn, $agentIds);
+                    $query->whereIn($qualifiedCreatorColumn, $agentIds);
                 }
             }
         }
@@ -773,7 +828,7 @@ class PropertyReportController extends Controller
 
         $query->where(function ($periodQ) use ($from, $to, $soldFrom, $soldTo, $soldStatuses) {
             $periodQ->where(function ($openQ) use ($from, $to, $soldStatuses) {
-                $openQ->whereNotIn('moderation_status', $soldStatuses);
+                $openQ->whereNotIn('moderation_status', array_merge($soldStatuses, ['deposit']));
 
                 if ($from) {
                     $openQ->whereDate('created_at', '>=', $from);
@@ -791,6 +846,16 @@ class PropertyReportController extends Controller
 
                 if ($soldTo) {
                     $closedQ->whereDate('sold_at', '<=', $soldTo);
+                }
+            })->orWhere(function ($depositQ) use ($from, $to) {
+                $depositQ->where('moderation_status', 'deposit');
+
+                if ($from) {
+                    $depositQ->whereDate('deposit_received_at', '>=', $from);
+                }
+
+                if ($to) {
+                    $depositQ->whereDate('deposit_received_at', '<=', $to);
                 }
             });
         });
@@ -843,44 +908,23 @@ class PropertyReportController extends Controller
             'rented',
         ];
 
-        $depositStatus = 'deposit';
         $approved = 'approved';
 
+        // One report period must mean the same thing in every block:
+        // open objects by created_at, deposits by deposit_received_at and
+        // closed objects by sold_at.
+        $filterRequest = new Request($request->except([
+            'date_from',
+            'date_to',
+            'sold_at_from',
+            'sold_at_to',
+            'date_field',
+        ]));
+        $filterRequest->setUserResolver(fn () => $request->user());
+
         $base = Property::query();
-        [$q] = $this->applyCommonFilters($request, $base);
-
-        $soldRequest = $request->except(['date_from', 'date_to']);
-
-        $soldRequest['sold_at_from'] = $request->input('date_from');
-        $soldRequest['sold_at_to']   = $request->input('date_to');
-
-
-        $soldBase = Property::query()
-            ->whereIn('moderation_status', $soldStatuses);
-
-        [$soldQ] = $this->applyCommonFilters(
-            new Request($soldRequest),
-            $soldBase
-        );
-
-        // --- deposit: по deposit_received_at
-        $depositBase = Property::query()
-            ->where('moderation_status', 'deposit');
-
-        $depositRequest = $request->except(['date_from', 'date_to']);
-        $depositRequest['date_field'] = 'deposit_received_at';
-        $depositRequest['date_from']  = $request->input('date_from');
-        $depositRequest['date_to']    = $request->input('date_to');
-
-        [$depositQ] = $this->applyCommonFilters(
-            new Request($depositRequest),
-            $depositBase
-        );
-
-        $depositStatusRow = (clone $depositQ)
-            ->select('moderation_status', DB::raw('COUNT(*) as cnt'))
-            ->groupBy('moderation_status')
-            ->get();
+        [$q] = $this->applyCommonFilters($filterRequest, $base);
+        $q = $this->applyAgentPropertiesPeriodFilter($request, $q, $soldStatuses);
 
         $total = (clone $q)->count();
 
@@ -895,19 +939,16 @@ class PropertyReportController extends Controller
             ->where('offer_type', 'rent')
             ->count();
 
-        // --- byStatus: все НЕ закрытые статусы по created_at
+        // --- byStatus: all non-closed statuses from the same aligned set
         $byStatus = (clone $q)
-            ->whereNotIn('moderation_status', array_merge($soldStatuses, [$depositStatus], [$approved]))
+            ->whereNotIn('moderation_status', array_merge($soldStatuses, [$approved]))
             ->select('moderation_status', DB::raw('COUNT(*) as cnt'))
             ->groupBy('moderation_status')
             ->get();
 
-        $byStatus = $byStatus
-            ->concat($depositStatusRow)
-            ->values();
-
-        // --- soldStatus: закрытые статусы по sold_at
-        $soldStatus = (clone $soldQ)
+        // --- soldStatus: closed statuses from the same aligned set
+        $soldStatus = (clone $q)
+            ->whereIn('moderation_status', $soldStatuses)
             ->select('moderation_status', DB::raw('COUNT(*) as cnt'))
             ->groupBy('moderation_status')
             ->get();
@@ -955,7 +996,8 @@ class PropertyReportController extends Controller
         if ($request->filled('agent_id')) {
             $scopedUsersQuery->whereIn('id', array_map('intval', $this->toArray($request->input('agent_id'))));
         }
-        $allowedUserIds = $scopedUsersQuery
+        $historicalRop = auth()->user()?->hasRole('rop');
+        $allowedUserIds = $historicalRop ? [] : $scopedUsersQuery
             ->pluck('id')
             ->map(fn ($id) => (int) $id)
             ->all();
@@ -978,17 +1020,21 @@ class PropertyReportController extends Controller
         [$q] = $this->applyCommonFilters(new Request($periodRequestData), $base);
         $q = $this->applyAgentPropertiesPeriodFilter(new Request($periodRequestData), $q, $soldStatuses);
 
+        // Open objects belong to their creator. Closed objects are added below
+        // to the actual seller, otherwise a deal created by A and closed by B
+        // inflates A's total while the sale is shown for B.
         $baseData = (clone $q)
+            ->whereNotIn('moderation_status', $soldStatuses)
             ->select([
-                $groupBy,
+                'created_by',
                 DB::raw('COUNT(*) as total'),
                 DB::raw("SUM(CASE WHEN moderation_status = 'approved' THEN 1 ELSE 0 END) as approved"),
                 DB::raw("$expr as $alias"),
                 DB::raw("SUM(COALESCE(total_area,0)) as sum_total_area"),
             ])
-            ->groupBy($groupBy)
+            ->groupBy('created_by')
             ->get()
-            ->keyBy($groupBy);
+            ->keyBy('created_by');
         // Normalize to base Collection so `only()` filters by collection keys (group ids),
         // not by Eloquent model primary-key semantics.
         $baseData = collect($baseData->all());
@@ -1011,6 +1057,15 @@ class PropertyReportController extends Controller
             ->get();
 
         $creditsByProperty = $this->salesAttributionService->creditsByProperty($soldProperties, ['sold', 'rented']);
+
+        if ($historicalRop) {
+            $allowedUserIds = $baseData->keys()->merge(array_keys($uniqueClientsMap));
+            foreach ($creditsByProperty as $credits) $allowedUserIds = $allowedUserIds->merge(array_keys($credits));
+            $allowedUserIds = $allowedUserIds->map(fn ($id) => (int) $id)->filter()->unique()->values();
+            if ($request->filled('agent_id')) $allowedUserIds = $allowedUserIds->intersect(array_map('intval', $this->toArray($request->input('agent_id'))));
+            $allowedUserIds = $allowedUserIds->all();
+            $allowedUserMap = array_fill_keys($allowedUserIds, true);
+        }
 
         $soldCounters = [];
         foreach ($soldProperties as $property) {
@@ -1059,11 +1114,13 @@ class PropertyReportController extends Controller
         $userIds = $allKeys->filter()->values();
         $users = User::whereIn('id', $userIds)->get(['id','name','email'])->keyBy('id');
 
-        $result = $allKeys->map(function ($key) use ($baseData, $soldData, $users, $groupBy, $alias, $uniqueClientsMap) {
+        $contactUserIds = $historicalRop ? app(\App\Support\RopGroupAccess::class)->employees(auth()->user())
+            ->whereIn('users.id', $userIds)->pluck('users.id')->flip() : null;
+        $result = $allKeys->map(function ($key) use ($baseData, $soldData, $users, $groupBy, $alias, $uniqueClientsMap, $contactUserIds) {
             $baseRow = $baseData[$key] ?? null;
             $soldRow = $soldData[$key] ?? null;
 
-            $total = (float)($baseRow->total ?? 0);
+            $openTotal = (float)($baseRow->total ?? 0);
             $approved = (int)($baseRow->approved ?? 0);
 
             $sold = round((float)($soldRow->sold ?? 0), 4);
@@ -1071,12 +1128,13 @@ class PropertyReportController extends Controller
             $soldByOwner = round((float)($soldRow->sold_by_owner ?? 0), 4);
 
             $closed = $sold + $rented + $soldByOwner;
+            $total = $openTotal + $closed;
 
             return [
                 'id' => $key,
                 'name' => $users[$key]->name ?? '—',
                 'agent_id' => $users[$key]->id ?? '—',
-                'email' => $users[$key]->email ?? null,
+                'email' => $contactUserIds === null || $contactUserIds->has($key) ? ($users[$key]->email ?? null) : null,
                 'total' => round($total, 4),
                 'approved' => $approved,
                 'sold' => $sold,
@@ -1166,8 +1224,25 @@ class PropertyReportController extends Controller
 
         [$expr, $alias] = $this->priceExpr($request);
 
+        $soldStatuses = ['sold', 'rented', 'sold_by_owner'];
+        $filterRequest = new Request($request->except([
+            'date_from',
+            'date_to',
+            'sold_at_from',
+            'sold_at_to',
+            'date_field',
+        ]));
+        $filterRequest->setUserResolver(fn () => $request->user());
+
         $base = Property::query();
-        [$q, $dateField] = $this->applyCommonFilters($request, $base);
+        [$q] = $this->applyCommonFilters($filterRequest, $base);
+        $q = $this->applyAgentPropertiesPeriodFilter($request, $q, $soldStatuses);
+
+        $dateField = "CASE
+            WHEN moderation_status IN ('sold','rented','sold_by_owner') THEN sold_at
+            WHEN moderation_status = 'deposit' THEN deposit_received_at
+            ELSE created_at
+        END";
 
         $format = match ($interval) {
             'month' => '%Y-%m',
@@ -1178,7 +1253,7 @@ class PropertyReportController extends Controller
         // closed теперь включает sold_by_owner, sold, rented; поле даты определяется автоматически через applyCommonFilters
         $rows = (clone $q)
             ->select(
-                DB::raw("DATE_FORMAT($dateField, '$format') as bucket"),
+                DB::raw("DATE_FORMAT(($dateField), '$format') as bucket"),
                 DB::raw("COUNT(*) as total"),
                 DB::raw("SUM(CASE WHEN moderation_status IN ('sold','rented','sold_by_owner') THEN 1 ELSE 0 END) as closed"),
                 DB::raw("$expr as $alias")
@@ -1239,8 +1314,19 @@ class PropertyReportController extends Controller
     // --- 8) Гистограмма по комнатам
     public function roomsHistogram(Request $request)
     {
+        $soldStatuses = ['sold', 'rented', 'sold_by_owner'];
+        $filterRequest = new Request($request->except([
+            'date_from',
+            'date_to',
+            'sold_at_from',
+            'sold_at_to',
+            'date_field',
+        ]));
+        $filterRequest->setUserResolver(fn () => $request->user());
+
         $base = Property::query()->whereNotNull('rooms');
-        [$q] = $this->applyCommonFilters($request, $base);
+        [$q] = $this->applyCommonFilters($filterRequest, $base);
+        $q = $this->applyAgentPropertiesPeriodFilter($request, $q, $soldStatuses);
 
         $rows = (clone $q)
             ->select('rooms', DB::raw('COUNT(*) as cnt'))
@@ -1395,6 +1481,17 @@ class PropertyReportController extends Controller
         return "$coalesce IS NULL";
     }
 
+    private function scopeVisiblePropertyClient(Request $request, \Illuminate\Database\Eloquent\Builder $query, string $foreignKey): void
+    {
+        if (! $request->user()?->hasRole('rop')) {
+            return;
+        }
+        $visibleClients = app(\App\Support\RopGroupAccess::class)->scope(
+            \App\Models\Client::query(), $request->user(), 'clients.branch_group_id', 'clients.branch_id'
+        )->select('clients.id');
+        $query->where(fn ($query) => $query->whereNull($foreignKey)->orWhereIn($foreignKey, $visibleClients));
+    }
+
     public function missingPhoneList(Request $request)
     {
         $select = [
@@ -1420,6 +1517,7 @@ class PropertyReportController extends Controller
             ->select($select);
 
         [$q] = $this->applyCommonFilters($request, $base);
+        $this->scopeVisiblePropertyClient($request, $q, 'properties.owner_client_id');
 
         $phoneMissing = $this->phoneIsNullExpr();
 
@@ -1465,6 +1563,7 @@ class PropertyReportController extends Controller
     {
         $base = Property::query();
         [$q] = $this->applyCommonFilters($request, $base);
+        $this->scopeVisiblePropertyClient($request, $q, 'properties.owner_client_id');
 
         $phoneMissing = $this->phoneIsNullExpr();
 
@@ -1494,8 +1593,12 @@ class PropertyReportController extends Controller
 
         $userIds = $rows->pluck('created_by')->filter()->unique()->values();
         $users = User::whereIn('id', $userIds)->get(['id','name','email'])->keyBy('id');
+        $contactUserIds = $request->user()?->hasRole('rop')
+            ? app(\App\Support\RopGroupAccess::class)->employees($request->user())
+                ->whereIn('users.id', $userIds)->pluck('users.id')->flip()
+            : null;
 
-        $result = $rows->map(function ($r) use ($users, $totals) {
+        $result = $rows->map(function ($r) use ($users, $totals, $contactUserIds) {
             $key = $r->created_by . '|' . $r->moderation_status;
             $total = (int)($totals[$key]->total_cnt ?? 0);
             $missing = (int)$r->missing_phone_cnt;
@@ -1503,7 +1606,8 @@ class PropertyReportController extends Controller
             return [
                 'agent_id'           => (int)$r->created_by,
                 'agent_name'         => $users[$r->created_by]->name ?? '—',
-                'agent_email'        => $users[$r->created_by]->email ?? null,
+                'agent_email'        => $contactUserIds === null || $contactUserIds->has($r->created_by)
+                    ? ($users[$r->created_by]->email ?? null) : null,
                 'moderation_status'  => $r->moderation_status,
                 'missing_phone'      => $missing,
                 'bucket_total'       => $total,
@@ -1554,14 +1658,40 @@ class PropertyReportController extends Controller
 
             // If single-agent mode: restrict properties to that agent (sale_user_id OR agent_id OR created_by)
             if ($agentId !== null) {
-                $propsQ->where(function ($q) use ($agentId) {
-                    if (Schema::hasColumn('properties', 'sale_user_id')) {
-                        $q->where('sale_user_id', $agentId)->orWhere('agent_id', $agentId)->orWhere('created_by', $agentId);
-                        return;
-                    }
+                $propsQ->where(function ($q) use ($agentId, $soldStatuses) {
+                    $q->where(function ($openQ) use ($agentId, $soldStatuses) {
+                        $openQ->whereNotIn('moderation_status', $soldStatuses)
+                            ->where('created_by', $agentId);
+                    })->orWhere(function ($closedQ) use ($agentId, $soldStatuses) {
+                        $closedQ->whereIn('moderation_status', $soldStatuses);
 
-                    $q->where('agent_id', $agentId)
-                        ->orWhere('created_by', $agentId);
+                        if (Schema::hasColumn('properties', 'sale_user_id')) {
+                            $closedQ->where(function ($sellerQ) use ($agentId) {
+                                $sellerQ->where('sale_user_id', $agentId)
+                                    ->orWhere(function ($legacyAgentQ) use ($agentId) {
+                                        $legacyAgentQ->whereNull('sale_user_id')->where('agent_id', $agentId);
+                                    })
+                                    ->orWhere(function ($legacyCreatorQ) use ($agentId) {
+                                        $legacyCreatorQ->whereNull('sale_user_id')
+                                            ->where(function ($missingAgentQ) {
+                                                $missingAgentQ->whereNull('agent_id')->orWhere('agent_id', 0);
+                                            })
+                                            ->where('created_by', $agentId);
+                                    });
+                            });
+                        } else {
+                            $closedQ->where(function ($sellerQ) use ($agentId) {
+                                $sellerQ->where('agent_id', $agentId)
+                                    ->orWhere(function ($legacyCreatorQ) use ($agentId) {
+                                        $legacyCreatorQ
+                                            ->where(function ($missingAgentQ) {
+                                                $missingAgentQ->whereNull('agent_id')->orWhere('agent_id', 0);
+                                            })
+                                            ->where('created_by', $agentId);
+                                    });
+                            });
+                        }
+                    });
                 });
 
                 $properties = $propsQ->get();
@@ -1578,8 +1708,18 @@ class PropertyReportController extends Controller
                     ->whereIn('property_id', $propertyIds)
                     ->groupBy('property_id');
 
-                if ($from) $bookingsQ->where('start_time', '>=', $from);
-                if ($to)   $bookingsQ->where('start_time', '<=', $to);
+                if ($request->user()?->hasRole('rop')) {
+                    $this->applyBranchAccessByUserColumn($request, $bookingsQ, 'bookings.agent_id');
+                }
+
+                $bookingFrom = $from && preg_match('/^\d{4}-\d{2}-\d{2}$/', (string) $from)
+                    ? $from.' 00:00:00'
+                    : $from;
+                $bookingTo = $to && preg_match('/^\d{4}-\d{2}-\d{2}$/', (string) $to)
+                    ? $to.' 23:59:59'
+                    : $to;
+                if ($bookingFrom) $bookingsQ->where('start_time', '>=', $bookingFrom);
+                if ($bookingTo)   $bookingsQ->where('start_time', '<=', $bookingTo);
 
                 $bookings = $bookingsQ->get()->keyBy('property_id');
 
@@ -1654,7 +1794,7 @@ class PropertyReportController extends Controller
                     return $p->sale_user_id;
                 }
 
-                return $p->agent_id ?: $p->created_by;
+                return $p->created_by;
             });
 
             // collect property IDs for bookings aggregation
@@ -1671,8 +1811,18 @@ class PropertyReportController extends Controller
                 ->whereIn('property_id', $allPropertyIds)
                 ->groupBy('property_id');
 
-            if ($from) $bookingsQ->where('start_time', '>=', $from);
-            if ($to)   $bookingsQ->where('start_time', '<=', $to);
+            if ($request->user()?->hasRole('rop')) {
+                $this->applyBranchAccessByUserColumn($request, $bookingsQ, 'bookings.agent_id');
+            }
+
+            $bookingFrom = $from && preg_match('/^\d{4}-\d{2}-\d{2}$/', (string) $from)
+                ? $from.' 00:00:00'
+                : $from;
+            $bookingTo = $to && preg_match('/^\d{4}-\d{2}-\d{2}$/', (string) $to)
+                ? $to.' 23:59:59'
+                : $to;
+            if ($bookingFrom) $bookingsQ->where('start_time', '>=', $bookingFrom);
+            if ($bookingTo)   $bookingsQ->where('start_time', '<=', $bookingTo);
 
             $bookings = $bookingsQ->get()->keyBy('property_id');
 
@@ -1809,6 +1959,8 @@ class PropertyReportController extends Controller
                     });
             });
 
+        $this->scopeVisiblePropertyClient($request, $clients, 'properties.buyer_client_id');
+
         $uniqueClients = (clone $clients)
             ->selectRaw("
                 COUNT(DISTINCT
@@ -1864,12 +2016,13 @@ class PropertyReportController extends Controller
             'date_field' => 'bookings.created_at',
         ]);
 
-        [$q] = $this->applyCommonFilters($requestWithDateField, $base, 'properties.created_by');
+        $isRop = $request->user()?->hasRole('rop');
+        [$q] = $this->applyCommonFilters($requestWithDateField, $base, $isRop ? 'bookings.agent_id' : 'properties.created_by');
 
         if ($request->filled('agent_id')) {
             $agentIds = $this->toArray($request->input('agent_id'));
-            // фильтр агента только по properties.created_by
-            $q->whereIn('properties.created_by', $agentIds);
+            // РОП фильтрует по ответственному за показ; другие роли сохраняют прежнюю атрибуцию.
+            $q->whereIn($isRop ? 'bookings.agent_id' : 'properties.created_by', $agentIds);
         }
 
         $totalShows = (clone $q)->count();

@@ -20,7 +20,11 @@ class PropertyLiquidityFeatureTest extends TestCase
         parent::setUp();
         Schema::dropAllTables();
         $this->createSchema();
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
+        (require database_path('migrations/2026_09_08_200000_create_rop_liquidity_results.php'))->up();
+        (require database_path('migrations/2026_09_08_210000_create_rop_liquidity_history.php'))->up();
         $this->seedCatalogsAndComparables();
+        User::findOrFail(5)->supervisedGroups()->attach(1);
     }
 
     public function test_calculator_marks_competitive_apartment_below_market_and_exposes_only_public_badge_to_guest(): void
@@ -151,6 +155,214 @@ class PropertyLiquidityFeatureTest extends TestCase
         ]);
     }
 
+    public function test_rop_priority_rejects_other_group_and_rolls_back_when_audit_fails(): void
+    {
+        $own = $this->createTarget(90_000, 1);
+        $foreign = $this->createTarget(91_000, 1);
+        DB::table('properties')->where('id', $foreign->id)->update(['branch_group_id' => 3]);
+        Sanctum::actingAs(User::findOrFail(5));
+        $payload = ['enabled' => true, 'comment' => 'Local priority test'];
+        $beforeForeign = $foreign->fresh()->getAttributes();
+        $this->patchJson('/api/properties/'.$foreign->id.'/liquidity/business-priority', $payload)->assertNotFound();
+        $this->assertSame($beforeForeign, $foreign->fresh()->getAttributes());
+        $beforeOwn = $own->fresh()->getAttributes();
+        DB::unprepared("CREATE TRIGGER reject_priority_audit BEFORE INSERT ON property_liquidity_priority_logs BEGIN SELECT RAISE(ABORT, 'test audit failure'); END");
+        try {
+            $this->patchJson('/api/properties/'.$own->id.'/liquidity/business-priority', $payload)->assertServerError();
+            $this->assertSame($beforeOwn, $own->fresh()->getAttributes());
+            $this->assertDatabaseCount('property_liquidity_priority_logs', 0);
+        } finally {
+            DB::unprepared('DROP TRIGGER reject_priority_audit');
+        }
+        $this->patchJson('/api/properties/'.$own->id.'/liquidity/business-priority', $payload)->assertOk();
+        User::findOrFail(5)->supervisedGroups()->detach();
+        $beforeOwn = $own->fresh()->getAttributes();
+        $this->patchJson('/api/properties/'.$own->id.'/liquidity/business-priority', ['enabled' => false, 'comment' => 'After revoke'])->assertNotFound();
+        $this->assertSame($beforeOwn, $own->fresh()->getAttributes());
+        $this->assertDatabaseCount('property_liquidity_priority_logs', 1);
+    }
+
+    public function test_rop_liquidity_reads_hide_foreign_ids_and_batch_latest_promotions(): void
+    {
+        $first = $this->createTarget(90_000, 1);
+        $second = $this->createTarget(91_000, 1);
+        $foreign = $this->createTarget(92_000, 1);
+        foreach ([$first, $second, $foreign] as $property) app(PropertyLiquidityCalculator::class)->calculate($property);
+        DB::table('properties')->where('id', $foreign->id)->update(['branch_group_id' => 3]);
+        $latestId = DB::table('property_social_promotions')->insertGetId(['property_id' => $first->id, 'channel' => 'instagram', 'status' => 'planned', 'created_at' => now(), 'updated_at' => now()]);
+        DB::table('property_social_promotions')->insert(['property_id' => $first->id, 'channel' => 'telegram', 'status' => 'planned', 'created_at' => now()->subDay(), 'updated_at' => now()]);
+        Sanctum::actingAs(User::findOrFail(5));
+        foreach (['liquidity', 'liquidity/history'] as $suffix) {
+            $this->getJson('/api/properties/'.$foreign->id.'/'.$suffix)->assertNotFound();
+            $this->getJson('/api/properties/999999/'.$suffix)->assertNotFound();
+            $this->getJson('/api/properties/'.$first->id.'/'.$suffix)->assertOk();
+        }
+        $queries = [];
+        DB::listen(function ($query) use (&$queries) { $queries[] = strtolower($query->sql); });
+        $response = $this->getJson('/api/properties/liquidity-feed?per_page=20')->assertOk()->assertJsonCount(7, 'data')->assertJsonPath('total', 7);
+        $row = collect($response->json('data'))->firstWhere('id', $first->id);
+        $this->assertSame($latestId, $row['promotion']['latest']['id']);
+        $this->assertSame(2, collect($queries)->filter(fn ($sql) => str_contains($sql, 'select') && str_contains($sql, 'from "property_social_promotions"'))->count(), 'One chunk aggregate and one page relation query, independent of property count');
+    }
+
+    public function test_rop_preview_excludes_foreign_comparables_without_writing_global_scores(): void
+    {
+        $property = $this->createTarget(90_000, 1);
+        $calculator = app(PropertyLiquidityCalculator::class);
+        $global = $calculator->calculate($property);
+        $this->assertNotNull($global);
+        $before = $property->fresh()->getAttributes();
+        $snapshotCount = DB::table('property_liquidity_snapshots')->count();
+        $foreignId = DB::table('properties')->where('moderation_status', 'sold')->value('id');
+        DB::table('properties')->where('id', $foreignId)->update(['branch_group_id' => 3]);
+        $rop = User::findOrFail(5);
+        $preview = $calculator->previewForRop($property, $rop);
+        $this->assertNotNull($preview);
+        $this->assertFalse($preview->exists);
+        $this->assertSame($global->cohort_sold_count - 1, $preview->cohort_sold_count);
+        $this->assertSame($before, $property->fresh()->getAttributes());
+        $this->assertSame($snapshotCount, DB::table('property_liquidity_snapshots')->count());
+        DB::table('properties')->where('id', '!=', $property->id)->update(['branch_group_id' => 3]);
+        $this->assertNull($calculator->previewForRop($property, $rop));
+        $this->assertSame($before, $property->fresh()->getAttributes());
+        $this->assertSame($snapshotCount, DB::table('property_liquidity_snapshots')->count());
+    }
+
+    public function test_rop_detail_uses_scoped_demand_and_never_falls_back_to_global_snapshot(): void
+    {
+        $property = $this->createTarget(90_000, 1);
+        $typeId = DB::table('client_need_types')->insertGetId(['slug' => 'buy']);
+        $statusId = DB::table('client_need_statuses')->insertGetId(['slug' => 'active', 'is_closed' => false]);
+        foreach ([1, 3, null] as $group) {
+            $clientId = DB::table('clients')->insertGetId(['branch_id' => 1, 'branch_group_id' => $group]);
+            DB::table('client_needs')->insert(['client_id' => $clientId, 'type_id' => $typeId, 'status_id' => $statusId,
+                'currency' => 'USD', 'location_id' => 1, 'district_id' => 1, 'created_at' => now(), 'updated_at' => now()]);
+        }
+        $global = app(PropertyLiquidityCalculator::class)->calculate($property);
+        $this->assertSame(3, $global->market['matching_active_needs_count']);
+        $before = $property->fresh()->getAttributes();
+        $snapshotCount = DB::table('property_liquidity_snapshots')->count();
+        Sanctum::actingAs(User::findOrFail(5));
+        $this->getJson('/api/properties/'.$property->id.'/liquidity')->assertOk()
+            ->assertJsonPath('data.market.matching_active_needs_count', 1);
+        $this->assertSame($before, $property->fresh()->getAttributes());
+        $this->assertSame($snapshotCount, DB::table('property_liquidity_snapshots')->count());
+        DB::table('properties')->where('id', '!=', $property->id)->update(['branch_group_id' => 3]);
+        $this->getJson('/api/properties/'.$property->id.'/liquidity')->assertOk()
+            ->assertJsonPath('data.status', 'not_calculated')->assertJsonMissingPath('data.score')->assertJsonMissingPath('data.market');
+        $this->assertSame($before, $property->fresh()->getAttributes());
+        Sanctum::actingAs(User::findOrFail(4));
+        $this->getJson('/api/properties/'.$property->id.'/liquidity')->assertOk()
+            ->assertJsonPath('data.market.matching_active_needs_count', 3)->assertJsonPath('data.score', $global->score);
+    }
+
+    public function test_rop_materialized_results_require_current_version_and_refresh_atomically(): void
+    {
+        $property = $this->createTarget(90_000, 1);
+        $before = $property->fresh()->getAttributes();
+        $rop = User::findOrFail(5);
+        $results = app(\App\Services\PropertyLiquidity\RopLiquidityResults::class);
+        $results->refresh($rop);
+        $this->assertTrue($results->query($rop)->where('property_id', $property->id)->exists());
+        $this->assertSame($before, $property->fresh()->getAttributes());
+        $stored = DB::table('rop_liquidity_results')->orderBy('id')->get()->toJson();
+        DB::unprepared("CREATE TRIGGER reject_scope_result BEFORE INSERT ON rop_liquidity_results BEGIN SELECT RAISE(ABORT, 'test refresh failure'); END");
+        try {
+            try {
+                $results->refresh($rop);
+                $this->fail('Refresh should fail');
+            } catch (\Illuminate\Database\QueryException $error) {
+                $this->assertStringContainsString('test refresh failure', $error->getMessage());
+            }
+            $this->assertSame($stored, DB::table('rop_liquidity_results')->orderBy('id')->get()->toJson());
+        } finally { DB::unprepared('DROP TRIGGER reject_scope_result'); }
+        DB::table('users')->where('id', $rop->id)->increment('access_scope_version');
+        $this->assertSame(0, $results->query($rop)->count(), 'A stale actor object must not expose an old cache version');
+        $results->refresh($rop);
+        $this->assertGreaterThan(0, $results->query($rop)->count());
+        DB::table('properties')->where('id', $property->id)->update(['branch_group_id' => 3]);
+        $this->assertFalse($results->query($rop)->where('property_id', $property->id)->exists());
+        $rop->supervisedGroups()->detach();
+        $this->assertSame(0, $results->query($rop)->count());
+    }
+
+    public function test_rop_feed_filters_and_report_use_scoped_results_instead_of_global_columns(): void
+    {
+        $property = $this->createTarget(90_000, 1);
+        $expected = app(PropertyLiquidityCalculator::class)->previewForRop($property, User::findOrFail(5));
+        $this->assertNotNull($expected);
+        DB::table('properties')->update(['liquidity_score' => 0, 'liquidity_category' => 'very_low', 'price_position' => 'above_market']);
+        $before = $property->fresh()->getAttributes();
+        Sanctum::actingAs(User::findOrFail(5));
+        $response = $this->getJson('/api/properties/liquidity-feed?category='.$expected->category.'&per_page=1')->assertOk()->assertJsonCount(1, 'data');
+        $this->assertGreaterThan(0, $response->json('data.0.score'));
+        $this->assertSame($expected->category, $response->json('data.0.category'));
+        $this->assertGreaterThan(0, $response->json('total'));
+        $this->getJson('/api/properties/liquidity-feed?price_position=below_market')->assertOk()->assertJsonFragment(['id' => $property->id]);
+        $report = $this->getJson('/api/reports/properties/liquidity')->assertOk();
+        $this->assertGreaterThan(0, $report->json('data.summary.below_market'));
+        $this->assertSame(6, $report->json('data.summary.total'));
+        $this->assertGreaterThan(0, $report->json('data.by_district.0.average_score'));
+        $this->assertSame($before, $property->fresh()->getAttributes());
+        User::findOrFail(5)->supervisedGroups()->detach();
+        $this->getJson('/api/properties/liquidity-feed')->assertOk()->assertJsonCount(0, 'data')->assertJsonPath('total', 0);
+        $this->getJson('/api/reports/properties/liquidity')->assertOk()->assertJsonPath('data.summary.total', 0);
+    }
+
+    public function test_rop_history_preserves_scope_epochs_and_rolls_back_with_cache(): void
+    {
+        $property = $this->createTarget(90_000, 1);
+        app(PropertyLiquidityCalculator::class)->calculate($property);
+        $rop = User::findOrFail(5);
+        $service = app(\App\Services\PropertyLiquidity\RopLiquidityResults::class);
+        Sanctum::actingAs($rop);
+        $url = '/api/properties/'.$property->id.'/liquidity/history';
+        $this->getJson($url)->assertOk()->assertJsonCount(0, 'data');
+        $service->refresh($rop);
+        $response = $this->getJson($url)->assertOk()->assertJsonCount(1, 'data');
+        $this->assertStringEndsWith('Z', $response->json('data.0.calculated_at'));
+        $before = DB::table('rop_liquidity_history')->orderBy('id')->get()->toJson();
+        $cache = DB::table('rop_liquidity_results')->orderBy('id')->get()->toJson();
+        DB::table('properties')->where('id', $property->id)->update(['price' => 80_000]);
+        DB::unprepared("CREATE TRIGGER reject_scope_history BEFORE INSERT ON rop_liquidity_history BEGIN SELECT RAISE(ABORT, 'test history failure'); END");
+        try {
+            try { $service->refresh($rop); $this->fail('History insert must fail'); }
+            catch (\Illuminate\Database\QueryException $error) { $this->assertStringContainsString('test history failure', $error->getMessage()); }
+            $this->assertSame($before, DB::table('rop_liquidity_history')->orderBy('id')->get()->toJson());
+            $this->assertSame($cache, DB::table('rop_liquidity_results')->orderBy('id')->get()->toJson());
+        } finally { DB::unprepared('DROP TRIGGER reject_scope_history'); }
+        DB::table('users')->where('id', $rop->id)->increment('access_scope_version');
+        $this->getJson($url)->assertOk()->assertJsonCount(0, 'data');
+        $this->assertSame($before, DB::table('rop_liquidity_history')->orderBy('id')->get()->toJson());
+        $service->refresh($rop);
+        $this->getJson($url)->assertOk()->assertJsonCount(1, 'data');
+        $this->assertGreaterThan(0, DB::table('rop_liquidity_history')->where('access_scope_version', 0)->count());
+        Sanctum::actingAs(User::findOrFail(4));
+        $this->getJson($url)->assertOk()->assertJsonCount(1, 'data');
+    }
+
+    public function test_rop_history_records_changes_but_not_identical_refreshes(): void
+    {
+        $this->travelTo(now()->startOfMinute());
+        $property = $this->createTarget(90_000, 1);
+        $rop = User::findOrFail(5);
+        $service = app(\App\Services\PropertyLiquidity\RopLiquidityResults::class);
+        $service->refresh($rop);
+        $first = DB::table('rop_liquidity_history')->where('property_id', $property->id)->first();
+        $count = DB::table('rop_liquidity_history')->count();
+        $this->travel(1)->seconds();
+        $service->refresh($rop);
+        $this->assertSame($count, DB::table('rop_liquidity_history')->count());
+        $this->assertSame((array) $first, (array) DB::table('rop_liquidity_history')->where('id', $first->id)->first());
+        DB::table('properties')->where('id', $property->id)->update(['price' => 80_000]);
+        $service->refresh($rop);
+        $this->assertSame(2, DB::table('rop_liquidity_history')->where('property_id', $property->id)->count());
+        DB::table('properties')->where('id', $property->id)->update(['price' => 90_000]);
+        $service->refresh($rop);
+        $this->assertSame(3, DB::table('rop_liquidity_history')->where('property_id', $property->id)->count(), 'Returning to an earlier result is a new change');
+        $this->travelBack();
+    }
+
     public function test_market_days_exclude_unpublished_periods_without_resetting_listing_age(): void
     {
         $listedAt = CarbonImmutable::parse('2026-08-01 00:00:00');
@@ -201,6 +413,8 @@ class PropertyLiquidityFeatureTest extends TestCase
     private function seedCatalogsAndComparables(): void
     {
         $now = now();
+        DB::table('branches')->insert([['id' => 1, 'name' => 'One'], ['id' => 2, 'name' => 'Two']]);
+        DB::table('branch_groups')->insert([['id' => 1, 'branch_id' => 1, 'name' => 'A'], ['id' => 2, 'branch_id' => 2, 'name' => 'B'], ['id' => 3, 'branch_id' => 1, 'name' => 'C']]);
         DB::table('roles')->insert([
             ['id' => 1, 'name' => 'Агент', 'slug' => 'agent', 'description' => '', 'created_at' => $now, 'updated_at' => $now],
             ['id' => 2, 'name' => 'Клиент', 'slug' => 'client', 'description' => '', 'created_at' => $now, 'updated_at' => $now],
@@ -267,6 +481,8 @@ class PropertyLiquidityFeatureTest extends TestCase
 
     private function createSchema(): void
     {
+        Schema::create('branches', function (Blueprint $table) { $table->id(); $table->string('name'); $table->timestamps(); });
+        Schema::create('branch_groups', function (Blueprint $table) { $table->id(); $table->unsignedBigInteger('branch_id'); $table->string('name'); $table->timestamps(); });
         Schema::create('roles', function (Blueprint $table) {
             $table->id();
             $table->string('name');
@@ -379,6 +595,7 @@ class PropertyLiquidityFeatureTest extends TestCase
             $table->boolean('is_closed');
             $table->timestamps();
         });
+        Schema::create('clients', function (Blueprint $table) { $table->id(); $table->unsignedBigInteger('branch_id'); $table->unsignedBigInteger('branch_group_id')->nullable(); $table->softDeletes(); $table->timestamps(); });
         Schema::create('client_needs', function (Blueprint $table) {
             $table->id();
             $table->unsignedBigInteger('client_id');

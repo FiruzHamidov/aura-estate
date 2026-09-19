@@ -48,6 +48,10 @@ class NotificationFeatureTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('branch_groups', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('branch_id'); $table->string('name'); $table->timestamps();
+        });
+
         Schema::create('users', function (Blueprint $table) {
             $table->id();
             $table->string('name');

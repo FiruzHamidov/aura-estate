@@ -44,8 +44,11 @@ class KpiModuleService
     {
     }
 
-    public function plans(string $role): Collection
+    public function plans(string $role, ?int $groupId = null): Collection
     {
+        $actor = auth()->user();
+        $rop = $actor?->hasRole('rop') ?? false;
+        if ($rop) $groupId = app(\App\Support\RopGroupAccess::class)->creationGroup($actor, $groupId);
         $base = collect(config('kpi.metrics', []))->map(function (array $cfg, string $metricKey) use ($role) {
             return [
                 'role' => $role,
@@ -57,8 +60,19 @@ class KpiModuleService
         })->values();
 
         $overrides = Schema::hasTable('kpi_plans')
-            ? KpiPlan::query()->where('role_slug', $role)->get()->keyBy('metric_key')
+            ? KpiPlan::query()->where('role_slug', $role)
+                ->when($rop, fn ($query) => $query->where('branch_id', $actor->branch_id)->where('branch_group_id', $groupId)
+                    ->whereNull('user_id')->whereNull('effective_from')->whereNull('effective_to'))
+                ->orderBy('id')->get()->keyBy('metric_key')
             : collect();
+
+        // Preserve legacy defaults while returning supported metrics written by the v2 API.
+        foreach (self::PLAN_METRIC_WHITELIST as $metricKey) {
+            if ($overrides->has($metricKey) && ! $base->contains('metric_key', $metricKey)) {
+                $base->push(['role' => $role, 'metric_key' => $metricKey, 'daily_plan' => 0.0,
+                    'weight' => 0.0, 'comment' => $metricKey]);
+            }
+        }
 
         return $base->map(function (array $row) use ($overrides) {
             $override = $overrides->get($row['metric_key']);
@@ -74,20 +88,40 @@ class KpiModuleService
         });
     }
 
-    public function upsertPlans(string $role, array $items): Collection
+    public function upsertPlans(string $role, array $items, ?int $groupId = null): Collection
     {
-        foreach ($items as $item) {
-            KpiPlan::query()->updateOrCreate(
-                ['role_slug' => $role, 'metric_key' => $item['metric_key']],
-                $this->buildPlanWritePayload([
+        return DB::transaction(function () use ($role, $items, $groupId) {
+            $actor = auth()->user();
+            if ($actor) {
+                [$actor] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($actor, null, null, $groupId);
+                abort_unless(in_array($actor->role?->slug, ['admin', 'superadmin', 'rop', 'branch_director', 'mop'], true), 403, 'KPI_FORBIDDEN_ROLE_ACTION');
+            }
+            $scope = [];
+            if ($actor?->hasRole('rop')) {
+                $groupId = app(\App\Support\RopGroupAccess::class)->creationGroup($actor, $groupId);
+                \App\Models\BranchGroup::query()->whereKey($groupId)->lockForUpdate()->firstOrFail();
+                $scope = ['branch_id' => $actor->branch_id, 'branch_group_id' => $groupId,
+                    'user_id' => null, 'effective_from' => null, 'effective_to' => null];
+            }
+            foreach ($items as $item) {
+                $identity = ['role_slug' => $role, 'metric_key' => $item['metric_key']] + $scope;
+                $plan = KpiPlan::query()->where($identity)->lockForUpdate()->first() ?? new KpiPlan($identity);
+                $before = $plan->exists ? $plan->getAttributes() : [];
+                $plan->fill($this->buildPlanWritePayload([
                     'daily_plan' => $this->planValueFromItem((array) $item),
                     'weight' => $item['weight'],
                     'comment' => $item['comment'] ?? null,
-                ])
-            );
-        }
+                ]));
+                $changed = ! $plan->exists || $plan->isDirty();
+                $plan->save();
+                if ($changed) {
+                    $this->auditLogger->log($plan, $actor, 'kpi_role_plan_upserted', $before, $plan->getAttributes(),
+                        'KPI role plan updated', ['branch_id' => $plan->branch_id, 'branch_group_id' => $plan->branch_group_id]);
+                }
 
-        return $this->plans($role);
+            }
+            return $this->plans($role, $groupId);
+        });
     }
 
     public function plansForUser(int $userId, Carbon $date): Collection
@@ -105,7 +139,8 @@ class KpiModuleService
             $merged = $this->serializePlanRows($commonRows, 'common')->keyBy('metric_key');
         }
 
-        $personalRows = KpiPlan::query()
+        $personalRows = KpiPlan::query()->tap(fn ($query) => $this->scopePlanQuery($query))
+            ->when(auth()->user()?->hasRole('rop'), fn ($query) => $query->where('branch_group_id', $user->branch_group_id))
             ->where('user_id', $userId)
             ->where(function ($q) use ($date) {
                 $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $date->toDateString());
@@ -151,35 +186,42 @@ class KpiModuleService
 
     public function upsertUserPlans(User $actor, int $userId, array $payload): Collection
     {
-        $user = User::query()->with('role')->findOrFail($userId);
-        $this->ensurePlanScopeAccess($actor, $user);
+        return DB::transaction(function () use ($actor, $userId, $payload) {
+            [$actor] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquireMany($actor, [], [$userId]);
+            $user = User::query()->with('role')->lockForUpdate()->findOrFail($userId);
+            $this->ensurePlanScopeAccess($actor, $user);
+            if (isset($payload['scope'])) {
+                $this->kpiPlanScopePolicy->ensureTargetMatchesBulkScope($actor, $user, (array) $payload['scope']);
+            }
 
-        $from = (string) $payload['effective_from'];
-        $to = $payload['effective_to'] ?? null;
-        $replaceIfConflict = (bool) ($payload['replace_if_conflict'] ?? false);
-        $conflictStrategy = (string) ($payload['conflict_strategy'] ?? ($replaceIfConflict ? 'replace' : 'error'));
 
-        $conflictsQuery = KpiPlan::query()
-            ->where('user_id', $userId)
-            ->where(function ($q) use ($from, $to) {
-                $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $from);
-            })
-            ->where(function ($q) use ($to) {
-                if ($to === null) {
-                    $q->whereNotNull('id');
-                    return;
-                }
+            $from = (string) $payload['effective_from'];
+            $to = $payload['effective_to'] ?? null;
+            $replaceIfConflict = (bool) ($payload['replace_if_conflict'] ?? false);
+            $conflictStrategy = (string) ($payload['conflict_strategy'] ?? ($replaceIfConflict ? 'replace' : 'error'));
 
-                $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $to);
-            });
+            $conflictsQuery = KpiPlan::query()
+                ->where('user_id', $userId)
+                ->where('branch_id', $user->branch_id)
+                ->where('branch_group_id', $user->branch_group_id)
+                ->where(function ($q) use ($from, $to) {
+                    $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $from);
+                })
+                ->where(function ($q) use ($to) {
+                    if ($to === null) {
+                        $q->whereNotNull('id');
+                        return;
+                    }
 
-        $hasConflicts = (clone $conflictsQuery)->exists();
+                    $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $to);
+                });
 
-        if ($hasConflicts && $conflictStrategy !== 'replace') {
-            throw new \DomainException('Plan period conflicts with an existing personal KPI plan interval.');
-        }
+            $hasConflicts = (clone $conflictsQuery)->lockForUpdate()->get(['id'])->isNotEmpty();
 
-        DB::transaction(function () use ($conflictsQuery, $hasConflicts, $conflictStrategy, $user, $userId, $payload, $from, $to, $actor): void {
+            if ($hasConflicts && $conflictStrategy !== 'replace') {
+                throw new \DomainException('Plan period conflicts with an existing personal KPI plan interval.');
+            }
+
             if ($hasConflicts && $conflictStrategy === 'replace') {
                 $conflictsQuery->delete();
             }
@@ -220,9 +262,9 @@ class KpiModuleService
                     'KPI personal plan upserted'
                 );
             }
-        });
 
-        return $this->plansForUser($userId, Carbon::parse($from, self::TZ));
+            return $this->plansForUser($userId, Carbon::parse($from, self::TZ));
+        });
     }
 
     public function commonPlans(string $role, Carbon $date, ?int $branchId, ?int $branchGroupId): Collection
@@ -306,7 +348,9 @@ class KpiModuleService
 
         $actor->loadMissing('role');
         $role = (string) ($actor->role?->slug ?? '');
-        if (in_array($role, ['rop', 'branch_director'], true)) {
+        if ($role === 'rop') {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'kp.branch_group_id', 'kp.branch_id');
+        } elseif ($role === 'branch_director') {
             $query->where(function ($scope) use ($actor) {
                 $scope->where(function ($q) use ($actor) {
                     $q->whereNotNull('kp.user_id')->where('u.branch_id', (int) $actor->branch_id);
@@ -361,7 +405,7 @@ class KpiModuleService
 
     public function planById(int $planId, ?string $forcedType = null): ?array
     {
-        $seed = KpiPlan::query()->find($planId);
+        $seed = KpiPlan::query()->tap(fn ($query) => $this->scopePlanQuery($query))->find($planId);
         if (! $seed) {
             return null;
         }
@@ -407,90 +451,98 @@ class KpiModuleService
 
     public function upsertCommonPlans(User $actor, array $payload): Collection
     {
-        $role = (string) $payload['role'];
-        $from = (string) $payload['effective_from'];
-        $to = $payload['effective_to'] ?? null;
-        $branchId = isset($payload['branch_id']) ? (int) $payload['branch_id'] : null;
-        $branchGroupId = isset($payload['branch_group_id']) ? (int) $payload['branch_group_id'] : null;
+        return DB::transaction(function () use ($actor, $payload) {
+            $groupId = isset($payload['branch_group_id']) ? (int) $payload['branch_group_id'] : null;
+            [$actor] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($actor, null, null, $groupId);
+            $this->kpiPlanScopePolicy->ensureCanManageCommonPlan($actor, $payload);
+            if ($actor->hasRole('rop')) {
+                $payload['branch_id'] = (int) $actor->branch_id;
+            }
+            $role = (string) $payload['role'];
+            $from = (string) $payload['effective_from'];
+            $to = $payload['effective_to'] ?? null;
+            $branchId = isset($payload['branch_id']) ? (int) $payload['branch_id'] : null;
+            $branchGroupId = isset($payload['branch_group_id']) ? (int) $payload['branch_group_id'] : null;
 
-        $existing = KpiPlan::query()
-            ->whereNull('user_id')
-            ->where('role_slug', $role)
-            ->where('branch_id', $branchId)
-            ->where('branch_group_id', $branchGroupId)
-            ->where(function ($q) use ($from, $to) {
-                $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $from);
-            })
-            ->where(function ($q) use ($to) {
-                if ($to === null) {
-                    $q->whereNotNull('id');
-                    return;
-                }
+            $existing = KpiPlan::query()
+                ->whereNull('user_id')
+                ->where('role_slug', $role)
+                ->where('branch_id', $branchId)
+                ->where('branch_group_id', $branchGroupId)
+                ->where(function ($q) use ($from, $to) {
+                    $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $from);
+                })
+                ->where(function ($q) use ($to) {
+                    if ($to === null) {
+                        $q->whereNotNull('id');
+                        return;
+                    }
 
-                $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $to);
-            })
-            ->get();
+                    $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $to);
+                })
+                ->lockForUpdate()->get();
 
-        $samePeriod = $existing->every(function (KpiPlan $plan) use ($from, $to) {
-            return optional($plan->effective_from)->toDateString() === $from
-                && optional($plan->effective_to)->toDateString() === $to;
-        });
+            $samePeriod = $existing->every(function (KpiPlan $plan) use ($from, $to) {
+                return optional($plan->effective_from)->toDateString() === $from
+                    && optional($plan->effective_to)->toDateString() === $to;
+            });
 
-        if ($existing->isNotEmpty() && ! $samePeriod) {
-            throw new \DomainException('Plan period conflicts with an existing common KPI plan interval.');
-        }
+            if ($existing->isNotEmpty() && ! $samePeriod) {
+                throw new \DomainException('Plan period conflicts with an existing common KPI plan interval.');
+            }
 
-        KpiPlan::query()
-            ->whereNull('user_id')
-            ->where('role_slug', $role)
-            ->where('branch_id', $branchId)
-            ->where('branch_group_id', $branchGroupId)
-            ->whereDate('effective_from', $from)
-            ->where(function ($q) use ($to) {
-                if ($to === null) {
-                    $q->whereNull('effective_to');
-                    return;
-                }
+            KpiPlan::query()
+                ->whereNull('user_id')
+                ->where('role_slug', $role)
+                ->where('branch_id', $branchId)
+                ->where('branch_group_id', $branchGroupId)
+                ->whereDate('effective_from', $from)
+                ->where(function ($q) use ($to) {
+                    if ($to === null) {
+                        $q->whereNull('effective_to');
+                        return;
+                    }
 
-                $q->whereDate('effective_to', $to);
-            })
-            ->delete();
+                    $q->whereDate('effective_to', $to);
+                })
+                ->delete();
 
-        foreach ((array) $payload['items'] as $item) {
-            $newPlan = KpiPlan::query()->create($this->buildPlanWritePayload([
-                'role_slug' => $role,
-                'user_id' => null,
-                'branch_id' => $branchId,
-                'branch_group_id' => $branchGroupId,
-                'metric_key' => (string) $item['metric_key'],
-                'daily_plan' => $this->planValueFromItem((array) $item),
-                'weight' => (float) $item['weight'],
-                'comment' => $item['comment'] ?? null,
-                'effective_from' => $from,
-                'effective_to' => $to,
-            ]));
-
-            $this->auditLogger->log(
-                $newPlan,
-                $actor,
-                'kpi_common_plan_upserted',
-                [],
-                [
-                    'role' => $role,
+            foreach ((array) $payload['items'] as $item) {
+                $newPlan = KpiPlan::query()->create($this->buildPlanWritePayload([
+                    'role_slug' => $role,
+                    'user_id' => null,
                     'branch_id' => $branchId,
                     'branch_group_id' => $branchGroupId,
                     'metric_key' => (string) $item['metric_key'],
-                    'monthly_plan' => $this->planValueFromItem((array) $item),
+                    'daily_plan' => $this->planValueFromItem((array) $item),
                     'weight' => (float) $item['weight'],
                     'comment' => $item['comment'] ?? null,
                     'effective_from' => $from,
                     'effective_to' => $to,
-                ],
-                'KPI common plan upserted'
-            );
-        }
+                ]));
 
-        return $this->commonPlans($role, Carbon::parse($from, self::TZ), $branchId, $branchGroupId);
+                $this->auditLogger->log(
+                    $newPlan,
+                    $actor,
+                    'kpi_common_plan_upserted',
+                    [],
+                    [
+                        'role' => $role,
+                        'branch_id' => $branchId,
+                        'branch_group_id' => $branchGroupId,
+                        'metric_key' => (string) $item['metric_key'],
+                        'monthly_plan' => $this->planValueFromItem((array) $item),
+                        'weight' => (float) $item['weight'],
+                        'comment' => $item['comment'] ?? null,
+                        'effective_from' => $from,
+                        'effective_to' => $to,
+                    ],
+                    'KPI common plan upserted'
+                );
+            }
+
+            return $this->commonPlans($role, Carbon::parse($from, self::TZ), $branchId, $branchGroupId);
+        });
     }
 
     public function dailyRows(User $authUser, Carbon $date, array $filters): Collection
@@ -504,19 +556,21 @@ class KpiModuleService
     public function periodRows(User $authUser, string $periodType, Carbon $from, Carbon $to, array $filters): Collection
     {
         $query = DailyReport::query()->with(['user.role'])
-            ->whereBetween('report_date', [$from->toDateString(), $to->toDateString()]);
+            ->where('report_date', '>=', $from->toDateString())
+            ->where('report_date', '<', $to->copy()->startOfDay()->addDay()->toDateString());
         $this->applyScope($query, $authUser, $filters);
 
-        return $query->get()->groupBy('user_id')->map(function (Collection $rows) use ($periodType, $from, $to) {
+        return $query->get()->groupBy(fn ($report) => $authUser->hasRole('rop') ? $report->user_id.'|'.$report->branch_group_id.'|'.$report->role_slug : $report->user_id)->map(function (Collection $rows) use ($periodType, $from, $to, $authUser) {
             $first = $rows->first();
             return [
                 'period_type' => $periodType,
                 'period_start' => $from->toDateString(),
                 'period_end' => $to->toDateString(),
+                ...($authUser->hasRole('rop') ? ['branch_group_id' => $first->branch_group_id, 'role_slug' => $first->role_slug] : []),
                 'user' => [
                     'id' => $first?->user?->id,
                     'name' => $first?->user?->name,
-                    'role_slug' => $first?->user?->role?->slug,
+                    ...($authUser->hasRole('rop') ? [] : ['role_slug' => $first?->user?->role?->slug]),
                 ],
                 'metrics' => [
                     'calls_count' => (int) $rows->sum('calls_count'),
@@ -557,9 +611,15 @@ class KpiModuleService
         $dayStartUtc = $dayStart->copy()->setTimezone('UTC');
         $dayEndUtc = $dayEnd->copy()->setTimezone('UTC');
 
-        $ranking = collect($base['ranking'])->map(function (array $row) use ($date) {
+        $sourceUsers = User::query()->whereIn('id', collect($base['ranking'])->pluck('user.id'))->get()->keyBy('id');
+        $ranking = collect($base['ranking'])->map(function (array $row) use ($date, $authUser, $sourceUsers) {
             $userId = (int) ($row['user']['id'] ?? 0);
-            $user = $userId > 0 ? User::query()->find($userId) : null;
+            $user = $sourceUsers->get($userId);
+            if ($user && $authUser->hasRole('rop')) {
+                $user = clone $user;
+                $user->branch_group_id = $row['branch_group_id'];
+                $user->branch_id = $authUser->branch_id;
+            }
             $sourceCounts = $user ? $this->dailyReportService->autoMetrics($user, $date->toDateString()) : [];
 
             $row['source_counts'] = $sourceCounts;
@@ -618,42 +678,34 @@ class KpiModuleService
 
     public function taskDailySummary(User $authUser, Carbon $date, array $filters): Collection
     {
-        $query = CrmTask::query()->with(['assignee.role'])
-            ->whereDate('created_at', $date->toDateString());
-
+        $start = $date->copy()->startOfDay();
+        $query = CrmTask::query()->where('created_at', '>=', $start->toDateTimeString())
+            ->where('created_at', '<', $start->copy()->addDay()->toDateTimeString());
         $this->applyTaskScope($query, $authUser, $filters);
 
-        return $query->get()->groupBy('assignee_id')->map(function (Collection $rows, $assigneeId) use ($date) {
-            return [
-                'date' => $date->toDateString(),
-                'assignee_id' => (int) $assigneeId,
-                'tasks_total' => $rows->count(),
-                'done_total' => $rows->where('status', 'done')->count(),
-                'overdue_total' => $rows->where('status', 'overdue')->count(),
-            ];
-        })->values();
+        return $this->aggregateTaskSummary($query, ['date' => $date->toDateString()]);
     }
 
     public function taskWeeklySummary(User $authUser, int $year, int $week, array $filters): Collection
     {
         $start = Carbon::now(self::TZ)->setISODate($year, $week)->startOfWeek(Carbon::MONDAY);
-        $end = $start->copy()->endOfWeek(Carbon::SUNDAY);
-
-        $query = CrmTask::query()->with(['assignee.role'])
-            ->whereBetween('created_at', [$start->toDateString(), $end->toDateString()]);
-
+        $query = CrmTask::query()->where('created_at', '>=', $start->toDateTimeString())
+            ->where('created_at', '<', $start->copy()->addWeek()->toDateTimeString());
         $this->applyTaskScope($query, $authUser, $filters);
 
-        return $query->get()->groupBy('assignee_id')->map(function (Collection $rows, $assigneeId) use ($year, $week) {
-            return [
-                'year' => $year,
-                'week' => $week,
-                'assignee_id' => (int) $assigneeId,
-                'tasks_total' => $rows->count(),
-                'done_total' => $rows->where('status', 'done')->count(),
-                'overdue_total' => $rows->where('status', 'overdue')->count(),
-            ];
-        })->values();
+        return $this->aggregateTaskSummary($query, ['year' => $year, 'week' => $week]);
+    }
+
+    private function aggregateTaskSummary(Builder $query, array $period): Collection
+    {
+        return $query->select('assignee_id')
+            ->selectRaw('COUNT(*) AS tasks_total, SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS done_total, SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) AS overdue_total', ['done', 'overdue'])
+            ->groupBy('assignee_id')->orderBy('assignee_id')->get()->map(fn ($row) => $period + [
+                'assignee_id' => (int) $row->assignee_id,
+                'tasks_total' => (int) $row->tasks_total,
+                'done_total' => (int) $row->done_total,
+                'overdue_total' => (int) $row->overdue_total,
+            ]);
     }
 
     public function myDailyProgress(User $authUser, Carbon $date): array
@@ -853,7 +905,8 @@ class KpiModuleService
 
         match ($actor->role?->slug) {
             'admin', 'superadmin', 'owner' => null,
-            'rop', 'branch_director' => $query->where('users.branch_id', (int) $actor->branch_id),
+            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'users.branch_group_id', 'users.branch_id')->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop'])),
+            'branch_director' => $query->where('users.branch_id', (int) $actor->branch_id),
             'mop' => $query
                 ->where('users.branch_group_id', (int) $actor->branch_group_id)
                 ->whereHas('role', fn (Builder $roleQ) => $roleQ->whereIn('slug', ['agent', 'intern'])),
@@ -885,18 +938,13 @@ class KpiModuleService
 
     public function applyCommonPlanToUsers(User $actor, array $payload): array
     {
+        $actor = User::query()->with('role')->findOrFail($actor->id);
+        $this->kpiPlanScopePolicy->ensureCanManageCommonPlan($actor, $payload);
+        if ($actor->hasRole('rop')) {
+            $payload['branch_id'] = (int) $actor->branch_id;
+        }
         $role = (string) $payload['role'];
         $from = Carbon::parse((string) $payload['effective_from'], self::TZ);
-        $commonItems = $this->commonPlans(
-            $role,
-            $from,
-            isset($payload['branch_id']) ? (int) $payload['branch_id'] : null,
-            isset($payload['branch_group_id']) ? (int) $payload['branch_group_id'] : null
-        );
-
-        if ($commonItems->isEmpty()) {
-            return ['success_count' => 0, 'failed_count' => 0, 'results' => []];
-        }
 
         $query = User::query()->with('role')->whereHas('role', fn (Builder $q) => $q->where('slug', $role));
         if (isset($payload['branch_id'])) {
@@ -912,19 +960,36 @@ class KpiModuleService
         $results = [];
         foreach ($query->get() as $targetUser) {
             try {
-                $this->upsertUserPlans($actor, (int) $targetUser->id, [
-                    'effective_from' => $payload['effective_from'],
-                    'effective_to' => $payload['effective_to'] ?? null,
-                    'items' => $commonItems->map(fn (array $item) => [
-                        'metric_key' => (string) $item['metric_key'],
-                        'daily_plan' => (float) $item['daily_plan'],
-                        'weight' => (float) $item['weight'],
-                        'comment' => $item['comment'] ?? null,
-                    ])->values()->all(),
-                ]);
+                $applied = DB::transaction(function () use ($actor, $targetUser, $payload, $role, $from) {
+                    [$freshActor] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquireMany(
+                        $actor, [], [$targetUser->id], [$payload['branch_group_id'] ?? null]
+                    );
+                    $this->kpiPlanScopePolicy->ensureCanManageCommonPlan($freshActor, $payload);
+                    $commonItems = $this->commonPlans($role, $from, $payload['branch_id'] ?? null, $payload['branch_group_id'] ?? null);
+                    if ($commonItems->isEmpty()) return false;
+                    $this->upsertUserPlans($freshActor, (int) $targetUser->id, [
+                        'scope' => array_intersect_key($payload, array_flip(['role', 'branch_id', 'branch_group_id'])),
+                        'effective_from' => $payload['effective_from'],
+                        'effective_to' => $payload['effective_to'] ?? null,
+                        'items' => $commonItems->map(fn (array $item) => [
+                            'metric_key' => (string) $item['metric_key'],
+                            'daily_plan' => (float) $item['daily_plan'],
+                            'weight' => (float) $item['weight'],
+                            'comment' => $item['comment'] ?? null,
+                        ])->values()->all(),
+                    ]);
+                    return true;
+                });
+                if (! $applied) continue;
                 $results[] = ['user_id' => (int) $targetUser->id, 'ok' => true];
             } catch (\DomainException $e) {
                 $results[] = ['user_id' => (int) $targetUser->id, 'ok' => false, 'code' => 'KPI_PLAN_PERIOD_CONFLICT', 'message' => $e->getMessage()];
+            } catch (\Illuminate\Http\Exceptions\HttpResponseException | \Symfony\Component\HttpKernel\Exception\HttpExceptionInterface $e) {
+                $status = $e instanceof \Illuminate\Http\Exceptions\HttpResponseException
+                    ? $e->getResponse()->getStatusCode() : $e->getStatusCode();
+                $results[] = ['user_id' => (int) $targetUser->id, 'ok' => false,
+                    'code' => in_array($status, [403, 404], true) ? 'KPI_FORBIDDEN_SCOPE' : 'KPI_CONFLICT',
+                    'message' => 'Unable to apply plan in current scope.'];
             } catch (\Throwable $e) {
                 $results[] = ['user_id' => (int) $targetUser->id, 'ok' => false, 'code' => 'KPI_CONFLICT', 'message' => $e->getMessage()];
             }
@@ -939,54 +1004,80 @@ class KpiModuleService
 
     public function upsertDailyRowsV2(User $authUser, array $rows): array
     {
-        $saved = [];
+        return DB::transaction(function () use ($authUser, $rows) {
+            [$authUser] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquireMany(
+                $authUser, [], array_column($rows, 'employee_id')
+            );
+            $saved = [];
 
-        foreach ($rows as $row) {
-            $employeeId = (int) Arr::get($row, 'employee_id');
-            $date = (string) Arr::get($row, 'date');
-            $targetUser = User::query()->with('role')->findOrFail($employeeId);
-            $this->ensureCanUpsertDailyForUser($authUser, $targetUser);
-            $writePayload = [
-                'role_slug' => (string) (Arr::get($row, 'role') ?: $targetUser->role?->slug),
-                'ad_count' => (int) Arr::get($row, 'ads', Arr::get($row, 'advertisement', 0)),
-                'calls_count' => (int) Arr::get($row, 'calls', Arr::get($row, 'call', 0)),
-                'new_clients_count' => (int) Arr::get($row, 'kabul', 0),
-                'shows_count' => (int) Arr::get($row, 'shows', Arr::get($row, 'show', 0)),
-                'new_properties_count' => (int) Arr::get($row, 'objects', Arr::get($row, 'lead', 0)),
-                'deposits_count' => (int) Arr::get($row, 'deposit', 0),
-                'deals_count' => (int) floor((float) Arr::get($row, 'sales', Arr::get($row, 'deal', 0))),
-                'comment' => Arr::get($row, 'comment'),
-                'submitted_at' => now(),
-            ];
-            if (Schema::hasColumn('daily_reports', 'sales_count')) {
-                $writePayload['sales_count'] = (float) Arr::get($row, 'sales', Arr::get($row, 'deal', 0));
+            foreach ($rows as $row) {
+                $employeeId = (int) Arr::get($row, 'employee_id');
+                $date = (string) Arr::get($row, 'date');
+                $targetUser = User::query()->with('role')->findOrFail($employeeId);
+                $report = DailyReport::query()->where('user_id', $employeeId)->whereDate('report_date', $date)->lockForUpdate()->first();
+                if ($authUser->hasRole('rop') && $report) {
+                    app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $report);
+                    abort_unless(in_array($report->role_slug, ['agent', 'mop'], true), 404, 'NOT_FOUND');
+                } else {
+                    $this->ensureCanUpsertDailyForUser($authUser, $targetUser);
+                }
+                if ($authUser->hasRole('rop')) {
+                    abort_if(! $report && $date !== now(self::TZ)->toDateString(), 422, 'HISTORICAL_GROUP_UNCLASSIFIED');
+                    $groupId = $report?->branch_group_id ?? $targetUser->branch_group_id;
+                    foreach (['day', 'week', 'month'] as $periodType) {
+                        abort_if($this->isPeriodLocked($periodType, Carbon::parse($date, self::TZ), ['branch_group_id' => $groupId]), 422, 'Period is locked. Use an adjustment.');
+                    }
+                }
+
+                $writePayload = [
+                    'role_slug' => (string) ($authUser->hasRole('rop') ? ($report?->role_slug ?? $targetUser->role?->slug) : (Arr::get($row, 'role') ?: $targetUser->role?->slug)),
+                    'ad_count' => (int) Arr::get($row, 'ads', Arr::get($row, 'advertisement', 0)),
+                    'calls_count' => (int) Arr::get($row, 'calls', Arr::get($row, 'call', 0)),
+                    'new_clients_count' => (int) Arr::get($row, 'kabul', 0),
+                    'shows_count' => (int) Arr::get($row, 'shows', Arr::get($row, 'show', 0)),
+                    'new_properties_count' => (int) Arr::get($row, 'objects', Arr::get($row, 'lead', 0)),
+                    'deposits_count' => (int) Arr::get($row, 'deposit', 0),
+                    'deals_count' => (int) floor((float) Arr::get($row, 'sales', Arr::get($row, 'deal', 0))),
+                    'comment' => Arr::get($row, 'comment'),
+                    'submitted_at' => now(),
+                ];
+                if (Schema::hasColumn('daily_reports', 'sales_count')) {
+                    $writePayload['sales_count'] = (float) Arr::get($row, 'sales', Arr::get($row, 'deal', 0));
+                }
+
+                if ($authUser->hasRole('rop') && $report) {
+                    $aliases = ['ad_count' => ['ads', 'advertisement'], 'calls_count' => ['calls', 'call'],
+                        'new_clients_count' => ['kabul'], 'shows_count' => ['shows', 'show'], 'new_properties_count' => ['objects', 'lead'],
+                        'deposits_count' => ['deposit'], 'deals_count' => ['sales', 'deal'], 'sales_count' => ['sales', 'deal'], 'comment' => ['comment']];
+                    foreach ($aliases as $field => $inputs) {
+                        if (array_intersect($inputs, array_keys($row)) === []) unset($writePayload[$field]);
+                    }
+                    $writePayload['submitted_at'] = $report->submitted_at ?? now();
+                }
+
+                // Date casts may persist a midnight timestamp (notably on SQLite).
+                // Match the calendar day so a retry updates the same report.
+                $report ??= new DailyReport(['user_id' => $employeeId, 'report_date' => $date]);
+                if (! $report->exists && $authUser->hasRole('rop')) $report->branch_group_id = $targetUser->branch_group_id;
+                $report->fill($writePayload)->save();
+
+                $saved[] = [
+                    'date' => $report->report_date->toDateString(),
+                    'role' => $report->role_slug,
+                    'employee_id' => $employeeId,
+                    'employee_name' => (string) ($targetUser->name ?? Arr::get($row, 'employee_name', '')),
+                    'group_name' => (string) Arr::get($row, 'group_name', ''),
+                    'objects' => (int) $report->new_properties_count,
+                    'shows' => (int) $report->shows_count,
+                    'ads' => (int) $report->ad_count,
+                    'calls' => (int) $report->calls_count,
+                    'sales' => (float) ($report->sales_count ?? $report->deals_count),
+                    'comment' => (string) ($report->comment ?? ''),
+                ];
             }
 
-            // Date casts may persist a midnight timestamp (notably on SQLite).
-            // Match the calendar day so a retry updates the same report.
-            $report = DailyReport::query()
-                ->whereDate('report_date', $date)
-                ->updateOrCreate(
-                    ['user_id' => $employeeId],
-                    array_merge($writePayload, ['report_date' => $date])
-                );
-
-            $saved[] = [
-                'date' => $report->report_date->toDateString(),
-                'role' => $report->role_slug,
-                'employee_id' => $employeeId,
-                'employee_name' => (string) ($targetUser->name ?? Arr::get($row, 'employee_name', '')),
-                'group_name' => (string) Arr::get($row, 'group_name', ''),
-                'objects' => (int) $report->new_properties_count,
-                'shows' => (int) $report->shows_count,
-                'ads' => (int) $report->ad_count,
-                'calls' => (int) $report->calls_count,
-                'sales' => (float) ($report->sales_count ?? $report->deals_count),
-                'comment' => (string) ($report->comment ?? ''),
-            ];
-        }
-
-        return $saved;
+            return $saved;
+        });
     }
 
     public function dailyRowsV2(User $authUser, Carbon $date, array $filters): array
@@ -1050,7 +1141,7 @@ class KpiModuleService
         }
 
         $query = DailyReport::query()
-            ->with(['user.role', 'user.branch', 'user.branchGroup'])
+            ->with(['user.role', 'user.branch', 'user.branchGroup', 'branchGroup.branch'])
             ->whereDate('report_date', '>=', $from->toDateString())
             ->whereDate('report_date', '<=', $to->toDateString());
         $this->applyScope($query, $authUser, $filters);
@@ -1065,10 +1156,18 @@ class KpiModuleService
         $globalSourceError = false;
 
         $data = collect($paginator->items())
-            ->groupBy('user_id')
-            ->map(function (Collection $rows) use ($periodType, $from, $to, $mapping, $targetMap, $weightMap, $withBreakdown, &$globalSourceError) {
+            ->groupBy(fn ($row) => $authUser->hasRole('rop') ? $row->user_id.'|'.$row->branch_group_id.'|'.$row->role_slug : $row->user_id)
+            ->map(function (Collection $rows) use ($authUser, $periodType, $from, $to, $mapping, $targetMap, $weightMap, $withBreakdown, &$globalSourceError) {
                 $first = $rows->first();
                 $user = $first?->user;
+                if ($authUser->hasRole('rop') && $user) {
+                    $user = clone $user;
+                    $user->branch_group_id = $first->branch_group_id;
+                    $user->branch_id = $authUser->branch_id;
+                    $user->setRelation('branchGroup', $first->branchGroup);
+                    $user->setRelation('branch', $first->branchGroup?->branch);
+                    $user->setRelation('role', new \App\Models\Role(['slug' => $first->role_slug]));
+                }
                 $autoByDate = [];
                 $sourceErrors = [];
 
@@ -1094,7 +1193,7 @@ class KpiModuleService
                 $kpiValue = $score['kpi_value'];
                 $kpiPercent = $score['kpi_percent'];
                 $status = $this->statusForKpiPercent($kpiPercent, $score);
-                $locked = $this->isPeriodLockedForUser($periodType, $from, $user);
+                $locked = $this->isPeriodLockedForUser($periodType, $from, $user, $rows->first()?->branch_group_id);
                 $rowSourceError = collect($metrics)->contains(fn (array $metric) => (bool) $metric['source_error']);
                 $globalSourceError = $globalSourceError || $rowSourceError;
                 $liveClients = Schema::hasTable('clients')
@@ -1157,6 +1256,7 @@ class KpiModuleService
         $completeness = $this->completenessPct($data);
         $qualityIssuesCount = Schema::hasTable('kpi_quality_issues')
             ? KpiQualityIssue::query()
+                ->forRop($authUser, isset($filters['branch_group_id']) ? (int) $filters['branch_group_id'] : null)
                 ->where('status', 'open')
                 ->whereDate('detected_at', '>=', $from->toDateString())
                 ->whereDate('detected_at', '<=', $to->toDateString())
@@ -1201,7 +1301,7 @@ class KpiModuleService
         $perPage = (int) ($filters['per_page'] ?? 50);
         $page = max(1, (int) ($filters['page'] ?? 1));
 
-        $usersPaginator = $this->weeklyUsersScopeQuery($authUser, $filters)
+        $usersPaginator = ($authUser->hasRole('rop') ? $this->historicalKpiUsersQuery($authUser, $filters, $from, $to) : $this->weeklyUsersScopeQuery($authUser, $filters))
             ->orderBy('users.name')
             ->paginate($perPage, ['*'], 'page', $page);
         $userIds = collect($usersPaginator->items())->pluck('id')->map(fn ($id) => (int) $id)->values();
@@ -1210,15 +1310,16 @@ class KpiModuleService
             ->with(['user.role', 'user.branch', 'user.branchGroup'])
             ->whereDate('report_date', '>=', $from->toDateString())
             ->whereDate('report_date', '<=', $to->toDateString())
-            ->when($userIds->isNotEmpty(), fn (Builder $q) => $q->whereIn('user_id', $userIds->all()))
+            ->whereIn('user_id', $userIds->all())
+            ->when($authUser->hasRole('rop'), fn (Builder $q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'daily_reports.branch_group_id'))
             ->get()
-            ->groupBy('user_id');
+            ->groupBy(fn ($row) => $authUser->hasRole('rop') ? $row->user_id.'|'.$row->branch_group_id : $row->user_id);
 
         // Do not call DailyReportService::autoMetrics() for every user/day.  That
         // method issues several queries per invocation, which made a 50-user
         // monthly page fan out into thousands of SQL statements.  Load each
         // source once for the whole page and aggregate it in memory.
-        $autoMetricsByUserDate = $this->preloadAutoMetricsByUserDate($userIds->all(), $from, $to);
+        $autoMetricsByUserDate = $this->preloadAutoMetricsByUserDate($userIds->all(), $from, $to, $authUser);
         $planResolutions = $this->preloadPeriodTargetMaps(collect($usersPaginator->items()), $from, (array) config('kpi.v2.targets', []));
         $lockedScopes = $this->preloadLockedScopes($periodType, $from);
 
@@ -1231,19 +1332,21 @@ class KpiModuleService
         $debugFormulaTrace = (bool) ($filters['debug_kpi_trace'] ?? false);
         $traceId = (string) (request()->attributes->get('trace_id') ?? '');
         $planTraceRows = [];
-        $preloadedSalesByUserDate = $this->preloadSalesCreditsByUserDate($userIds->all(), $from, $to);
+        $preloadedSalesByUserDate = $this->preloadSalesCreditsByUserDate($userIds->all(), $from, $to, $authUser);
 
-        $data = collect($usersPaginator->items())->map(function (User $user) use ($reports, $periodType, $from, $to, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, $preloadedSalesByUserDate, $autoMetricsByUserDate, $planResolutions, $lockedScopes, &$globalSourceError, &$planTraceRows) {
-            $rows = collect($reports->get($user->id, collect()));
-            $autoByDate = $autoMetricsByUserDate[(int) $user->id] ?? [];
+        $data = collect($usersPaginator->items())->map(function (User $user) use ($authUser, $reports, $periodType, $from, $to, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, $preloadedSalesByUserDate, $autoMetricsByUserDate, $planResolutions, $lockedScopes, &$globalSourceError, &$planTraceRows) {
+            $contextKey = $authUser->hasRole('rop') ? $user->id.'|'.$user->branch_group_id : $user->id;
+            $rows = collect($reports->get($contextKey, collect()));
+            if ($authUser->hasRole('rop')) $rows = $rows->where('role_slug', $user->role?->slug)->values();
+            $autoByDate = $autoMetricsByUserDate[$contextKey] ?? [];
             $sourceErrors = [];
-            $targetResolution = $planResolutions[(int) $user->id] ?? $this->defaultPeriodTargetMap($defaultTargetMap, $from);
+            $targetResolution = $planResolutions[$user->id.'|'.$user->branch_group_id.'|'.$user->role?->slug] ?? $this->defaultPeriodTargetMap($defaultTargetMap, $from);
             $targetMap = $targetResolution['targets'];
             $metricPlanSourceMap = $targetResolution['sources'];
             $metricPlanDailyMap = $targetResolution['plan_daily_values'];
             $metricPlanMetaMap = $targetResolution['plan_meta'];
 
-            foreach ($preloadedSalesByUserDate[(int) $user->id] ?? [] as $dayKey => $salesCredit) {
+            foreach ($preloadedSalesByUserDate[$contextKey] ?? [] as $dayKey => $salesCredit) {
                 $autoByDate[$dayKey] = array_merge($autoByDate[$dayKey] ?? [], [
                     'deals_count' => (int) floor($salesCredit),
                     'sales_count' => $salesCredit,
@@ -1355,6 +1458,7 @@ class KpiModuleService
         $completeness = $this->completenessPct($data);
         $qualityIssuesCount = Schema::hasTable('kpi_quality_issues')
             ? KpiQualityIssue::query()
+                ->forRop($authUser, isset($filters['branch_group_id']) ? (int) $filters['branch_group_id'] : null)
                 ->where('status', 'open')
                 ->whereDate('detected_at', '>=', $from->toDateString())
                 ->whereDate('detected_at', '<=', $to->toDateString())
@@ -1426,7 +1530,7 @@ class KpiModuleService
         ];
     }
 
-    private function preloadSalesCreditsByUserDate(array $userIds, Carbon $from, Carbon $to): array
+    private function preloadSalesCreditsByUserDate(array $userIds, Carbon $from, Carbon $to, User $authUser): array
     {
         $userIds = array_values(array_unique(array_map('intval', $userIds)));
         if ($userIds === [] || ! Schema::hasTable('properties') || ! Schema::hasColumn('properties', 'sold_at')) {
@@ -1438,7 +1542,8 @@ class KpiModuleService
             $select[] = 'sale_agent_id';
         }
 
-        $soldProperties = DB::table('properties')
+        if ($authUser->hasRole('rop')) $select[] = 'branch_group_id';
+        $soldProperties = DB::table('properties')->when($authUser->hasRole('rop'), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id'))
             ->select($select)
             ->where('moderation_status', 'sold')
             ->whereBetween('sold_at', [
@@ -1467,7 +1572,8 @@ class KpiModuleService
                 if (! isset($targetUsers[(int) $agentId])) {
                     continue;
                 }
-                $result[(int) $agentId][$dayKey] = round((float) ($result[(int) $agentId][$dayKey] ?? 0.0) + (float) $credit, 4);
+                $key = $authUser->hasRole('rop') ? $agentId.'|'.$property->branch_group_id : (int) $agentId;
+                $result[$key][$dayKey] = round((float) ($result[$key][$dayKey] ?? 0.0) + (float) $credit, 4);
             }
         }
 
@@ -1479,7 +1585,7 @@ class KpiModuleService
      * of index-friendly range queries. Dates are converted in PHP so the SQL
      * predicates remain sargable (no DATE()/CONVERT_TZ() on indexed columns).
      */
-    private function preloadAutoMetricsByUserDate(array $userIds, Carbon $from, Carbon $to): array
+    private function preloadAutoMetricsByUserDate(array $userIds, Carbon $from, Carbon $to, User $authUser): array
     {
         $userIds = array_values(array_unique(array_map('intval', $userIds)));
         if ($userIds === []) {
@@ -1489,41 +1595,41 @@ class KpiModuleService
         $start = $from->copy()->startOfDay()->setTimezone('UTC')->toDateTimeString();
         $end = $to->copy()->endOfDay()->setTimezone('UTC')->toDateTimeString();
         $result = [];
-        $put = static function (array &$target, int $userId, string $date, string $metric, float $value): void {
+        $put = static function (array &$target, int|string $userId, string $date, string $metric, float $value): void {
             $target[$userId][$date][$metric] = (float) ($target[$userId][$date][$metric] ?? 0) + $value;
         };
         $localDate = static fn ($value): string => Carbon::parse((string) $value, 'UTC')->setTimezone(self::TZ)->toDateString();
 
         if (Schema::hasTable('crm_tasks') && Schema::hasTable('crm_task_types')) {
-            $tasks = DB::table('crm_tasks')
+            $tasks = DB::table('crm_tasks')->when($authUser->hasRole('rop'), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'crm_tasks.branch_group_id'))
                 ->join('crm_task_types', 'crm_task_types.id', '=', 'crm_tasks.task_type_id')
                 ->select(['crm_tasks.assignee_id', 'crm_tasks.completed_at', 'crm_task_types.code'])
                 ->whereIn('crm_tasks.assignee_id', $userIds)
                 ->where('crm_tasks.status', 'done')
                 ->whereIn('crm_task_types.code', ['CALL', 'AD_PUBLICATION', 'AD_CREATE'])
                 ->whereBetween('crm_tasks.completed_at', [$start, $end])
-                ->get();
+                ->when($authUser->hasRole('rop'), fn ($q) => $q->addSelect('crm_tasks.branch_group_id'))->get();
             foreach ($tasks as $task) {
                 $metric = $task->code === 'CALL' ? 'calls_count' : 'ad_count';
-                $put($result, (int) $task->assignee_id, $localDate($task->completed_at), $metric, 1);
+                $put($result, $authUser->hasRole('rop') ? (int) $task->assignee_id.'|'.$task->branch_group_id : (int) $task->assignee_id, $localDate($task->completed_at), $metric, 1);
             }
         }
 
         if (Schema::hasTable('bookings')) {
-            foreach (DB::table('bookings')->select(['agent_id', 'start_time'])
-                ->whereIn('agent_id', $userIds)->whereBetween('start_time', [$start, $end])->get() as $booking) {
+            foreach (DB::table('bookings')->when($authUser->hasRole('rop'), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'bookings.branch_group_id'))->select(['agent_id', 'start_time'])
+                ->whereIn('agent_id', $userIds)->whereBetween('start_time', [$start, $end])->when($authUser->hasRole('rop'), fn ($q) => $q->addSelect('bookings.branch_group_id'))->get() as $booking) {
                 $date = $localDate($booking->start_time);
-                $put($result, (int) $booking->agent_id, $date, 'shows_count', 1);
-                $put($result, (int) $booking->agent_id, $date, 'meetings_count', 1);
+                $put($result, $authUser->hasRole('rop') ? (int) $booking->agent_id.'|'.$booking->branch_group_id : (int) $booking->agent_id, $date, 'shows_count', 1);
+                $put($result, $authUser->hasRole('rop') ? (int) $booking->agent_id.'|'.$booking->branch_group_id : (int) $booking->agent_id, $date, 'meetings_count', 1);
             }
         }
 
         if (Schema::hasTable('clients')) {
-            foreach (DB::table('clients')->select(['created_by', 'responsible_agent_id', 'created_at'])
+            foreach (DB::table('clients')->when($authUser->hasRole('rop'), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'clients.branch_group_id'))->select(['created_by', 'responsible_agent_id', 'created_at'])
                 ->whereBetween('created_at', [$start, $end])
                 ->where(function ($q) use ($userIds) {
                     $q->whereIn('created_by', $userIds)->orWhereIn('responsible_agent_id', $userIds);
-                })->get() as $client) {
+                })->when($authUser->hasRole('rop'), fn ($q) => $q->addSelect('clients.branch_group_id'))->get() as $client) {
                 $clientUserIds = array_values(array_unique([
                     (int) $client->created_by,
                     (int) $client->responsible_agent_id,
@@ -1532,13 +1638,13 @@ class KpiModuleService
                     if ($userId <= 0 || ! in_array($userId, $userIds, true)) {
                         continue;
                     }
-                    $put($result, $userId, $localDate($client->created_at), 'new_clients_count', 1);
+                    $put($result, $authUser->hasRole('rop') ? $userId.'|'.$client->branch_group_id : $userId, $localDate($client->created_at), 'new_clients_count', 1);
                 }
             }
         }
 
         if (Schema::hasTable('properties')) {
-            foreach (DB::table('properties')->select(['created_by', 'agent_id', 'created_at'])
+            foreach (DB::table('properties')->when($authUser->hasRole('rop'), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id'))->select(['created_by', 'agent_id', 'created_at'])
                 ->whereBetween('created_at', [$start, $end])
                 ->where(function ($q) use ($userIds) {
                     $q->whereIn('created_by', $userIds)->orWhere(function ($legacy) use ($userIds) {
@@ -1546,11 +1652,11 @@ class KpiModuleService
                             $creatorMissing->whereNull('created_by')->orWhere('created_by', 0);
                         });
                     });
-                })->get() as $property) {
+                })->when($authUser->hasRole('rop'), fn ($q) => $q->addSelect('properties.branch_group_id'))->get() as $property) {
                 $creator = (int) $property->created_by;
                 $userId = $creator > 0 ? $creator : (int) $property->agent_id;
                 if ($userId > 0) {
-                    $put($result, $userId, $localDate($property->created_at), 'new_properties_count', 1);
+                    $put($result, $authUser->hasRole('rop') ? $userId.'|'.$property->branch_group_id : $userId, $localDate($property->created_at), 'new_properties_count', 1);
                 }
             }
         }
@@ -1590,7 +1696,8 @@ class KpiModuleService
                     && (int) ($plan->branch_id ?? 0) === (int) ($branchId ?? 0));
                 if ($candidate->isNotEmpty()) { $common = $candidate; break; }
             }
-            $effective = $common->concat($plans->filter(fn (KpiPlan $plan) => (int) $plan->user_id === (int) $user->id));
+            $effective = $common->concat($plans->filter(fn (KpiPlan $plan) => (int) $plan->user_id === (int) $user->id
+                && (! auth()->user()?->hasRole('rop') || ((int) $plan->branch_group_id === (int) $user->branch_group_id && $plan->role_slug === $user->role?->slug))));
             foreach ($effective as $plan) {
                 $key = (string) $plan->metric_key;
                 $resolution['targets'][$key] = (float) $plan->daily_plan;
@@ -1598,7 +1705,7 @@ class KpiModuleService
                 $resolution['plan_daily_values'][$key] = (float) $plan->daily_plan;
                 $resolution['plan_meta'][$key] = ['plan_id' => (int) $plan->id, 'user_id' => $plan->user_id ? (int) $plan->user_id : null, 'branch_id' => $plan->branch_id ? (int) $plan->branch_id : null, 'branch_group_id' => $plan->branch_group_id ? (int) $plan->branch_group_id : null, 'effective_from' => optional($plan->effective_from)->toDateString(), 'effective_to' => optional($plan->effective_to)->toDateString()];
             }
-            $result[(int) $user->id] = $resolution;
+            $result[$user->id.'|'.$user->branch_group_id.'|'.$user->role?->slug] = $resolution;
         }
         return $result;
     }
@@ -1763,6 +1870,25 @@ class KpiModuleService
         ];
     }
 
+    private function historicalKpiUsersQuery(User $actor, array $filters, Carbon $from, Carbon $to): Builder
+    {
+        $current = $this->weeklyUsersScopeQuery($actor, $filters)->reorder()->select([
+            'users.id as user_id', 'users.branch_group_id', 'users.role_id',
+        ])->toBase();
+        $history = DailyReport::query()->join('roles as historical_roles', 'historical_roles.slug', '=', 'daily_reports.role_slug')
+            ->where('report_date', '>=', $from->toDateString())
+            ->where('report_date', '<', $to->copy()->addDay()->toDateString());
+        $this->applyScope($history, $actor, $filters);
+        foreach (['assignee_id', 'agent_id', 'mop_id'] as $key) {
+            if (! empty($filters[$key])) $history->where('daily_reports.user_id', (int) $filters[$key]);
+        }
+        $contexts = $current->union($history->select(['daily_reports.user_id', 'daily_reports.branch_group_id', 'historical_roles.id as role_id'])->toBase());
+        return User::query()->joinSub($contexts, 'kpi_context', fn ($join) => $join->on('users.id', '=', 'kpi_context.user_id'))
+            ->join('branch_groups as historical_groups', 'historical_groups.id', '=', 'kpi_context.branch_group_id')
+            ->select(['users.id', 'users.name', 'kpi_context.branch_group_id', 'kpi_context.role_id', 'historical_groups.branch_id'])
+            ->with(['role:id,slug', 'branch:id,name', 'branchGroup:id,branch_id,name']);
+    }
+
     private function weeklyUsersScopeQuery(User $authUser, array $filters): Builder
     {
         $authUser->loadMissing('role');
@@ -1803,7 +1929,8 @@ class KpiModuleService
 
         match ($authUser->role?->slug) {
             'admin', 'superadmin', 'owner' => null,
-            'rop', 'branch_director' => $query->where('users.branch_id', (int) $authUser->branch_id),
+            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'users.branch_group_id', 'users.branch_id')->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop'])),
+            'branch_director' => $query->where('users.branch_id', (int) $authUser->branch_id),
             'mop' => $query->where('users.branch_group_id', (int) $authUser->branch_group_id),
             default => $query->where('users.id', (int) $authUser->id),
         };
@@ -2020,7 +2147,7 @@ class KpiModuleService
 
         $periodKey = match ($periodType) {
             'day' => $periodStart->toDateString(),
-            'week' => $periodStart->toDateString(),
+            'week' => $periodStart->format('o-\WW'),
             'month' => $periodStart->format('Y-m'),
             default => $periodStart->toDateString(),
         };
@@ -2028,6 +2155,8 @@ class KpiModuleService
         $query = KpiPeriodLock::query()
             ->where('period_type', $periodType)
             ->where('period_key', $periodKey);
+        $actor = auth()->user();
+        if ($actor?->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'kpi_period_locks.branch_group_id', 'kpi_period_locks.branch_id');
 
         if (! empty($filters['branch_id'])) {
             $query->where('branch_id', (int) $filters['branch_id']);
@@ -2039,10 +2168,14 @@ class KpiModuleService
         return $query->exists();
     }
 
-    private function isPeriodLockedForUser(string $periodType, Carbon $periodStart, ?User $user): bool
+    private function isPeriodLockedForUser(string $periodType, Carbon $periodStart, ?User $user, ?int $reportGroupId = null): bool
     {
         if (! $user) {
             return false;
+        }
+
+        if (auth()->user()?->hasRole('rop')) {
+            return $reportGroupId !== null && $this->isPeriodLocked($periodType, $periodStart, ['branch_group_id' => $reportGroupId]);
         }
 
         return $this->isPeriodLocked($periodType, $periodStart, [
@@ -2072,6 +2205,8 @@ class KpiModuleService
     private function applyScope(Builder $query, User $authUser, array $filters): void
     {
         $authUser->loadMissing('role');
+        $historical = $authUser->hasRole('rop');
+        if ($historical) $query->whereIn('daily_reports.role_slug', ['agent', 'mop']);
         $includeInactive = (bool) ($filters['include_inactive'] ?? false);
 
         if (! $includeInactive) {
@@ -2094,20 +2229,24 @@ class KpiModuleService
         }
 
         if (! empty($filters['branch_id'])) {
-            $query->whereHas('user', fn (Builder $q) => $q->where('branch_id', (int) $filters['branch_id']));
+            $historical ? $query->whereHas('branchGroup', fn (Builder $q) => $q->where('branch_id', (int) $filters['branch_id']))
+                : $query->whereHas('user', fn (Builder $q) => $q->where('branch_id', (int) $filters['branch_id']));
         }
 
         if (! empty($filters['branch_group_id'])) {
-            $query->whereHas('user', fn (Builder $q) => $q->where('branch_group_id', (int) $filters['branch_group_id']));
+            $historical ? $query->where('daily_reports.branch_group_id', (int) $filters['branch_group_id'])
+                : $query->whereHas('user', fn (Builder $q) => $q->where('branch_group_id', (int) $filters['branch_group_id']));
         }
 
         if (! empty($filters['role'])) {
-            $query->whereHas('user.role', fn (Builder $q) => $q->where('slug', (string) $filters['role']));
+            $historical ? $query->where('daily_reports.role_slug', (string) $filters['role'])
+                : $query->whereHas('user.role', fn (Builder $q) => $q->where('slug', (string) $filters['role']));
         }
 
         match ($authUser->role?->slug) {
             'admin', 'superadmin', 'owner' => null,
-            'rop', 'branch_director' => $query->whereHas('user', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id)),
+            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'daily_reports.branch_group_id'),
+            'branch_director' => $query->whereHas('user', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id)),
             'mop' => $query->whereHas('user', fn (Builder $q) => $q->where('branch_group_id', $authUser->branch_group_id)),
             default => $query->where('user_id', $authUser->id),
         };
@@ -2175,6 +2314,21 @@ class KpiModuleService
 
     private function applyTaskScope(Builder $query, User $authUser, array $filters): void
     {
+        $access = app(\App\Support\RopGroupAccess::class);
+        if ($access->applies($authUser)) {
+            $access->scope($query, $authUser, 'crm_tasks.branch_group_id');
+            if (! empty($filters['branch_id'])) {
+                abort_unless((int) $filters['branch_id'] === (int) $authUser->branch_id, 403, 'RBAC_GROUP_SCOPE_VIOLATION');
+            }
+            if (! empty($filters['branch_group_id'])) {
+                $access->ensureGroup($authUser, (int) $filters['branch_group_id']);
+                $query->where('crm_tasks.branch_group_id', (int) $filters['branch_group_id']);
+            }
+            if (! empty($filters['assignee_id'])) $query->where('assignee_id', (int) $filters['assignee_id']);
+
+            return;
+        }
+
         if (! empty($filters['assignee_id'])) {
             $query->where('assignee_id', (int) $filters['assignee_id']);
         }
@@ -2191,7 +2345,8 @@ class KpiModuleService
 
         match ($authUser->role?->slug) {
             'admin', 'superadmin', 'owner' => null,
-            'rop', 'branch_director' => $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id)),
+            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'crm_tasks.branch_group_id'),
+            'branch_director' => $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id)),
             'mop' => $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_group_id', $authUser->branch_group_id)),
             default => $query->where('assignee_id', $authUser->id),
         };
@@ -2213,6 +2368,7 @@ class KpiModuleService
         $reportedUserIds = DailyReport::query()
             ->whereDate('report_date', '>=', $from->toDateString())
             ->whereDate('report_date', '<=', $to->toDateString())
+            ->when($authUser->hasRole('rop'), fn (Builder $q) => $this->applyScope($q, $authUser, $filters))
             ->when(! empty($filters['agent_id']), fn (Builder $q) => $q->where('user_id', (int) $filters['agent_id']))
             ->pluck('user_id')
             ->map(fn ($id) => (int) $id)
@@ -2231,10 +2387,11 @@ class KpiModuleService
 
                 return in_array((int) ($row['employee_id'] ?? 0), $reportedUserIds->all(), true);
             })
-            ->map(function (array $row) use ($periodType, $from) {
+            ->map(function (array $row) use ($authUser, $periodType, $from) {
                 return [
                     $periodType === 'week' ? 'week' : 'month' => $periodType === 'week' ? (int) $from->isoWeek() : (int) $from->month,
                     'year' => $periodType === 'week' ? (int) $from->isoWeekYear() : (int) $from->year,
+                    ...($authUser->hasRole('rop') ? ['branch_group_id' => $row['branch_group_id'] ?? null, 'role' => $row['role'] ?? null] : []),
                     'employee_id' => (int) ($row['employee_id'] ?? 0),
                     'employee_name' => (string) ($row['employee_name'] ?? ''),
                     'objects' => $this->normalizeNumber((float) ($row['objects'] ?? 0)),
@@ -2278,9 +2435,16 @@ class KpiModuleService
         abort(403, 'Forbidden.');
     }
 
+    private function scopePlanQuery(\Illuminate\Database\Eloquent\Builder $query): void
+    {
+        $actor = auth()->user();
+        $access = app(\App\Support\RopGroupAccess::class);
+        if ($access->applies($actor)) $access->scope($query, $actor, 'kpi_plans.branch_group_id', 'kpi_plans.branch_id');
+    }
+
     private function findCommonPlanRows(string $role, Carbon $date, ?int $branchId, ?int $branchGroupId): EloquentCollection
     {
-        $queryBase = KpiPlan::query()
+        $queryBase = KpiPlan::query()->tap(fn ($query) => $this->scopePlanQuery($query))
             ->whereNull('user_id')
             ->where('role_slug', $role)
             ->where(function ($q) use ($date) {

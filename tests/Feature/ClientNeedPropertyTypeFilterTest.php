@@ -39,6 +39,8 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             $table->timestamps();
         });
 
+        (require database_path('migrations/2026_03_09_120000_create_branch_groups_table.php'))->up();
+
         Schema::create('users', function (Blueprint $table) {
             $table->id();
             $table->string('name');

@@ -43,4 +43,12 @@ final class AttendanceScheduleResolver
         $this->globalLoaded = false;
         $this->globalSchedule = null;
     }
+
+    public function isWorkingDate(string $date, ?AttendanceWorkSchedule $settings, ?array $snapshot = null): bool
+    {
+        $holidays = $snapshot['holidays'] ?? $settings?->holidays ?? [];
+        if (in_array($date, $holidays, true)) return false;
+        $day = \Carbon\CarbonImmutable::parse($date, $snapshot['timezone'] ?? $this->timezone($settings));
+        return is_array(($snapshot['schedule'] ?? $this->schedule($settings))[(string) $day->dayOfWeekIso] ?? null);
+    }
 }

@@ -8,6 +8,8 @@ use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Client extends Model
 {
+    use \App\Models\Concerns\ProjectsRopRelations;
+
     use HasFactory, SoftDeletes;
 
     public const CONTACT_KIND_BUYER = 'buyer';

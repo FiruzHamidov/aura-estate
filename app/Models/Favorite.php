@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Model;
 class Favorite extends Model
 {
     use HasFactory;
+    use \App\Models\Concerns\ProjectsRopRelations;
 
     protected $fillable = ['user_id', 'property_id', 'entity_type', 'entity_id'];
 

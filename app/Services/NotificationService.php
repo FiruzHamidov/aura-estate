@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Jobs\SendFirebasePushNotification;
+use App\Services\GroupAccess\NotificationGroupAccess;
 use App\Models\AttendanceDevice;
 use App\Models\Booking;
 use App\Models\Conversation;
@@ -40,7 +41,11 @@ class NotificationService
             return $notification;
         }
 
-        abort_unless((int) $notification->user_id === (int) $user->id, 403, 'Forbidden');
+        if ($user->hasRole('rop')) {
+            abort_unless(app(NotificationGroupAccess::class)->allows($notification, $user), 404, 'NOT_FOUND');
+        } else {
+            abort_unless((int) $notification->user_id === (int) $user->id, 403, 'Forbidden');
+        }
 
         if (! $notification->read_at) {
             $notification->forceFill([
@@ -58,7 +63,7 @@ class NotificationService
             return 0;
         }
 
-        return Notification::query()
+        return app(NotificationGroupAccess::class)->scope(Notification::query(), $user)
             ->where('user_id', $user->id)
             ->when($category, fn ($query) => $query->where('category', $category))
             ->whereNull('read_at')
@@ -75,7 +80,7 @@ class NotificationService
             return 0;
         }
 
-        return Notification::query()
+        return app(NotificationGroupAccess::class)->scope(Notification::query(), $user)
             ->where('user_id', $user->id)
             ->whereNull('read_at')
             ->count();
@@ -616,8 +621,11 @@ class NotificationService
             'requested_showing' => 'Клиент хочет показ по объекту из подборки.',
         };
 
+        $recipients = $this->recipients->selectionOwner($selection)->filter(
+            fn (User $user) => app(NotificationGroupAccess::class)->selectionEventAllowed($user, $selection, $payload)
+        );
         $this->notifyUsers(
-            $this->recipients->selectionOwner($selection),
+            $recipients,
             $type,
             $title,
             $body,
@@ -636,7 +644,7 @@ class NotificationService
 
         if (in_array($eventType, ['viewed', 'opened'], true)) {
             $this->notifyUsers(
-                $this->recipients->selectionOwner($selection),
+                $recipients,
                 NotificationType::MOTIVATION_AGENT_CLIENT_INTEREST,
                 'Клиент проявляет интерес',
                 'Клиент активно взаимодействует с подборкой. Самое время предложить показ или уточнить детали.',
@@ -646,6 +654,7 @@ class NotificationService
                     'action_url' => '/selections/'.$selection->id,
                     'action_type' => 'open_selection',
                     'dedupe_key' => 'selection:motivation:'.$selection->id,
+                    'data' => ['selection_id' => $selection->id, 'payload' => $payload],
                 ]
             );
         }
@@ -852,6 +861,13 @@ class NotificationService
 
             $latestReport = $workingReports->first();
             $previousReport = $workingReports->get(1);
+            $receivers = $receivers->filter(function (User $receiver) use ($latestReport, $previousReport): bool {
+                if (! $receiver->hasRole('rop')) return true;
+                $access = app(NotificationGroupAccess::class);
+                return $previousReport && $access->subjectAllowed($receiver, $latestReport)
+                    && $access->subjectAllowed($receiver, $previousReport)
+                    && $access->snapshot($latestReport) === $access->snapshot($previousReport);
+            });
             $message = sprintf(
                 'Ранний риск KPI: %s (%s) — два рабочих дня подряд ниже 0.8 (%.2f и %.2f).',
                 $agent->name,
@@ -865,7 +881,7 @@ class NotificationService
                 NotificationType::KPI_EARLY_RISK,
                 'Ранний риск KPI',
                 $message,
-                null,
+                $latestReport,
                 null,
                 [
                     'channels' => [NotificationChannel::IN_APP, NotificationChannel::TELEGRAM],
@@ -1029,6 +1045,7 @@ class NotificationService
         $recipients = collect($users)
             ->filter(fn ($user) => $user instanceof User && $user->status === User::STATUS_ACTIVE)
             ->unique('id')
+            ->filter(fn (User $user) => app(NotificationGroupAccess::class)->subjectAllowed($user, $subject))
             ->reject(fn (User $user) => $actor && (int) $user->id === (int) $actor->id)
             ->values();
 
@@ -1068,6 +1085,10 @@ class NotificationService
             return new Notification;
         }
 
+        if (! app(NotificationGroupAccess::class)->subjectAllowed($recipient, $subject)) {
+            return new Notification;
+        }
+
         $now = now();
         $dedupeKey = $options['dedupe_key'] ?? $type.':'.$recipient->id.':'.($subject?->getMorphClass() ?? 'none').':'.($subject?->getKey() ?? 'none');
         $channels = array_values($options['channels'] ?? NotificationType::defaultChannels($type));
@@ -1085,8 +1106,13 @@ class NotificationService
             'subject_id' => $subject?->getKey(),
         ]);
 
+        $hasGroupSnapshot = Schema::hasColumn('notifications', 'branch_group_id');
+        $groupSnapshot = app(NotificationGroupAccess::class)->snapshot($subject);
         $existing = Notification::query()
             ->where('user_id', $recipient->id)
+            ->where('subject_type', $subject?->getMorphClass())
+            ->where('subject_id', $subject?->getKey())
+            ->when($hasGroupSnapshot, fn (Builder $query) => $query->where('branch_group_id', $groupSnapshot))
             ->where('type', $type)
             ->where('dedupe_key', $dedupeKey)
             ->whereNull('read_at')
@@ -1112,6 +1138,17 @@ class NotificationService
             'scheduled_at' => $options['scheduled_at'] ?? null,
             'data' => $options['data'] ?? [],
         ];
+
+        if ($recipient->hasRole('rop') && $subject instanceof Selection) {
+            // Public tracking accepts only property_id; never copy arbitrary event data or public access hashes.
+            $eventPropertyId = $options['data']['payload']['property_id'] ?? null;
+            $payload['data'] = ['selection_id' => $subject->id, 'payload' => $eventPropertyId !== null ? ['property_id' => (int) $eventPropertyId] : null];
+            $payload['action_url'] = '/profile/clients';
+        }
+
+        if ($hasGroupSnapshot) {
+            $payload['branch_group_id'] = $groupSnapshot;
+        }
 
         if ($subject) {
             $payload['subject_type'] = $subject->getMorphClass();
@@ -1159,6 +1196,16 @@ class NotificationService
     }
 
     private function deliverTelegramNotification(Notification $notification, User $recipient): void
+    {
+        \Illuminate\Support\Facades\DB::transaction(function () use ($notification, $recipient): void {
+            $current = User::query()->whereKey($recipient->id)->lockForUpdate()->first();
+            if ($current && app(NotificationGroupAccess::class)->allows($notification, $current)) {
+                $this->deliverTelegramNotificationNow($notification, $current);
+            }
+        });
+    }
+
+    private function deliverTelegramNotificationNow(Notification $notification, User $recipient): void
     {
         if (! $this->telegramBot->isEnabled()) {
             return;

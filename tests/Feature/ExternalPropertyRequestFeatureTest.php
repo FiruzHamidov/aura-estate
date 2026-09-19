@@ -282,6 +282,63 @@ class ExternalPropertyRequestFeatureTest extends TestCase
         ]);
     }
 
+    public function test_request_photos_are_private_and_require_current_parent_access(): void
+    {
+        \Illuminate\Support\Facades\Storage::fake('public');
+        \Illuminate\Support\Facades\Storage::fake(\App\Services\ExternalRequestMedia::DISK);
+        $owner = $this->user($this->externalRole, '939000001');
+        $other = $this->user($this->externalRole, '939000002');
+        $request = ExternalPropertyRequest::create(['external_agent_id' => $owner->id, 'status' => 'draft']);
+        Sanctum::actingAs($owner);
+        $uploaded = $this->postJson('/api/external/property-requests/'.$request->id.'/photos', [
+            'photos' => [\Illuminate\Http\UploadedFile::fake()->image('private.png')],
+        ])->assertCreated()->assertJsonMissingPath('data.0.file_path')->json('data.0');
+        $photo = \App\Models\ExternalPropertyRequestPhoto::findOrFail($uploaded['id']);
+        \Illuminate\Support\Facades\Storage::disk('public')->assertMissing($photo->file_path);
+        \Illuminate\Support\Facades\Storage::disk(\App\Services\ExternalRequestMedia::DISK)->assertExists($photo->file_path);
+        $url = '/api/external-request-photos/'.$photo->id;
+        $this->get($url)->assertOk()->assertHeader('X-Content-Type-Options', 'nosniff');
+        $this->assertStringContainsString('no-store', $this->get($url)->headers->get('Cache-Control'));
+        Sanctum::actingAs($other);
+        $this->getJson($url)->assertNotFound();
+        Sanctum::actingAs($owner);
+        $request->delete();
+        $this->getJson($url)->assertNotFound();
+    }
+
+    public function test_legacy_request_photo_migration_verifies_and_removes_the_public_copy(): void
+    {
+        \Illuminate\Support\Facades\Storage::fake('public');
+        \Illuminate\Support\Facades\Storage::fake(\App\Services\ExternalRequestMedia::DISK);
+        $owner = $this->user($this->externalRole, '939000003');
+        $request = ExternalPropertyRequest::create(['external_agent_id' => $owner->id, 'status' => 'draft']);
+        $path = 'external-property-requests/'.$request->id.'/legacy.png';
+        $bytes = 'private legacy photo bytes';
+        \Illuminate\Support\Facades\Storage::disk('public')->put($path, $bytes);
+        $request->photos()->create(['file_path' => $path]);
+        $this->artisan('rop-groups:privatize-request-photos')->assertSuccessful();
+        \Illuminate\Support\Facades\Storage::disk('public')->assertExists($path);
+        \Illuminate\Support\Facades\Storage::disk(\App\Services\ExternalRequestMedia::DISK)->assertMissing($path);
+        $this->artisan('rop-groups:privatize-request-photos', ['--apply' => true])->assertSuccessful();
+        \Illuminate\Support\Facades\Storage::disk('public')->assertMissing($path);
+        $this->assertSame($bytes, \Illuminate\Support\Facades\Storage::disk(\App\Services\ExternalRequestMedia::DISK)->get($path));
+        $this->artisan('rop-groups:privatize-request-photos', ['--apply' => true])->assertSuccessful();
+    }
+
+    public function test_rop_cannot_use_unadapted_external_agent_management_or_media(): void
+    {
+        $owner = $this->user($this->externalRole, '939000004');
+        $request = ExternalPropertyRequest::create(['external_agent_id' => $owner->id, 'branch_id' => 1, 'branch_group_id' => 1]);
+        $photo = $request->photos()->create(['file_path' => 'external-property-requests/private.png']);
+        $rop = $this->user(Role::create(['name' => 'ROP', 'slug' => 'rop']), '939000005', branchId: 1, branchGroupId: 1);
+        Sanctum::actingAs($rop);
+        foreach (['/api/external-agent-requests', '/api/external-agent-requests/stats', '/api/external-agent-requests/leaderboard',
+            '/api/external-agent-requests/'.$request->id, '/api/external-request-photos/'.$photo->id,
+            '/api/crm/reports/performance?role_type=operator'] as $url) {
+            $this->getJson($url)->assertForbidden()->assertJsonPath('code', 'FORBIDDEN_ACTION');
+        }
+    }
+
     public function test_external_agent_creates_and_sees_only_own_requests(): void
     {
         $externalAgent = $this->user($this->externalRole, '930000001');
@@ -407,6 +464,8 @@ class ExternalPropertyRequestFeatureTest extends TestCase
 
     public function test_internal_agent_converts_external_request_to_property_with_source(): void
     {
+        \Illuminate\Support\Facades\Storage::fake('public');
+        \Illuminate\Support\Facades\Storage::fake(\App\Services\ExternalRequestMedia::DISK);
         $externalAgent = $this->user($this->externalRole, '930000011', branchId: 1, branchGroupId: 1);
         $internalAgent = $this->user($this->agentRole, '930000012', branchId: 1, branchGroupId: 1);
         $type = PropertyType::create(['name' => 'Квартира', 'slug' => 'apartment']);
@@ -429,6 +488,9 @@ class ExternalPropertyRequestFeatureTest extends TestCase
             'external_comment' => 'Срочно продает',
         ]);
 
+        $sourcePath = 'external-property-requests/'.$request->id.'/private.png';
+        \Illuminate\Support\Facades\Storage::disk(\App\Services\ExternalRequestMedia::DISK)->put($sourcePath, 'private-photo');
+        $request->photos()->create(['file_path' => $sourcePath]);
         Sanctum::actingAs($internalAgent);
 
         $this->postJson("/api/external-agent-requests/{$request->id}/convert", [
@@ -449,6 +511,10 @@ class ExternalPropertyRequestFeatureTest extends TestCase
         $this->assertSame(ExternalPropertyRequest::SOURCE_TYPE, $property->source_type);
         $this->assertSame($client->id, $property->owner_client_id);
         $this->assertSame(Client::CONTACT_KIND_SELLER, $client->contact_kind);
+        $photo = $property->photos()->firstOrFail();
+        $this->assertNotSame($sourcePath, $photo->file_path);
+        $this->assertSame('private-photo', \Illuminate\Support\Facades\Storage::disk('public')->get($photo->file_path));
+        \Illuminate\Support\Facades\Storage::disk('public')->assertMissing($sourcePath);
     }
 
     public function test_duplicate_request_requires_force_before_conversion(): void

@@ -20,6 +20,7 @@ class ClientPropertyMatcher
 
     public function forProperty(User $authUser, Property $property, int $limit = 10): array
     {
+        app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $property);
         $roleSlug = $this->clientAccess->roleSlug($authUser);
 
         $clients = $this->clientAccess->visibleQuery($authUser)
@@ -73,7 +74,7 @@ class ClientPropertyMatcher
             ->all();
     }
 
-    public function forClient(Client $client, int $limitPerNeed = 10): array
+    public function forClient(User $authUser, Client $client, int $limitPerNeed = 10): array
     {
         $client->load([
             'openNeeds' => function ($query) {
@@ -83,10 +84,10 @@ class ClientPropertyMatcher
         ]);
 
         return $client->openNeeds
-            ->map(function (ClientNeed $need) use ($limitPerNeed) {
+            ->map(function (ClientNeed $need) use ($limitPerNeed, $authUser) {
                 return [
                     'need' => $this->needSummary($need),
-                    'matches' => $this->matchingPropertiesForNeed($need, $limitPerNeed),
+                    'matches' => $this->matchingPropertiesForNeed($authUser, $need, $limitPerNeed),
                 ];
             })
             ->filter(fn (array $entry) => $entry['matches'] !== [])
@@ -94,9 +95,10 @@ class ClientPropertyMatcher
             ->all();
     }
 
-    private function matchingPropertiesForNeed(ClientNeed $need, int $limitPerNeed): array
+    private function matchingPropertiesForNeed(User $authUser, ClientNeed $need, int $limitPerNeed): array
     {
         $properties = Property::query()
+            ->when($authUser->hasRole('rop'), fn (Builder $q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id', 'properties.branch_id'))
             ->whereNotIn('moderation_status', ['deleted', 'sold', 'rented', 'sold_by_owner'])
             ->where(function (Builder $query) use ($need) {
                 if ($this->scoreCalculator->offerTypeMatches((string) ($need->type?->slug ?? ''), 'sale')) {

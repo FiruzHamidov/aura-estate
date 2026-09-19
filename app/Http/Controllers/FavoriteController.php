@@ -4,6 +4,9 @@ namespace App\Http\Controllers;
 
 use App\Models\Favorite;
 use App\Models\Property;
+use App\Models\User;
+use App\Support\RopGroupAccess;
+use Illuminate\Support\Facades\DB;
 use App\Services\NotificationService;
 use Illuminate\Http\Request;
 
@@ -18,7 +21,12 @@ class FavoriteController extends Controller
     {
         $favorites = Favorite::where('user_id', auth()->id())
             ->where('entity_type', 'property')
-            ->whereHas('property', fn ($properties) => $properties->publicSearchable())
+            ->whereHas('property', function ($properties) {
+                $properties->publicSearchable();
+                if (auth()->user()?->hasRole('rop')) {
+                    app(RopGroupAccess::class)->scope($properties, auth()->user(), 'properties.branch_group_id', 'properties.branch_id');
+                }
+            })
             ->with('property.photos', 'property.type') // Загрузка property и его photos
             ->get();
 
@@ -29,33 +37,47 @@ class FavoriteController extends Controller
     public function store(Request $request)
     {
         $data = $request->validate(['property_id' => 'required|integer']);
-        Property::query()->publicSearchable()->findOrFail($data['property_id']);
+        return DB::transaction(function () use ($data) {
+            $actor = User::query()->lockForUpdate()->findOrFail(auth()->id());
+            auth()->setUser($actor);
+            $property = Property::query()->publicSearchable()->lockForUpdate()->findOrFail($data['property_id']);
+            app(RopGroupAccess::class)->ensureVisible($actor, $property);
 
-        $favorite = Favorite::firstOrCreate([
-            'user_id' => auth()->id(),
-            'property_id' => $data['property_id'],
-        ]);
+            $favorite = Favorite::firstOrCreate([
+                'user_id' => auth()->id(),
+                'property_id' => $data['property_id'],
+            ]);
 
-        if ($favorite->wasRecentlyCreated) {
-            $this->notifications->handleFavoriteAdded($favorite->fresh(['property.agent.role', 'property.creator.role', 'user.role']));
-        }
+            if ($favorite->wasRecentlyCreated) {
+                $this->notifications->handleFavoriteAdded($favorite->fresh(['property.agent.role', 'property.creator.role', 'user.role']));
+            }
 
-        return response()->json($favorite, 201);
+            return response()->json($favorite, 201);
+        });
     }
 
     // Удалить объект из избранного
     public function destroy($id)
     {
-        $favorite = Favorite::where('user_id', auth()->id())
-            ->where('property_id', $id)
-            ->first();
+        return DB::transaction(function () use ($id) {
+            $actor = User::query()->lockForUpdate()->findOrFail(auth()->id());
+            auth()->setUser($actor);
+            if ($actor->hasRole('rop')) {
+                $property = Property::query()->lockForUpdate()->findOrFail($id);
+                app(RopGroupAccess::class)->ensureVisible($actor, $property);
+            }
+            $favorite = Favorite::where('user_id', auth()->id())
+                ->where('property_id', $id)
+                ->first();
 
-        if (!$favorite) {
-            return response()->json(['message' => 'Не найдено'], 404);
-        }
+            if (!$favorite) {
+                return response()->json(['message' => 'Не найдено'], 404);
+            }
 
-        $favorite->delete();
+            $favorite->delete();
 
-        return response()->json(['message' => 'Удалено из избранного']);
+            return response()->json(['message' => 'Удалено из избранного']);
+        });
     }
+
 }

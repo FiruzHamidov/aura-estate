@@ -182,6 +182,7 @@ class PropertyController extends Controller
 
         abort_unless($user, 401, 'Unauthenticated.');
         $user->loadMissing('role');
+        app(\App\Support\RopGroupAccess::class)->ensureVisible($user, $property);
 
         if (! $this->moderationAccess->canEdit($user, $property)) {
             abort(403, 'Доступ запрещён');
@@ -197,7 +198,7 @@ class PropertyController extends Controller
         if (Schema::hasTable('property_logs')) {
             $lastRefresh = PropertyLog::query()
                 ->where('property_id', $property->id)
-                ->where('action', 'listing_date_refreshed')
+                ->whereIn('action', ['listing_date_refreshed', 'listing_reopened'])
                 ->latest('created_at')
                 ->first();
 
@@ -360,6 +361,7 @@ class PropertyController extends Controller
             );
 
             $this->ensureDealAssigneeExists((int) $data[$field]);
+            if ($actor->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->ensureEmployee($actor, (int) $data[$field], $property?->branch_group_id, true);
         }
 
         foreach (($data['agents'] ?? []) as $index => $agent) {
@@ -374,6 +376,7 @@ class PropertyController extends Controller
             );
 
             $this->ensureDealAssigneeExists((int) $agent['agent_id']);
+            if ($actor->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->ensureEmployee($actor, (int) $agent['agent_id'], $property?->branch_group_id, true);
         }
     }
 
@@ -623,7 +626,7 @@ class PropertyController extends Controller
     private function syncPropertyClientSnapshots(array $data): array
     {
         if (! empty($data['owner_client_id'])) {
-            $ownerClient = Client::query()->with('type')->find($data['owner_client_id']);
+            $ownerClient = Client::query()->with('type')->lockForUpdate()->find($data['owner_client_id']);
             if ($ownerClient) {
                 $this->syncClientContactKind($ownerClient, Client::CONTACT_KIND_SELLER);
                 $data['owner_name'] = $ownerClient->full_name;
@@ -633,7 +636,7 @@ class PropertyController extends Controller
         }
 
         if (! empty($data['buyer_client_id'])) {
-            $buyerClient = Client::query()->with('type')->find($data['buyer_client_id']);
+            $buyerClient = Client::query()->with('type')->lockForUpdate()->find($data['buyer_client_id']);
             if ($buyerClient) {
                 $this->syncClientContactKind($buyerClient, Client::CONTACT_KIND_BUYER);
                 $data['buyer_full_name'] = $buyerClient->full_name;
@@ -805,6 +808,10 @@ class PropertyController extends Controller
             'buyerClient.type',
         ];
 
+        if (auth()->user()?->hasRole('rop')) {
+            $relations[] = 'creator.role';
+        }
+
         if (Schema::hasTable('contract_types')) {
             $relations[] = 'contractType';
         }
@@ -823,6 +830,10 @@ class PropertyController extends Controller
 
         if ($this->supportsPropertyTags()) {
             $relations[] = 'tags';
+        }
+
+        if (Schema::hasTable('property_promotions')) {
+            $relations[] = 'activePromotion';
         }
 
         return $relations;
@@ -884,6 +895,9 @@ class PropertyController extends Controller
         if ($user?->hasRole('security')) {
             $query->whereIn('properties.moderation_status', config('security-property-control.trigger_statuses', []));
         }
+        if ($user?->hasRole('rop')) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $user, 'properties.branch_group_id', 'properties.branch_id');
+        }
 
         $hasStatusFilter = $request->filled('moderation_status');
 
@@ -922,6 +936,9 @@ class PropertyController extends Controller
     {
         $user = $this->propertyShowAuthUser($request);
         $query = Property::query()->with($relations ?? $this->propertyListRelations());
+        if ($user?->hasRole('rop')) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $user, 'properties.branch_group_id', 'properties.branch_id');
+        }
 
         $hasStatusFilter = $request->filled('moderation_status');
 
@@ -2165,30 +2182,58 @@ class PropertyController extends Controller
         });
     }
 
+    private function lockPropertyWrite(User $actor, ?Property $property, array $data, array $responsibleIds = []): array
+    {
+        $records = $property ? ['property' => $property] : [];
+        foreach (['owner_client_id', 'buyer_client_id'] as $field) {
+            if (! empty($data[$field])) $records[$field] = Client::findOrFail($data[$field]);
+        }
+        [$actor, $records] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquireMany(
+            $actor, $records, [...$responsibleIds, $data['agent_id'] ?? null], [$data['branch_group_id'] ?? null]
+        );
+        foreach ($records as $record) app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $record);
+        if (! empty($data['agent_id'])) {
+            $responsible = User::query()->lockForUpdate()->findOrFail($data['agent_id']);
+            $groupId = $data['branch_group_id'] ?? ($records['property'] ?? null)?->getRawOriginal('branch_group_id') ?? $responsible->branch_group_id;
+            if ($groupId && in_array($responsible->role?->slug, ['agent', 'mop'], true)) {
+                abort_unless((int) $responsible->branch_group_id === (int) $groupId, 422, 'RESPONSIBLE_GROUP_MISMATCH');
+                abort_unless($responsible->status === User::STATUS_ACTIVE && ! $responsible->isDeletedAccount(), 422, 'INVALID_TRANSFER_TARGET');
+            }
+        }
+        return [$actor, $records['property'] ?? null];
+    }
+
     public function store(Request $request)
     {
         $user = $this->crmAuthUser();
         $this->moderation->assertCanCreate($user);
-        $this->moderation->assertNoProtectedFields($request, ['branch_id', 'branch_group_id'], $user);
+        $this->moderation->assertNoProtectedFields($request,
+            $user->hasRole('rop') ? ['branch_id', 'branch_group_id', 'agent_id'] : ['branch_id', 'branch_group_id'], $user);
 
         $promotionInput = $request->validate(['requested_listing_type' => 'nullable|in:regular,vip,urgent']);
         $requestedType = $promotionInput['requested_listing_type'] ?? 'regular';
+        $requiresReview = $requestedType !== 'regular';
         $validated = $this->validateProperty($request);
+        // The creation wizard has no title field; the database column is non-nullable.
+        $validated['title'] ??= '';
+        if ($user->hasRole('rop')) {
+            $validated = array_merge($validated, $request->validate(['agent_id' => 'required|integer|exists:users,id']));
+        }
         $featureIds = $validated['features'] ?? [];
         $tagIds = $validated['tags'] ?? [];
         unset($validated['features']);
         unset($validated['tags']);
-        $validated = $this->normalizeMopBranchGroupPayload($user, $validated);
-        $this->ensureVisibleClientsForProperty($validated);
-        $validated = $this->syncPropertyClientSnapshots($validated);
-
-        $dups = $this->propertyDuplicateService->find($validated);
-        $qualityWarnings = $this->propertyQualityService->inspect($validated);
-        $validated['created_by'] = $user->id;
-        $requiresReview = $requestedType !== 'regular' && ! $this->moderationAccess->canModerate($user, new Property($validated));
-        $validated = $this->moderation->creationState($validated, $dups, $qualityWarnings, $requiresReview);
-
-        $property = DB::transaction(function () use ($request, $validated, $featureIds, $tagIds, $dups, $qualityWarnings, $user, $requiresReview, $requestedType) {
+        [$property, $dups, $qualityWarnings, $user] = DB::transaction(function () use ($request, $validated, $featureIds, $tagIds, $user, $requiresReview, $requestedType) {
+            [$user] = $this->lockPropertyWrite($user, null, $validated);
+            $this->moderation->assertCanCreate($user);
+            $validated = $this->normalizeMopBranchGroupPayload($user, $validated);
+            $this->ensureVisibleClientsForProperty($validated);
+            $validated = $this->syncPropertyClientSnapshots($validated);
+            $dups = $this->propertyDuplicateService->find($validated);
+            $qualityWarnings = $this->propertyQualityService->inspect($validated);
+            $validated['created_by'] = $user->id;
+            $requiresReview = $requestedType !== 'regular' && ! $this->moderationAccess->canModerate($user, new Property($validated));
+            $validated = $this->moderation->creationState($validated, $dups, $qualityWarnings, $requiresReview);
             $property = Property::create($validated);
             if ($this->supportsPropertyFeatures()) {
                 $property->features()->sync($featureIds);
@@ -2205,7 +2250,7 @@ class PropertyController extends Controller
                 );
             }
 
-            return $property;
+            return [$property, $dups, $qualityWarnings, $user];
         });
 
         $fresh = $property->fresh($this->propertyMutationRelations());
@@ -2231,7 +2276,9 @@ class PropertyController extends Controller
 
         return response()->json([
             'property_id' => (int) $property->id,
-            'duplicates' => $this->propertyDuplicateService->find($data, (int) $property->id),
+            'duplicates' => app(\App\Services\GroupAccess\GroupDataProjection::class)->duplicateResults(
+                $this->propertyDuplicateService->find($data, (int) $property->id), $request->user(),
+            ),
             'cases' => $cases,
             'quality_warnings' => $this->propertyQualityService->inspect($data),
         ]);
@@ -2249,9 +2296,6 @@ class PropertyController extends Controller
         $tagIds = $validated['tags'] ?? [];
         unset($validated['features']);
         unset($validated['tags']);
-        $validated = $this->normalizeMopBranchGroupPayload($user, $validated);
-        $this->ensureVisibleClientsForProperty($validated, $property);
-        $validated = $this->syncPropertyClientSnapshots($validated);
 
         DB::transaction(function () use (
             $request,
@@ -2263,7 +2307,10 @@ class PropertyController extends Controller
             $tagIds,
             $user
         ): void {
-            $property = Property::query()->lockForUpdate()->findOrFail($property->id);
+            [$user, $property] = $this->lockPropertyWrite($user, $property, $validated);
+            $validated = $this->normalizeMopBranchGroupPayload($user, $validated);
+            $this->ensureVisibleClientsForProperty($validated, $property);
+            $validated = $this->syncPropertyClientSnapshots($validated);
             $this->moderation->assertMutationVersion($request, $property);
             abort_unless($this->moderationAccess->canEdit($user, $property), 403);
             $property->fill($validated);
@@ -2352,9 +2399,12 @@ class PropertyController extends Controller
 
         // Delete selected photos if requested
         if ($request->filled('delete_photo_ids')) {
-            foreach ($property->photos()->whereIn('id', $request->delete_photo_ids)->get() as $old) {
+            $selected = $property->photos()->whereIn('id', $request->delete_photo_ids)->lockForUpdate()->get();
+            abort_unless($selected->count() === count($request->delete_photo_ids), 404);
+            foreach ($selected as $old) {
                 if (! $preserveDeletedFiles) {
-                    \Storage::disk('public')->delete($old->file_path);
+                    $path = $old->file_path;
+                    DB::afterCommit(fn () => \Storage::disk('public')->delete($path));
                 }
                 $old->delete();
                 $changed = true;
@@ -2397,9 +2447,11 @@ class PropertyController extends Controller
     private function applyOrder(Property $property, array $orderedIds): bool
     {
         $changed = false;
+        $photos = $property->photos()->whereKey($orderedIds)->lockForUpdate()->get()->keyBy('id');
+        abort_unless($photos->count() === count($orderedIds), 404);
 
         foreach ($orderedIds as $pos => $id) {
-            $photo = $property->photos()->whereKey($id)->first();
+            $photo = $photos->get($id);
 
             if ($photo && (int) $photo->position !== $pos) {
                 $photo->update(['position' => $pos]);
@@ -2427,6 +2479,9 @@ class PropertyController extends Controller
     public function show(Request $request, Property $property)
     {
         $authUser = $this->propertyShowAuthUser($request);
+        if ($authUser) {
+            app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $property);
+        }
         $this->moderation->publicOrFail($property, $authUser);
 
         $property->load($this->propertyDetailRelations());
@@ -2453,11 +2508,8 @@ class PropertyController extends Controller
         $actor = $this->authorizePropertyMutation($property);
 
         return DB::transaction(function () use ($property, $actor) {
-            /** @var Property $lockedProperty */
-            $lockedProperty = Property::query()
-                ->whereKey($property->id)
-                ->lockForUpdate()
-                ->firstOrFail();
+            [$actor, $lockedProperty] = $this->lockPropertyWrite($actor, $property, []);
+            abort_unless($this->moderationAccess->canEdit($actor, $lockedProperty), 403);
 
             if ($lockedProperty->moderation_status !== Property::PUBLIC_MODERATION_STATUS) {
                 return response()->json([
@@ -2687,11 +2739,11 @@ class PropertyController extends Controller
 
             // Reorder existing
             'photo_order' => ['sometimes', 'array'],
-            'photo_order.*' => ['integer', 'exists:property_photos,id'],
+            'photo_order.*' => ['integer', 'min:1', 'distinct'],
 
             // Delete list
             'delete_photo_ids' => ['sometimes', 'array'],
-            'delete_photo_ids.*' => ['integer', 'exists:property_photos,id'],
+            'delete_photo_ids.*' => ['integer', 'min:1', 'distinct'],
 
             'developer_id' => 'nullable|exists:developers,id',
             'heating_type_id' => 'nullable|exists:heating_types,id',
@@ -2993,8 +3045,10 @@ class PropertyController extends Controller
         $this->moderation->assertNoProtectedFields($request, $this->dealProtectedFieldExceptions(), $user, $property);
         $this->ensureDealAssignmentUsersInScope($user, $request->validated(), $property);
 
-        $updated = DB::transaction(function () use ($request, $property): Property {
-            $locked = Property::query()->lockForUpdate()->findOrFail($property->id);
+        $updated = DB::transaction(function () use ($request, $property, $user): Property {
+            $data = $request->validated();
+            $participants = [$data['sale_user_id'] ?? null, $data['deposit_user_id'] ?? null, ...array_column($data['agents'] ?? [], 'agent_id')];
+            [$user, $locked] = $this->lockPropertyWrite($user, $property, $data, $participants);
             $user = $this->authorizePropertyDealMutation(
                 $locked,
                 $request->deal_status,

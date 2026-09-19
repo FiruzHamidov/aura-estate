@@ -470,7 +470,10 @@ class ChatService
     {
         if ($sessionUuid) {
             $s = ChatSession::where('session_uuid', $sessionUuid)->first();
-            if ($s) return $s;
+            if ($s) {
+                \App\Support\ChatSessionAccess::ensureVisible($userId ? \App\Models\User::find($userId) : null, $s);
+                return $s;
+            }
         }
 
         return ChatSession::create([

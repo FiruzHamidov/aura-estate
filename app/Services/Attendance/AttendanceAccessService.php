@@ -121,7 +121,9 @@ final class AttendanceAccessService
                     });
                 }
             }),
-            'rop', 'branch_director' => $viewer->branch_id === null
+            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id')
+                ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop'])),
+            'branch_director' => $viewer->branch_id === null
                 ? $query->whereKey($viewer->id)
                 : $query->where('branch_id', $viewer->branch_id),
             default => $query->whereKey($viewer->id),

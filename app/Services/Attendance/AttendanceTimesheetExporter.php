@@ -27,21 +27,32 @@ final class AttendanceTimesheetExporter
         'incomplete' => 'Нет ухода',
     ];
 
-    public function build(Collection $users, CarbonImmutable $from, CarbonImmutable $to): string
+    public function build(Collection $users, CarbonImmutable $from, CarbonImmutable $to, ?\App\Models\User $viewer = null): string
     {
         $dates = collect(CarbonPeriod::create($from->startOfDay(), $to->startOfDay()))
             ->map(fn ($date) => $date->toDateString());
+        if ($viewer?->hasRole('rop')) {
+            $groups = app(\App\Support\RopGroupAccess::class);
+            $users = $users->map(function ($user) use ($viewer, $groups) {
+                $copy = clone $user;
+                if (! $groups->allows($viewer, $user)) {
+                    foreach (['role', 'branch', 'branchGroup'] as $relation) $copy->setRelation($relation, null);
+                }
+                return $copy;
+            });
+        }
         $userIds = $users->pluck('id');
-        $summaries = AttendanceDailySummary::query()->whereIn('user_id', $userIds)
+        $facts = fn (string $model) => $viewer ? app(AttendanceGroupScope::class)->apply($model::query(), $viewer) : $model::query();
+        $summaries = $facts(AttendanceDailySummary::class)->whereIn('user_id', $userIds)
             ->whereBetween('work_date', [$from->toDateString(), $to->toDateString()])->get()
             ->groupBy('user_id')->map(fn (Collection $rows) => $rows->keyBy(fn ($row) => $row->work_date->toDateString()));
-        $comments = AttendanceDailyComment::query()->whereIn('user_id', $userIds)
+        $comments = $facts(AttendanceDailyComment::class)->whereIn('user_id', $userIds)
             ->whereBetween('work_date', [$from->toDateString(), $to->toDateString()])->get()
             ->groupBy('user_id')->map(fn (Collection $rows) => $rows->keyBy(fn ($row) => $row->work_date->toDateString()));
-        $leaves = AttendanceLeave::query()->whereIn('user_id', $userIds)
+        $leaves = $facts(AttendanceLeave::class)->whereIn('user_id', $userIds)
             ->whereDate('date_from', '<=', $to->toDateString())->whereDate('date_to', '>=', $from->toDateString())
             ->get()->groupBy('user_id');
-        $duties = AttendanceDuty::query()->whereIn('user_id', $userIds)
+        $duties = $facts(AttendanceDuty::class)->whereIn('user_id', $userIds)
             ->whereDate('date_from', '<=', $to->toDateString())->whereDate('date_to', '>=', $from->toDateString())
             ->get()->groupBy('user_id');
         $schedules = AttendanceWorkSchedule::query()->whereIn('user_id', $userIds)->get()->keyBy('user_id');
@@ -135,7 +146,7 @@ final class AttendanceTimesheetExporter
                 $summary = $userSummaries->get($date);
                 $leave = $this->leaveForDate($userLeaves, $date);
                 $duty = $this->dutyForDate($userDuties, $date);
-                $workingDay = $leave === null && $this->isWorkingDay($schedule, $date, $holidays);
+                $workingDay = $leave === null && $this->isWorkingDay($schedule, $date, $holidays, $summary?->schedule_snapshot);
                 [$code, $style] = $this->attendanceCode($summary?->status, $workingDay, $leave !== null, $duty !== null);
                 $workedHours = $summary?->worked_minutes !== null ? round($summary->worked_minutes / 60, 2) : null;
                 $cells[] = $this->textCell($this->columnName($columnIndex++).$rowNumber, $code, $style);
@@ -179,7 +190,7 @@ final class AttendanceTimesheetExporter
                 $leave = $this->leaveForDate($userLeaves, $date);
                 $duty = $this->dutyForDate($userDuties, $date);
                 $holiday = $holidays->get($date);
-                $workingDay = $leave === null && $this->isWorkingDay($schedules->get($user->id), $date, $holidays);
+                $workingDay = $leave === null && $this->isWorkingDay($schedules->get($user->id), $date, $holidays, $summary?->schedule_snapshot);
                 [$code] = $this->attendanceCode($summary?->status, $workingDay, $leave !== null, $duty !== null);
                 $comment = $userComments->get($date)?->comment ?? $leave?->note ?? $duty?->note ?? '';
                 $detailStatus = $leave ? 'Отпуск'
@@ -250,17 +261,12 @@ final class AttendanceTimesheetExporter
         return ['—', 6];
     }
 
-    private function isWorkingDay(?AttendanceWorkSchedule $settings, string $date, Collection $globalHolidays): bool
+    private function isWorkingDay(?AttendanceWorkSchedule $settings, string $date, Collection $globalHolidays, ?array $snapshot = null): bool
     {
         if ($globalHolidays->has($date)) {
             return false;
         }
-        $day = CarbonImmutable::parse($date, $this->scheduleResolver->timezone($settings));
-        if ($settings && in_array($date, $settings->holidays ?? [], true)) {
-            return false;
-        }
-
-        return is_array($this->scheduleResolver->schedule($settings)[(string) $day->dayOfWeekIso] ?? null);
+        return $this->scheduleResolver->isWorkingDate($date, $settings, $snapshot);
     }
 
     private function leaveForDate(Collection $leaves, string $date): ?AttendanceLeave

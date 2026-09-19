@@ -41,7 +41,9 @@ return Application::configure(basePath: dirname(__DIR__))
             EnsureTraceId::class,
             LogApiRequest::class,
             DetectClientLocale::class,
+            \App\Http\Middleware\EnforceRopGroupScope::class,
             SubstituteBindings::class,
+            \App\Http\Middleware\EnforceRopBoundResourceScope::class,
         ]);
 
         $middleware->alias([
@@ -60,6 +62,20 @@ return Application::configure(basePath: dirname(__DIR__))
         });
     })
     ->withExceptions(function (Exceptions $exceptions) {
+        $exceptions->respond(fn ($response, $exception, Request $request) =>
+            \App\Support\RopScopeResponse::headers($response, $request));
+
+        $exceptions->render(function (\Illuminate\Database\DeadlockException $e, Request $request) {
+            if (! $request->attributes->has(\App\Support\RopScopeResponse::VERSION_ATTRIBUTE)) return null;
+
+            return response()->json([
+                'code' => 'CONCURRENT_GROUP_CHANGE',
+                'message' => 'Данные изменяются другим запросом. Обновите карточку и повторите операцию.',
+                'details' => (object) [],
+                'trace_id' => $request->attributes->get('trace_id'),
+            ], 409);
+        });
+
         $exceptions->report(function (\Throwable $exception) {
             if (! app()->bound('request') || ! \App\Support\ResidentialDiagnostics::applies(request())) {
                 return null;

@@ -21,6 +21,11 @@ class PropertyShowAuthContactsTest extends TestCase
 
         Schema::dropAllTables();
 
+        Schema::create('branch_groups', function (Blueprint $table) { $table->id(); $table->unsignedBigInteger('branch_id'); $table->string('name'); $table->timestamps(); });
+        \Illuminate\Support\Facades\DB::table('branch_groups')->insert(['id' => 100, 'branch_id' => 10, 'name' => 'Group 100']);
+        \Illuminate\Support\Facades\DB::table('branch_groups')->insert(['id' => 200, 'branch_id' => 20, 'name' => 'Group 200']);
+        \Illuminate\Support\Facades\DB::table('branch_groups')->insert(['id' => 300, 'branch_id' => 30, 'name' => 'Group 300']);
+
         Schema::create('roles', function (Blueprint $table) {
             $table->id();
             $table->string('name');

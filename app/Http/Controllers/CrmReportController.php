@@ -28,6 +28,8 @@ class CrmReportController extends Controller
 
     private function ensureReportsAllowed(User $authUser): void
     {
+        // This report measures operator/manager roles, outside a ROP's agent/MOP scope.
+        abort_if($authUser->hasRole('rop'), 403, 'FORBIDDEN_ACTION');
         abort_if($authUser->role?->slug === 'marketing', 403, 'Forbidden');
     }
 

@@ -26,6 +26,7 @@ final class AttendanceWebController extends Controller
 {
     public function __construct(
         private readonly AttendanceAccessService $access,
+        private readonly \App\Services\Attendance\AttendanceGroupScope $groupScope,
         private readonly AttendanceHolidayCalendar $holidays,
         private readonly AttendanceScheduleResolver $scheduleResolver,
     ) {}
@@ -40,9 +41,9 @@ final class AttendanceWebController extends Controller
         $dates = collect(CarbonPeriod::create($from->startOfDay(), $to->startOfDay()))
             ->map(fn ($date) => $date->toDateString());
 
-        $visibleQuery = $this->access->visibleUsersQuery($request->user())
+        $visibleQuery = $this->groupScope->users($request->user(), $from->toDateString(), $to->toDateString())
             ->select('users.*');
-        $activeUsersCount = (clone $visibleQuery)->count('users.id');
+        $activeUsersCount = $this->access->visibleUsersQuery($request->user())->count('users.id');
         $this->applyUserFilters($visibleQuery, $filters, $from, $to);
 
         if ($filters['view'] === 'branches') {
@@ -69,10 +70,11 @@ final class AttendanceWebController extends Controller
                 'date_to' => $to->toDateString(),
                 'permissions' => $this->access->permissions($request->user()),
                 'selectable_branches' => $request->user()->hasRole('security')
-                    ? \App\Models\Branch::query()->whereIn('id', $this->access->securityBranchIds($request->user()))->orderBy('name')->get(['id', 'name']) : null,
+                    ? \App\Models\Branch::query()->whereIn('id', $this->access->securityBranchIds($request->user()))->orderBy('name')->get(['id', 'name'])
+                    : null,
                 'summary' => $this->summary($request->user(), $activeUsersCount, $from, $to),
                 'pagination' => $pagination,
-                'last_updated_at' => AttendanceDailySummary::query()->max('updated_at'),
+                'last_updated_at' => $this->facts(AttendanceDailySummary::class)->max('updated_at'),
             ],
         ]);
     }
@@ -80,7 +82,7 @@ final class AttendanceWebController extends Controller
     public function day(Request $request, User $user, string $date)
     {
         $this->access->assertCanViewTable($request->user());
-        $this->access->assertCanViewUser($request->user(), $user);
+        $this->groupScope->assertHistoryUser($request->user(), $user);
         $timezone = (string) config('attendance.timezone', 'Asia/Dushanbe');
         try {
             $day = CarbonImmutable::createFromFormat('!Y-m-d', $date, $timezone);
@@ -92,20 +94,27 @@ final class AttendanceWebController extends Controller
         }
 
         $user->loadMissing(['role', 'branch', 'branchGroup']);
-        $summary = AttendanceDailySummary::query()->where('user_id', $user->id)->whereDate('work_date', $date)->first();
+        $summary = $this->facts(AttendanceDailySummary::class)->where('user_id', $user->id)->whereDate('work_date', $date)->first();
         $settings = $this->scheduleResolver->forUser($user);
-        $leave = AttendanceLeave::query()->where('user_id', $user->id)
+        $leave = $this->facts(AttendanceLeave::class)->where('user_id', $user->id)
             ->whereDate('date_from', '<=', $date)->whereDate('date_to', '>=', $date)->first();
-        $duty = AttendanceDuty::query()->where('user_id', $user->id)
+        $duty = $this->facts(AttendanceDuty::class)->where('user_id', $user->id)
             ->whereDate('date_from', '<=', $date)->whereDate('date_to', '>=', $date)->first();
         $holiday = $this->holidays->holiday($date);
         $schedule = ($settings?->schedule ?? config('attendance.default_schedule', []))[(string) $day->dayOfWeekIso] ?? null;
-        $events = AttendanceEvent::query()
+        if ($request->user()->hasRole('rop') && ! app(\App\Support\RopGroupAccess::class)->allows($request->user(), $user)) $schedule = null;
+        if ($summary?->schedule_snapshot !== null || ($request->user()->hasRole('rop') && \Schema::hasColumn('attendance_daily_summaries', 'schedule_snapshot'))) {
+            $schedule = $summary?->schedule_snapshot['schedule'][(string) $day->dayOfWeekIso] ?? null;
+        }
+        $events = $this->facts(AttendanceEvent::class)
             ->with('device:id,name,serial_number')
             ->where('user_id', $user->id)
             ->whereBetween('occurred_at', [$day->utc(), $day->endOfDay()->utc()])
             ->orderBy('occurred_at')->orderBy('id')->get();
-        $comment = AttendanceDailyComment::query()->with('author:id,name')->where('user_id', $user->id)->whereDate('work_date', $date)->first();
+        $comment = $this->comments()->with('author:id,name')->where('user_id', $user->id)->whereDate('work_date', $date)->first();
+        if ($request->user()->hasRole('rop')) {
+            abort_unless($summary || $events->isNotEmpty() || $leave || $duty, 404, 'NOT_FOUND');
+        }
 
         return response()->json(['data' => [
             'user' => $this->userPayload($user),
@@ -129,6 +138,22 @@ final class AttendanceWebController extends Controller
             'duty' => $duty ? $this->dutyPayload($duty) : null,
             'holiday' => $holiday ? $this->holidayPayload($holiday) : null,
         ]]);
+    }
+
+    private function facts(string $model): Builder
+    {
+        return $this->groupScope->apply($model::query(), request()->user());
+    }
+
+    private function comments(): Builder
+    {
+        $query = $this->facts(AttendanceDailyComment::class);
+        if (request()->user()->hasRole('rop')) {
+            $query->whereExists($this->facts(AttendanceDailySummary::class)->selectRaw('1')
+                ->whereColumn('attendance_daily_summaries.user_id', 'attendance_daily_comments.user_id')
+                ->whereColumn('attendance_daily_summaries.work_date', 'attendance_daily_comments.work_date'));
+        }
+        return $query;
     }
 
     private function matrixFilters(Request $request): array
@@ -168,13 +193,14 @@ final class AttendanceWebController extends Controller
 
     private function applyUserFilters(Builder $query, array $filters, CarbonImmutable $from, CarbonImmutable $to): void
     {
+        $this->groupScope->filterUsers($query, request()->user(), $filters, $from->toDateString(), $to->toDateString());
         if (isset($filters['branch_ids'])) $query->whereIn('users.branch_id', $filters['branch_ids']);
         foreach (['branch_id', 'branch_group_id'] as $field) {
-            if (isset($filters[$field])) {
+            if (isset($filters[$field]) && ! request()->user()->hasRole('rop')) {
                 $query->where('users.'.$field, $filters[$field]);
             }
         }
-        if (isset($filters['role'])) {
+        if (isset($filters['role']) && ! request()->user()->hasRole('rop')) {
             $query->whereHas('role', fn (Builder $roles) => $roles->where('slug', $filters['role']));
         }
         if (isset($filters['user_id'])) {
@@ -190,16 +216,16 @@ final class AttendanceWebController extends Controller
             });
         }
         if (isset($filters['status'])) {
-            $query->whereIn('users.id', AttendanceDailySummary::query()->select('user_id')
+            $query->whereIn('users.id', $this->facts(AttendanceDailySummary::class)->select('user_id')
                 ->whereBetween('work_date', [$from->toDateString(), $to->toDateString()])
                 ->where('status', $filters['status']));
         }
         if (! empty($filters['has_comment'])) {
-            $query->whereIn('users.id', AttendanceDailyComment::query()->select('user_id')
+            $query->whereIn('users.id', $this->comments()->select('user_id')
                 ->whereBetween('work_date', [$from->toDateString(), $to->toDateString()]));
         }
         if (isset($filters['verification_method']) || isset($filters['device_id'])) {
-            $events = AttendanceEvent::query()->select('user_id')->whereBetween('occurred_at', [$from->utc(), $to->utc()]);
+            $events = $this->facts(AttendanceEvent::class)->select('user_id')->whereBetween('occurred_at', [$from->utc(), $to->utc()]);
             if (isset($filters['verification_method'])) {
                 $events->where('verification_method', $filters['verification_method']);
             }
@@ -213,12 +239,12 @@ final class AttendanceWebController extends Controller
     private function applySort(Builder $query, array $filters, CarbonImmutable $from, CarbonImmutable $to): void
     {
         if ($filters['sort'] === 'late_count') {
-            $query->orderByDesc(AttendanceDailySummary::query()->selectRaw('COUNT(*)')
+            $query->orderByDesc($this->facts(AttendanceDailySummary::class)->selectRaw('COUNT(*)')
                 ->whereColumn('attendance_daily_summaries.user_id', 'users.id')
                 ->whereBetween('work_date', [$from->toDateString(), $to->toDateString()])
                 ->where('status', 'late'));
         } elseif ($filters['sort'] === 'average_late_minutes') {
-            $query->orderByDesc(AttendanceDailySummary::query()->selectRaw('COALESCE(AVG(late_minutes), 0)')
+            $query->orderByDesc($this->facts(AttendanceDailySummary::class)->selectRaw('COALESCE(AVG(late_minutes), 0)')
                 ->whereColumn('attendance_daily_summaries.user_id', 'users.id')
                 ->whereBetween('work_date', [$from->toDateString(), $to->toDateString()]));
         }
@@ -257,7 +283,9 @@ final class AttendanceWebController extends Controller
 
                     $holiday = $data['holidays']->get($date);
 
-                    return [$date => $this->dayPayload($summary, $leave === null && $this->isWorkingDay($data['schedules']->get($user->id), $date, $data['holidays']), $methods, $comment, $leave, $holiday, $duty)];
+                    $workingDay = $this->isWorkingDay($data['schedules']->get($user->id), $date, $data['holidays'], $summary?->schedule_snapshot);
+                    if (request()->user()->hasRole('rop') && $summary?->schedule_snapshot === null) $workingDay = $summary !== null;
+                    return [$date => $this->dayPayload($summary, $leave === null && $workingDay, $methods, $comment, $leave, $holiday, $duty)];
                 })->all(),
             ];
         });
@@ -267,13 +295,13 @@ final class AttendanceWebController extends Controller
     {
         $data = $this->matrixData($users, $from, $to);
 
-        return $users->groupBy(fn (User $user) => $user->branch_id ?? 0)->map(function (Collection $branchUsers) use ($dates, $data) {
-            $branch = $branchUsers->first()?->branch;
+        return $users->groupBy(fn (User $user) => request()->user()->hasRole('rop') ? request()->user()->branch_id : ($user->branch_id ?? 0))->map(function (Collection $branchUsers) use ($dates, $data) {
+            $branch = request()->user()->hasRole('rop') ? request()->user()->branch : $branchUsers->first()?->branch;
 
             return [
                 'branch' => ['id' => $branch?->id ?? 0, 'name' => $branch?->name ?? 'Без филиала'],
                 'days' => $dates->mapWithKeys(function (string $date) use ($branchUsers, $data) {
-                    $scheduled = $branchUsers->filter(fn (User $user) => $this->leaveForDate($data['leaves']->get($user->id, collect()), $date) === null
+                    $scheduled = $branchUsers->filter(fn (User $user) => (! request()->user()->hasRole('rop') || $data['summaries']->get($user->id, collect())->has($date)) && $this->leaveForDate($data['leaves']->get($user->id, collect()), $date) === null
                         && $this->isWorkingDay($data['schedules']->get($user->id), $date, $data['holidays']));
                     $summaries = $scheduled->map(fn (User $user) => $data['summaries']->get($user->id, collect())->get($date))->filter();
                     $checkedIn = $summaries->whereIn('status', ['present', 'late', 'incomplete'])->count();
@@ -299,23 +327,23 @@ final class AttendanceWebController extends Controller
         if ($ids->isEmpty()) {
             return ['summaries' => collect(), 'comments' => collect(), 'methods' => collect(), 'schedules' => collect(), 'leaves' => collect(), 'duties' => collect(), 'holidays' => $this->holidays->between($from->toDateString(), $to->toDateString())];
         }
-        $summaries = AttendanceDailySummary::query()->whereIn('user_id', $ids)
+        $summaries = $this->facts(AttendanceDailySummary::class)->whereIn('user_id', $ids)
             ->whereBetween('work_date', [$from->toDateString(), $to->toDateString()])->get()
             ->groupBy('user_id')->map(fn (Collection $rows) => $rows->keyBy(fn ($row) => $row->work_date->toDateString()));
-        $comments = AttendanceDailyComment::query()->whereIn('user_id', $ids)
+        $comments = $this->comments()->whereIn('user_id', $ids)
             ->whereBetween('work_date', [$from->toDateString(), $to->toDateString()])->get()
             ->groupBy('user_id')->map(fn (Collection $rows) => $rows->keyBy(fn ($row) => $row->work_date->toDateString()));
         $timezone = (string) config('attendance.timezone', 'Asia/Dushanbe');
-        $methods = AttendanceEvent::query()->whereIn('user_id', $ids)->whereBetween('occurred_at', [$from->utc(), $to->utc()])
+        $methods = $this->facts(AttendanceEvent::class)->whereIn('user_id', $ids)->whereBetween('occurred_at', [$from->utc(), $to->utc()])
             ->get(['user_id', 'occurred_at', 'verification_method'])->groupBy('user_id')
             ->map(fn (Collection $rows) => $rows->groupBy(fn ($event) => $event->occurred_at->setTimezone($timezone)->toDateString())
                 ->map(fn (Collection $events) => $events->pluck('verification_method')->unique()->values()));
         $schedules = AttendanceWorkSchedule::query()->whereIn('user_id', $ids)->get()->keyBy('user_id');
-        $leaves = AttendanceLeave::query()->whereIn('user_id', $ids)
+        $leaves = $this->facts(AttendanceLeave::class)->whereIn('user_id', $ids)
             ->whereDate('date_from', '<=', $to->toDateString())
             ->whereDate('date_to', '>=', $from->toDateString())
             ->orderBy('date_from')->get()->groupBy('user_id');
-        $duties = AttendanceDuty::query()->whereIn('user_id', $ids)
+        $duties = $this->facts(AttendanceDuty::class)->whereIn('user_id', $ids)
             ->whereDate('date_from', '<=', $to->toDateString())
             ->whereDate('date_to', '>=', $from->toDateString())
             ->orderBy('date_from')->get()->groupBy('user_id');
@@ -392,30 +420,26 @@ final class AttendanceWebController extends Controller
         ];
     }
 
-    private function isWorkingDay(?AttendanceWorkSchedule $settings, string $date, ?Collection $globalHolidays = null): bool
+    private function isWorkingDay(?AttendanceWorkSchedule $settings, string $date, ?Collection $globalHolidays = null, ?array $snapshot = null): bool
     {
         if ($globalHolidays?->has($date) || ($globalHolidays === null && $this->holidays->isHoliday($date))) {
             return false;
         }
-        $day = CarbonImmutable::parse($date, $this->scheduleResolver->timezone($settings));
-        if ($settings && in_array($date, $settings->holidays ?? [], true)) {
-            return false;
-        }
-
-        return is_array($this->scheduleResolver->schedule($settings)[(string) $day->dayOfWeekIso] ?? null);
+        return $this->scheduleResolver->isWorkingDate($date, $settings, $snapshot);
     }
 
     private function summary(User $viewer, int $activeUsers, CarbonImmutable $from, CarbonImmutable $to): array
     {
-        $visibleIds = $this->access->visibleUsersQuery($viewer)->select('users.id');
+        $visibleIds = $this->groupScope->users($viewer, $from->toDateString(), $to->toDateString())->select('users.id');
         $today = CarbonImmutable::now((string) config('attendance.timezone'))->toDateString();
-        $todayRows = AttendanceDailySummary::query()->whereIn('user_id', clone $visibleIds)->whereDate('work_date', $today);
-        $periodRows = AttendanceDailySummary::query()->whereIn('user_id', clone $visibleIds)
+        $todayRows = $this->facts(AttendanceDailySummary::class)->whereIn('user_id', clone $visibleIds)->whereDate('work_date', $today);
+        $periodRows = $this->facts(AttendanceDailySummary::class)->whereIn('user_id', clone $visibleIds)
             ->whereBetween('work_date', [$from->toDateString(), $to->toDateString()]);
         foreach ([$todayRows, $periodRows] as $rows) {
             $rows->whereNotExists(function ($query) {
                 $query->selectRaw('1')->from('attendance_leaves')
                     ->whereColumn('attendance_leaves.user_id', 'attendance_daily_summaries.user_id')
+                    ->when(request()->user()->hasRole('rop'), fn ($leaves) => $leaves->whereColumn('attendance_leaves.branch_group_id', 'attendance_daily_summaries.branch_group_id'))
                     ->whereColumn('attendance_leaves.date_from', '<=', 'attendance_daily_summaries.work_date')
                     ->whereColumn('attendance_leaves.date_to', '>=', 'attendance_daily_summaries.work_date');
             })->whereNotExists(function ($query) {
@@ -436,6 +460,10 @@ final class AttendanceWebController extends Controller
 
     private function userPayload(User $user): array
     {
+        $viewer = request()->user();
+        if ($viewer->hasRole('rop') && ! app(\App\Support\RopGroupAccess::class)->allows($viewer, $user)) {
+            return $user->only(['id', 'name']);
+        }
         return [
             'id' => $user->id,
             'name' => $user->name,

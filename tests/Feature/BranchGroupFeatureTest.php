@@ -71,6 +71,8 @@ class BranchGroupFeatureTest extends TestCase
             $table->timestamps();
         });
 
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
+
         Schema::create('personal_access_tokens', function (Blueprint $table) {
             $table->id();
             $table->morphs('tokenable');
@@ -196,6 +198,89 @@ class BranchGroupFeatureTest extends TestCase
         $this->deleteJson('/api/branch-groups/' . $group->id)
             ->assertStatus(409)
             ->assertJsonPath('message', 'Нельзя удалить группу: к ней привязаны пользователи или контакты.');
+    }
+
+    public function test_rop_group_counts_include_only_accessible_employees_and_clients(): void
+    {
+        $branch = Branch::create(['name' => 'Source']);
+        $other = Branch::create(['name' => 'Other']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Team']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $rop = $this->createUser($ropRole, $branch, 'ROP', $group);
+        $admin = $this->createUser($adminRole, $branch, 'Admin', $group);
+        $this->createUser($agentRole, $branch, 'Agent', $group);
+        $this->createUser($agentRole, $other, 'Inconsistent branch', $group);
+        $rop->supervisedGroups()->attach($group->id);
+        foreach ([$branch, $other] as $clientBranch) {
+            \Illuminate\Support\Facades\DB::table('clients')->insert(['full_name' => 'Contact',
+                'branch_id' => $clientBranch->id, 'branch_group_id' => $group->id]);
+        }
+        Sanctum::actingAs($rop);
+        $this->getJson('/api/branch-groups')->assertOk()->assertJsonPath('data.0.users_count', 1)->assertJsonPath('data.0.clients_count', 1);
+        $this->getJson('/api/branch-groups/'.$group->id)->assertOk()->assertJsonPath('users_count', 1)->assertJsonPath('clients_count', 1);
+        Sanctum::actingAs($admin);
+        $this->getJson('/api/branch-groups/'.$group->id)->assertOk()->assertJsonPath('users_count', 4)->assertJsonPath('clients_count', 2);
+    }
+
+    public function test_group_with_rop_assignment_cannot_move_or_be_deleted(): void
+    {
+        $branch = Branch::create(['name' => 'Source']);
+        $other = Branch::create(['name' => 'Destination']);
+        $admin = $this->createUser(Role::create(['name' => 'Admin', 'slug' => 'admin']), $branch, 'Admin');
+        $rop = $this->createUser(Role::create(['name' => 'ROP', 'slug' => 'rop']), $branch, 'ROP');
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Assigned']);
+        $rop->supervisedGroups()->attach($group->id);
+        Sanctum::actingAs($admin);
+        $this->patchJson('/api/branch-groups/'.$group->id, ['branch_id' => $other->id])->assertUnprocessable();
+        $this->deleteJson('/api/branch-groups/'.$group->id)->assertConflict();
+        $this->assertSame($branch->id, (int) $group->fresh()->branch_id);
+        $this->assertDatabaseHas('rop_branch_groups', ['rop_id' => $rop->id, 'branch_group_id' => $group->id]);
+        $this->patchJson('/api/branch-groups/'.$group->id, ['name' => 'Renamed'])->assertOk()->assertJsonPath('name', 'Renamed');
+        Sanctum::actingAs($rop);
+        $this->patchJson('/api/branch-groups/'.$group->id, ['name' => 'Forbidden'])->assertForbidden();
+        $this->deleteJson('/api/branch-groups/'.$group->id)->assertForbidden();
+    }
+
+    public function test_group_history_and_configuration_prevent_deletion_and_branch_reassignment(): void
+    {
+        $branch = Branch::create(['name' => 'Source']);
+        $other = Branch::create(['name' => 'Destination']);
+        $admin = $this->createUser(Role::create(['name' => 'Admin', 'slug' => 'admin']), $branch, 'Admin');
+        Sanctum::actingAs($admin);
+        foreach (['attendance_devices', 'external_property_requests', 'kpi_rop_plans', 'kpi_period_locks',
+            'kpi_early_risk_alerts', 'kpi_quality_issues', 'kpi_acceptance_runs', 'kpi_adjustment_logs',
+            'rop_liquidity_results', 'rop_liquidity_history'] as $table) {
+            Schema::create($table, function (Blueprint $schema) {
+                $schema->id();
+                // Include legacy references without an FK: the guard must not rely on it.
+                $schema->unsignedBigInteger('branch_group_id');
+            });
+            $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => $table]);
+            \Illuminate\Support\Facades\DB::table($table)->insert(['branch_group_id' => $group->id]);
+            $this->patchJson('/api/branch-groups/'.$group->id, ['branch_id' => $other->id])->assertUnprocessable();
+            $this->deleteJson('/api/branch-groups/'.$group->id)->assertConflict();
+            $this->assertSame($branch->id, (int) $group->fresh()->branch_id);
+            $this->assertDatabaseHas($table, ['branch_group_id' => $group->id]);
+            $this->patchJson('/api/branch-groups/'.$group->id, ['name' => $table.' renamed'])->assertOk();
+        }
+    }
+
+    public function test_only_empty_unassigned_groups_can_move_and_be_deleted(): void
+    {
+        $branch = Branch::create(['name' => 'Source']);
+        $other = Branch::create(['name' => 'Destination']);
+        $admin = $this->createUser(Role::create(['name' => 'Admin', 'slug' => 'admin']), $branch, 'Admin');
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Empty']);
+        Sanctum::actingAs($admin);
+        $this->patchJson('/api/branch-groups/'.$group->id, ['branch_id' => $other->id])->assertOk()->assertJsonPath('branch_id', $other->id);
+        $this->deleteJson('/api/branch-groups/'.$group->id)->assertOk();
+        $historical = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'History']);
+        \Illuminate\Support\Facades\DB::table('clients')->insert(['full_name' => 'Archived contact',
+            'branch_group_id' => $historical->id, 'branch_id' => $branch->id, 'deleted_at' => now()]);
+        $this->patchJson('/api/branch-groups/'.$historical->id, ['branch_id' => $other->id])->assertUnprocessable();
+        $this->deleteJson('/api/branch-groups/'.$historical->id)->assertConflict();
     }
 
     private function createUser(Role $role, Branch $branch, string $name, ?BranchGroup $group = null): User

@@ -33,7 +33,7 @@ class KpiModuleApiFeatureTest extends TestCase
         Schema::create('users', function (Blueprint $t) {
             $t->id(); $t->string('name'); $t->string('phone')->unique(); $t->unsignedBigInteger('role_id');
             $t->unsignedBigInteger('branch_id')->nullable(); $t->unsignedBigInteger('branch_group_id')->nullable();
-            $t->string('status')->default('active'); $t->string('auth_method')->default('password'); $t->timestamps();
+            $t->string('status')->default('active'); $t->string('auth_method')->default('password'); $t->softDeletes(); $t->timestamps();
         });
         Schema::create('daily_reports', function (Blueprint $t) {
             $t->id(); $t->unsignedBigInteger('user_id'); $t->string('role_slug')->nullable(); $t->date('report_date');
@@ -97,6 +97,581 @@ class KpiModuleApiFeatureTest extends TestCase
         });
 
         Schema::create('personal_access_tokens', function (Blueprint $t) { $t->id(); $t->morphs('tokenable'); $t->string('name'); $t->string('token',64)->unique(); $t->text('abilities')->nullable(); $t->timestamp('last_used_at')->nullable(); $t->timestamp('expires_at')->nullable(); $t->timestamps(); });
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
+        (require database_path('migrations/2026_09_08_170000_add_kpi_alert_group.php'))->up();
+        (require database_path('migrations/2026_09_08_180000_add_kpi_diagnostic_groups.php'))->up();
+        (require database_path('migrations/2026_09_08_190000_add_kpi_adjustment_group.php'))->up();
+    }
+
+    public function test_daily_report_edit_uses_snapshot_group_after_employee_transfer(): void
+    {
+        $branch = Branch::create(['name' => 'Main']);
+        $groups = collect(['A', 'C'])->mapWithKeys(fn ($name) => [$name => BranchGroup::create(['name' => $name, 'branch_id' => $branch->id])]);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = User::create(['name' => 'Transferred agent', 'phone' => '900000011', 'role_id' => $agentRole->id,
+            'branch_id' => $branch->id, 'branch_group_id' => $groups['C']->id]);
+        $rops = [];
+        foreach (['A', 'C'] as $i => $group) {
+            $rops[$group] = User::create(['name' => 'ROP '.$group, 'phone' => '90000002'.$i,
+                'role_id' => $ropRole->id, 'branch_id' => $branch->id]);
+            $rops[$group]->supervisedGroups()->attach($groups[$group]->id);
+        }
+        $report = DailyReport::create(['user_id' => $agent->id, 'branch_group_id' => $groups['A']->id,
+            'role_slug' => 'agent', 'report_date' => '2026-05-04', 'calls_count' => 3,
+            'new_properties_count' => 17, 'deals_count' => 4]);
+        Sanctum::actingAs($rops['C']);
+        $before = $report->fresh()->getAttributes();
+        $this->patchJson('/api/daily-reports/'.$report->id, ['calls_count' => 99])->assertNotFound();
+        $this->getJson('/api/kpi/daily/report?date=2026-05-04&employee_id='.$agent->id)->assertNotFound();
+        $this->patchJson('/api/kpi/daily/report', ['report_date' => '2026-05-04',
+            'employee_id' => $agent->id, 'ads' => 2, 'calls' => 99])->assertNotFound();
+        $this->assertSame($before, $report->fresh()->getAttributes());
+
+        Sanctum::actingAs($rops['A']);
+        $this->patchJson('/api/daily-reports/'.$report->id, ['calls_count' => 8])->assertOk()
+            ->assertJsonPath('calls_count', 8)->assertJsonPath('new_properties_count', 17)
+            ->assertJsonPath('deals_count', 4)->assertJsonPath('branch_group_id', $groups['A']->id)
+            ->assertJsonPath('user.id', $agent->id)->assertJsonMissingPath('user.phone');
+        $this->assertSame('agent', $report->fresh()->role_slug);
+        $this->getJson('/api/kpi/daily/report?date=2026-05-04&employee_id='.$agent->id)->assertOk()
+            ->assertJsonPath('metrics.objects.fact_value', 17)->assertJsonPath('manual.calls', 8);
+        $this->getJson('/api/kpi/daily/report?date=2026-05-03&employee_id='.$agent->id)->assertNotFound();
+
+
+        Schema::table('daily_reports', function (Blueprint $table) {
+            $table->unsignedBigInteger('updated_by')->nullable();
+            $table->string('updated_by_role')->nullable();
+            $table->string('updated_reason')->nullable();
+            $table->string('edit_source')->nullable();
+        });
+        $today = \Carbon\Carbon::now(config('kpi.timezone', 'Asia/Dushanbe'))->toDateString();
+        $report->update(['report_date' => $today]);
+        $this->patchJson('/api/kpi/daily/report', ['report_date' => $today,
+            'employee_id' => $agent->id, 'ads' => 2, 'calls' => 8])->assertOk()
+            ->assertJsonPath('metrics.objects.fact_value', 17)->assertJsonPath('manual.calls', 8);
+        $this->assertSame((int) $groups['A']->id, (int) $report->fresh()->branch_group_id);
+
+        $groupPlan = KpiPlan::create(['role_slug' => 'agent', 'user_id' => null,
+            'branch_id' => $branch->id, 'branch_group_id' => $groups['A']->id,
+            'metric_key' => 'objects', 'daily_plan' => 5, 'weight' => 1]);
+        KpiPlan::create(['role_slug' => 'agent', 'user_id' => $agent->id,
+            'branch_id' => $branch->id, 'branch_group_id' => $groups['C']->id,
+            'metric_key' => 'objects', 'daily_plan' => 999, 'weight' => 1]);
+        KpiPlan::create(['role_slug' => 'agent', 'user_id' => null,
+            'branch_id' => $branch->id, 'branch_group_id' => null,
+            'metric_key' => 'shows', 'daily_plan' => 777, 'weight' => 1]);
+        $this->getJson('/api/kpi/daily/report?date='.$today.'&employee_id='.$agent->id)->assertOk()
+            ->assertJsonPath('metrics.objects.target_value', 5)
+            ->assertJsonPath('metrics.shows.target_value', null)
+            ->assertJsonPath('meta.debug.plan_resolution.metrics.objects.source_record_id', $groupPlan->id)
+            ->assertJsonPath('meta.debug.plan_resolution.metrics.shows.source_record_id', null);
+        $this->getJson('/api/daily-reports?report_date='.$today)->assertOk()
+            ->assertJsonPath('data.0.metrics.objects.fact_value', 17)
+            ->assertJsonPath('data.0.metrics.objects.target_value', 5);
+
+        $otherBranch = Branch::create(['name' => 'Other branch']);
+        $otherGroup = BranchGroup::create(['name' => 'D', 'branch_id' => $otherBranch->id]);
+        \DB::table('users')->where('id', $agent->id)->update(['branch_id' => $otherBranch->id, 'branch_group_id' => $otherGroup->id]);
+        $this->getJson('/api/daily-reports?user_id='.$agent->id.'&report_date='.$today)->assertOk()
+            ->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $report->id)
+            ->assertJsonMissingPath('data.0.user.phone');
+        $stranger = User::create(['name' => 'No history', 'phone' => '900000033', 'role_id' => $agentRole->id,
+            'branch_id' => $otherBranch->id, 'branch_group_id' => $otherGroup->id]);
+        $this->getJson('/api/daily-reports?user_id='.$stranger->id)->assertForbidden();
+        $this->getJson('/api/daily-reports?user_id='.$agent->id.'&branch_group_id='.$groups['C']->id)->assertForbidden();
+
+        $rops['A']->supervisedGroups()->detach();
+        $this->putJson('/api/daily-reports/'.$report->id, ['calls_count' => 10])->assertNotFound();
+        $this->assertSame(8, $report->fresh()->calls_count);
+    }
+
+    public function test_period_kpi_keeps_automatic_facts_and_personal_plans_in_their_historical_group(): void
+    {
+        $branch = Branch::create(['name' => 'Main']);
+        $groups = [];
+        foreach (['A', 'B', 'C'] as $name) $groups[$name] = BranchGroup::create(['name' => $name, 'branch_id' => $branch->id]);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '918000001', 'role_id' => $ropRole->id, 'branch_id' => $branch->id]);
+        $agent = User::create(['name' => 'Transferred', 'phone' => '918000002', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $groups['C']->id]);
+        $rop->supervisedGroups()->attach([$groups['A']->id, $groups['B']->id]);
+        $type = CrmTaskType::create(['code' => 'CALL', 'name' => 'Call']);
+        foreach (['A' => 1, 'B' => 2, 'C' => 3] as $name => $count) {
+            $group = $groups[$name];
+            \DB::table('daily_reports')->insert(['user_id' => $agent->id, 'branch_group_id' => $group->id, 'role_slug' => 'agent', 'report_date' => '2026-05-01']);
+            for ($i = 0; $i < $count; $i++) \DB::table('crm_tasks')->insert(['task_type_id' => $type->id, 'assignee_id' => $agent->id, 'creator_id' => $agent->id, 'branch_group_id' => $group->id, 'title' => 'Historical call', 'status' => 'done', 'completed_at' => '2026-05-01 10:00:00']);
+            KpiPlan::create(['user_id' => $agent->id, 'role_slug' => 'agent', 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'metric_key' => 'calls', 'daily_plan' => $count * 10, 'effective_from' => '2026-01-01']);
+        }
+        Sanctum::actingAs($rop);
+        $url = '/api/kpi/weekly?v=2&day=2026-05-01&user_id='.$agent->id;
+        $rows = collect($this->getJson($url)->assertOk()->assertJsonPath('meta.pagination.total', 2)->json('data'))->keyBy('branch_group_id');
+        foreach (['A' => 1, 'B' => 2] as $name => $count) {
+            $row = $rows[$groups[$name]->id];
+            $this->assertEquals($count, $row['metrics']['calls']['fact_value']);
+            $this->assertEquals(round($count * 10 * 7 / 30, 4), $row['metrics']['calls']['target_value']);
+            $this->assertSame($groups[$name]->id, $row['metrics']['calls']['plan_source'] === 'personal' ? $row['branch_group_id'] : null);
+        }
+        $this->getJson($url.'&branch_group_id='.$groups['A']->id)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.metrics.calls.fact_value', 1);
+    }
+
+    public function test_plan_endpoints_scope_the_plan_record_instead_of_current_employee_group(): void
+    {
+        $branch = Branch::create(['name' => 'Main']);
+        $a = BranchGroup::create(['name' => 'A', 'branch_id' => $branch->id]);
+        $c = BranchGroup::create(['name' => 'C', 'branch_id' => $branch->id]);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '911000001', 'role_id' => $ropRole->id, 'branch_id' => $branch->id]);
+        $agent = User::create(['name' => 'Transferred', 'phone' => '911000002', 'role_id' => $agentRole->id,
+            'branch_id' => $branch->id, 'branch_group_id' => $c->id]);
+        $rop->supervisedGroups()->attach($a->id);
+        $plans = [];
+        foreach (['a' => $a->id, 'c' => $c->id, 'null' => null] as $key => $group) {
+            $plans[$key] = KpiPlan::create(['user_id' => $agent->id, 'role_slug' => 'agent',
+                'branch_id' => $branch->id, 'branch_group_id' => $group, 'metric_key' => 'objects',
+                'daily_plan' => $key === 'a' ? 5 : 99, 'weight' => 1, 'effective_from' => '2026-05-01']);
+        }
+        $branchPlan = KpiPlan::create(['user_id' => null, 'role_slug' => 'agent', 'branch_id' => $branch->id,
+            'metric_key' => 'shows', 'daily_plan' => 999, 'weight' => 1]);
+        Sanctum::actingAs($rop);
+        $this->getJson('/api/kpi/plans/list')->assertOk()->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.plan_id', $plans['a']->id);
+        $this->getJson('/api/kpi/plans/'.$plans['a']->id)->assertOk()->assertJsonPath('data.0.id', $plans['a']->id);
+        foreach (['c', 'null'] as $key) $this->getJson('/api/kpi/plans/'.$plans[$key]->id)->assertNotFound();
+        $this->getJson('/api/kpi/plans/common/'.$branchPlan->id)->assertNotFound();
+        \DB::table('users')->where('id', $agent->id)->update(['branch_group_id' => $a->id]);
+        $this->getJson('/api/kpi/plans?user_id='.$agent->id.'&date=2026-05-02')->assertOk()
+            ->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $plans['a']->id);
+        $foreignBefore = KpiPlan::query()->whereIn('id', [$plans['c']->id, $plans['null']->id])->orderBy('id')->get()->toJson();
+        $payload = ['effective_from' => '2026-05-01', 'effective_to' => '2026-05-31',
+            'items' => [['metric_key' => 'objects', 'daily_plan' => 23, 'weight' => 1]]];
+        $this->putJson('/api/kpi/plans/'.$agent->id, $payload)->assertConflict();
+        $response = $this->putJson('/api/kpi/plans/'.$agent->id, $payload + ['conflict_strategy' => 'replace'])->assertOk()
+            ->assertJsonCount(1, 'data')->assertJsonPath('data.0.branch_group_id', $a->id)
+            ->assertJsonPath('data.0.daily_plan', 23);
+        $newId = $response->json('data.0.id');
+        $this->assertSame($foreignBefore, KpiPlan::query()->whereIn('id', [$plans['c']->id, $plans['null']->id])->orderBy('id')->get()->toJson());
+        $this->assertDatabaseMissing('kpi_plans', ['id' => $plans['a']->id]);
+        $rop->supervisedGroups()->detach();
+        $this->getJson('/api/kpi/plans/list')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/kpi/plans/'.$newId)->assertNotFound();
+    }
+
+    public function test_rop_plan_pagination_counts_only_assigned_groups_and_limits_sql(): void
+    {
+        $branch = Branch::create(['name' => 'Main']);
+        $a = BranchGroup::create(['name' => 'A', 'branch_id' => $branch->id]);
+        $c = BranchGroup::create(['name' => 'C', 'branch_id' => $branch->id]);
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '912000001', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $rop->supervisedGroups()->attach($a->id);
+        $ids = [];
+        foreach ([$a, $c, $a, $c, $a] as $group) {
+            $plan = \App\Models\KpiRopPlan::create(['role_slug' => 'agent', 'month' => '2001-01', 'branch_id' => $branch->id,
+                'branch_group_id' => $group->id, 'items' => [], 'created_by' => $rop->id]);
+            if ($group->id === $a->id) $ids[] = $plan->id;
+        }
+        Sanctum::actingAs($rop);
+        $queries = [];
+        \Illuminate\Support\Facades\DB::listen(function ($query) use (&$queries) { $queries[] = strtolower($query->sql); });
+        $this->getJson('/api/kpi/rop-plans?month=2001-01&per_page=2&page=1')->assertOk()
+            ->assertJsonCount(2, 'data')->assertJsonPath('meta.total', 3)->assertJsonPath('meta.last_page', 2)
+            ->assertJsonPath('data.0.id', $ids[2])->assertJsonPath('data.1.id', $ids[1]);
+        $this->assertTrue(collect($queries)->contains(fn ($sql) => str_contains($sql, 'kpi_rop_plans') && str_contains($sql, 'limit 2')));
+        $this->getJson('/api/kpi/rop-plans?month=2001-01&per_page=2&page=2')->assertOk()
+            ->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $ids[0])->assertJsonPath('meta.page', 2);
+        $this->getJson('/api/kpi/rop-plans?month=2001-01&per_page=101')->assertUnprocessable();
+        $rop->supervisedGroups()->detach();
+        $this->getJson('/api/kpi/rop-plans?month=2001-01')->assertOk()->assertJsonCount(0, 'data')->assertJsonPath('meta.total', 0);
+    }
+
+    public function test_rop_plan_patch_cannot_claim_foreign_source_and_copy_checks_both_groups(): void
+    {
+        $branch = Branch::create(['name' => 'Main']);
+        $a = BranchGroup::create(['name' => 'A', 'branch_id' => $branch->id]);
+        $b = BranchGroup::create(['name' => 'B', 'branch_id' => $branch->id]);
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '912000001', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $rop->supervisedGroups()->attach($a->id);
+        $items = [['metric_key' => 'calls', 'plan_value' => 10, 'weight' => 1]];
+        $foreign = \App\Models\KpiRopPlan::create(['role_slug' => 'agent', 'month' => '2000-01', 'branch_id' => $branch->id, 'branch_group_id' => $b->id, 'items' => $items, 'created_by' => $rop->id]);
+        Sanctum::actingAs($rop);
+        $this->patchJson('/api/kpi/rop-plans/'.$foreign->id, ['branch_group_id' => $a->id, 'items' => $items])->assertForbidden();
+        $this->assertEquals($b->id, $foreign->fresh()->branch_group_id);
+        $this->postJson('/api/kpi/rop-plans/'.$foreign->id.'/copy', ['branch_group_id' => $a->id, 'month' => '2000-02'])->assertForbidden();
+        $response = $this->postJson('/api/kpi/rop-plans', ['role' => 'agent', 'month' => '2000-01', 'items' => $items])->assertCreated()->assertJsonPath('branch_id', $branch->id)->assertJsonPath('branch_group_id', $a->id);
+        $id = $response->json('id');
+        $this->getJson('/api/kpi/rop-plans?month=2000-01')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $id);
+        $this->postJson('/api/kpi/rop-plans/'.$id.'/copy', ['month' => '2000-02', 'branch_group_id' => $b->id])->assertForbidden();
+        $this->postJson('/api/kpi/rop-plans/'.$id.'/copy', ['month' => '2000-02'])->assertCreated()->assertJsonPath('branch_group_id', $a->id);
+        $rop->supervisedGroups()->attach($b->id);
+        $this->patchJson('/api/kpi/rop-plans/'.$id, ['branch_group_id' => $b->id])->assertUnprocessable();
+        $this->assertDatabaseCount('kpi_rop_plans', 3);
+        $logs = \App\Models\CrmAuditLog::whereIn('event', ['kpi_rop_plan_created', 'kpi_rop_plan_copied'])->orderBy('id')->get();
+        $this->assertCount(2, $logs);
+        $this->assertEquals($rop->id, $logs[0]->actor_id);
+        $this->assertEquals($id, $logs[1]->context['source_id']);
+        $this->assertEquals($a->id, $logs[1]->context['branch_group_id']);
+        $this->patchJson('/api/kpi/rop-plans/'.$id, ['month' => '2000-03'])->assertOk();
+        $audit = \App\Models\CrmAuditLog::where('event', 'kpi_rop_plan_updated')->firstOrFail();
+        $this->assertSame('2000-01', $audit->old_values['month']);
+        $this->assertSame('2000-03', $audit->new_values['month']);
+        $failAudit = true;
+        \App\Models\CrmAuditLog::creating(function ($log) use (&$failAudit) {
+            if ($failAudit && str_starts_with($log->event, 'kpi_rop_plan_')) throw new \RuntimeException('Simulated plan audit failure');
+        });
+        try {
+            $this->postJson('/api/kpi/rop-plans/'.$id.'/copy', ['month' => '2000-04'])->assertServerError();
+            $this->patchJson('/api/kpi/rop-plans/'.$id, ['month' => '2000-05'])->assertServerError();
+            $this->assertDatabaseCount('kpi_rop_plans', 3);
+            $this->assertSame('2000-03', \App\Models\KpiRopPlan::findOrFail($id)->month);
+        } finally { $failAudit = false; }
+
+    }
+
+    public function test_daily_v2_write_uses_report_group_and_rolls_back_mixed_scope_batch(): void
+    {
+        $branch = Branch::create(['name' => 'Main']);
+        $a = BranchGroup::create(['name' => 'A', 'branch_id' => $branch->id]);
+        $b = BranchGroup::create(['name' => 'B', 'branch_id' => $branch->id]);
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '912000011', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '912000012', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $b->id]);
+        $rop->supervisedGroups()->attach($a->id);
+        $own = DailyReport::create(['user_id' => $agent->id, 'branch_group_id' => $a->id, 'role_slug' => 'agent', 'report_date' => '2000-01-01', 'calls_count' => 3, 'new_properties_count' => 9, 'submitted_at' => '2000-01-01 12:00:00']);
+        $foreign = DailyReport::create(['user_id' => $agent->id, 'branch_group_id' => $b->id, 'role_slug' => 'agent', 'report_date' => '2000-01-02', 'calls_count' => 99]);
+        Sanctum::actingAs($rop);
+        $row = ['employee_id' => $agent->id, 'date' => '2000-01-01', 'calls' => 7, 'role' => 'admin'];
+        $this->postJson('/api/kpi/daily?v=2', ['rows' => [$row, array_replace($row, ['date' => '2000-01-02'])]])->assertNotFound();
+        $this->assertEquals(3, $own->fresh()->calls_count);
+        $this->assertEquals(99, $foreign->fresh()->calls_count);
+        $this->postJson('/api/kpi/daily?v=2', ['rows' => [$row]])->assertCreated()->assertJsonPath('data.0.role', 'agent');
+        $this->assertEquals(7, $own->fresh()->calls_count);
+        $this->assertEquals(9, $own->fresh()->new_properties_count);
+        $this->assertSame('2000-01-01 12:00:00', $own->fresh()->submitted_at->format('Y-m-d H:i:s'));
+        $this->postJson('/api/kpi-period-locks', ['period_type' => 'month', 'period_key' => '2000-01'])->assertCreated();
+        $this->postJson('/api/kpi/daily?v=2', ['rows' => [array_replace($row, ['calls' => 11])]])->assertUnprocessable();
+        $this->assertEquals(7, $own->fresh()->calls_count);
+        $rop->supervisedGroups()->sync([$b->id]);
+        $this->postJson('/api/kpi/daily?v=2', ['rows' => [$row]])->assertNotFound();
+        $this->postJson('/api/kpi/daily?v=2', ['rows' => [array_replace($row, ['date' => '2000-01-03'])]])->assertUnprocessable();
+        $this->assertDatabaseCount('daily_reports', 2);
+    }
+
+    public function test_kpi_period_lock_metadata_uses_assigned_group_and_iso_week(): void
+    {
+        $branch = Branch::create(['name' => 'Main']);
+        $a = BranchGroup::create(['name' => 'A', 'branch_id' => $branch->id]);
+        $b = BranchGroup::create(['name' => 'B', 'branch_id' => $branch->id]);
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '912000021', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $rop->supervisedGroups()->attach($a->id);
+        Sanctum::actingAs($rop);
+        foreach (['day' => '2026-05-01', 'week' => '2026-W18'] as $type => $key) {
+            $url = $type === 'day' ? '/api/kpi/daily?date=2026-05-01&v=2' : '/api/kpi/weekly?year=2026&week=18&v=2';
+            foreach ([$b->id, null] as $groupId) {
+                \App\Models\KpiPeriodLock::create(['period_type' => $type, 'period_key' => $key, 'branch_id' => $branch->id, 'branch_group_id' => $groupId, 'locked_by' => $rop->id, 'locked_at' => now()]);
+            }
+            $this->getJson($url)->assertOk()->assertJsonPath('meta.locked', false);
+            $this->postJson('/api/kpi-period-locks', ['period_type' => $type, 'period_key' => $key])->assertCreated();
+            $this->getJson($url)->assertOk()->assertJsonPath('meta.locked', true);
+        }
+    }
+
+    public function test_adjustment_changes_only_snapshot_group_and_requires_its_period_lock(): void
+    {
+        $branch = Branch::create(['name' => 'Main']);
+        $a = BranchGroup::create(['name' => 'A', 'branch_id' => $branch->id]);
+        $b = BranchGroup::create(['name' => 'B', 'branch_id' => $branch->id]);
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '912000031', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '912000032', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $b->id]);
+        $rop->supervisedGroups()->attach($a->id);
+        $own = DailyReport::create(['user_id' => $agent->id, 'branch_group_id' => $a->id, 'role_slug' => 'agent', 'report_date' => '2000-01-01', 'calls_count' => 3]);
+        $foreign = DailyReport::create(['user_id' => $agent->id, 'branch_group_id' => $b->id, 'role_slug' => 'agent', 'report_date' => '2000-01-02', 'calls_count' => 99]);
+        \App\Models\KpiPeriodLock::create(['period_type' => 'month', 'period_key' => '2000-01', 'branch_id' => $branch->id, 'branch_group_id' => $b->id, 'locked_by' => $rop->id, 'locked_at' => now()]);
+        Sanctum::actingAs($rop);
+        $payload = ['period_type' => 'month', 'period_key' => '2000-01', 'entity_id' => $agent->id, 'field_name' => 'calls', 'new_value' => 7, 'reason' => 'Correct historical count'];
+        $entities = $this->getJson('/api/kpi/adjustments/entities?period_type=month&period_key=2000-01')->assertOk()->assertJsonCount(1, 'data');
+        $this->assertSame(['id' => $agent->id, 'name' => 'Agent'], $entities->json('data.0'));
+        $this->getJson('/api/kpi/adjustments/entities?period_type=month&period_key=2000-02')->assertOk()->assertJsonCount(0, 'data');
+        $this->postJson('/api/kpi/adjustments', $payload)->assertUnprocessable();
+        $this->assertEquals(3, $own->fresh()->calls_count);
+        $this->postJson('/api/kpi-period-locks', ['period_type' => 'month', 'period_key' => '2000-01'])->assertCreated()->assertJsonPath('branch_group_id', $a->id);
+        $extra = DailyReport::create(['user_id' => $agent->id, 'branch_group_id' => $a->id, 'role_slug' => 'agent', 'report_date' => '2000-01-03', 'calls_count' => 5]);
+        $beforeReports = \Illuminate\Support\Facades\DB::table('daily_reports')->orderBy('id')->get()->toJson();
+        $failAudit = true;
+        \App\Models\KpiAdjustmentLog::creating(function () use (&$failAudit) {
+            if ($failAudit) throw new \RuntimeException('Simulated adjustment journal failure');
+        });
+        try {
+            foreach (['set_first_day', 'distribute_evenly'] as $mode) {
+                $this->postJson('/api/kpi/adjustments', $payload + ['distribution_mode' => $mode])->assertServerError();
+                $this->assertSame($beforeReports, \Illuminate\Support\Facades\DB::table('daily_reports')->orderBy('id')->get()->toJson());
+                $this->assertDatabaseCount('kpi_adjustment_logs', 0);
+            }
+        } finally {
+            $failAudit = false;
+            $extra->delete();
+        }
+        $this->postJson('/api/kpi/adjustments', $payload)->assertCreated()->assertJsonPath('old_value', 3)->assertJsonPath('new_value', 7)->assertJsonPath('branch_group_id', $a->id);
+        $this->assertEquals(7, $own->fresh()->calls_count);
+        $this->assertEquals(99, $foreign->fresh()->calls_count);
+        $this->getJson('/api/kpi/adjustments')->assertOk()->assertJsonCount(1, 'data');
+        $history = $this->getJson('/api/kpi/adjustments?entity_id='.$agent->id)->assertOk();
+        $this->assertSame([['id' => $agent->id, 'name' => 'Agent']], $history->json('entities'));
+        $rop->supervisedGroups()->attach($b->id);
+        $this->getJson('/api/kpi/adjustments?branch_group_id='.$b->id)->assertOk()->assertJsonCount(0, 'data')->assertJsonPath('total', 0)->assertJsonCount(0, 'entities');
+        $this->getJson('/api/kpi/adjustments?branch_group_id='.$a->id)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('total', 1);
+        $rop->supervisedGroups()->sync([$b->id]);
+        $this->getJson('/api/kpi/adjustments')->assertOk()->assertJsonCount(0, 'data');
+    }
+
+    public function test_kpi_diagnostics_hide_foreign_and_unclassified_rows_from_rop(): void
+    {
+        $branch = Branch::create(['name' => 'Main']);
+        $a = BranchGroup::create(['name' => 'A', 'branch_id' => $branch->id]);
+        $b = BranchGroup::create(['name' => 'B', 'branch_id' => $branch->id]);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '912000041', 'role_id' => $ropRole->id, 'branch_id' => $branch->id]);
+        $admin = User::create(['name' => 'Admin', 'phone' => '912000042', 'role_id' => $adminRole->id, 'branch_id' => $branch->id]);
+        $rop->supervisedGroups()->attach($a->id);
+        foreach ([$a->id, $b->id, null] as $groupId) {
+            \App\Models\KpiQualityIssue::create(['branch_group_id' => $groupId, 'title' => 'Issue', 'status' => 'open', 'severity' => 'high', 'detected_at' => '2026-05-01 12:00:00']);
+            \App\Models\KpiAcceptanceRun::create(['branch_group_id' => $groupId, 'run_type' => 'daily', 'status' => 'success']);
+        }
+        Schema::create('properties', function (Blueprint $table) { $table->id(); $table->unsignedBigInteger('branch_id'); $table->unsignedBigInteger('branch_group_id'); $table->softDeletes(); });
+        $propertyId = \Illuminate\Support\Facades\DB::table('properties')->insertGetId(['branch_id' => $branch->id, 'branch_group_id' => $b->id]);
+        $issue = \App\Models\KpiQualityIssue::where('branch_group_id', $a->id)->firstOrFail();
+        $issue->update(['title' => 'Private property snapshot', 'details' => ['property_id' => $propertyId, 'owner_phone' => 'private-phone', 'metric_key' => 'sales']]);
+        Sanctum::actingAs($rop);
+        $projected = $this->getJson('/api/kpi/quality/issues')->assertOk();
+        $projected->assertJsonPath('data.0.title', 'KPI quality issue')->assertJsonMissing(['owner_phone' => 'private-phone']);
+        $this->assertArrayNotHasKey('property_id', $projected->json('data.0.details'));
+        $this->assertSame('Private property snapshot', $issue->fresh()->title);
+        $run = \App\Models\KpiAcceptanceRun::where('branch_group_id', $a->id)->firstOrFail();
+        $run->update(['details' => ['nested' => ['property_id' => $propertyId, 'owner_phone' => 'private-phone']]]);
+        $alert = KpiEarlyRiskAlert::create(['branch_group_id' => $a->id, 'user_id' => $rop->id,
+            'alert_date' => '2026-05-01', 'status' => 'open', 'message' => 'private-phone',
+            'meta' => ['nested' => ['property_id' => $propertyId, 'owner_phone' => 'private-phone']]]);
+        $this->getJson('/api/kpi/acceptance-runs')->assertOk()->assertJsonPath('data.0.details_unavailable', true)->assertJsonMissing(['owner_phone' => 'private-phone']);
+        $this->getJson('/api/kpi/early-risk-alerts')->assertOk()->assertJsonPath('data.0.message', 'Связанная запись недоступна')->assertJsonMissing(['owner_phone' => 'private-phone']);
+        $this->assertSame('private-phone', $alert->fresh()->message);
+        $this->assertSame($propertyId, $run->fresh()->details['nested']['property_id']);
+
+        Sanctum::actingAs($admin);
+        $this->getJson('/api/kpi/quality/issues')->assertOk()->assertJsonFragment(['owner_phone' => 'private-phone']);
+        foreach ([[$rop, 1], [$admin, 3]] as [$actor, $count]) {
+            Sanctum::actingAs($actor);
+            foreach (['/api/kpi/quality/issues', '/api/kpi/ops/quality/issues', '/api/kpi/acceptance-runs', '/api/kpi/ops/acceptance-runs'] as $path) {
+                $this->getJson($path)->assertOk()->assertJsonCount($count, 'data');
+            }
+        }
+        Sanctum::actingAs($rop);
+        foreach (['/api/kpi/daily?date=2026-05-01&v=2', '/api/kpi/weekly?year=2026&week=18&v=2'] as $path) {
+            $this->getJson($path)->assertOk()->assertJsonPath('meta.quality.issues_count', 1);
+        }
+        $rop->supervisedGroups()->attach($b->id);
+        $this->getJson('/api/kpi/acceptance-runs?branch_group_id='.$b->id)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.branch_group_id', $b->id);
+        foreach (['/api/kpi/daily?date=2026-05-01&v=2', '/api/kpi/weekly?year=2026&week=18&v=2'] as $path) {
+            $this->getJson($path)->assertOk()->assertJsonPath('meta.quality.issues_count', 2);
+            $this->getJson($path.'&branch_group_id='.$b->id)->assertOk()->assertJsonPath('meta.quality.issues_count', 1);
+        }
+        $this->getJson('/api/kpi/quality/issues?branch_group_id='.$b->id)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.branch_group_id', $b->id);
+        $rop->supervisedGroups()->detach();
+        Sanctum::actingAs($rop);
+        $this->getJson('/api/kpi/quality/issues')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/kpi/acceptance-runs')->assertOk()->assertJsonCount(0, 'data');
+    }
+
+    public function test_preparation_reports_alert_history_without_guessing_its_group(): void
+    {
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['name' => 'A', 'branch_id' => $branch->id]);
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '912000051', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $alert = KpiEarlyRiskAlert::create(['user_id' => $rop->id, 'alert_date' => '2000-01-01', 'status' => 'open', 'message' => 'Unclassified']);
+        foreach ([[], ['--apply' => true]] as $options) {
+            $this->assertSame(0, \Illuminate\Support\Facades\Artisan::call('rop-groups:prepare', $options));
+            $report = json_decode(\Illuminate\Support\Facades\Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+            $this->assertSame(1, $report['unclassified_history']['kpi_early_risk_alerts']);
+            $this->assertContains($rop->id, $report['rops_without_groups']);
+            $this->assertFalse($report['rop_assignments'][0]['valid']);
+            $this->assertNull($alert->fresh()->branch_group_id);
+            $this->assertSame(0, $rop->supervisedGroups()->count());
+        }
+        $other = BranchGroup::create(['name' => 'B', 'branch_id' => $branch->id]);
+        Schema::create('clients', function (Blueprint $table) { $table->id(); $table->unsignedBigInteger('branch_group_id'); $table->unsignedBigInteger('responsible_agent_id')->nullable(); });
+        Schema::create('leads', function (Blueprint $table) { $table->id(); $table->unsignedBigInteger('branch_group_id'); $table->unsignedBigInteger('responsible_agent_id')->nullable(); $table->unsignedBigInteger('client_id'); });
+        $clientId = \Illuminate\Support\Facades\DB::table('clients')->insertGetId(['branch_group_id' => $other->id]);
+        $leadId = \Illuminate\Support\Facades\DB::table('leads')->insertGetId(['branch_group_id' => $group->id, 'client_id' => $clientId]);
+        $rop->supervisedGroups()->attach($group->id);
+        \Illuminate\Support\Facades\Artisan::call('rop-groups:prepare');
+        $report = json_decode(\Illuminate\Support\Facades\Artisan::output(), true, flags: JSON_THROW_ON_ERROR);
+        $this->assertTrue($report['rop_assignments'][0]['valid']);
+        $this->assertCount(1, $report['cross_group_links']);
+        $this->assertEquals($leadId, $report['cross_group_links'][0]['id']);
+        $this->assertEquals($other->id, $report['cross_group_links'][0]['parent_group_id']);
+        $this->assertEquals($group->id, $report['rop_assignments'][0]['branch_group_id']);
+    }
+
+    public function test_early_risk_alerts_use_snapshot_group_for_reads_and_status_changes(): void
+    {
+        $branch = Branch::create(['name' => 'Main']);
+        $a = BranchGroup::create(['name' => 'A', 'branch_id' => $branch->id]);
+        $b = BranchGroup::create(['name' => 'B', 'branch_id' => $branch->id]);
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '912000061', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '912000062', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $a->id]);
+        $rop->supervisedGroups()->attach($a->id);
+        $own = KpiEarlyRiskAlert::create(['user_id' => $agent->id, 'alert_date' => now('Asia/Dushanbe')->toDateString(), 'status' => 'open', 'message' => 'A']);
+        $this->assertEquals($a->id, $own->branch_group_id);
+        User::whereKey($agent->id)->update(['branch_group_id' => $b->id]);
+        $foreign = KpiEarlyRiskAlert::create(['user_id' => $agent->id, 'alert_date' => now('Asia/Dushanbe')->toDateString(), 'status' => 'open', 'message' => 'B']);
+        $unknown = KpiEarlyRiskAlert::create(['user_id' => $agent->id, 'alert_date' => '2000-01-01', 'status' => 'open', 'message' => 'Unknown']);
+        $this->assertNull($unknown->branch_group_id);
+        Sanctum::actingAs($rop);
+        $this->getJson('/api/kpi/early-risk-alerts')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $own->id);
+        $this->patchJson('/api/kpi/early-risk-alerts/status', ['alert_id' => $own->id, 'status' => 'closed'])->assertOk();
+        foreach ([$foreign, $unknown] as $alert) {
+            $this->patchJson('/api/kpi/early-risk-alerts/status', ['alert_id' => $alert->id, 'status' => 'closed'])->assertNotFound();
+            $this->assertSame('open', $alert->fresh()->status);
+        }
+        $rop->supervisedGroups()->attach($b->id);
+        $this->getJson('/api/kpi/early-risk-alerts?branch_group_id='.$a->id)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $own->id);
+        $rop->supervisedGroups()->detach();
+        $this->getJson('/api/kpi/early-risk-alerts')->assertOk()->assertJsonCount(0, 'data');
+        $this->patchJson('/api/kpi/early-risk-alerts/status', ['alert_id' => $own->id, 'status' => 'escalated'])->assertNotFound();
+        $this->assertSame('closed', $own->fresh()->status);
+    }
+
+    public function test_apply_common_plan_uses_selected_group_without_branch_fallback(): void
+    {
+        $branch = Branch::create(['name' => 'Main']);
+        $a = BranchGroup::create(['name' => 'A', 'branch_id' => $branch->id]);
+        $b = BranchGroup::create(['name' => 'B', 'branch_id' => $branch->id]);
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '912000071', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '912000072', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $a->id]);
+        $rop->supervisedGroups()->attach([$a->id, $b->id]);
+        Sanctum::actingAs($rop);
+        foreach ([$a->id => 7, $b->id => 99] as $groupId => $value) {
+            KpiPlan::create(['role_slug' => 'agent', 'branch_id' => $branch->id, 'branch_group_id' => $groupId,
+                'metric_key' => 'objects', 'daily_plan' => $value, 'weight' => 1, 'effective_from' => '2026-05-01']);
+        }
+        $payload = ['role' => 'agent', 'branch_group_id' => $a->id, 'effective_from' => '2026-05-01', 'user_ids' => [$agent->id]];
+        $this->postJson('/api/kpi/plans/common/apply-to-users', $payload)->assertOk()->assertJsonPath('success_count', 1);
+        $this->assertDatabaseHas('kpi_plans', ['user_id' => $agent->id, 'branch_group_id' => $a->id, 'daily_plan' => 7]);
+        $before = KpiPlan::orderBy('id')->get()->toJson();
+        $rop->supervisedGroups()->detach($a->id);
+        try {
+            app(\App\Services\KpiModuleService::class)->applyCommonPlanToUsers($rop, $payload);
+            $this->fail('Revoked group must not be copied');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpExceptionInterface $error) {
+            $this->assertSame(403, $error->getStatusCode());
+        }
+        $this->assertSame($before, KpiPlan::orderBy('id')->get()->toJson());
+    }
+
+    public function test_bulk_plan_scope_rejects_an_employee_in_another_assigned_group(): void
+    {
+        $branch = Branch::create(['name' => 'Main']);
+        $a = BranchGroup::create(['name' => 'A', 'branch_id' => $branch->id]);
+        $b = BranchGroup::create(['name' => 'B', 'branch_id' => $branch->id]);
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '912000081', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '912000082', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $b->id]);
+        $rop->supervisedGroups()->attach([$a->id, $b->id]);
+        Sanctum::actingAs($rop);
+        $payload = ['effective_from' => '2026-05-01', 'items' => [['metric_key' => 'objects', 'daily_plan' => 5, 'weight' => 1]],
+            'scope' => ['branch_group_id' => $a->id, 'roles' => ['agent']]];
+        $service = app(\App\Services\KpiModuleService::class);
+        foreach ([['branch_group_id' => $a->id, 'roles' => ['agent']], ['branch_group_id' => $b->id, 'roles' => ['mop']]] as $scope) {
+            try {
+                $service->upsertUserPlans($rop, $agent->id, array_replace($payload, ['scope' => $scope]));
+                $this->fail('Target must match selected group and role under lock');
+            } catch (\Illuminate\Http\Exceptions\HttpResponseException $error) {
+                $this->assertSame(403, $error->getResponse()->getStatusCode());
+            }
+            $this->assertDatabaseCount('kpi_plans', 0);
+        }
+        $service->upsertUserPlans($rop, $agent->id, array_replace($payload, ['scope' => ['branch_group_id' => $b->id, 'roles' => ['agent']]]));
+        $this->assertDatabaseHas('kpi_plans', ['user_id' => $agent->id, 'branch_group_id' => $b->id, 'daily_plan' => 5]);
+    }
+
+    public function test_common_plan_write_rechecks_actor_and_rolls_back_replacement_on_failure(): void
+    {
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['name' => 'A', 'branch_id' => $branch->id]);
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '912000091', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $rop->supervisedGroups()->attach($group->id);
+        Sanctum::actingAs($rop);
+        $service = app(\App\Services\KpiModuleService::class);
+        $payload = ['role' => 'agent', 'branch_group_id' => $group->id, 'effective_from' => '2026-05-01',
+            'items' => [['metric_key' => 'objects', 'daily_plan' => 5, 'weight' => 1]]];
+        $service->upsertCommonPlans($rop, $payload);
+        $this->assertDatabaseHas('kpi_plans', ['branch_id' => $branch->id, 'branch_group_id' => $group->id, 'daily_plan' => 5]);
+        $before = KpiPlan::orderBy('id')->get()->toJson();
+        $armed = true;
+        KpiPlan::creating(function () use (&$armed) {
+            if ($armed) throw new \RuntimeException('Simulated persistence failure');
+        });
+        try {
+            $service->upsertCommonPlans($rop, $payload);
+            $this->fail('Persistence failure must propagate');
+        } catch (\RuntimeException $error) {
+            $this->assertSame('Simulated persistence failure', $error->getMessage());
+        } finally { $armed = false; }
+        $this->assertSame($before, KpiPlan::orderBy('id')->get()->toJson());
+        $rop->load('role');
+        User::whereKey($rop->id)->update(['role_id' => $agentRole->id]);
+        try {
+            $service->upsertCommonPlans($rop, $payload);
+            $this->fail('Stale ROP role must not authorize writing');
+        } catch (\Illuminate\Http\Exceptions\HttpResponseException $error) {
+            $this->assertSame(403, $error->getResponse()->getStatusCode());
+        }
+        $this->assertSame($before, KpiPlan::orderBy('id')->get()->toJson());
+    }
+
+    public function test_legacy_role_plans_require_a_group_and_never_overwrite_other_plan_contexts(): void
+    {
+        $branch = Branch::create(['name' => 'Main']);
+        $groups = collect(['A', 'B', 'C'])->mapWithKeys(fn ($name) => [$name => BranchGroup::create(['name' => $name, 'branch_id' => $branch->id])]);
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '912000001', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $rop->supervisedGroups()->attach([$groups['A']->id, $groups['B']->id]);
+        $base = ['role_slug' => 'agent', 'branch_id' => $branch->id, 'metric_key' => 'objects', 'daily_plan' => 5, 'weight' => 1];
+        $own = KpiPlan::create($base + ['branch_group_id' => $groups['A']->id]);
+        $foreign = KpiPlan::create(array_replace($base, ['branch_group_id' => $groups['C']->id, 'daily_plan' => 999]));
+        $dated = KpiPlan::create(array_replace($base, ['branch_group_id' => $groups['A']->id, 'daily_plan' => 888, 'effective_from' => '2026-05-01']));
+        $before = KpiPlan::whereIn('id', [$foreign->id, $dated->id])->orderBy('id')->get()->toJson();
+        Sanctum::actingAs($rop);
+        $this->getJson('/api/kpi-plans?role=agent')->assertUnprocessable();
+        $this->getJson('/api/kpi-plans?role=agent&branch_group_id='.$groups['C']->id)->assertForbidden();
+        $response = $this->getJson('/api/kpi-plans?role=agent&branch_group_id='.$groups['A']->id)->assertOk();
+        $this->assertEquals(5, collect($response->json('data'))->firstWhere('metric_key', 'objects')['daily_plan']);
+        $payload = ['role' => 'agent', 'items' => [['metric_key' => 'objects', 'daily_plan' => 23, 'weight' => 1]]];
+        $this->patchJson('/api/kpi-plans', $payload)->assertUnprocessable();
+        $this->patchJson('/api/kpi-plans', $payload + ['branch_group_id' => $groups['C']->id])->assertForbidden();
+        $this->patchJson('/api/kpi-plans', $payload + ['branch_group_id' => $groups['A']->id])->assertOk();
+        $this->assertEquals(23, $own->fresh()->daily_plan);
+        $audit = \App\Models\CrmAuditLog::where('event', 'kpi_role_plan_upserted')->where('auditable_id', $own->id)->firstOrFail();
+        $this->assertSame((int) $rop->id, (int) $audit->actor_id);
+        $this->assertEquals(5, $audit->old_values['daily_plan']);
+        $this->assertEquals(23, $audit->new_values['daily_plan']);
+        $this->assertEquals($groups['A']->id, $audit->context['branch_group_id']);
+
+        $this->assertSame($before, KpiPlan::whereIn('id', [$foreign->id, $dated->id])->orderBy('id')->get()->toJson());
     }
 
     public function test_kpi_module_endpoints_work_with_fallbacks(): void
@@ -743,7 +1318,7 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->patchJson('/api/kpi/plans/'.$otherMop->id, $payload)->assertOk();
     }
 
-    public function test_rop_can_save_agent_mop_intern_in_own_branch(): void
+    public function test_rop_can_save_agent_and_mop_in_assigned_group_but_not_intern(): void
     {
         $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
         $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
@@ -757,6 +1332,7 @@ class KpiModuleApiFeatureTest extends TestCase
         $agent = User::create(['name' => 'Agent', 'phone' => '900000423', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
         $intern = User::create(['name' => 'Intern', 'phone' => '900000424', 'role_id' => $internRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
 
+        $rop->supervisedGroups()->sync([$rop->branch_group_id]);
         Sanctum::actingAs($rop);
         $payload = [
             'effective_from' => '2026-05-01',
@@ -768,7 +1344,7 @@ class KpiModuleApiFeatureTest extends TestCase
 
         $this->patchJson('/api/kpi/plans/'.$agent->id, $payload)->assertOk();
         $this->patchJson('/api/kpi/plans/'.$mop->id, $payload)->assertOk();
-        $this->patchJson('/api/kpi/plans/'.$intern->id, $payload)->assertOk();
+        $this->patchJson('/api/kpi/plans/'.$intern->id, $payload)->assertForbidden();
     }
 
     public function test_effective_plan_prefers_personal_then_common_for_mop_and_agent_scope_fallback(): void
@@ -1161,6 +1737,7 @@ class KpiModuleApiFeatureTest extends TestCase
         $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
         $rop = User::create(['name' => 'ROP', 'phone' => '900000459', 'role_id' => $ropRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
 
+        $rop->supervisedGroups()->sync([$rop->branch_group_id]);
         Sanctum::actingAs($rop);
 
         $payload = [
@@ -1210,6 +1787,7 @@ class KpiModuleApiFeatureTest extends TestCase
             ]);
         });
 
+        $rop->supervisedGroups()->sync([$rop->branch_group_id]);
         Sanctum::actingAs($rop);
 
         $rows = $users->map(fn (User $user) => [
@@ -1233,7 +1811,7 @@ class KpiModuleApiFeatureTest extends TestCase
             ->assertJsonPath('failed_count', 0);
     }
 
-    public function test_bulk_upsert_supports_scope_roles_multiselect_and_keeps_partial_success(): void
+    public function test_rop_bulk_upsert_rejects_inaccessible_employee_before_any_writes(): void
     {
         $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
@@ -1244,6 +1822,7 @@ class KpiModuleApiFeatureTest extends TestCase
         $agent = User::create(['name' => 'Agent', 'phone' => '900000761', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
         $intern = User::create(['name' => 'Intern', 'phone' => '900000762', 'role_id' => $internRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
 
+        $rop->supervisedGroups()->sync([$rop->branch_group_id]);
         Sanctum::actingAs($rop);
 
         $payloadItems = [
@@ -1262,12 +1841,30 @@ class KpiModuleApiFeatureTest extends TestCase
                 ['user_id' => $agent->id, 'items' => $payloadItems],
                 ['user_id' => $intern->id, 'items' => $payloadItems],
             ],
-        ])->assertOk()
-            ->assertJsonPath('success_count', 1)
-            ->assertJsonPath('failed_count', 1)
-            ->assertJsonPath('results.0.ok', true)
-            ->assertJsonPath('results.1.code', 'KPI_FORBIDDEN_SCOPE')
-            ->assertJsonPath('results.1.details.role', 'intern');
+        ])->assertForbidden()->assertJsonPath('code', 'RBAC_GROUP_SCOPE_VIOLATION');
+        $this->assertDatabaseCount('kpi_plans', 0);
+    }
+
+    public function test_rop_bulk_plan_late_group_conflict_rolls_back_earlier_valid_rows(): void
+    {
+        $branch = Branch::create(['name' => 'Main']);
+        $a = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'A']);
+        $b = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'B']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '900012001', 'role_id' => $ropRole->id, 'branch_id' => $branch->id]);
+        $agentA = User::create(['name' => 'A', 'phone' => '900012002', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $a->id]);
+        $agentB = User::create(['name' => 'B', 'phone' => '900012003', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $b->id]);
+        $rop->supervisedGroups()->attach([$a->id, $b->id]);
+        Sanctum::actingAs($rop);
+        $items = array_map(fn ($metric) => ['metric' => $metric, 'daily_plan' => 1, 'weight' => 0.2], ['objects', 'shows', 'ads', 'calls', 'sales']);
+        $payload = ['effective_from' => '2026-05-06', 'scope' => ['branch_group_id' => $a->id, 'roles' => ['agent']],
+            'rows' => [['user_id' => $agentA->id, 'items' => $items], ['user_id' => $agentB->id, 'items' => $items]]];
+        $this->postJson('/api/kpi/plans/bulk-upsert', $payload)->assertForbidden();
+        $this->assertDatabaseCount('kpi_plans', 0);
+        $payload['rows'] = [$payload['rows'][0]];
+        $this->postJson('/api/kpi/plans/bulk-upsert', $payload)->assertOk()->assertJsonPath('success_count', 1);
+        $this->assertGreaterThan(0, \DB::table('kpi_plans')->count());
     }
 
     public function test_mop_bulk_upsert_rejects_foreign_scope_at_request_level(): void
@@ -1497,6 +2094,7 @@ class KpiModuleApiFeatureTest extends TestCase
         $branch = Branch::create(['name' => 'Main']);
         $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
         $rop = User::create(['name' => 'ROP', 'phone' => '900000907', 'role_id' => $ropRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $rop->supervisedGroups()->sync([$rop->branch_group_id]);
         Sanctum::actingAs($rop);
 
         $payload = [

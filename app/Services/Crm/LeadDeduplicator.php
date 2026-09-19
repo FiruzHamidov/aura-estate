@@ -4,6 +4,7 @@ namespace App\Services\Crm;
 
 use App\Models\Client;
 use App\Models\Lead;
+use App\Support\RopGroupAccess;
 
 class LeadDeduplicator
 {
@@ -16,6 +17,7 @@ class LeadDeduplicator
             'email',
             'responsible_agent_id',
             'branch_id',
+            'branch_group_id',
         ]);
 
         $leadMatches = $this->leadMatchesQuery($lead)->limit(3)->get([
@@ -26,6 +28,7 @@ class LeadDeduplicator
             'status',
             'responsible_agent_id',
             'branch_id',
+            'branch_group_id',
         ]);
 
         return [
@@ -49,7 +52,8 @@ class LeadDeduplicator
             return Client::query()->whereRaw('1 = 0');
         }
 
-        return Client::query()
+        return Client::query()->when(app(RopGroupAccess::class)->applies(auth()->user()),
+            fn ($query) => app(RopGroupAccess::class)->scope($query, auth()->user(), 'clients.branch_group_id', 'clients.branch_id'))
             ->when(
                 $lead->branch_id,
                 fn ($query) => $query->where('branch_id', $lead->branch_id),
@@ -72,7 +76,8 @@ class LeadDeduplicator
             return Lead::query()->whereRaw('1 = 0');
         }
 
-        return Lead::query()
+        return Lead::query()->when(app(RopGroupAccess::class)->applies(auth()->user()),
+            fn ($query) => app(RopGroupAccess::class)->scope($query, auth()->user(), 'leads.branch_group_id', 'leads.branch_id'))
             ->whereKeyNot($lead->id)
             ->whereNotIn('status', Lead::closedStatuses())
             ->when(

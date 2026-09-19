@@ -87,6 +87,10 @@ class EnsureDailyReportSubmitted
             return true;
         }
 
+        if ($path === 'api/kpi/daily/my-report/draft' && $request->isMethod('put')) {
+            return true;
+        }
+
         if ($path === 'api/kpi/daily/report' && in_array($request->method(), ['GET', 'PATCH'], true)) {
             return true;
         }

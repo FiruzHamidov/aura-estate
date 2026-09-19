@@ -242,6 +242,7 @@ class LocationTrackingController extends Controller
             'mode' => $preference->mode,
             'user_ids' => DB::table('user_location_watchlist')
                 ->where('viewer_user_id', $viewer->id)
+                ->whereIn('target_user_id', $this->access->availableUsersQuery($viewer)->select('users.id'))
                 ->pluck('target_user_id')
                 ->map(fn ($id) => (int) $id)
                 ->values(),

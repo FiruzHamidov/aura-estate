@@ -128,7 +128,7 @@ class DailyReportService
         ];
     }
 
-    public function autoMetricsDebug(User $user, string $reportDate, ?array $auto = null): array
+    public function autoMetricsDebug(User $user, string $reportDate, ?array $auto = null, bool $snapshot = false): array
     {
         [$startUtc, $endUtc] = $this->utcDayBounds($reportDate);
         $localStart = Carbon::parse($reportDate, $this->timezone())->startOfDay();
@@ -136,6 +136,8 @@ class DailyReportService
         $autoMetrics = $auto ?? $this->autoMetrics($user, $reportDate);
 
         return [
+            'source' => $snapshot ? 'stored_report' : 'live_records',
+            'source_ids_available' => ! $snapshot,
             'employee_id' => (int) $user->id,
             'date' => $reportDate,
             'timezone' => $this->timezone(),
@@ -149,9 +151,9 @@ class DailyReportService
                     'end' => $endUtc->toDateTimeString(),
                 ],
             ],
-            'object_ids' => $this->newPropertyIds($user, $startUtc, $endUtc),
-            'booking_ids' => $this->bookingIds($user, $startUtc, $endUtc),
-            'sales_property_ids' => $this->dealPropertyIds($user, $startUtc, $endUtc),
+            'object_ids' => $snapshot ? [] : $this->newPropertyIds($user, $startUtc, $endUtc),
+            'booking_ids' => $snapshot ? [] : $this->bookingIds($user, $startUtc, $endUtc),
+            'sales_property_ids' => $snapshot ? [] : $this->dealPropertyIds($user, $startUtc, $endUtc),
             'metrics' => [
                 'objects' => ['fact' => (int) ($autoMetrics['new_properties_count'] ?? 0)],
                 'shows' => ['fact' => (int) ($autoMetrics['shows_count'] ?? 0)],
@@ -198,7 +200,7 @@ class DailyReportService
             return [];
         }
 
-        return DB::table('bookings')
+        return DB::table('bookings')->tap(fn ($query) => $this->scopeMetricQuery($query, 'bookings', $user))
             ->where('agent_id', $user->id)
             ->whereBetween('start_time', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
             ->orderBy('id')
@@ -214,7 +216,7 @@ class DailyReportService
             && Schema::hasColumn('crm_tasks', 'assignee_id')
             && Schema::hasColumn('crm_tasks', 'status')
             && Schema::hasColumn('crm_tasks', 'completed_at')) {
-            return (int) DB::table('crm_tasks')
+            return (int) DB::table('crm_tasks')->tap(fn ($query) => $this->scopeMetricQuery($query, 'crm_tasks', $user))
                 ->join('crm_task_types', 'crm_task_types.id', '=', 'crm_tasks.task_type_id')
                 ->where('crm_tasks.assignee_id', $user->id)
                 ->where('crm_tasks.status', 'done')
@@ -230,7 +232,7 @@ class DailyReportService
             return 0;
         }
 
-        return (int) DB::table('crm_audit_logs')
+        return (int) DB::table('crm_audit_logs')->tap(fn ($query) => $this->scopeMetricQuery($query, 'crm_audit_logs', $user))
             ->where('actor_id', $user->id)
             ->where('event', 'call')
             ->whereBetween('created_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
@@ -247,7 +249,7 @@ class DailyReportService
             return 0;
         }
 
-        return (int) DB::table('crm_tasks')
+        return (int) DB::table('crm_tasks')->tap(fn ($query) => $this->scopeMetricQuery($query, 'crm_tasks', $user))
             ->join('crm_task_types', 'crm_task_types.id', '=', 'crm_tasks.task_type_id')
             ->where('crm_tasks.assignee_id', $user->id)
             ->where('crm_tasks.status', 'done')
@@ -262,7 +264,7 @@ class DailyReportService
             return 0;
         }
 
-        $query = DB::table('clients')
+        $query = DB::table('clients')->tap(fn ($query) => $this->scopeMetricQuery($query, 'clients', $user))
             ->where(function ($query) use ($user) {
                 if (Schema::hasColumn('clients', 'created_by')) {
                     $query->where('created_by', $user->id);
@@ -301,7 +303,7 @@ class DailyReportService
             return [];
         }
 
-        return DB::table('properties')
+        return DB::table('properties')->tap(fn ($query) => $this->scopeMetricQuery($query, 'properties', $user))
             ->where(function ($query) use ($user) {
                 $hasCreatedBy = Schema::hasColumn('properties', 'created_by');
                 $hasAgentId = Schema::hasColumn('properties', 'agent_id');
@@ -356,7 +358,7 @@ class DailyReportService
             $select[] = 'sale_agent_id';
         }
 
-        $soldProperties = DB::table('properties')
+        $soldProperties = DB::table('properties')->tap(fn ($query) => $this->scopeMetricQuery($query, 'properties', $user))
             ->select($select)
             ->where('moderation_status', 'sold')
             ->whereBetween('sold_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
@@ -389,6 +391,21 @@ class DailyReportService
         ];
     }
 
+    private function scopeMetricQuery(\Illuminate\Database\Query\Builder $query, string $table, User $context): void
+    {
+        $actor = auth()->user();
+        $access = app(\App\Support\RopGroupAccess::class);
+        if (! $access->applies($actor)) return;
+        if (! Schema::hasColumn($table, 'branch_group_id')) {
+            // Unclassified legacy facts cannot be attributed using today's employee group.
+            $query->whereRaw('1 = 0');
+            return;
+        }
+        $access->scope($query, $actor, $table.'.branch_group_id',
+            Schema::hasColumn($table, 'branch_id') ? $table.'.branch_id' : null);
+        $query->where($table.'.branch_group_id', $context->branch_group_id);
+    }
+
     private function utcDayBounds(string $reportDate): array
     {
         $start = Carbon::parse($reportDate, $this->timezone())->startOfDay();
@@ -411,8 +428,12 @@ class DailyReportService
             return;
         }
 
+        $identity = ['title' => $code.'#'.$propertyId];
+        if (Schema::hasColumn('kpi_quality_issues', 'branch_group_id')) {
+            $identity['branch_group_id'] = DB::table('properties')->where('id', $propertyId)->value('branch_group_id');
+        }
         KpiQualityIssue::query()->updateOrCreate(
-            ['title' => $code.'#'.$propertyId],
+            $identity,
             [
                 'severity' => 'high',
                 'detected_at' => now(),

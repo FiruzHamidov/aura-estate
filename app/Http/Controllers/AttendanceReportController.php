@@ -7,6 +7,7 @@ use App\Models\AttendanceEvent;
 use App\Models\AttendanceRawEvent;
 use App\Models\User;
 use App\Services\Attendance\AttendanceAccessService;
+use App\Services\Attendance\AttendanceGroupScope;
 use App\Services\Attendance\AttendanceIngestionService;
 use App\Services\Attendance\AttendanceTimesheetExporter;
 use Carbon\CarbonImmutable;
@@ -18,6 +19,7 @@ final class AttendanceReportController extends Controller
 {
     public function __construct(
         private readonly AttendanceAccessService $access,
+        private readonly AttendanceGroupScope $groupScope,
         private readonly AttendanceIngestionService $ingestion,
         private readonly AttendanceTimesheetExporter $timesheetExporter,
     ) {}
@@ -35,7 +37,7 @@ final class AttendanceReportController extends Controller
     public function daily(Request $request)
     {
         $validated = $this->filters($request);
-        $visibleIds = $this->access->visibleUsersQuery($request->user())->pluck('users.id');
+        $visibleIds = $this->groupScope->users($request->user(), $validated['date_from'] ?? null, $validated['date_to'] ?? null)->select('users.id');
         $query = AttendanceDailySummary::query()->with(['user.role', 'user.branch', 'user.branchGroup'])
             ->whereIn('user_id', $visibleIds);
         $this->applySummaryFilters($query, $validated);
@@ -52,7 +54,7 @@ final class AttendanceReportController extends Controller
 
     public function userDaily(Request $request, User $user)
     {
-        $this->access->assertCanViewUser($request->user(), $user);
+        $this->groupScope->assertHistoryUser($request->user(), $user);
         $request->merge(['user_id' => $user->id]);
 
         return $this->daily($request);
@@ -132,19 +134,32 @@ final class AttendanceReportController extends Controller
                 $usersQuery->whereIn('users.id', (clone $query)->select('user_id'));
             }
             $users = $usersQuery->orderBy('users.branch_id')->orderBy('users.name')->get();
-            $path = $this->timesheetExporter->build($users, $from, $to);
+            $path = $this->timesheetExporter->build($users, $from, $to, $request->user());
+            try {
+                $this->assertExportScope($request->user());
+            } catch (\Throwable $error) {
+                if (is_file($path)) unlink($path);
+                throw $error;
+            }
             $filename = sprintf('Табель_%s_%s.xlsx', $from->format('Y-m-d'), $to->format('Y-m-d'));
 
-            return response()->download($path, $filename, [
+            $download = response()->download($path, $filename, [
                 'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             ])->deleteFileAfterSend(true);
+            $actor = $request->user();
+            return ($actor->hasRole('rop') || $actor->hasRole('security'))
+                ? new \App\Http\Responses\CheckedTemporaryDownload($download, fn () => $this->assertExportScope($actor))
+                : $download;
         }
 
-        return response()->streamDownload(function () use ($query) {
+        $actor = $request->user();
+        return response()->streamDownload(function () use ($query, $actor) {
+            $this->assertExportScope($actor);
             $stream = fopen('php://output', 'wb');
             fwrite($stream, "\xEF\xBB\xBF");
             fputcsv($stream, ['date', 'user_id', 'employee', 'first_in_at', 'last_out_at', 'worked_minutes', 'late_minutes', 'status']);
-            $query->orderBy('work_date')->orderBy('user_id')->chunk(500, function ($rows) use ($stream) {
+            $query->orderBy('work_date')->orderBy('user_id')->chunk(500, function ($rows) use ($stream, $actor) {
+                $this->assertExportScope($actor);
                 foreach ($rows as $row) {
                     fputcsv($stream, [
                         $row->work_date?->toDateString(), $row->user_id, $this->spreadsheetSafe($row->user?->name),
@@ -157,15 +172,33 @@ final class AttendanceReportController extends Controller
         }, 'attendance.csv', ['Content-Type' => 'text/csv; charset=UTF-8']);
     }
 
+    private function assertExportScope(User $actor): void
+    {
+        if ($actor->hasRole('security')) {
+            $fresh = User::query()->with('role')->find($actor->id);
+            abort_unless($fresh && $fresh->hasRole('security') && $fresh->status === User::STATUS_ACTIVE
+                && $this->access->securityBranchIds($fresh) === $this->access->securityBranchIds($actor),
+                409, 'ACCESS_SCOPE_VERSION_CONFLICT');
+            return;
+        }
+        if (! $actor->hasRole('rop')) return;
+        $fresh = User::query()->with('role')->find($actor->id);
+        abort_unless($fresh && $fresh->hasRole('rop') && $fresh->status === User::STATUS_ACTIVE
+            && (int) $fresh->branch_id === (int) $actor->branch_id
+            && (int) $fresh->access_scope_version === (int) $actor->access_scope_version,
+            409, 'ACCESS_SCOPE_VERSION_CONFLICT');
+    }
+
     private function attendanceUsersQuery(Request $request): Builder
     {
-        $query = $this->access->visibleUsersQuery($request->user());
+        $query = $this->groupScope->users($request->user(), $request->input('date_from'), $request->input('date_to'));
         if ($request->has('branch_ids')) $query->whereIn('users.branch_id', $request->input('branch_ids', []));
         foreach (['branch_id', 'branch_group_id'] as $field) {
-            if ($request->filled($field)) $query->where('users.'.$field, $request->integer($field));
+            if ($request->filled($field) && ! $request->user()->hasRole('rop')) $query->where('users.'.$field, $request->integer($field));
         }
         if ($request->filled('user_id')) $query->whereKey($request->integer('user_id'));
-        if ($request->filled('role')) $query->whereHas('role', fn (Builder $roles) => $roles->where('slug', (string) $request->string('role')));
+        $this->groupScope->filterUsers($query, $request->user(), $request->all(), $request->input('date_from'), $request->input('date_to'));
+        if ($request->filled('role') && ! $request->user()->hasRole('rop')) $query->whereHas('role', fn (Builder $roles) => $roles->where('slug', (string) $request->string('role')));
         if ($request->filled('search')) {
             $search = trim((string) $request->string('search'));
             $query->where(function (Builder $users) use ($search) {
@@ -211,7 +244,13 @@ final class AttendanceReportController extends Controller
 
     private function scopeEvents(Builder $query, User $viewer): void
     {
-        $query->whereIn('user_id', $this->access->visibleUsersQuery($viewer)->pluck('users.id'));
+        $this->access->assertCanViewModule($viewer);
+        if ($viewer->hasRole('security')) $this->groupScope->apply($query, $viewer);
+        if ($viewer->hasRole('rop')) {
+            $this->groupScope->apply($query, $viewer);
+        } else {
+            $query->whereIn('user_id', $this->access->visibleUsersQuery($viewer)->select('users.id'));
+        }
     }
 
     private function applyEventFilters(Builder $query, array $filters): void
@@ -232,6 +271,7 @@ final class AttendanceReportController extends Controller
 
     private function applySummaryFilters(Builder $query, array $filters): void
     {
+        $this->groupScope->apply($query, request()->user());
         if (isset($filters['branch_ids'])) $query->whereHas('user', fn (Builder $users) => $users->whereIn('branch_id', $filters['branch_ids']));
         if (isset($filters['date_from'])) {
             $query->whereDate('work_date', '>=', $filters['date_from']);
@@ -242,16 +282,17 @@ final class AttendanceReportController extends Controller
         if (isset($filters['user_id'])) {
             $query->where('user_id', $filters['user_id']);
         }
-        if (isset($filters['branch_id'])) {
+        if (isset($filters['branch_id']) && ! request()->user()->hasRole('rop')) {
             $query->whereHas('user', fn (Builder $users) => $users->where('branch_id', $filters['branch_id']));
         }
         if (isset($filters['branch_group_id'])) {
-            $query->whereHas('user', fn (Builder $users) => $users->where('branch_group_id', $filters['branch_group_id']));
+            if (request()->user()->hasRole('rop')) $query->where('branch_group_id', $filters['branch_group_id']);
+            else $query->whereHas('user', fn (Builder $users) => $users->where('branch_group_id', $filters['branch_group_id']));
         }
         if (isset($filters['device_id'])) {
             $query->whereJsonContains('device_ids', (int) $filters['device_id']);
         }
-        if (isset($filters['role'])) {
+        if (isset($filters['role']) && ! request()->user()->hasRole('rop')) {
             $query->whereHas('user.role', fn (Builder $roles) => $roles->where('slug', $filters['role']));
         }
         if (! empty($filters['search'])) {
@@ -271,7 +312,7 @@ final class AttendanceReportController extends Controller
             });
         }
         if (isset($filters['verification_method'])) {
-            $query->whereIn('user_id', AttendanceEvent::query()->select('user_id')
+            $query->whereIn('user_id', $this->groupScope->apply(AttendanceEvent::query(), request()->user())->select('user_id')
                 ->where('verification_method', $filters['verification_method'])
                 ->when(isset($filters['date_from']), fn ($events) => $events->where('occurred_at', '>=', \Carbon\CarbonImmutable::parse($filters['date_from'], config('attendance.timezone'))->startOfDay()->utc()))
                 ->when(isset($filters['date_to']), fn ($events) => $events->where('occurred_at', '<=', \Carbon\CarbonImmutable::parse($filters['date_to'], config('attendance.timezone'))->endOfDay()->utc())));

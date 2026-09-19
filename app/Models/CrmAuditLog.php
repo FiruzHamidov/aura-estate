@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Model;
 class CrmAuditLog extends Model
 {
     use HasFactory;
+    use \App\Models\Concerns\ProjectsRopRelations;
 
     protected $fillable = [
         'auditable_type',

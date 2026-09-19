@@ -22,22 +22,39 @@ class SelectionController extends Controller
     // Список моих подборок (для личного кабинета агента)
     public function index(Request $request)
     {
+        $validated = $request->validate([
+            'per_page' => 'nullable|integer|min:1|max:100',
+            'page' => 'nullable|integer|min:1',
+            'status' => 'nullable|string|max:24',
+            'deal_id' => 'nullable|integer|min:1',
+            'branch_group_id' => 'nullable|integer|min:1',
+        ]);
+        abort_if(Auth::user()?->hasRole('rop') && ! empty($validated['deal_id']), 422, 'LEGACY_SELECTION_LINK_NOT_SUPPORTED');
         $q = Selection::query()
+            ->when(! empty($validated['branch_group_id']), fn ($query) => $query->where('branch_group_id', $validated['branch_group_id']))
             ->when($request->filled('deal_id'), fn ($qq) => $qq->where('deal_id', $request->integer('deal_id')))
             ->when($request->filled('status'), fn ($qq) => $qq->where('status', $request->string('status')));
 
         // Если используете Sanctum и роли — можно ограничить по created_by
-        if (Auth::check()) {
+        if (Auth::user()?->hasRole('rop')) {
+            app(\App\Support\RopGroupAccess::class)->scope($q, Auth::user(), 'selections.branch_group_id');
+        } elseif (Auth::check()) {
             $q->where('created_by', Auth::id());
         }
 
-        return $q->latest()->paginate((int) $request->input('per_page', 20));
+        $page = $q->orderByDesc('id')->paginate((int) ($validated['per_page'] ?? 20))->withQueryString();
+        if (Auth::user()?->hasRole('rop')) {
+            app(\App\Services\GroupAccess\GroupDataProjection::class)->prepareSelections($page->getCollection(), Auth::user());
+        }
+
+        return $page;
     }
 
     // Создание подборки во внутренней CRM Aura
     public function store(Request $request)
     {
         $validated = $request->validate([
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'title' => 'nullable|string|max:255',
             'property_ids' => 'required|array|min:1',
             'property_ids.*' => 'integer|exists:properties,id',
@@ -48,34 +65,51 @@ class SelectionController extends Controller
             'expires_at' => 'nullable|date',
         ]);
 
-        // Генерация уникального hash и URL (подставьте свой домен/роут)
-        $hash = Str::lower(Str::random(32));
-        $url = 'https://aura.tj/s/'.$hash;
+        return DB::transaction(function () use ($validated) {
+            $properties = Property::query()->whereKey($validated['property_ids'])->get();
+            [$actor, $properties] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquireMany(
+                Auth::user(), $properties->all(), [], [$validated['branch_group_id'] ?? null]
+            );
+            $access = app(\App\Support\RopGroupAccess::class);
+            if ($access->applies($actor)) {
+                abort_if(! empty($validated['deal_id']) || ! empty($validated['contact_id']), 422, 'LEGACY_SELECTION_LINK_NOT_SUPPORTED');
+                $groupId = $access->creationGroup($actor, $validated['branch_group_id'] ?? null);
+                foreach ($properties as $property) $access->ensureVisible($actor, $property);
+            } else {
+                $groupId = $actor->branch_group_id;
+            }
+            // Генерация уникального hash и URL (подставьте свой домен/роут)
+            $hash = Str::lower(Str::random(32));
+            $url = 'https://aura.tj/s/'.$hash;
 
-        $selection = new Selection;
-        $selection->created_by = Auth::id();
-        $selection->deal_id = $validated['deal_id'] ?? null;
-        $selection->contact_id = $validated['contact_id'] ?? null;
-        $selection->title = $validated['title'] ?? null;
-        $selection->property_ids = $validated['property_ids'];
-        $selection->channel = $validated['channel'] ?? null;
-        $selection->note = $validated['note'] ?? null;
-        $selection->selection_hash = $hash;
-        $selection->selection_url = $url;
-        $selection->expires_at = isset($validated['expires_at']) ? Carbon::parse($validated['expires_at']) : null;
-        $selection->status = 'draft';
-        $selection->save();
+            $selection = new Selection;
+            $selection->created_by = $actor->id;
+            $selection->branch_group_id = $groupId;
+            $selection->deal_id = $validated['deal_id'] ?? null;
+            $selection->contact_id = $validated['contact_id'] ?? null;
+            $selection->title = $validated['title'] ?? null;
+            $selection->property_ids = $validated['property_ids'];
+            $selection->channel = $validated['channel'] ?? null;
+            $selection->note = $validated['note'] ?? null;
+            $selection->selection_hash = $hash;
+            $selection->selection_url = $url;
+            $selection->expires_at = isset($validated['expires_at']) ? Carbon::parse($validated['expires_at']) : null;
+            $selection->status = 'draft';
+            $selection->save();
 
-        return response()->json([
-            'selection' => $selection,
-        ], 201);
+            return response()->json([
+                'selection' => $selection,
+            ], 201);
+        });
     }
 
     // Детали (для агента в кабинете)
     public function show($id)
     {
         $sel = Selection::findOrFail($id);
-        if (Auth::check() && $sel->created_by && $sel->created_by !== Auth::id()) {
+        if (Auth::user()?->hasRole('rop')) {
+            app(\App\Support\RopGroupAccess::class)->ensureVisible(Auth::user(), $sel);
+        } elseif (Auth::check() && $sel->created_by && $sel->created_by !== Auth::id()) {
             abort(403);
         }
 

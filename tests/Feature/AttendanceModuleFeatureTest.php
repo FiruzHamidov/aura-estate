@@ -2,6 +2,8 @@
 
 namespace Tests\Feature;
 
+use Illuminate\Support\Facades\DB;
+
 use App\Http\Middleware\EnsureDailyReportSubmitted;
 use App\Http\Middleware\LogApiRequest;
 use App\Jobs\ProcessAttendanceRawEvent;
@@ -44,6 +46,8 @@ class AttendanceModuleFeatureTest extends TestCase
         (require database_path('migrations/2026_08_16_000004_create_attendance_holidays_table.php'))->up();
         (require database_path('migrations/2026_08_16_000005_create_attendance_duties_table.php'))->up();
         (require database_path('migrations/2026_08_16_000006_create_attendance_global_schedules_table.php'))->up();
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
+        (require database_path('migrations/2026_09_08_140000_add_attendance_context_groups.php'))->up();
         config([
             'attendance.timezone' => 'Asia/Dushanbe',
             'attendance.duplicate_window_seconds' => 10,
@@ -352,7 +356,7 @@ class AttendanceModuleFeatureTest extends TestCase
     public function test_attendance_rbac_limits_agents_mop_and_rop_to_their_scope(): void
     {
         $context = $this->context();
-        AttendanceDailySummary::create(['user_id' => $context['agent']->id, 'work_date' => '2026-08-16', 'status' => 'present']);
+        AttendanceDailySummary::create(['user_id' => $context['agent']->id, 'branch_group_id' => $context['group']->id, 'work_date' => '2026-08-16', 'status' => 'present']);
         AttendanceDailySummary::create(['user_id' => $context['otherAgent']->id, 'work_date' => '2026-08-16', 'status' => 'present']);
 
         Sanctum::actingAs($context['agent']);
@@ -589,8 +593,7 @@ class AttendanceModuleFeatureTest extends TestCase
 
         Sanctum::actingAs($context['rop']);
         $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&branch_id='.$context['otherAgent']->branch_id)
-            ->assertOk()->assertJsonCount(0, 'data')
-            ->assertJsonPath('meta.permissions.can_view_all_branches', false);
+            ->assertForbidden()->assertJsonPath('code', 'RBAC_GROUP_SCOPE_VIOLATION');
 
         Sanctum::actingAs($context['agent']);
         $this->getJson('/api/attendance/matrix')->assertStatus(403)->assertJsonPath('code', 'ATTENDANCE_TABLE_FORBIDDEN');
@@ -602,6 +605,7 @@ class AttendanceModuleFeatureTest extends TestCase
         $device = $this->device('ZAM230-WEB-DAY', $context['branch'], $context['group']);
         AttendanceDailySummary::query()->create([
             'user_id' => $context['agent']->id,
+            'branch_group_id' => $context['group']->id,
             'work_date' => '2026-08-17',
             'first_in_at' => '2026-08-17 04:07:00',
             'last_out_at' => '2026-08-17 13:00:00',
@@ -749,12 +753,15 @@ class AttendanceModuleFeatureTest extends TestCase
         foreach ([$context['agent'], $client, $externalAgent] as $user) {
             AttendanceDailySummary::query()->create([
                 'user_id' => $user->id,
+                'branch_group_id' => $context['group']->id,
                 'work_date' => '2026-08-17',
                 'late_minutes' => $user->id === $context['agent']->id ? 7 : 100,
                 'status' => 'late',
             ]);
             AttendanceEvent::query()->create([
                 'user_id' => $user->id,
+                'branch_group_id' => $context['group']->id,
+                'branch_id' => $context['branch']->id,
                 'device_id' => $device->id,
                 'device_user_id' => (string) $user->id,
                 'event_type' => 'check_in',
@@ -787,14 +794,16 @@ class AttendanceModuleFeatureTest extends TestCase
                     $this->getJson('/api/attendance/'.$report.'?'.$range)->assertOk()
                         ->assertJsonCount(1, 'data')->assertJsonPath('data.0.user_id', $context['agent']->id);
                     foreach ([$client, $externalAgent] as $excludedUser) {
-                        $this->getJson('/api/attendance/'.$report.'?'.$range.'&user_id='.$excludedUser->id)
-                            ->assertOk()->assertJsonCount(0, 'data');
+                        $response = $this->getJson('/api/attendance/'.$report.'?'.$range.'&user_id='.$excludedUser->id);
+                        if ($viewer->hasRole('rop')) $response->assertForbidden()->assertJsonPath('code', 'RBAC_GROUP_SCOPE_VIOLATION');
+                        else $response->assertOk()->assertJsonCount(0, 'data');
                     }
                 }
                 foreach ([$client, $externalAgent] as $excludedUser) {
                     foreach (['daily', 'days/2026-08-17'] as $detail) {
-                        $this->getJson('/api/attendance/users/'.$excludedUser->id.'/'.$detail)
-                            ->assertForbidden()->assertJsonPath('code', 'ATTENDANCE_FORBIDDEN_SCOPE');
+                        $response = $this->getJson('/api/attendance/users/'.$excludedUser->id.'/'.$detail);
+                        if ($viewer->hasRole('rop')) $response->assertNotFound();
+                        else $response->assertForbidden()->assertJsonPath('code', 'ATTENDANCE_FORBIDDEN_SCOPE');
                     }
                     foreach (['schedule', 'leaves', 'duties'] as $detail) {
                         $this->getJson('/api/attendance/users/'.$excludedUser->id.'/'.$detail)->assertForbidden();
@@ -1497,6 +1506,135 @@ class AttendanceModuleFeatureTest extends TestCase
         ]);
     }
 
+    public function test_saved_attendance_role_and_schedule_survive_employee_role_and_group_changes(): void
+    {
+        (require database_path('migrations/2026_09_09_010000_add_attendance_historical_context.php'))->up();
+        $context = $this->context();
+        $employee = $context['agent'];
+        $snapshot = ['timezone' => 'Asia/Dushanbe', 'schedule' => ['1' => ['start' => '09:00', 'end' => '18:00']]];
+        $summary = AttendanceDailySummary::create(['user_id' => $employee->id, 'branch_group_id' => $context['group']->id,
+            'role_slug' => 'agent', 'schedule_snapshot' => $snapshot, 'work_date' => '2026-08-17', 'status' => 'late', 'late_minutes' => 12]);
+        AttendanceDailySummary::create(['user_id' => $employee->id, 'branch_group_id' => $context['group']->id,
+            'work_date' => '2026-08-18', 'status' => 'late', 'late_minutes' => 99]);
+        $employee->forceFill(['role_id' => $context['hr']->role_id,
+            'branch_id' => $context['otherAgent']->branch_id, 'branch_group_id' => $context['otherAgent']->branch_group_id])->save();
+        Sanctum::actingAs($context['rop']);
+        $range = 'date_from=2026-08-17&date_to=2026-08-18&role=agent&branch_group_id='.$context['group']->id;
+        $this->getJson('/api/attendance/daily?'.$range)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.late_minutes', 12);
+        $matrix = $this->getJson('/api/attendance/matrix?'.$range)->assertOk();
+        $row = collect($matrix->json('data'))->firstWhere('user.id', $employee->id);
+        $this->assertSame(12, $row['days']['2026-08-17']['late_minutes']);
+        $this->assertNull($row['days']['2026-08-18']['late_minutes']);
+        $this->getJson('/api/attendance/users/'.$employee->id.'/days/2026-08-17')->assertOk()
+            ->assertJsonPath('data.schedule.starts_at', '09:00');
+        app(\App\Services\Attendance\AttendanceSummaryService::class)->recompute($employee, '2026-08-17');
+        $this->assertSame('agent', $summary->fresh()->role_slug);
+        $this->assertSame($snapshot, $summary->fresh()->schedule_snapshot);
+        $this->assertSame($context['group']->id, (int) $summary->fresh()->branch_group_id);
+    }
+
+    public function test_historical_group_limits_daily_matrix_comments_and_exports_after_employee_moves(): void
+    {
+        $context = $this->context();
+        $employee = $context['agent'];
+        $newGroup = $context['otherAgent']->branch_group_id;
+        AttendanceDailySummary::create(['user_id' => $employee->id, 'branch_group_id' => $context['group']->id,
+            'work_date' => '2026-08-17', 'status' => 'late', 'late_minutes' => 7]);
+        AttendanceDailySummary::create(['user_id' => $employee->id, 'branch_group_id' => $newGroup,
+            'work_date' => '2026-08-18', 'status' => 'late', 'late_minutes' => 93]);
+        \App\Models\AttendanceDailyComment::create(['user_id' => $employee->id, 'work_date' => '2026-08-18',
+            'comment' => 'FOREIGN_GROUP_HR_SECRET', 'author_id' => $context['hr']->id, 'version' => 1]);
+        $employee->forceFill(['branch_id' => $context['otherAgent']->branch_id, 'branch_group_id' => $newGroup])->save();
+        Sanctum::actingAs($context['rop']);
+        $range = 'date_from=2026-08-17&date_to=2026-08-18';
+        $this->getJson('/api/attendance/daily?'.$range)->assertOk()->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.late_minutes', 7);
+        $this->getJson('/api/attendance/users/'.$employee->id.'/daily?'.$range)->assertOk()->assertJsonCount(1, 'data');
+        $matrix = $this->getJson('/api/attendance/matrix?'.$range)->assertOk();
+        $row = collect($matrix->json('data'))->firstWhere('user.id', $employee->id);
+        $this->assertSame(7, $row['days']['2026-08-17']['late_minutes']);
+        $this->assertNull($row['days']['2026-08-18']['late_minutes']);
+        $this->assertFalse($row['days']['2026-08-18']['has_comment']);
+        $this->assertSame(['id' => $employee->id, 'name' => $employee->name], $row['user']);
+        $csv = $this->get('/api/attendance/export?'.$range)->assertOk()->streamedContent();
+        $this->assertStringContainsString('2026-08-17', $csv);
+        $this->assertStringNotContainsString('2026-08-18', $csv);
+        $xlsx = $this->get('/api/attendance/export?'.$range.'&format=xlsx')->assertOk();
+        $zip = new \ZipArchive;
+        $path = $xlsx->baseResponse->getFile()->getPathname();
+        $this->assertTrue($zip->open($path));
+        $contents = $zip->getFromName('xl/worksheets/sheet2.xml');
+        $zip->close();
+        $this->assertStringNotContainsString('FOREIGN_GROUP_HR_SECRET', $contents);
+        $this->assertStringNotContainsString('Branch B', $contents);
+        @unlink($path);
+        $this->assertDatabaseHas('attendance_daily_summaries', ['user_id' => $employee->id,
+            'work_date' => '2026-08-17', 'branch_group_id' => $context['group']->id]);
+    }
+
+    public function test_csv_export_rechecks_scope_before_sending_any_bytes(): void
+    {
+        $context = $this->context();
+        Sanctum::actingAs($context['rop']);
+        $response = $this->get('/api/attendance/export')->assertOk();
+        app(\App\Services\GroupAccess\RopGroupAssignments::class)->replace(
+            $context['admin'], $context['rop']->id, [], (int) $context['rop']->access_scope_version
+        );
+        ob_start();
+        try {
+            $response->baseResponse->sendContent();
+            $this->fail('Revoked export was sent');
+        } catch (\Illuminate\Routing\Exceptions\StreamedResponseException $error) {
+            $cause = $error->getInnerException();
+            $this->assertInstanceOf(\Symfony\Component\HttpKernel\Exception\HttpException::class, $cause);
+            $this->assertSame(409, $cause->getStatusCode());
+            $this->assertSame('', ob_get_contents());
+        } finally {
+            ob_end_clean();
+        }
+    }
+
+    public function test_xlsx_is_discarded_if_scope_changes_during_generation(): void
+    {
+        $context = $this->context();
+        Sanctum::actingAs($context['rop']);
+        $before = glob(sys_get_temp_dir().'/attendance-xlsx-*');
+        $changed = false;
+        DB::listen(function ($query) use (&$changed, $context) {
+            if (! $changed && str_contains($query->sql, 'attendance_work_schedules') && str_starts_with($query->sql, 'select')) {
+                $changed = true;
+                DB::table('users')->where('id', $context['rop']->id)->increment('access_scope_version');
+            }
+        });
+        $this->getJson('/api/attendance/export?format=xlsx&date_from=2026-08-17&date_to=2026-08-17')
+            ->assertStatus(409);
+        $this->assertTrue($changed);
+        $this->assertSame($before, glob(sys_get_temp_dir().'/attendance-xlsx-*'));
+    }
+
+    public function test_generated_xlsx_rechecks_scope_at_send_time_and_removes_revoked_file(): void
+    {
+        $context = $this->context();
+        Sanctum::actingAs($context['rop']);
+        $response = $this->get('/api/attendance/export?format=xlsx&date_from=2026-08-17&date_to=2026-08-17')->assertOk();
+        $path = $response->baseResponse->getFile()->getPathname();
+        $this->assertFileExists($path);
+        app(\App\Services\GroupAccess\RopGroupAssignments::class)->replace(
+            $context['admin'], $context['rop']->id, [], (int) $context['rop']->access_scope_version
+        );
+        ob_start();
+        try {
+            $response->baseResponse->sendContent();
+            $this->fail('Generated revoked file was sent');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $error) {
+            $this->assertSame(409, $error->getStatusCode());
+            $this->assertSame('', ob_get_contents());
+            $this->assertFileDoesNotExist($path);
+        } finally {
+            ob_end_clean();
+        }
+    }
+
     private function context(): array
     {
         $branchA = Branch::firstOrCreate(['name' => 'Branch A']);
@@ -1512,7 +1650,7 @@ class AttendanceModuleFeatureTest extends TestCase
             ]);
         };
 
-        return [
+        $context = [
             'branch' => $branchA,
             'group' => $groupA,
             'agent' => $make('agent', 'Agent A', $branchA, $groupA),
@@ -1522,6 +1660,8 @@ class AttendanceModuleFeatureTest extends TestCase
             'hr' => $make('hr', 'HR', $branchA, $groupA),
             'otherAgent' => $make('agent', 'Agent B', $branchB, $groupB),
         ];
+        $context['rop']->supervisedGroups()->syncWithoutDetaching([$groupA->id]);
+        return $context;
     }
 
     private function createBaseSchema(): void

@@ -35,6 +35,10 @@ class ReelFeatureTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('branch_groups', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('branch_id'); $table->string('name'); $table->timestamps();
+        });
+
         Schema::create('users', function (Blueprint $table) {
             $table->id();
             $table->string('name');
@@ -43,6 +47,7 @@ class ReelFeatureTest extends TestCase
             $table->string('password')->nullable();
             $table->foreignId('role_id')->constrained('roles')->cascadeOnDelete();
             $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('branch_group_id')->nullable();
             $table->string('status')->default('active');
             $table->string('auth_method')->default('password');
             $table->rememberToken()->nullable();
@@ -72,6 +77,9 @@ class ReelFeatureTest extends TestCase
 
         Schema::create('properties', function (Blueprint $table) {
             $table->id();
+            $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('branch_group_id')->nullable();
+            $table->string('owner_phone')->nullable();
             $table->string('title')->nullable();
             $table->text('description')->nullable();
             $table->unsignedBigInteger('type_id');
@@ -145,6 +153,9 @@ class ReelFeatureTest extends TestCase
             $table->unique(['reel_id', 'user_id']);
             $table->unique(['reel_id', 'guest_token']);
         });
+
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
+        (require database_path('migrations/2026_09_08_160000_add_reel_group.php'))->up();
 
         Schema::create('personal_access_tokens', function (Blueprint $table) {
             $table->id();
@@ -797,7 +808,7 @@ class ReelFeatureTest extends TestCase
         Queue::assertPushed(ProcessReelVideo::class);
     }
 
-    public function test_rop_can_create_reel_for_agent_property_from_same_branch(): void
+    public function test_rop_can_create_reel_for_property_in_assigned_group(): void
     {
         Storage::fake('public');
         Queue::fake();
@@ -805,6 +816,9 @@ class ReelFeatureTest extends TestCase
         $rop = $this->createUser('rop', '930100006', 10);
         $agent = $this->createUser('agent', '930100007', 10);
         $property = $this->createProperty($agent, 'Branch property');
+        $group = \App\Models\BranchGroup::create(['name' => 'Assigned', 'branch_id' => 10]);
+        $rop->supervisedGroups()->attach($group->id);
+        $property->update(['branch_id' => 10, 'branch_group_id' => $group->id]);
 
         Sanctum::actingAs($rop);
 
@@ -817,6 +831,113 @@ class ReelFeatureTest extends TestCase
         $response->assertCreated();
         $response->assertJsonPath('property_id', $property->id);
         $response->assertJsonPath('created_by', $rop->id);
+    }
+
+    public function test_rop_cannot_manage_foreign_group_reel_and_public_show_hides_private_fields(): void
+    {
+        $rop = $this->createUser('rop', '930100020', 10);
+        $agent = $this->createUser('agent', '930100021', 10);
+        $assigned = \App\Models\BranchGroup::create(['name' => 'Assigned', 'branch_id' => 10]);
+        $foreign = \App\Models\BranchGroup::create(['name' => 'Foreign', 'branch_id' => 10]);
+        $rop->supervisedGroups()->attach($assigned->id);
+        $property = $this->createProperty($agent, 'Public property');
+        $property->update(['branch_id' => 10, 'branch_group_id' => $foreign->id,
+            'owner_phone' => 'Private owner phone', 'moderation_status' => Property::PUBLIC_MODERATION_STATUS]);
+        $reel = Reel::create(['property_id' => $property->id, 'created_by' => $rop->id, 'title' => 'Public reel',
+            'video_url' => 'reels/public.mp4', 'status' => Reel::STATUS_PUBLISHED,
+            'transcode_status' => Reel::TRANSCODE_COMPLETED, 'published_at' => now(),
+            'processing_meta' => ['secret' => 'Internal details']]);
+        $this->getJson('/api/reels/'.$reel->id)->assertOk()->assertJsonMissingPath('property.owner_phone')
+            ->assertJsonMissingPath('processing_meta')->assertJsonMissingPath('created_by');
+        Sanctum::actingAs($rop);
+        $this->getJson('/api/reels/'.$reel->id)->assertOk()->assertJsonMissingPath('property.owner_phone')
+            ->assertJsonMissingPath('processing_meta');
+        $this->patchJson('/api/reels/'.$reel->id, ['title' => 'Forbidden'])->assertForbidden();
+        $this->deleteJson('/api/reels/'.$reel->id)->assertForbidden();
+        $this->assertSame('Public reel', $reel->fresh()->title);
+        \Illuminate\Support\Facades\DB::table('properties')->where('id', $property->id)->update(['moderation_status' => 'draft']);
+        $this->getJson('/api/reels/'.$reel->id)->assertNotFound();
+    }
+
+    public function test_rolled_back_reel_deletion_keeps_existing_media(): void
+    {
+        Storage::fake('public');
+        Storage::disk('public')->put('reels/retained.mp4', 'existing video');
+        $manager = $this->createUser('reels_manager', '930100043');
+        $reel = Reel::create(['created_by' => $manager->id, 'title' => 'Retained',
+            'video_url' => 'reels/retained.mp4', 'status' => Reel::STATUS_DRAFT]);
+        Sanctum::actingAs($manager);
+        try {
+            \Illuminate\Support\Facades\DB::transaction(function () use ($reel) {
+                app(\App\Http\Controllers\ReelController::class)->destroy($reel);
+                throw new \RuntimeException('Outer transaction failed');
+            });
+        } catch (\RuntimeException $error) {
+            $this->assertSame('Outer transaction failed', $error->getMessage());
+        }
+        $this->assertNotNull(Reel::find($reel->id));
+        Storage::disk('public')->assertExists('reels/retained.mp4');
+    }
+
+    public function test_reel_write_rejects_stale_property_link_before_mutation(): void
+    {
+        $manager = $this->createUser('reels_manager', '930100040');
+        $first = $this->createProperty($manager, 'First');
+        $second = $this->createProperty($manager, 'Second');
+        $reel = Reel::create(['property_id' => $first->id, 'created_by' => $manager->id,
+            'title' => 'Original', 'video_url' => 'reels/original.mp4', 'status' => Reel::STATUS_DRAFT]);
+        \Illuminate\Support\Facades\DB::table('reels')->where('id', $reel->id)->update(['property_id' => $second->id]);
+        Sanctum::actingAs($manager);
+        try {
+            app(\App\Http\Controllers\ReelController::class)->update(
+                \Illuminate\Http\Request::create('/api/reels/'.$reel->id, 'PATCH', ['title' => 'Stale change']), $reel);
+            $this->fail('Stale source link must be rejected.');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpExceptionInterface $error) {
+            $this->assertSame(409, $error->getStatusCode());
+            $this->assertSame('REEL_SOURCE_CHANGED', $error->getMessage());
+        }
+        $this->assertSame('Original', $reel->fresh()->title);
+        $this->assertSame($second->id, (int) $reel->fresh()->property_id);
+    }
+
+    public function test_reel_write_rechecks_current_actor_role(): void
+    {
+        $manager = $this->createUser('reels_manager', '930100041');
+        $agent = $this->createUser('agent', '930100042');
+        $reel = Reel::create(['created_by' => $manager->id, 'title' => 'Original',
+            'video_url' => 'reels/original.mp4', 'status' => Reel::STATUS_DRAFT]);
+        $manager->load('role');
+        \Illuminate\Support\Facades\DB::table('users')->where('id', $manager->id)->update(['role_id' => $agent->role_id]);
+        Sanctum::actingAs($manager);
+        try {
+            app(\App\Http\Controllers\ReelController::class)->update(
+                \Illuminate\Http\Request::create('/api/reels/'.$reel->id, 'PATCH', ['title' => 'Former manager']), $reel);
+            $this->fail('Former manager must not retain write access.');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpExceptionInterface $error) {
+            $this->assertSame(403, $error->getStatusCode());
+        }
+        $this->assertSame('Original', $reel->fresh()->title);
+    }
+
+    public function test_rop_standalone_reel_requires_explicit_group_and_revokes_without_author_fallback(): void
+    {
+        Storage::fake('public');
+        Queue::fake();
+        $rop = $this->createUser('rop', '930100030', 10);
+        $groups = collect(['A', 'B', 'C'])->map(fn ($name) => \App\Models\BranchGroup::create(['name' => $name, 'branch_id' => 10]));
+        $rop->supervisedGroups()->attach([$groups[0]->id, $groups[1]->id]);
+        Sanctum::actingAs($rop);
+        $payload = fn () => ['title' => 'Standalone group reel', 'video' => UploadedFile::fake()->create('scope.mp4', 10, 'video/mp4')];
+        $this->postJson('/api/reels', $payload())->assertUnprocessable();
+        $this->postJson('/api/reels', $payload() + ['branch_group_id' => $groups[2]->id])->assertForbidden();
+        $this->assertSame([], Storage::disk('public')->allFiles());
+        $created = $this->postJson('/api/reels', $payload() + ['branch_group_id' => $groups[0]->id])->assertCreated()
+            ->assertJsonPath('branch_group_id', $groups[0]->id)->json();
+        $this->patchJson('/api/reels/'.$created['id'], ['title' => 'Updated'])->assertOk();
+        $rop->supervisedGroups()->detach($groups[0]->id);
+        $this->patchJson('/api/reels/'.$created['id'], ['title' => 'Forbidden'])->assertForbidden();
+        $this->assertSame('Updated', Reel::findOrFail($created['id'])->title);
+        $this->getJson('/api/reels/'.$created['id'])->assertNotFound();
     }
 
     public function test_branch_director_can_manage_standalone_reel_of_agent_from_same_branch(): void

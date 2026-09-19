@@ -80,6 +80,13 @@ class PropertyModerationWorkflowTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('branches', function (Blueprint $table): void {
+            $table->id(); $table->string('name'); $table->timestamps();
+        });
+        DB::table('branches')->insert([['id' => 1, 'name' => 'One'], ['id' => 2, 'name' => 'Two']]);
+        (require database_path('migrations/2026_03_09_120000_create_branch_groups_table.php'))->up();
+        DB::table('branch_groups')->insert(['id' => 1, 'branch_id' => 1, 'name' => 'Assigned']);
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
         (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
         (require database_path('migrations/2025_06_23_004510_create_notifications_table.php'))->up();
         (require database_path('migrations/2026_04_04_180000_expand_notifications_table.php'))->up();
@@ -365,6 +372,27 @@ class PropertyModerationWorkflowTest extends TestCase
 
         $this->assertSame(PropertyPromotion::STATUS_ACTIVE, $approved->status);
         $this->assertSame('vip', $property->fresh()->listing_type);
+    }
+
+    public function test_eager_promotion_visibility_is_batched_and_blocked_properties_are_regular(): void
+    {
+        [$agent] = $this->users();
+        $property = Property::create($this->propertyPayload($agent, ['publication_status' => 'published', 'moderation_status' => 'approved']));
+        PropertyPromotion::create(['property_id' => $property->id, 'type' => 'vip', 'status' => 'active',
+            'requested_by' => $agent->id, 'requested_at' => now(), 'starts_at' => now()->subDay(), 'ends_at' => now()->addDay()]);
+        $loaded = Property::with('activePromotion')->findOrFail($property->id);
+        DB::enableQueryLog();
+        DB::flushQueryLog();
+        try {
+            $this->assertSame('vip', $loaded->listing_type);
+            $this->assertSame([], DB::getQueryLog());
+        } finally {
+            DB::disableQueryLog();
+            DB::flushQueryLog();
+        }
+        PropertyModerationCase::create(['property_id' => $property->id, 'type' => 'initial_review', 'status' => 'open',
+            'blocking' => true, 'submitted_by' => $agent->id, 'submitted_at' => now()]);
+        $this->assertSame('regular', Property::with('activePromotion')->findOrFail($property->id)->listing_type);
     }
 
     public function test_expired_promotion_is_removed_from_authoritative_listing_type(): void
@@ -672,6 +700,37 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertSame('true', $replayed->headers->get('Idempotent-Replayed'));
     }
 
+    public function test_rop_foreign_property_routes_return_404_before_payload_validation(): void
+    {
+        [$agent, $rop] = $this->users();
+        $foreign = Property::create($this->propertyPayload($agent, ['branch_group_id' => null]));
+        $before = $foreign->fresh()->getAttributes();
+        $this->actingAs($rop);
+        foreach ([['PUT', ''], ['DELETE', ''], ['PATCH', '/co-owner'], ['POST', '/deal'], ['POST', '/transfer'], ['POST', '/withdraw'], ['POST', '/promotions'], ['POST', '/photos'], ['PUT', '/photos/reorder'], ['POST', '/refresh-listing-date'], ['GET', '/logs'], ['GET', '/matching-clients']] as [$method, $suffix]) {
+            $this->json($method, '/api/properties/'.$foreign->id.$suffix, [])->assertNotFound();
+        }
+        $this->assertSame($before, $foreign->fresh()->getAttributes());
+        $this->assertDatabaseCount('property_moderation_events', 0);
+    }
+
+    public function test_rop_idempotency_replay_never_returns_a_saved_private_snapshot(): void
+    {
+        [, $rop] = $this->users();
+        $middleware = new EnsurePropertyModerationIdempotency;
+        $request = Request::create('/api/properties', 'POST', ['price' => 100]);
+        $request->headers->set('Idempotency-Key', 'rop-private-replay-0001');
+        $request->setUserResolver(fn () => $rop);
+        $calls = 0;
+        $action = function () use (&$calls) { $calls++; return response()->json(['owner_phone' => 'private original phone']); };
+        $this->assertSame(200, $middleware->handle($request, $action)->getStatusCode());
+        $rop->supervisedGroups()->detach();
+        $response = $middleware->handle($request, $action);
+        $this->assertSame(409, $response->getStatusCode());
+        $this->assertStringNotContainsString('private original phone', $response->getContent());
+        $this->assertSame('IDEMPOTENCY_RESULT_REQUIRES_REFRESH', json_decode($response->getContent(), true)['code']);
+        $this->assertSame(1, $calls);
+    }
+
     public function test_moderation_notifications_use_a_numeric_priority_and_are_deduplicated(): void
     {
         [$agent, $rop, $director] = $this->users();
@@ -697,7 +756,6 @@ class PropertyModerationWorkflowTest extends TestCase
         $middleware = new EnsurePropertyModerationIdempotency;
         $failed = $middleware->handle($request, function () use ($agent) {
             Property::create($this->propertyPayload($agent));
-
             // Laravel's routing pipeline can render an exception before it reaches this middleware.
             return response()->json(['message' => 'Server Error.'], 500);
         });
@@ -708,7 +766,6 @@ class PropertyModerationWorkflowTest extends TestCase
         $calls = 0;
         $action = function () use ($agent, &$calls) {
             $calls++;
-
             return response()->json(['id' => Property::create($this->propertyPayload($agent))->id], 201);
         };
         $retried = $middleware->handle($request, $action);
@@ -936,6 +993,66 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertSame(hash('sha256', 'approved-content-0'), $snapshot[0]['hash']);
     }
 
+    public function test_photo_removal_batch_rejects_foreign_ids_and_preserves_files_on_rollback(): void
+    {
+        [$agent] = $this->users();
+        \Illuminate\Support\Facades\Storage::fake('public');
+        $property = Property::create($this->propertyPayload($agent));
+        $foreign = Property::create($this->propertyPayload($agent));
+        $ownPhoto = $property->photos()->create(['file_path' => 'properties/own.jpg', 'position' => 0]);
+        $foreignPhoto = $foreign->photos()->create(['file_path' => 'properties/foreign.jpg', 'position' => 0]);
+        \Illuminate\Support\Facades\Storage::disk('public')->put($ownPhoto->file_path, 'own bytes');
+        $method = new \ReflectionMethod(\App\Http\Controllers\PropertyController::class, 'storePhotosFromRequest');
+        $controller = app(\App\Http\Controllers\PropertyController::class);
+        foreach ([[$ownPhoto->id, $foreignPhoto->id], [$ownPhoto->id]] as $ids) {
+            try {
+                DB::transaction(function () use ($method, $controller, $property, $ids) {
+                    $method->invoke($controller, Request::create('/', 'POST', ['delete_photo_ids' => $ids]), $property);
+                    throw new \RuntimeException('Synthetic late failure');
+                });
+                $this->fail('Expected failure');
+            } catch (\Symfony\Component\HttpKernel\Exception\HttpException $error) {
+                $this->assertSame(404, $error->getStatusCode());
+            } catch (\RuntimeException $error) {
+                $this->assertSame('Synthetic late failure', $error->getMessage());
+            }
+            $this->assertNotNull($ownPhoto->fresh());
+            $this->assertNotNull($foreignPhoto->fresh());
+            \Illuminate\Support\Facades\Storage::disk('public')->assertExists($ownPhoto->file_path);
+        }
+    }
+
+    public function test_photo_reorder_rejects_foreign_ids_atomically_and_rop_foreign_root_is_404(): void
+    {
+        [$agent, $rop] = $this->users();
+        $property = Property::create($this->propertyPayload($agent));
+        $foreign = Property::create($this->propertyPayload($agent, ['branch_group_id' => null]));
+        $ownPhoto = $property->photos()->create(['file_path' => 'properties/own.jpg', 'position' => 7]);
+        $foreignPhoto = $foreign->photos()->create(['file_path' => 'properties/foreign.jpg', 'position' => 4]);
+        $controller = app(\App\Http\Controllers\PropertyPhotoController::class);
+        $this->actingAs($agent);
+        $before = $property->fresh()->getAttributes();
+        try {
+            $controller->reorder(Request::create('/', 'PUT', ['version' => $property->fresh()->moderation_version,
+                'photo_order' => [$ownPhoto->id, $foreignPhoto->id]]), $property);
+            $this->fail('Mixed photo batch must be rejected.');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $error) {
+            $this->assertSame(404, $error->getStatusCode());
+        }
+        $this->assertSame(7, $ownPhoto->fresh()->position);
+        $this->assertSame(4, $foreignPhoto->fresh()->position);
+        $this->assertSame($before, $property->fresh()->getAttributes());
+        $this->actingAs($rop);
+        foreach (['store', 'reorder', 'destroy'] as $method) {
+            try {
+                $controller->$method(Request::create('/', 'POST'), $foreign, $foreignPhoto);
+                $this->fail('Unclassified root must be hidden.');
+            } catch (\Symfony\Component\HttpKernel\Exception\HttpException $error) {
+                $this->assertSame(404, $error->getStatusCode());
+            }
+        }
+    }
+
     public function test_withdrawing_price_case_restores_price_even_when_content_case_stays_open(): void
     {
         [$agent, $rop] = $this->users();
@@ -1078,7 +1195,7 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->actingAs($rop);
         $this->postJson("/api/properties/{$property->id}/promotion-settings", [
             'version' => $property->fresh()->moderation_version, 'type' => 'urgent', 'days' => 7,
-        ], ['Idempotency-Key' => 'foreign-branch-denied'])->assertForbidden();
+        ], ['Idempotency-Key' => 'foreign-branch-denied'])->assertNotFound();
     }
 
     public function test_all_four_leadership_roles_can_approve_their_own_proposals(): void
@@ -1132,32 +1249,32 @@ class PropertyModerationWorkflowTest extends TestCase
         }
     }
 
-    private function users(): array
+    public function test_rop_cannot_decide_or_merge_a_duplicate_from_an_unassigned_group(): void
     {
-        $agentRole = Role::firstOrCreate(['slug' => 'agent'], ['name' => 'Agent']);
-        $ropRole = Role::firstOrCreate(['slug' => 'rop'], ['name' => 'ROP']);
-        $directorRole = Role::firstOrCreate(['slug' => 'branch_director'], ['name' => 'Director']);
-        $agent = User::forceCreate(['name' => 'Agent', 'phone' => '900000001', 'role_id' => $agentRole->id, 'branch_id' => 1, 'status' => 'active']);
-        $rop = User::forceCreate(['name' => 'ROP', 'phone' => '900000002', 'role_id' => $ropRole->id, 'branch_id' => 1, 'status' => 'active']);
-        $director = User::forceCreate(['name' => 'Director', 'phone' => '900000003', 'role_id' => $directorRole->id, 'branch_id' => 1, 'status' => 'active']);
-
-        return [$agent, $rop, $director];
+        [$agent, $rop] = $this->users();
+        DB::table('branch_groups')->insert(['id' => 2, 'branch_id' => 1, 'name' => 'Other']);
+        $property = Property::create($this->propertyPayload($agent));
+        $foreign = Property::create($this->propertyPayload($agent, ['branch_group_id' => 2]));
+        $case = PropertyModerationCase::create(['property_id' => $property->id,
+            'type' => 'duplicate_review', 'status' => 'open', 'submitted_by' => $agent->id,
+            'submitted_at' => now(), 'version' => 1]);
+        $candidate = PropertyDuplicateCandidate::create(['moderation_case_id' => $case->id,
+            'candidate_property_id' => $foreign->id, 'score' => 90]);
+        $service = $this->moderation();
+        foreach ([
+            fn () => $service->decideDuplicate($candidate, $rop, 'not_duplicate', 'test', 1),
+            fn () => $service->mergeDuplicate($candidate, $rop, 'test', 1),
+            fn () => $service->rejectDuplicate($candidate, $rop, 'test', 1),
+        ] as $operation) {
+            try {
+                $operation();
+                $this->fail('Foreign duplicate must be inaccessible.');
+            } catch (\Symfony\Component\HttpKernel\Exception\HttpException $error) {
+                $this->assertSame(404, $error->getStatusCode());
+            }
+        }
+        $this->assertSame('open', $case->fresh()->status);
+        $this->assertSame('pending', $candidate->fresh()->decision);
     }
 
-    private function propertyPayload(User $creator, array $overrides = []): array
-    {
-        return array_merge([
-            'title' => 'Квартира',
-            'price' => 100_000,
-            'currency' => 'TJS',
-            'offer_type' => 'sale',
-            'created_by' => $creator->id,
-            'agent_id' => $creator->id,
-            'branch_id' => 1,
-            'moderation_status' => 'pending',
-            'publication_status' => 'pending',
-            'deal_status' => 'available',
-            'listing_type' => 'regular',
-        ], $overrides);
-    }
 }

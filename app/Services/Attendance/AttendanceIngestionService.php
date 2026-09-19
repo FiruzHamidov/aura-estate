@@ -196,12 +196,16 @@ final class AttendanceIngestionService
                 $raw->occurred_at_utc->copy()->addSeconds($window),
             ])
             ->exists();
+        $organization = app(\App\Services\GroupAccess\HistoricalUserGroup::class)->at($user, \Carbon\CarbonImmutable::instance($raw->occurred_at_utc));
+        if (\Schema::hasColumn('attendance_events', 'role_slug')) {
+            $organization['role_slug'] = app(\App\Services\GroupAccess\HistoricalUserGroup::class)
+                ->roleAt($user, \Carbon\CarbonImmutable::instance($raw->occurred_at_utc));
+        }
         $event = AttendanceEvent::query()->create([
             'raw_event_id' => $raw->id,
             'user_id' => $user->id,
             'device_id' => $raw->device_id,
-            'branch_id' => $user->branch_id ?? $raw->device?->branch_id,
-            'branch_group_id' => $user->branch_group_id ?? $raw->device?->branch_group_id,
+            ...$organization,
             'device_user_id' => $raw->device_user_id,
             'event_type' => $eventType,
             'occurred_at' => $raw->occurred_at_utc,

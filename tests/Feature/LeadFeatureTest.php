@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\Branch;
+use App\Models\BranchGroup;
 use App\Models\Client;
 use App\Models\ClientNeed;
 use App\Models\ClientType;
@@ -31,8 +32,16 @@ class LeadFeatureTest extends TestCase
         // Deal scope includes property ownership, even when this fixture has no listings.
         Schema::create('properties', function (Blueprint $table) {
             $table->id();
+            $table->unsignedBigInteger('branch_group_id')->nullable();
+            $table->unsignedBigInteger('branch_id')->nullable();
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('agent_id')->nullable();
+        });
+
+        Schema::create('settings', function (Blueprint $table) {
+            $table->string('key')->primary();
+            $table->text('value')->nullable();
+            $table->timestamps();
         });
 
         Schema::create('roles', function (Blueprint $table) {
@@ -49,6 +58,13 @@ class LeadFeatureTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('branch_groups', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('branch_id');
+            $table->string('name');
+            $table->timestamps();
+        });
+
         Schema::create('users', function (Blueprint $table) {
             $table->id();
             $table->string('name');
@@ -57,8 +73,10 @@ class LeadFeatureTest extends TestCase
             $table->string('password')->nullable();
             $table->unsignedBigInteger('role_id');
             $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('branch_group_id')->nullable();
             $table->enum('status', ['active', 'inactive'])->default('active');
             $table->enum('auth_method', ['password', 'sms'])->default('password');
+            $table->softDeletes();
             $table->rememberToken()->nullable();
             $table->timestamps();
         });
@@ -90,6 +108,15 @@ class LeadFeatureTest extends TestCase
             $table->unsignedBigInteger('bitrix_contact_id')->nullable();
             $table->json('meta')->nullable();
             $table->softDeletes();
+            $table->timestamps();
+        });
+
+        Schema::create('client_collaborators', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('client_id');
+            $table->unsignedBigInteger('user_id');
+            $table->string('role')->default('viewer');
+            $table->unsignedBigInteger('granted_by')->nullable();
             $table->timestamps();
         });
 
@@ -281,6 +308,8 @@ class LeadFeatureTest extends TestCase
             $table->timestamps();
         });
 
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
+
         Schema::create('personal_access_tokens', function (Blueprint $table) {
             $table->id();
             $table->morphs('tokenable');
@@ -367,7 +396,7 @@ class LeadFeatureTest extends TestCase
         $response->assertJsonPath('responsible_agent_id', $agent->id);
     }
 
-    public function test_agent_sees_only_own_leads_while_rop_sees_entire_branch(): void
+    public function test_agent_sees_only_own_leads_while_rop_sees_assigned_group(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
         $branchB = Branch::create(['name' => 'Branch B']);
@@ -401,6 +430,53 @@ class LeadFeatureTest extends TestCase
             ->assertJsonFragment(['id' => $ownLead->id])
             ->assertJsonFragment(['id' => $sameBranchForeignLead->id])
             ->assertJsonMissing(['full_name' => $foreignBranchLead->full_name]);
+    }
+
+    public function test_rop_cannot_read_or_mutate_unassigned_group_in_same_branch(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $rop = $this->createUser($ropRole, $branch, 'ROP');
+        $agent = $this->createUser($agentRole, $branch, 'Agent');
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Unassigned']);
+        $agent->update(['branch_group_id' => $group->id]);
+        $lead = $this->createLead($branch, $agent, $agent, 'Hidden lead', '992950001010');
+        $stage = DealStage::query()->firstOrFail();
+        $deal = Deal::create(['title' => 'Hidden deal', 'branch_id' => $branch->id,
+            'responsible_agent_id' => $agent->id, 'created_by' => $agent->id,
+            'pipeline_id' => $stage->pipeline_id, 'stage_id' => $stage->id]);
+
+        Sanctum::actingAs($rop);
+        foreach (['leads' => $lead, 'deals' => $deal] as $resource => $record) {
+            $this->getJson('/api/'.$resource)->assertOk()->assertJsonCount(0, 'data');
+            $this->getJson('/api/'.$resource.'/'.$record->id)->assertNotFound();
+            $this->patchJson('/api/'.$resource.'/'.$record->id, ['note' => 'Forbidden'])->assertNotFound();
+            $this->deleteJson('/api/'.$resource.'/'.$record->id)->assertNotFound();
+            $this->postJson('/api/crm/'.$resource.'/'.$record->id.'/activities', ['type' => 'comment', 'comment' => 'Forbidden'])->assertNotFound();
+            $this->assertNull($record->fresh()->note);
+            $this->assertNull($record->fresh()->deleted_at);
+        }
+    }
+
+    public function test_admin_cannot_create_lead_or_deal_with_responsible_from_another_group(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $admin = $this->createUser($adminRole, $branch, 'Admin');
+        $agent = $this->createUser($agentRole, $branch, 'Agent');
+        $other = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Other']);
+        $stage = DealStage::query()->firstOrFail();
+        Sanctum::actingAs($admin);
+        $ownership = ['branch_group_id' => $other->id, 'responsible_agent_id' => $agent->id];
+        $this->postJson('/api/leads', $ownership + ['full_name' => 'Wrong group', 'phone' => '992950001020'])
+            ->assertUnprocessable()->assertJsonPath('message', 'RESPONSIBLE_GROUP_MISMATCH');
+        $this->postJson('/api/deals', $ownership + ['title' => 'Wrong group', 'pipeline_id' => $stage->pipeline_id])
+            ->assertUnprocessable()->assertJsonPath('message', 'RESPONSIBLE_GROUP_MISMATCH');
+        $this->assertDatabaseCount('leads', 0);
+        $this->assertDatabaseCount('crm_deals', 0);
+        $this->assertDatabaseCount('crm_audit_logs', 0);
     }
 
     public function test_manager_sees_and_updates_all_branch_leads(): void
@@ -455,24 +531,24 @@ class LeadFeatureTest extends TestCase
 
         $this->getJson('/api/leads?branch_id='.$branchB->id)
             ->assertStatus(403)
-            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+            ->assertJsonPath('code', 'RBAC_GROUP_SCOPE_VIOLATION');
 
         $this->getJson('/api/leads?responsible_agent_id='.$agentB->id)
             ->assertStatus(403)
-            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+            ->assertJsonPath('code', 'RBAC_GROUP_SCOPE_VIOLATION');
 
         $this->getJson('/api/deals?responsible_agent_id='.$agentB->id)
             ->assertStatus(403)
-            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+            ->assertJsonPath('code', 'RBAC_GROUP_SCOPE_VIOLATION');
 
         $this->getJson('/api/crm/reports/performance?role_type=operator&responsible_user_id='.$agentB->id)
             ->assertStatus(403)
-            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+            ->assertJsonPath('code', 'RBAC_GROUP_SCOPE_VIOLATION');
 
         $this->getJson('/api/leads?responsible_agent_id='.$agentA->id)->assertOk();
     }
 
-    public function test_rop_gets_403_with_rbac_code_on_foreign_lead_and_deal_details(): void
+    public function test_rop_gets_404_on_foreign_lead_and_deal_details(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
         $branchB = Branch::create(['name' => 'Branch B']);
@@ -499,12 +575,10 @@ class LeadFeatureTest extends TestCase
         Sanctum::actingAs($rop);
 
         $this->getJson('/api/leads/'.$foreignLead->id)
-            ->assertStatus(403)
-            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+            ->assertNotFound();
 
         $this->getJson('/api/deals/'.$foreignDeal->id)
-            ->assertStatus(403)
-            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+            ->assertNotFound();
     }
 
     public function test_admin_and_superadmin_keep_multibranch_crm_visibility(): void
@@ -684,6 +758,155 @@ class LeadFeatureTest extends TestCase
             ->assertJsonPath('stage.id', $stage->id);
     }
 
+    public function test_multigroup_rop_conversion_inherits_lead_group_and_hides_foreign_duplicates(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agent = $this->createUser($agentRole, $branch, 'Agent');
+        $rop = $this->createUser($ropRole, $branch, 'ROP');
+        $second = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Second allowed']);
+        $rop->supervisedGroups()->attach($second->id);
+        $foreign = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Foreign']);
+        $foreignAgent = $this->createUser($agentRole, $branch, 'Foreign agent');
+        $foreignAgent->update(['branch_group_id' => $foreign->id]);
+        $hiddenClient = $this->createClient($branch, $foreignAgent, 'Secret client', '992950001030');
+        $this->createLead($branch, $foreignAgent, $foreignAgent, 'Secret lead', '992950001030');
+        $lead = $this->createLead($branch, $agent, $agent, 'Convert me', '992950001030');
+        Sanctum::actingAs($rop);
+        $this->getJson('/api/leads/'.$lead->id)->assertOk()
+            ->assertJsonPath('duplicate_summary.client_matches_count', 0)
+            ->assertJsonPath('duplicate_summary.lead_matches_count', 0);
+        $result = $this->postJson('/api/leads/'.$lead->id.'/convert')->assertOk()
+            ->assertJsonPath('client.branch_group_id', $agent->branch_group_id)
+            ->assertJsonPath('deal.branch_group_id', $agent->branch_group_id)->json();
+        $this->assertNotEquals($hiddenClient->id, $result['client']['id']);
+        $this->assertSame('Secret client', $hiddenClient->fresh()->full_name);
+        $this->postJson('/api/leads/'.$lead->id.'/convert')->assertOk()
+            ->assertJsonPath('client.id', $result['client']['id'])
+            ->assertJsonPath('deal.id', $result['deal']['id']);
+    }
+
+    public function test_conversion_rejects_explicit_foreign_client_without_any_writes(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agent = $this->createUser($agentRole, $branch, 'Agent');
+        $rop = $this->createUser($ropRole, $branch, 'ROP');
+        $foreign = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Foreign']);
+        $foreignAgent = $this->createUser($agentRole, $branch, 'Foreign agent');
+        $foreignAgent->update(['branch_group_id' => $foreign->id]);
+        $client = $this->createClient($branch, $foreignAgent, 'Secret', '992950001040');
+        $lead = $this->createLead($branch, $agent, $agent, 'Convert me', '992950001041');
+        $lead->update(['client_id' => $client->id]);
+        Sanctum::actingAs($rop);
+        $this->postJson('/api/leads/'.$lead->id.'/convert')->assertNotFound();
+        $this->assertSame(Lead::STATUS_NEW, $lead->fresh()->status);
+        $this->assertDatabaseCount('crm_deals', 0);
+        $this->assertDatabaseCount('crm_audit_logs', 0);
+        $this->assertSame('Secret', $client->fresh()->full_name);
+    }
+
+    public function test_activity_snapshots_hide_foreign_contacts_without_changing_audit_storage(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agent = $this->createUser($agentRole, $branch, 'Agent');
+        $rop = $this->createUser($ropRole, $branch, 'ROP');
+        $admin = $this->createUser($adminRole, $branch, 'Admin');
+        $lead = $this->createLead($branch, $agent, $agent, 'Lead', '992950001071');
+        $own = $this->createClient($branch, $agent, 'Own', '992950001072');
+        $foreign = $this->createClient($branch, $agent, 'Foreign', '992950001073');
+        $other = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Other']);
+        DB::table('clients')->where('id', $foreign->id)->update(['branch_group_id' => $other->id]);
+        $logger = app(\App\Services\Crm\AuditLogger::class);
+        $hidden = $logger->log($lead, $agent, 'updated', ['client_id' => $foreign->id, 'phone' => 'COPIED_SECRET'],
+            ['client_id' => $own->id], 'COPIED_SECRET', ['snapshot' => ['client_id' => $foreign->id, 'phone' => 'COPIED_SECRET']]);
+        $shown = $logger->log($lead, $agent, 'updated', [], ['client_id' => $own->id, 'note' => 'Allowed details']);
+        $before = $hidden->fresh()->getAttributes();
+        Sanctum::actingAs($rop);
+        $queries = [];
+        DB::listen(function ($query) use (&$queries) { $queries[] = strtolower($query->sql); });
+        $response = $this->getJson('/api/crm/leads/'.$lead->id.'/activities')->assertOk()->assertJsonCount(2, 'data');
+        $rows = collect($response->json('data'))->keyBy('id');
+        $this->assertTrue($rows[$hidden->id]['details_unavailable']);
+        $this->assertNull($rows[$hidden->id]['old_values']);
+        $this->assertNull($rows[$hidden->id]['new_values']);
+        $this->assertNull($rows[$hidden->id]['context']);
+        $this->assertSame('Allowed details', $rows[$shown->id]['new_values']['note']);
+        $this->assertStringNotContainsString('COPIED_SECRET', $response->getContent());
+        $this->assertSame(1, collect($queries)->filter(fn ($sql) => str_contains($sql, 'select') && str_contains($sql, 'from "clients"'))->count());
+        $this->assertSame($before, $hidden->fresh()->getAttributes());
+        $this->getJson('/api/leads/'.$lead->id)->assertOk()->assertJsonMissing(['phone' => 'COPIED_SECRET']);
+        Sanctum::actingAs($admin);
+        $response = $this->getJson('/api/crm/leads/'.$lead->id.'/activities')->assertOk();
+        $this->assertStringContainsString('COPIED_SECRET', $response->getContent());
+    }
+
+    public function test_activity_history_shows_only_minimal_author_after_employee_moves(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agent = $this->createUser($agentRole, $branch, 'Historical author');
+        $rop = $this->createUser($ropRole, $branch, 'ROP');
+        $lead = $this->createLead($branch, $agent, $agent, 'Lead', '992950001070');
+        app(\App\Services\Crm\ActivityService::class)->logComment($lead, $agent, 'History');
+        $other = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Other']);
+        $agent->update(['branch_group_id' => $other->id]);
+        Sanctum::actingAs($rop);
+        $response = $this->getJson('/api/crm/leads/'.$lead->id.'/activities')->assertOk();
+        $this->assertSame(['id' => $agent->id, 'name' => 'Historical author'], $response->json('data.0.actor'));
+        $this->getJson('/api/leads/'.$lead->id)->assertOk()
+            ->assertJsonMissing(['phone' => $agent->phone]);
+    }
+
+    public function test_activity_failure_rolls_back_lead_changes(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = $this->createUser($role, $branch, 'Agent');
+        $lead = $this->createLead($branch, $agent, $agent, 'Lead', '992950001060');
+        $before = $lead->fresh()->getRawOriginal();
+        $this->mock(\App\Services\Crm\ActivityService::class, function ($mock) {
+            $mock->shouldReceive('logCall')->once()->andThrow(new \RuntimeException('Audit unavailable'));
+        });
+        Sanctum::actingAs($agent);
+        try {
+            app(\App\Http\Controllers\CrmActivityController::class)->leadStore(
+                \Illuminate\Http\Request::create('/api/crm/leads/'.$lead->id.'/activities', 'POST',
+                    ['type' => 'call', 'result' => 'Connected']), $lead);
+            $this->fail('Failed audit must abort the operation.');
+        } catch (\RuntimeException $error) {
+            $this->assertSame('Audit unavailable', $error->getMessage());
+        }
+        $this->assertSame($before, $lead->fresh()->getRawOriginal());
+        $this->assertDatabaseCount('crm_audit_logs', 0);
+    }
+
+    public function test_conversion_rejects_changed_source_snapshot_before_writing(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = $this->createUser($role, $branch, 'Agent');
+        $lead = $this->createLead($branch, $agent, $agent, 'Original', '992950001050');
+        DB::table('leads')->where('id', $lead->id)->update(['phone_normalized' => '992950001051']);
+        Sanctum::actingAs($agent);
+        try {
+            app(\App\Services\Crm\LeadConversionService::class)->convert($lead, $agent);
+            $this->fail('Stale conversion should fail.');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpExceptionInterface $error) {
+            $this->assertSame(409, $error->getStatusCode());
+            $this->assertSame('CONVERSION_SOURCE_CHANGED', $error->getMessage());
+        }
+        $this->assertDatabaseCount('clients', 0);
+        $this->assertDatabaseCount('crm_deals', 0);
+        $this->assertSame(Lead::STATUS_NEW, $lead->fresh()->status);
+    }
+
     public function test_converting_lead_reuses_existing_client_and_writes_audit_log(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);
@@ -850,14 +1073,21 @@ class LeadFeatureTest extends TestCase
 
     private function createUser(Role $role, Branch $branch, string $name): User
     {
-        return User::create([
+        $group = BranchGroup::firstOrCreate(['branch_id' => $branch->id], ['name' => 'Team']);
+        $user = User::create([
             'name' => $name,
             'phone' => $this->nextPhone(),
             'role_id' => $role->id,
             'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
             'status' => 'active',
             'auth_method' => 'password',
         ]);
+        if ($role->slug === 'rop') {
+            $user->supervisedGroups()->attach($group->id);
+        }
+
+        return $user;
     }
 
     private function createClient(Branch $branch, User $agent, string $name, string $phone, ?string $email = null): Client

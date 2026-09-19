@@ -30,6 +30,14 @@ class AppServiceProvider extends ServiceProvider
     public function boot(): void
     {
         Property::observe(PropertyObserver::class);
+        foreach ([Property::class, \App\Models\Client::class, \App\Models\Lead::class, \App\Models\Deal::class, \App\Models\Booking::class, \App\Models\CrmTask::class] as $model) {
+            $model::observe(\App\Observers\GroupOwnedRecordObserver::class);
+        }
+
+        \App\Models\DailyReport::observe(\App\Observers\GroupHistorySnapshotObserver::class);
+        \App\Models\AttendanceDailySummary::observe(\App\Observers\GroupHistorySnapshotObserver::class);
+        \App\Models\AttendanceLeave::observe(\App\Observers\GroupHistorySnapshotObserver::class);
+        \App\Models\AttendanceDuty::observe(\App\Observers\GroupHistorySnapshotObserver::class);
 
         Relation::morphMap([
             'user' => User::class,

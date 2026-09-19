@@ -66,6 +66,12 @@ class User extends Authenticatable
         return $this->belongsTo(Branch::class);
     }
 
+    public function supervisedGroups(): BelongsToMany
+    {
+        return $this->belongsToMany(BranchGroup::class, 'rop_branch_groups', 'rop_id', 'branch_group_id')
+            ->withPivot('assigned_by')->withTimestamps();
+    }
+
     public function branchGroup()
     {
         return $this->belongsTo(BranchGroup::class);

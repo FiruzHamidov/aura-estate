@@ -8,7 +8,7 @@ use App\Models\Role;
 use App\Models\User;
 use App\Support\RbacBranchScope;
 use Illuminate\Database\Schema\Blueprint;
-use Illuminate\Http\Exceptions\HttpResponseException;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
 
@@ -51,6 +51,7 @@ class RbacBranchScopeTest extends TestCase
             $table->string('auth_method')->default('password');
             $table->timestamps();
         });
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
     }
 
     public function test_it_denies_foreign_branch_group_for_rop_scope(): void
@@ -69,7 +70,12 @@ class RbacBranchScopeTest extends TestCase
             'branch_id' => $branchA->id,
         ]);
 
-        $this->expectException(HttpResponseException::class);
-        $scope->ensureBranchGroupInUserBranchOrDeny($groupB->id, $rop);
+        try {
+            $scope->ensureBranchGroupInUserBranchOrDeny($groupB->id, $rop);
+            $this->fail('Foreign group must be denied');
+        } catch (HttpException $error) {
+            $this->assertSame(403, $error->getStatusCode());
+            $this->assertSame('RBAC_GROUP_SCOPE_VIOLATION', $error->getMessage());
+        }
     }
 }

@@ -23,12 +23,17 @@ class AccountDeletionController extends Controller
         $user = $request->user();
 
         DB::transaction(function () use ($user, $validated) {
-            $user->refresh();
+            $user = User::query()->whereKey($user->id)->lockForUpdate()->firstOrFail();
 
             if ($user->deleted_at || $user->deletion_requested_at) {
                 $this->revokeAccess($user);
 
                 return;
+            }
+
+            if (in_array($user->role?->slug, ['agent', 'mop'], true)) {
+                abort_if(app(\App\Services\GroupAccess\UserOrganizationService::class)
+                    ->hasActiveRecords($user->id, lock: true, classifiedOnly: true), 409, 'EMPLOYEE_TRANSFER_REQUIRED');
             }
 
             $now = now();

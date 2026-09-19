@@ -12,13 +12,14 @@ return [
         'https://manora.tj',
         'https://www.manora.tj',
         'http://localhost:3000',
+        ...array_filter(explode(',', (string) env('CORS_EXTRA_ORIGINS', ''))),
     ],
 
     'allowed_origins_patterns' => [],
 
     'allowed_headers' => ['*'],
 
-    'exposed_headers' => [],
+    'exposed_headers' => ['X-Access-Scope-Version'],
 
     'max_age' => 0,
 

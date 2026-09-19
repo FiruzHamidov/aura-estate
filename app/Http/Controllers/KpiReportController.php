@@ -86,7 +86,9 @@ class KpiReportController extends Controller
         }
 
         if (array_key_exists('user_id', $validated) && $validated['user_id'] !== null) {
-            $this->branchScope->ensureUserInUserBranchOrDeny((int) $validated['user_id'], $authUser);
+            if (! $authUser->hasRole('rop') || ! app(\App\Support\RopGroupAccess::class)->hasVisibleDailyReportHistory($authUser, (int) $validated['user_id'])) {
+                $this->branchScope->ensureUserInUserBranchOrDeny((int) $validated['user_id'], $authUser);
+            }
         }
     }
 

@@ -12,10 +12,14 @@ Broadcast::channel('App.Models.User.{id}', function ($user, $id) {
     return (int) $user->id === (int) $id;
 });
 
-Broadcast::channel('location.user.{targetUserId}', function (User $viewer, int $targetUserId) {
-    $target = User::query()->find($targetUserId);
+// Retire the shared target channel: an already connected ROP must never receive new coordinates there.
+Broadcast::channel('location.user.{targetUserId}', fn () => false);
 
-    return $target !== null && app(LocationAccessService::class)->canView($viewer, $target);
+Broadcast::channel('location.viewer.{viewerId}.scope.{version}', function (User $viewer, int $viewerId, int $version) {
+    $current = User::query()->find($viewer->id);
+    return $current && $current->status === User::STATUS_ACTIVE && (int) $current->id === $viewerId
+        && (int) $current->access_scope_version === $version
+        && in_array(app(LocationAccessService::class)->role($current), config('location_tracking.viewer_roles', []), true);
 });
 
 Broadcast::channel('messaging.user.{userId}', function ($viewer, int $userId) {

@@ -30,7 +30,7 @@ class DailyReportFrontendScenariosTest extends TestCase
         Schema::create('users', function (Blueprint $t) {
             $t->id(); $t->string('name'); $t->string('phone')->unique(); $t->unsignedBigInteger('role_id');
             $t->unsignedBigInteger('branch_id')->nullable(); $t->unsignedBigInteger('branch_group_id')->nullable();
-            $t->string('status')->default('active'); $t->string('auth_method')->default('password'); $t->timestamps();
+            $t->string('status')->default('active'); $t->string('auth_method')->default('password'); $t->softDeletes(); $t->timestamps();
         });
         Schema::create('daily_reports', function (Blueprint $t) {
             $t->id(); $t->unsignedBigInteger('user_id'); $t->string('role_slug')->nullable(); $t->date('report_date');
@@ -67,6 +67,7 @@ class DailyReportFrontendScenariosTest extends TestCase
             $t->id(); $t->morphs('tokenable'); $t->string('name'); $t->string('token', 64)->unique();
             $t->text('abilities')->nullable(); $t->timestamp('last_used_at')->nullable(); $t->timestamp('expires_at')->nullable(); $t->timestamps();
         });
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
     }
 
     public function test_patch_daily_report_allows_only_rop_plus_and_denies_mop(): void
@@ -78,8 +79,7 @@ class DailyReportFrontendScenariosTest extends TestCase
             ->assertOk()
             ->assertJsonPath('comment', 'rop edit');
         $this->patchJson('/api/daily-reports/'.$reports['agentB'], ['comment' => 'x'])
-            ->assertStatus(403)
-            ->assertJsonPath('code', 'DAILY_REPORT_EDIT_FORBIDDEN');
+            ->assertNotFound();
 
         Sanctum::actingAs($users['mopA1']);
         $this->patchJson('/api/daily-reports/'.$reports['agentA'], ['comment' => 'mop edit'])
@@ -257,6 +257,15 @@ class DailyReportFrontendScenariosTest extends TestCase
             'effective_to' => '2026-05-01',
         ]);
 
+        foreach ([['2026-04-01', '2026-04-30'], ['2026-05-02', null]] as [$from, $to]) {
+            \App\Models\KpiPlan::create([
+                'role_slug' => 'agent', 'user_id' => $users['agentA']->id,
+                'branch_id' => $users['agentA']->branch_id, 'branch_group_id' => $users['agentA']->branch_group_id,
+                'metric_key' => 'objects', 'daily_plan' => 999, 'weight' => 1,
+                'effective_from' => $from, 'effective_to' => $to,
+            ]);
+        }
+
         Sanctum::actingAs($users['agentA']);
         $this->getJson('/api/kpi/daily/my-report?date=2026-05-01')
             ->assertOk()
@@ -273,6 +282,8 @@ class DailyReportFrontendScenariosTest extends TestCase
             ->assertJsonPath('meta.debug.plan_resolution.metrics.shows.resolved_from', 'rop');
 
         Sanctum::actingAs($users['ropA']);
+        \DB::enableQueryLog();
+        \DB::flushQueryLog();
         $this->getJson('/api/kpi/daily/report?date=2026-05-01&employee_id='.$users['agentA']->id)
             ->assertOk()
             ->assertJsonPath('metrics.objects.target_value', 9)
@@ -280,6 +291,9 @@ class DailyReportFrontendScenariosTest extends TestCase
             ->assertJsonPath('metrics.shows.target_value', 3)
             ->assertJsonPath('meta.debug.plan_resolution.employee_id', $users['agentA']->id)
             ->assertJsonPath('meta.debug.plan_resolution.metrics.objects.resolved_from', 'personal');
+        $planQueries = collect(\DB::getQueryLog())->filter(fn ($entry) => str_contains($entry['query'], 'from "kpi_plans"'));
+        \DB::disableQueryLog();
+        $this->assertCount(1, $planQueries, 'All five metrics must share one plan SELECT.');
     }
 
     public function test_my_daily_report_without_plan_returns_null_target_with_debug_meta(): void
@@ -299,6 +313,80 @@ class DailyReportFrontendScenariosTest extends TestCase
             ->assertJsonPath('meta.debug.plan_resolution.date', '2026-05-01')
             ->assertJsonPath('meta.debug.plan_resolution.metrics.objects.resolved_from', 'system')
             ->assertJsonPath('meta.debug.plan_resolution.metrics.objects.target_value', null);
+    }
+
+    public function test_report_page_batches_plans_without_mixing_groups_roles_or_dates(): void
+    {
+        [$users, $reports, $groups] = $this->seedContext();
+        $users['ropA']->supervisedGroups()->attach($groups['groupA2']->id);
+        $nextDay = DailyReport::create(['user_id' => $users['agentA']->id,
+            'branch_group_id' => $groups['groupA1']->id, 'role_slug' => 'agent', 'report_date' => '2026-05-02']);
+        foreach ([['agentA', '2026-05-01', 5], ['agentA2', '2026-05-01', 9],
+            ['mopA1', '2026-05-01', 13], ['agentA', '2026-05-02', 7]] as [$employee, $date, $value]) {
+            \App\Models\KpiPlan::create(['user_id' => null, 'role_slug' => $users[$employee]->role->slug,
+                'branch_id' => $users[$employee]->branch_id, 'branch_group_id' => $users[$employee]->branch_group_id,
+                'metric_key' => 'objects', 'daily_plan' => $value, 'weight' => 1,
+                'effective_from' => $date, 'effective_to' => $date]);
+        }
+        Sanctum::actingAs($users['ropA']);
+        \DB::enableQueryLog();
+        \DB::flushQueryLog();
+        $response = $this->getJson('/api/daily-reports?from=2026-05-01&to=2026-05-02&per_page=100')
+            ->assertOk()->assertJsonCount(4, 'data');
+        $queries = collect(\DB::getQueryLog());
+        \DB::disableQueryLog();
+        $this->assertCount(1, $queries->filter(fn ($entry) => str_contains($entry['query'], 'from "kpi_plans"')));
+        $this->assertLessThanOrEqual(2, $queries->filter(fn ($entry) => str_contains($entry['query'], 'from "branch_groups"'))->count());
+        $this->assertLessThanOrEqual(3, $queries->filter(fn ($entry) => str_contains($entry['query'], 'from "roles"'))->count());
+
+        $rows = collect($response->json('data'))->keyBy('id');
+        foreach ([$reports['agentA'] => 5, $reports['agentA2'] => 9, $reports['mopA1'] => 13, $nextDay->id => 7] as $id => $expected) {
+            $this->assertEquals($expected, data_get($rows->get($id), 'metrics.objects.target_value'));
+        }
+        // A fresh request must not reuse the previous page's authorized candidates.
+        $users['ropA']->supervisedGroups()->detach($groups['groupA2']->id);
+        $this->getJson('/api/daily-reports?from=2026-05-01&to=2026-05-02&per_page=100')
+            ->assertOk()->assertJsonCount(3, 'data');
+    }
+
+    public function test_self_draft_and_submit_preserve_pre_transfer_report_context(): void
+    {
+        [$users, $reports, $groups] = $this->seedContext();
+        $report = DailyReport::findOrFail($reports['agentA']);
+        $report->update(['submitted_at' => null, 'new_properties_count' => 17]);
+        \DB::table('users')->where('id', $users['agentA']->id)->update([
+            'branch_group_id' => $groups['groupA2']->id, 'role_id' => $users['mopA1']->role_id,
+        ]);
+        Sanctum::actingAs($users['agentA']->fresh());
+        $payload = ['report_date' => '2026-05-01', 'ads' => 2, 'calls' => 9];
+        $this->putJson('/api/kpi/daily/my-report/draft', $payload)->assertOk()
+            ->assertJsonPath('auto.new_properties_count', 17)
+            ->assertJsonPath('meta.debug.auto_metrics.source', 'stored_report')
+            ->assertJsonPath('meta.debug.auto_metrics.source_ids_available', false);
+        $this->assertSame('agent', $report->fresh()->role_slug);
+        $this->assertSame((int) $groups['groupA1']->id, (int) $report->fresh()->branch_group_id);
+        $this->postJson('/api/kpi/daily/my-report', $payload)->assertOk()
+            ->assertJsonPath('submitted', true)->assertJsonPath('auto.new_properties_count', 17);
+        $before = $report->fresh()->getAttributes();
+        $this->postJson('/api/kpi/daily/my-report', array_replace($payload, ['calls' => 99]))->assertForbidden();
+        $this->assertSame($before, $report->fresh()->getAttributes());
+        $this->postJson('/api/daily-reports', ['report_date' => '2026-05-01', 'calls_count' => 99])->assertForbidden();
+        UserDailyReportReminderSetting::create(['user_id' => $users['agentA']->id, 'allow_edit_submitted_daily_report' => true]);
+        $this->postJson('/api/daily-reports', ['report_date' => '2026-05-01', 'calls_count' => 10])->assertCreated()
+            ->assertJsonPath('new_properties_count', 17)->assertJsonPath('role_slug', 'agent')
+            ->assertJsonPath('branch_group_id', $groups['groupA1']->id);
+        $this->getJson('/api/daily-reports/my/2026-05-01')->assertOk()->assertJsonPath('auto.new_properties_count', 17);
+        $this->getJson('/api/daily-reports/status?report_date=2026-05-01')->assertOk()->assertJsonPath('auto.new_properties_count', 17);
+        Sanctum::actingAs($users['ropA']);
+        $this->putJson('/api/kpi/daily/my-report/draft', $payload)->assertUnprocessable();
+        $this->assertDatabaseMissing('daily_reports', ['user_id' => $users['ropA']->id, 'report_date' => '2026-05-01']);
+        DailyReport::create(['user_id' => $users['ropA']->id, 'branch_group_id' => $groups['groupA2']->id,
+            'role_slug' => 'rop', 'report_date' => '2026-05-01']);
+        $this->getJson('/api/daily-reports/my')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/daily-reports/my/2026-05-01')->assertNotFound();
+        $this->getJson('/api/daily-reports/status?report_date=2026-05-01')->assertNotFound();
+        $this->postJson('/api/daily-reports', ['report_date' => '2026-05-01', 'calls_count' => 99])->assertNotFound();
+
     }
 
     private function seedContext(): array
@@ -329,6 +417,8 @@ class DailyReportFrontendScenariosTest extends TestCase
             'agentB' => $this->makeUser('AgentB', $roles['agent'], $branchB, $groupB),
         ];
 
+        $users['ropA']->supervisedGroups()->attach($groupA1->id);
+
         $reports = [
             'agentA' => $this->makeReport($users['agentA']),
             'agentA2' => $this->makeReport($users['agentA2']),
@@ -356,6 +446,7 @@ class DailyReportFrontendScenariosTest extends TestCase
     {
         return (int) DailyReport::query()->create([
             'user_id' => $user->id,
+            'branch_group_id' => $user->branch_group_id,
             'role_slug' => $user->role?->slug,
             'report_date' => '2026-05-01',
             'calls_count' => 1,

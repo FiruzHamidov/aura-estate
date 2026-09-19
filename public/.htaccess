@@ -5,6 +5,9 @@
 
     RewriteEngine On
 
+    # Private request attachments must never bypass application authorization.
+    RewriteRule ^storage/external-property-requests(?:/|$) - [F,L]
+
     # Handle Authorization Header
     RewriteCond %{HTTP:Authorization} .
     RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]

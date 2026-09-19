@@ -8,7 +8,8 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 final class AttendanceDuty extends Model
 {
-    protected $fillable = ['user_id', 'date_from', 'date_to', 'note', 'created_by'];
+    protected $fillable = [
+        'branch_group_id','user_id', 'date_from', 'date_to', 'note', 'created_by'];
 
     protected $casts = ['date_from' => DateOnly::class, 'date_to' => DateOnly::class];
 

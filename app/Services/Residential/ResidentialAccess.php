@@ -10,7 +10,7 @@ final class ResidentialAccess
 {
     public const GLOBAL_ROLES = ['superadmin', 'admin', 'owner'];
 
-    public const BRANCH_ROLES = ['rop', 'branch_director'];
+    public const BRANCH_ROLES = ['branch_director'];
 
     public const AUTHOR_ROLES = ['agent', 'mop'];
 

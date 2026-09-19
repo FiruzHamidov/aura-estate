@@ -21,6 +21,10 @@ class ClientDeduplicator
     {
         $matchesQuery = $this->matchesQuery($data, (int) $authUser->id, $excludeClientId);
 
+        if ($authUser->hasRole('rop')) {
+            app(\App\Support\RopGroupAccess::class)->scope($matchesQuery, $authUser, 'clients.branch_group_id', 'clients.branch_id');
+        }
+
         $allMatchesCount = (clone $matchesQuery)->count();
 
         if ($allMatchesCount === 0) {

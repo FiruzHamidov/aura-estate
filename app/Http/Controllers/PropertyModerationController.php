@@ -42,6 +42,8 @@ final class PropertyModerationController extends Controller
         ))]);
     }
 
+
+
     public function submit(Request $request, Property $property)
     {
         $data = $request->validate(['version' => 'required|integer|min:0']);
@@ -98,7 +100,10 @@ final class PropertyModerationController extends Controller
             ->with('user:id,name,phone,branch_id')
             ->groupBy('user_id')
             ->orderBy('points_delta');
-        if (! in_array($user->role?->slug, config('property-moderation.global_moderator_roles', []), true)) {
+        if ($user->hasRole('rop')) {
+            $query->whereIn('user_id', app(\App\Support\RopGroupAccess::class)->employees($user)->select('users.id'));
+            $query->whereIn('property_id', $this->access->scopeModeratable(Property::query(), $user)->select('properties.id'));
+        } elseif (! in_array($user->role?->slug, config('property-moderation.global_moderator_roles', []), true)) {
             $query->whereHas('user', fn ($employees) => $employees->where('branch_id', $user->branch_id));
         }
         $page = $query->paginate($data['per_page'] ?? 25);

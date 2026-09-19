@@ -68,7 +68,7 @@ class NotificationController extends Controller
             'per_page' => 'nullable|integer|min:1|max:100',
         ]);
 
-        $query = Notification::query()
+        $query = app(\App\Services\GroupAccess\NotificationGroupAccess::class)->scope(Notification::query(), $user)
             ->with('actor.role')
             ->where('user_id', $user->id)
             ->latest('last_occurred_at')

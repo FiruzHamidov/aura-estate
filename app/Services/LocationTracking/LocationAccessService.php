@@ -42,7 +42,12 @@ class LocationAccessService
                 'role',
                 'branch',
                 'branchGroup',
-                'currentLocation',
+                'currentLocation' => function ($current) use ($viewer): void {
+                    if ($viewer->hasRole('rop')) {
+                        $points = app(\App\Support\RopGroupAccess::class)->scope(\App\Models\UserLocationPoint::query(), $viewer, 'branch_group_id', 'branch_id');
+                        $current->whereIn('location_point_id', $points->select('id'));
+                    }
+                },
                 'locationTrackingSetting',
                 'latestActiveLocationDevice',
             ]);
@@ -58,7 +63,9 @@ class LocationAccessService
                     });
                 }
             }),
-            'rop', 'branch_director' => $viewer->branch_id === null
+            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id')
+                ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop'])),
+            'branch_director' => $viewer->branch_id === null
                 ? $query->whereKey($viewer->id)
                 : $query->where('branch_id', $viewer->branch_id)
                     ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop'])),
@@ -108,6 +115,14 @@ class LocationAccessService
 
     public function applyHistoryScope(Builder $query, User $viewer, User $target): Builder
     {
+        if ($viewer->hasRole('rop')) {
+            $this->assertCanViewModule($viewer);
+            $groups = app(\App\Support\RopGroupAccess::class);
+            $historical = $groups->scope(\App\Models\UserLocationPoint::query()->where('user_id', $target->id), $viewer, 'branch_group_id', 'branch_id');
+            abort_unless($this->canView($viewer, $target) || $historical->exists(), 404, 'NOT_FOUND');
+            return $groups->scope($query, $viewer, 'branch_group_id', 'branch_id');
+        }
+
         $this->assertCanView($viewer, $target);
         $role = $this->role($viewer);
 

@@ -36,9 +36,12 @@ class PropertyLiquidityController extends Controller
             ]]);
         }
 
+        if ($user->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->ensureVisible($user, $property);
         abort_unless($this->access->canView($user, $property), 403, 'Доступ запрещён');
-        $property->loadMissing(['photos', 'agent', 'creator']);
-        $snapshot = $property->liquidity_score !== null ? $property->latestLiquiditySnapshot()->first() : null;
+        $property->loadMissing(['photos', 'type', 'agent', 'creator', 'latestSocialPromotion']);
+        $snapshot = $user->hasRole('rop')
+            ? $this->calculator->previewForRop($property, $user)
+            : ($property->liquidity_score !== null ? $property->latestLiquiditySnapshot()->first() : null);
         $eligibility = $this->calculator->eligibility($property);
 
         return response()->json(['data' => $snapshot ? $this->serialize($property, $snapshot, true) : [
@@ -65,25 +68,32 @@ class PropertyLiquidityController extends Controller
 
         $purpose = $validated['purpose'] ?? 'portfolio';
         $query = $this->scopedActiveQuery($user)
-            ->with(['photos', 'type:id,name,slug', 'agent:id,name,branch_id,branch_group_id', 'creator:id,name,branch_id,branch_group_id', 'latestLiquiditySnapshot'])
-            ->whereHas('latestLiquiditySnapshot');
+            ->with(['photos', 'type:id,name,slug', 'agent:id,name,branch_id,branch_group_id', 'creator:id,name,branch_id,branch_group_id', 'latestSocialPromotion']);
+        $query->select('properties.*');
+        if ($user->hasRole('rop')) {
+            $query->addSelect('scoped_liquidity.snapshot as rop_liquidity_snapshot');
+        } else {
+            $query->with('latestLiquiditySnapshot')->whereHas('latestLiquiditySnapshot');
+        }
 
         if ($purpose === 'social') {
             abort_unless(in_array($user->role?->slug, ['marketing', 'reels_manager', 'rop', 'mop', 'branch_director', 'admin', 'superadmin'], true), 403);
-            $query->whereIn('promotion_eligibility', ['eligible', 'content_needed'])
-                ->orderByDesc('promotion_priority_score');
+            $query->whereIn($this->liquidityColumn($user, 'promotion_eligibility'), ['eligible', 'content_needed'])
+                ->orderByDesc($this->liquidityColumn($user, 'promotion_priority_score'));
         } else {
-            $query->orderByDesc('liquidity_business_priority')->orderByDesc('liquidity_score');
+            $query->orderByDesc('properties.liquidity_business_priority')->orderByDesc($this->liquidityColumn($user, 'liquidity_score'));
         }
 
         foreach (['liquidity_category' => 'category', 'price_position' => 'price_position', 'district_id' => 'district_id', 'agent_id' => 'agent_id', 'promotion_eligibility' => 'promotion_eligibility'] as $column => $key) {
             if (array_key_exists($key, $validated)) {
-                $query->where($column, $validated[$key]);
+                $query->where($this->liquidityColumn($user, $column), $validated[$key]);
             }
         }
 
-        $page = $query->paginate($validated['per_page'] ?? 20);
-        $page->through(fn (Property $property) => $this->serialize($property, $property->latestLiquiditySnapshot, false));
+        $page = $query->orderByDesc('properties.id')->paginate($validated['per_page'] ?? 20);
+        $page->through(fn (Property $property) => $this->serialize($property, $user->hasRole('rop')
+            ? new PropertyLiquiditySnapshot(json_decode($property->rop_liquidity_snapshot, true, flags: JSON_THROW_ON_ERROR))
+            : $property->latestLiquiditySnapshot, false));
 
         return response()->json($page);
     }
@@ -95,19 +105,24 @@ class PropertyLiquidityController extends Controller
         abort_unless($this->access->isInternal($user), 403, 'Доступ запрещён');
         $query = $this->scopedActiveQuery($user);
 
+        $category = $this->liquidityColumn($user, 'liquidity_category');
+        $score = $this->liquidityColumn($user, 'liquidity_score');
+        $position = $this->liquidityColumn($user, 'price_position');
+        $confidence = $this->liquidityColumn($user, 'liquidity_confidence');
+
         $categories = (clone $query)
-            ->selectRaw('liquidity_category, COUNT(*) as aggregate')
-            ->groupBy('liquidity_category')
+            ->selectRaw("{$category} as liquidity_category, COUNT(*) as aggregate")
+            ->groupBy($category)
             ->pluck('aggregate', 'liquidity_category')
             ->map(fn ($value) => (int) $value);
         $byAgent = (clone $query)
             ->leftJoin('users as liquidity_agents', 'liquidity_agents.id', '=', 'properties.agent_id')
-            ->selectRaw('properties.agent_id, COALESCE(liquidity_agents.name, ?) as agent_name, COUNT(*) as total, SUM(CASE WHEN price_position = ? THEN 1 ELSE 0 END) as below_market', ['Не назначен', 'below_market'])
+            ->selectRaw("properties.agent_id, COALESCE(liquidity_agents.name, ?) as agent_name, COUNT(*) as total, SUM(CASE WHEN {$position} = ? THEN 1 ELSE 0 END) as below_market", ['Не назначен', 'below_market'])
             ->groupBy('properties.agent_id', 'liquidity_agents.name')
             ->orderByDesc('total')
             ->get();
         $byDistrict = (clone $query)
-            ->selectRaw('district, COUNT(*) as total, ROUND(AVG(liquidity_score), 1) as average_score')
+            ->selectRaw("properties.district, COUNT(*) as total, ROUND(AVG({$score}), 1) as average_score")
             ->groupBy('district')
             ->orderByDesc('total')
             ->get();
@@ -115,10 +130,10 @@ class PropertyLiquidityController extends Controller
         return response()->json(['data' => [
             'summary' => [
                 'total' => (clone $query)->count(),
-                'below_market' => (clone $query)->where('price_position', 'below_market')->count(),
-                'high_liquidity' => (clone $query)->where('liquidity_score', '>=', config('property-liquidity.liquid_score_threshold', 65))->count(),
-                'low_confidence' => (clone $query)->where('liquidity_confidence', '<', config('property-liquidity.public_badge_minimum_confidence', 45))->count(),
-                'stalled' => (clone $query)->where('liquidity_score', '<', 45)->where('listed_at', '<=', now()->subDays(60))->count(),
+                'below_market' => (clone $query)->where($position, 'below_market')->count(),
+                'high_liquidity' => (clone $query)->where($score, '>=', config('property-liquidity.liquid_score_threshold', 65))->count(),
+                'low_confidence' => (clone $query)->where($confidence, '<', config('property-liquidity.public_badge_minimum_confidence', 45))->count(),
+                'stalled' => (clone $query)->where($score, '<', 45)->where('listed_at', '<=', now()->subDays(60))->count(),
             ],
             'categories' => $categories,
             'by_agent' => $byAgent,
@@ -132,7 +147,17 @@ class PropertyLiquidityController extends Controller
     {
         /** @var User $user */
         $user = $request->user();
+        if ($user->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->ensureVisible($user, $property);
         abort_unless($this->access->isInternal($user) && $this->access->canView($user, $property), 403, 'Доступ запрещён');
+
+        if ($user->hasRole('rop')) {
+            return response()->json(['data' => app(\App\Services\PropertyLiquidity\RopLiquidityResults::class)
+                ->history($user, $property)->get(['score', 'price_delta_pct', 'price_position', 'confidence_score', 'calculated_at'])
+                ->map(function ($row) {
+                    $row->calculated_at = \Illuminate\Support\Carbon::parse($row->calculated_at)->toJSON();
+                    return $row;
+                })]);
+        }
 
         return response()->json(['data' => $property->liquiditySnapshots()
             ->latest('calculated_at')
@@ -180,36 +205,38 @@ class PropertyLiquidityController extends Controller
 
     public function updateBusinessPriority(Request $request, Property $property)
     {
-        /** @var User $user */
-        $user = $request->user();
-        abort_unless($this->access->canSetBusinessPriority($user) && $this->access->canView($user, $property), 403, 'Доступ запрещён');
         $data = $request->validate([
             'enabled' => ['required', 'boolean'],
             'comment' => ['required', 'string', 'min:3', 'max:1000'],
         ]);
-        $changedAt = now();
+        return DB::transaction(function () use ($request, $property, $data) {
+            [$user, $property] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($request->user(), $property, null, null);
+            if ($user->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->ensureVisible($user, $property);
+            abort_unless($this->access->canSetBusinessPriority($user) && $this->access->canView($user, $property), 403, 'Доступ запрещён');
+            $changedAt = now();
 
-        $property->updateQuietly([
-            'liquidity_business_priority' => $data['enabled'],
-            'liquidity_business_priority_comment' => $data['comment'],
-            'liquidity_business_priority_by' => $user->id,
-            'liquidity_business_priority_at' => $changedAt,
-        ]);
-        DB::table('property_liquidity_priority_logs')->insert([
-            'property_id' => $property->id,
-            'enabled' => $data['enabled'],
-            'comment' => $data['comment'],
-            'changed_by' => $user->id,
-            'created_at' => $changedAt,
-            'updated_at' => $changedAt,
-        ]);
+            $property->updateQuietly([
+                'liquidity_business_priority' => $data['enabled'],
+                'liquidity_business_priority_comment' => $data['comment'],
+                'liquidity_business_priority_by' => $user->id,
+                'liquidity_business_priority_at' => $changedAt,
+            ]);
+            DB::table('property_liquidity_priority_logs')->insert([
+                'property_id' => $property->id,
+                'enabled' => $data['enabled'],
+                'comment' => $data['comment'],
+                'changed_by' => $user->id,
+                'created_at' => $changedAt,
+                'updated_at' => $changedAt,
+            ]);
 
-        return response()->json(['data' => [
-            'enabled' => (bool) $data['enabled'],
-            'comment' => $data['comment'],
-            'changed_by' => $user->id,
-            'changed_at' => $changedAt->toJSON(),
-        ]]);
+            return response()->json(['data' => [
+                'enabled' => (bool) $data['enabled'],
+                'comment' => $data['comment'],
+                'changed_by' => $user->id,
+                'changed_at' => $changedAt->toJSON(),
+            ]]);
+        });
     }
 
     private function serialize(Property $property, PropertyLiquiditySnapshot $snapshot, bool $detailed): array
@@ -244,10 +271,10 @@ class PropertyLiquidityController extends Controller
             ],
             'interest' => $snapshot->interest,
             'promotion' => [
-                'eligible' => $property->promotion_eligibility === 'eligible',
-                'eligibility' => $property->promotion_eligibility,
-                'priority_score' => $property->promotion_priority_score,
-                'latest' => $property->socialPromotions()->latest()->first(),
+                'eligible' => ($snapshot->exists ? $property->promotion_eligibility : $snapshot->promotion_eligibility) === 'eligible',
+                'eligibility' => $snapshot->exists ? $property->promotion_eligibility : $snapshot->promotion_eligibility,
+                'priority_score' => $snapshot->exists ? $property->promotion_priority_score : $snapshot->promotion_priority_score,
+                'latest' => $property->latestSocialPromotion,
             ],
             'business_priority' => [
                 'enabled' => (bool) $property->liquidity_business_priority,
@@ -280,8 +307,22 @@ class PropertyLiquidityController extends Controller
         return $payload;
     }
 
+    private function liquidityColumn(User $user, string $column): string
+    {
+        $scalars = ['liquidity_score' => 'score', 'liquidity_category' => 'category', 'liquidity_confidence' => 'confidence_score',
+            'price_position' => 'price_position', 'promotion_priority_score' => 'promotion_priority_score', 'promotion_eligibility' => 'promotion_eligibility'];
+        return $user->hasRole('rop') && isset($scalars[$column]) ? 'scoped_liquidity.'.$scalars[$column] : 'properties.'.$column;
+    }
+
     private function scopedActiveQuery(User $user): Builder
     {
+        if ($user->hasRole('rop')) {
+            $results = app(\App\Services\PropertyLiquidity\RopLiquidityResults::class);
+            $results->refresh($user);
+            return Property::query()->joinSub($results->query($user), 'scoped_liquidity',
+                fn ($join) => $join->on('properties.id', '=', 'scoped_liquidity.property_id'));
+        }
+
         $query = Property::query()
             ->publicSearchable()
             ->whereNotNull('liquidity_score')

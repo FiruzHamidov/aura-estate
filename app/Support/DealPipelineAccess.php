@@ -36,7 +36,7 @@ class DealPipelineAccess
 
     public function isBranchManager(?string $roleSlug): bool
     {
-        return in_array($roleSlug, ['branch_director', 'rop'], true);
+        return $roleSlug === 'branch_director';
     }
 
     public function isBranchScopedRole(?string $roleSlug): bool

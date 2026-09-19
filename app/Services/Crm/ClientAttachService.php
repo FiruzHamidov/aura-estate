@@ -82,11 +82,18 @@ class ClientAttachService
             $query->where('clients.branch_id', $authUser->branch_id);
         }
 
+        if ($authUser->hasRole('rop')) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'clients.branch_group_id', 'clients.branch_id');
+        }
+
         return $query->with(['branch', 'branchGroup', 'responsibleAgent']);
     }
 
     public function canAttachClient(User $authUser, Client $client, array $context): bool
     {
+        if ($authUser->hasRole('rop') && ! app(\App\Support\RopGroupAccess::class)->allows($authUser, $client)) {
+            return false;
+        }
         try {
             $resolved = $this->resolveContext($authUser, $context, false);
         } catch (\Throwable) {
@@ -317,6 +324,9 @@ class ClientAttachService
 
     private function canAccessProperty(User $authUser, Property $property): bool
     {
+        if ($authUser->hasRole('rop')) {
+            return app(\App\Support\RopGroupAccess::class)->allows($authUser, $property);
+        }
         $roleSlug = $this->clientAccess->roleSlug($authUser);
 
         if ($this->clientAccess->isPrivilegedRole($roleSlug)) {

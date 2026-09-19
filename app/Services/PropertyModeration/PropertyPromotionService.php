@@ -40,7 +40,7 @@ final class PropertyPromotionService
         abort_unless(in_array($type, [PropertyPromotion::TYPE_VIP, PropertyPromotion::TYPE_URGENT], true), 422);
 
         return DB::transaction(function () use ($property, $actor, $type, $comment, $requestedDays, $expectedVersion): PropertyPromotion {
-            $lockedProperty = Property::query()->lockForUpdate()->findOrFail($property->id);
+            [$actor, $lockedProperty] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, $property);
             abort_if((int) $lockedProperty->moderation_version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
             abort_unless($this->access->canEdit($actor, $lockedProperty), 403, 'PROMOTION_PERMISSION_DENIED');
             abort_unless(in_array($lockedProperty->publication_status, ['published', 'pending'], true), 409, 'PROMOTION_BLOCKED_BY_MODERATION');
@@ -74,7 +74,7 @@ final class PropertyPromotionService
     public function approve(PropertyPromotion $promotion, User $actor, int $days, ?string $comment, ?int $expectedVersion = null): PropertyPromotion
     {
         return DB::transaction(function () use ($promotion, $actor, $days, $comment, $expectedVersion): PropertyPromotion {
-            $property = Property::query()->lockForUpdate()->findOrFail($promotion->property_id);
+            [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $promotion->property_id);
             $promotion = PropertyPromotion::query()->lockForUpdate()->findOrFail($promotion->id);
             $promotion->setRelation('property', $property);
             abort_unless($promotion->status === PropertyPromotion::STATUS_REQUESTED, 409, 'PROMOTION_NOT_REQUESTED');
@@ -109,7 +109,7 @@ final class PropertyPromotionService
     public function reject(PropertyPromotion $promotion, User $actor, string $comment, ?int $expectedVersion = null): PropertyPromotion
     {
         return DB::transaction(function () use ($promotion, $actor, $comment, $expectedVersion): PropertyPromotion {
-            $property = Property::query()->lockForUpdate()->findOrFail($promotion->property_id);
+            [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $promotion->property_id);
             $promotion = PropertyPromotion::query()->lockForUpdate()->findOrFail($promotion->id);
             $promotion->setRelation('property', $property);
             abort_unless($promotion->status === PropertyPromotion::STATUS_REQUESTED, 409, 'PROMOTION_NOT_REQUESTED');
@@ -133,7 +133,7 @@ final class PropertyPromotionService
     public function revoke(PropertyPromotion $promotion, User $actor, string $comment, ?int $expectedVersion = null): PropertyPromotion
     {
         return DB::transaction(function () use ($promotion, $actor, $comment, $expectedVersion): PropertyPromotion {
-            $property = Property::query()->lockForUpdate()->findOrFail($promotion->property_id);
+            [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $promotion->property_id);
             $promotion = PropertyPromotion::query()->lockForUpdate()->findOrFail($promotion->id);
             $promotion->setRelation('property', $property);
             abort_unless(in_array($promotion->status, [PropertyPromotion::STATUS_ACTIVE, PropertyPromotion::STATUS_REQUESTED], true), 409, 'PROMOTION_NOT_ACTIVE');

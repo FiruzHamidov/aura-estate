@@ -32,6 +32,13 @@ return [
 
     'disks' => [
 
+        'external_requests' => [
+            'driver' => 'local',
+            'root' => storage_path('app/external-requests-private'),
+            'visibility' => 'private',
+            'throw' => true,
+        ],
+
         'residential' => [
             'driver' => 'local',
             'root' => env('RESIDENTIAL_MEDIA_ROOT', storage_path('app/residential-private')),

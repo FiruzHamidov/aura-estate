@@ -24,6 +24,7 @@ class Reel extends Model
     public const TRANSCODE_FAILED = 'failed';
 
     protected $fillable = [
+        'branch_group_id',
         'property_id',
         'created_by',
         'title',

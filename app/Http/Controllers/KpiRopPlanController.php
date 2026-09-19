@@ -22,20 +22,27 @@ class KpiRopPlanController extends Controller
     public function index(Request $request): JsonResponse
     {
         $validated = $request->validate([
+            'page' => 'sometimes|integer|min:1',
+            'per_page' => 'sometimes|integer|min:1|max:100',
             'month' => ['required', 'regex:/^\d{4}-(0[1-9]|1[0-2])$/'],
             'role' => ['nullable', Rule::in(['agent', 'intern', 'mop', 'rop'])],
             'branch_id' => 'nullable|integer|exists:branches,id',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
         ]);
 
-        $data = $this->service->list($this->authUser(), $validated)->values();
+        $page = $this->service->list($this->authUser(), $validated);
+        $data = $page->getCollection()->values();
 
         return response()->json([
             'data' => $data,
             'plans' => $data,
             'source' => 'rop_plan',
             'meta' => [
-                'exists' => $data->isNotEmpty(),
+                'exists' => $page->total() > 0,
+                'page' => $page->currentPage(),
+                'per_page' => $page->perPage(),
+                'total' => $page->total(),
+                'last_page' => $page->lastPage(),
                 'source' => 'rop_plan',
                 'storage_unit' => 'monthly',
             ],

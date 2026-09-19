@@ -7,9 +7,12 @@ use Illuminate\Database\Eloquent\Model;
 
 class CrmTask extends Model
 {
+    use \App\Models\Concerns\ProjectsRopRelations;
+
     use HasFactory;
 
     protected $fillable = [
+        'branch_group_id',
         'task_type_id',
         'assignee_id',
         'creator_id',

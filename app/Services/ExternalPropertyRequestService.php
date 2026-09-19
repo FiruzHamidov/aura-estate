@@ -30,6 +30,8 @@ class ExternalPropertyRequestService
     public function scopedInternalQuery(User $user): Builder
     {
         $user->loadMissing('role');
+        // External-agent management has no defined ROP employee scope in this release.
+        abort_if($user->hasRole('rop'), 403, 'FORBIDDEN_ACTION');
 
         $query = ExternalPropertyRequest::query()
             ->with([
@@ -53,7 +55,7 @@ class ExternalPropertyRequestService
             return $query->where('branch_group_id', $user->branch_group_id);
         }
 
-        if ($user->hasRole('rop') || $user->hasRole('branch_director')) {
+        if ($user->hasRole('branch_director')) {
             if (empty($user->branch_id)) {
                 return $query->whereRaw('1 = 0');
             }
@@ -534,10 +536,16 @@ class ExternalPropertyRequestService
         foreach ($request->photos()->orderBy('position')->orderBy('id')->get() as $index => $photo) {
             $targetPath = $photo->file_path;
 
-            if (Storage::disk('public')->exists($photo->file_path)) {
+            $source = Storage::disk(app(ExternalRequestMedia::class)->disk($photo));
+            if ($source->exists($photo->file_path)) {
                 $extension = pathinfo($photo->file_path, PATHINFO_EXTENSION) ?: 'jpg';
                 $targetPath = 'properties/external-'.$request->id.'-'.$photo->id.'-'.uniqid('', true).'.'.$extension;
-                Storage::disk('public')->copy($photo->file_path, $targetPath);
+                $stream = $source->readStream($photo->file_path);
+                try {
+                    abort_unless(Storage::disk('public')->writeStream($targetPath, $stream), 500, 'PHOTO_COPY_FAILED');
+                } finally {
+                    if (is_resource($stream)) fclose($stream);
+                }
             }
 
             PropertyPhoto::query()->create([

@@ -8,7 +8,10 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class AttendanceEvent extends Model
 {
+    use \App\Models\Concerns\ProjectsRopRelations;
+
     protected $fillable = [
+        'role_slug',
         'raw_event_id', 'user_id', 'device_id', 'branch_id', 'branch_group_id', 'device_user_id',
         'event_type', 'occurred_at', 'verification_method', 'direction', 'is_duplicate', 'meta',
     ];

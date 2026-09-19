@@ -10,6 +10,8 @@ use Illuminate\Support\Facades\Schema;
 
 class Property extends Model
 {
+    use \App\Models\Concerns\ProjectsRopRelations;
+
     use HasFactory;
 
     public const LISTING_CONTENT_FIELDS = [
@@ -331,6 +333,8 @@ class Property extends Model
         return $this->hasOne(PropertyLiquiditySnapshot::class)->latestOfMany('calculated_at');
     }
 
+
+
     public function socialPromotions()
     {
         return $this->hasMany(PropertySocialPromotion::class);
@@ -482,12 +486,14 @@ class Property extends Model
 
     public function activePromotion()
     {
-        return $this->hasOne(PropertyPromotion::class)->currentlyActive()->latestOfMany('starts_at');
+        return $this->hasOne(PropertyPromotion::class)->currentlyActive()
+            ->whereHas('property', fn (Builder $properties) => $properties->publicSearchable())
+            ->latestOfMany('starts_at');
     }
 
     public function getListingTypeAttribute($value): string
     {
-        if (! Schema::hasTable('property_promotions') || ! $this->exists) {
+        if (! $this->exists || (! $this->relationLoaded('activePromotion') && ! Schema::hasTable('property_promotions'))) {
             return (string) ($value ?: 'regular');
         }
 
@@ -496,8 +502,7 @@ class Property extends Model
             : $this->activePromotion()->first();
 
         if (! $promotion || ! $promotion->starts_at || ! $promotion->ends_at
-            || $promotion->starts_at->isFuture() || $promotion->ends_at->isPast()
-            || ! static::query()->publicSearchable()->whereKey($this->id)->exists()) {
+            || $promotion->starts_at->isFuture() || $promotion->ends_at->isPast()) {
             return 'regular';
         }
 
@@ -549,6 +554,8 @@ class Property extends Model
         return $query->whereNotNull('sold_at')
             ->whereIn('moderation_status', ['sold', 'rented', 'sold_by_owner']);
     }
+
+
 
     public function scopePublicSearchable(Builder $query): Builder
     {

@@ -76,6 +76,7 @@ class KpiDailySupervisorScopeFeatureTest extends TestCase
             $t->id(); $t->morphs('tokenable'); $t->string('name'); $t->string('token', 64)->unique();
             $t->text('abilities')->nullable(); $t->timestamp('last_used_at')->nullable(); $t->timestamp('expires_at')->nullable(); $t->timestamps();
         });
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
     }
 
     public function test_mop_cannot_read_or_edit_other_users_reports(): void
@@ -106,7 +107,7 @@ class KpiDailySupervisorScopeFeatureTest extends TestCase
             ->assertJsonPath('code', 'KPI_FORBIDDEN_SCOPE');
     }
 
-    public function test_rop_can_read_and_edit_mop_in_same_branch_and_forbidden_for_other_branch(): void
+    public function test_rop_can_read_and_edit_mop_in_assigned_group_and_denies_other_branch(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-05-05 12:00:00', 'Asia/Dushanbe'));
         [$users] = $this->seedContext();
@@ -126,8 +127,7 @@ class KpiDailySupervisorScopeFeatureTest extends TestCase
         ])->assertOk()->assertJsonPath('manual.calls', 21);
 
         $this->getJson('/api/kpi/daily/report?date=2026-05-05&employee_id='.$users['mop_b1']->id)
-            ->assertStatus(403)
-            ->assertJsonPath('code', 'KPI_FORBIDDEN_SCOPE');
+            ->assertNotFound();
     }
 
     public function test_supervisor_update_rejects_unknown_kpi_like_key(): void
@@ -201,6 +201,8 @@ class KpiDailySupervisorScopeFeatureTest extends TestCase
             'agent_b1' => $this->u('Agent B1', $roles['agent'], $branchB, $groupB1),
         ];
 
+        $users['rop_a']->supervisedGroups()->attach($groupA1->id);
+
         $reports = [
             'agent_a1' => $this->r($users['agent_a1']),
             'mop_a1' => $this->r($users['mop_a1']),
@@ -228,6 +230,7 @@ class KpiDailySupervisorScopeFeatureTest extends TestCase
         return (int) DailyReport::query()->create([
             'user_id' => $user->id,
             'role_slug' => $user->role?->slug,
+            'branch_group_id' => $user->branch_group_id,
             'report_date' => '2026-05-05',
             'ad_count' => 1,
             'calls_count' => 2,

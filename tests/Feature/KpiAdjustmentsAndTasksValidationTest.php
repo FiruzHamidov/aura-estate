@@ -118,6 +118,7 @@ class KpiAdjustmentsAndTasksValidationTest extends TestCase
         });
 
         Schema::create('kpi_adjustment_logs', function (Blueprint $table) {
+            $table->unsignedBigInteger('branch_group_id')->nullable();
             $table->id();
             $table->string('period_type', 16);
             $table->string('period_key', 32);

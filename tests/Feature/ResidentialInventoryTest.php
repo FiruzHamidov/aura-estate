@@ -481,7 +481,7 @@ class ResidentialInventoryTest extends TestCase
     public function test_clients_hr_and_accountants_have_no_mutation_or_admin_read_access(): void
     {
         $building = $this->building();
-        foreach (['client', 'hr', 'accountant'] as $role) {
+        foreach (['client', 'hr', 'accountant', 'rop'] as $role) {
             Sanctum::actingAs($this->actor($role));
             $this->postJson('/api/new-buildings', ['title' => 'Нет'])->assertForbidden();
             $this->getJson('/api/admin/new-buildings/'.$building->id)->assertForbidden();
@@ -495,7 +495,7 @@ class ResidentialInventoryTest extends TestCase
         $branch = DB::table('branches')->insertGetId(['name' => 'A']);
         $otherBranch = DB::table('branches')->insertGetId(['name' => 'B']);
         $location = DB::table('locations')->insertGetId(['city' => 'Душанбе', 'district' => 'Центр']);
-        foreach (['rop', 'branch_director'] as $role) {
+        foreach (['branch_director'] as $role) {
             $actor = $this->actor($role, $branch);
             Sanctum::actingAs($actor);
             $building = $this->building(['publication_status' => 'pending', 'branch_id' => $branch, 'responsible_agent_id' => $actor->id, 'location_id' => $location, 'address' => 'Адрес']);

@@ -320,9 +320,14 @@ class DealPipelineController extends Controller
         $validated = $request->validate([
             'search' => 'nullable|string',
             'responsible_agent_id' => 'nullable|integer|exists:users,id',
-            'client_id' => 'nullable|integer|exists:clients,id',
-            'lead_id' => 'nullable|integer|exists:leads,id',
+            'client_id' => $authUser->hasRole('rop') ? 'nullable|integer|min:1' : 'nullable|integer|exists:clients,id',
+            'lead_id' => $authUser->hasRole('rop') ? 'nullable|integer|min:1' : 'nullable|integer|exists:leads,id',
         ]);
+        if ($authUser->hasRole('rop')) {
+            foreach (['client_id' => \App\Models\Client::class, 'lead_id' => \App\Models\Lead::class] as $field => $model) {
+                if (! empty($validated[$field])) app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $model::findOrFail($validated[$field]));
+            }
+        }
 
         $dealsQuery = $this->dealAccess->visibleQuery($authUser)
             ->where('pipeline_id', $dealPipeline->id)
@@ -331,11 +336,11 @@ class DealPipelineController extends Controller
 
         if (! empty($validated['search'])) {
             $term = trim($validated['search']);
-            $dealsQuery->where(function ($builder) use ($term) {
+            $dealsQuery->where(function ($builder) use ($term, $authUser) {
                 $builder
                     ->where('title', 'like', '%'.$term.'%')
-                    ->orWhereHas('client', fn ($query) => $query->where('full_name', 'like', '%'.$term.'%'))
-                    ->orWhereHas('lead', fn ($query) => $query->where('full_name', 'like', '%'.$term.'%'));
+                    ->orWhereHas('client', fn ($query) => $query->when($authUser->hasRole('rop'), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'clients.branch_group_id', 'clients.branch_id'))->where('full_name', 'like', '%'.$term.'%'))
+                    ->orWhereHas('lead', fn ($query) => $query->when($authUser->hasRole('rop'), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'leads.branch_group_id', 'leads.branch_id'))->where('full_name', 'like', '%'.$term.'%'));
             });
         }
 

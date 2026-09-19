@@ -7,10 +7,13 @@ use Illuminate\Database\Eloquent\Model;
 
 class Booking extends Model
 {
+    use \App\Models\Concerns\ProjectsRopRelations;
+
     use HasFactory;
 
 
     protected $fillable = [
+        'branch_group_id',
         'property_id',
         'agent_id',
         'client_id',

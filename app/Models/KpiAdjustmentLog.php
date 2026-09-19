@@ -10,6 +10,7 @@ class KpiAdjustmentLog extends Model
     use HasFactory;
 
     protected $fillable = [
+        'branch_group_id',
         'period_type',
         'period_key',
         'entity_id',

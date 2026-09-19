@@ -99,6 +99,7 @@ class KpiDailyMyReportStrictApiTest extends TestCase
             $t->timestamp('expires_at')->nullable();
             $t->timestamps();
         });
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
     }
 
     public function test_read_and_submit_strict_daily_my_report_contract(): void
@@ -369,7 +370,7 @@ class KpiDailyMyReportStrictApiTest extends TestCase
         $branch = Branch::firstOrCreate(['name' => 'A']);
         $group = BranchGroup::firstOrCreate(['branch_id' => $branch->id, 'name' => 'A1'], ['contact_visibility_mode' => 'group_only']);
 
-        return User::create([
+        $user = User::create([
             'name' => $roleSlug.' user',
             'phone' => '+992'.random_int(100000000, 999999999),
             'role_id' => $role->id,
@@ -378,5 +379,7 @@ class KpiDailyMyReportStrictApiTest extends TestCase
             'status' => 'active',
             'auth_method' => 'password',
         ]);
+        if ($roleSlug === 'rop') $user->supervisedGroups()->attach($group->id);
+        return $user;
     }
 }

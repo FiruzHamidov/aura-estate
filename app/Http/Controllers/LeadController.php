@@ -16,6 +16,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
@@ -159,6 +160,7 @@ class LeadController extends Controller
     private function validatePayload(Request $request, ?Lead $lead = null): array
     {
         $rules = [
+            'branch_group_id' => ['sometimes', 'nullable', 'integer', 'exists:branch_groups,id'],
             'name' => ($lead ? 'sometimes|' : '').'nullable|string|max:255',
             'full_name' => ($lead ? 'sometimes|' : '').'nullable|string|max:255',
             'phone' => ($lead ? 'sometimes|' : '').'nullable|string|max:50',
@@ -476,46 +478,50 @@ class LeadController extends Controller
 
     public function store(Request $request)
     {
-        $authUser = $this->authUser();
+        return DB::transaction(function () use ($request) {
+            [$authUser] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
+                $this->authUser(), null, $request->integer('responsible_agent_id') ?: null, $request->integer('branch_group_id') ?: null
+            );
 
-        $data = $this->validatePayload($request);
-        $data = $this->normalizeInput($data);
-        $data = $this->applyState($data);
-        $data = $this->leadAccess->normalizeCreationData($data, $authUser);
-        $data['updated_by'] = $authUser->id;
-        $this->leadAccess->validateMutationTargets($authUser, $data);
+            $data = $this->validatePayload($request);
+            $data = $this->normalizeInput($data);
+            $data = $this->applyState($data);
+            $data = $this->leadAccess->normalizeCreationData($data, $authUser);
+            $data['updated_by'] = $authUser->id;
+            $this->leadAccess->validateMutationTargets($authUser, $data);
 
-        $lead = Lead::create($data);
+            $lead = Lead::create($data);
 
-        $this->auditLogger->log(
-            $lead,
-            $authUser,
-            'created',
-            [],
-            Arr::only($lead->getAttributes(), [
-                'full_name',
-                'phone',
-                'email',
-                'source',
-                'branch_id',
-                'responsible_agent_id',
-                'budget',
-                'currency',
-                'status',
-                'tags',
-                'last_contact_result',
-                'next_follow_up_at',
-                'next_activity_at',
-            ]),
-            'Lead created.'
-        );
+            $this->auditLogger->log(
+                $lead,
+                $authUser,
+                'created',
+                [],
+                Arr::only($lead->getAttributes(), [
+                    'full_name',
+                    'phone',
+                    'email',
+                    'source',
+                    'branch_id',
+                    'responsible_agent_id',
+                    'budget',
+                    'currency',
+                    'status',
+                    'tags',
+                    'last_contact_result',
+                    'next_follow_up_at',
+                    'next_activity_at',
+                ]),
+                'Lead created.'
+            );
 
-        $this->notifications->handleLeadCreated($lead->fresh($this->relations()), $authUser);
+            $this->notifications->handleLeadCreated($lead->fresh($this->relations()), $authUser);
 
-        return response()->json(
-            $this->attachDuplicateSummary($lead->load($this->relations())),
-            201
-        );
+            return response()->json(
+                $this->attachDuplicateSummary($lead->load($this->relations())),
+                201
+            );
+        });
     }
 
     public function show(Request $request, Lead $lead)
@@ -537,57 +543,65 @@ class LeadController extends Controller
 
     public function update(Request $request, Lead $lead)
     {
-        $authUser = $this->authUser();
-        $this->leadAccess->ensureVisible($authUser, $lead);
+        return DB::transaction(function () use ($request, $lead) {
+            [$authUser, $lead] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
+                $this->authUser(), $lead, $request->integer('responsible_agent_id') ?: null, $request->integer('branch_group_id') ?: null
+            );
+            $this->leadAccess->ensureVisible($authUser, $lead);
 
-        $data = $this->validatePayload($request, $lead);
-        $data = $this->normalizeInput($data);
-        $data = $this->applyState($data, $lead);
-        $data = $this->leadAccess->normalizeUpdateData($data, $authUser, $lead);
-        $data['updated_by'] = $authUser->id;
-        $this->leadAccess->validateMutationTargets($authUser, $data);
+            $data = $this->validatePayload($request, $lead);
+            $data = $this->normalizeInput($data);
+            $data = $this->applyState($data, $lead);
+            $data = $this->leadAccess->normalizeUpdateData($data, $authUser, $lead);
+            $data['updated_by'] = $authUser->id;
+            $this->leadAccess->validateMutationTargets($authUser, $data);
 
-        $lead->fill($data);
-        $dirty = $lead->getDirty();
+            $lead->fill($data);
+            $dirty = $lead->getDirty();
 
-        if (! empty($dirty)) {
-            $oldValues = Arr::only($lead->getOriginal(), array_keys($dirty));
-            $lead->save();
-            $this->logTypedUpdates($lead, $authUser, $oldValues, $dirty);
-            $this->notifications->handleLeadUpdated($lead->fresh($this->relations()), $authUser, $oldValues, $dirty);
-        }
+            if (! empty($dirty)) {
+                $oldValues = Arr::only($lead->getOriginal(), array_keys($dirty));
+                $lead->save();
+                $this->logTypedUpdates($lead, $authUser, $oldValues, $dirty);
+                $this->notifications->handleLeadUpdated($lead->fresh($this->relations()), $authUser, $oldValues, $dirty);
+            }
 
-        return response()->json(
-            $this->attachDuplicateSummary($lead->fresh($this->relations()))
-        );
+            return response()->json(
+                $this->attachDuplicateSummary($lead->fresh($this->relations()))
+            );
+        });
     }
 
     public function destroy(Lead $lead)
     {
-        $authUser = $this->authUser();
-        $this->leadAccess->ensureVisible($authUser, $lead);
+        return DB::transaction(function () use ($lead) {
+            [$authUser, $lead] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
+                $this->authUser(), $lead, null, null
+            );
+            $this->leadAccess->ensureVisible($authUser, $lead);
 
-        $this->auditLogger->log(
-            $lead,
-            $authUser,
-            'deleted',
-            Arr::only($lead->getAttributes(), [
-                'full_name',
-                'phone',
-                'email',
-                'source',
-                'branch_id',
-                'responsible_agent_id',
-                'status',
-                'client_id',
-            ]),
-            [],
-            'Lead deleted.'
-        );
+            $this->auditLogger->log(
+                $lead,
+                $authUser,
+                'deleted',
+                Arr::only($lead->getAttributes(), [
+                    'full_name',
+                    'phone',
+                    'email',
+                    'source',
+                    'branch_id',
+                    'responsible_agent_id',
+                    'status',
+                    'client_id',
+                ]),
+                [],
+                'Lead deleted.'
+            );
 
-        $lead->delete();
+            $lead->delete();
 
-        return response()->json(['message' => 'Lead deleted']);
+            return response()->json(['message' => 'Lead deleted']);
+        });
     }
 
     public function convert(Lead $lead)

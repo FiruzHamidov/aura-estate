@@ -111,9 +111,9 @@ Route::get('/properties/{property}', [PropertyController::class, 'show'])->where
 Route::get('/properties/{property}/similar', [PropertyController::class, 'similar'])->whereNumber('property');
 Route::get('/properties/{property}/liquidity', [PropertyLiquidityController::class, 'show'])->whereNumber('property');
 Route::post('/properties/{property}/view', [PropertyController::class, 'trackView'])->whereNumber('property')->middleware('throttle:30,1');
-Route::get('/properties/{property}/reels', [ReelController::class, 'propertyIndex']);
-Route::get('/reels', [ReelController::class, 'index']);
-Route::get('/reels/{id}', [ReelController::class, 'show'])->whereNumber('id');
+Route::get('/properties/{property}/reels', [ReelController::class, 'propertyIndex'])->middleware('rop.branch.scope');
+Route::get('/reels', [ReelController::class, 'index'])->middleware('rop.branch.scope');
+Route::get('/reels/{id}', [ReelController::class, 'show'])->whereNumber('id')->middleware('rop.branch.scope');
 Route::post('/reels/{reel}/view', [ReelController::class, 'trackView'])->middleware('throttle:30,1');
 Route::post('/reels/{reel}/like', [ReelController::class, 'like'])->middleware('throttle:60,1');
 Route::delete('/reels/{reel}/like', [ReelController::class, 'unlike'])->middleware('throttle:60,1');
@@ -146,6 +146,16 @@ Route::get('/agents/{agent}/reviews', [ReviewController::class, 'index'])->where
 Route::post('/agents/{agent}/reviews', [ReviewController::class, 'store'])->middleware('throttle:10,1')->whereNumber('agent');
 
 Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
+    Route::get('/external-request-photos/{photo}', [\App\Http\Controllers\ExternalRequestMediaController::class, 'show'])
+        ->whereNumber('photo')->name('external-request-photo');
+    Route::get('/users/{user}/group-transfer', [\App\Http\Controllers\EmployeeGroupTransferController::class, 'preview'])->whereNumber('user');
+    Route::post('/users/{user}/group-transfer', [\App\Http\Controllers\EmployeeGroupTransferController::class, 'store'])->whereNumber('user');
+    Route::get('/group-transfers/{type}/{id}', [\App\Http\Controllers\GroupTransferController::class, 'preview'])->whereNumber('id');
+    Route::post('/group-transfers/{type}/{id}', [\App\Http\Controllers\GroupTransferController::class, 'store'])->whereNumber('id');
+    Route::get('/group-access/review', [\App\Http\Controllers\GroupAccessReviewController::class, 'index']);
+    Route::get('/me/access-scope', [\App\Http\Controllers\RopGroupAccessController::class, 'me']);
+    Route::get('/users/{ropId}/supervised-groups', [\App\Http\Controllers\RopGroupAccessController::class, 'show'])->whereNumber('ropId');
+    Route::put('/users/{ropId}/supervised-groups', [\App\Http\Controllers\RopGroupAccessController::class, 'update'])->whereNumber('ropId');
     Route::prefix('admin/catalogs')->group(function () {
         Route::get('/{catalog}/{item}/usage', [ReferenceCatalogController::class, 'usage'])
             ->where('catalog', '[a-z0-9-]+')
@@ -175,6 +185,7 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         Route::get('/admin/users/{user}/settings', [LocationTrackingController::class, 'settings'])->whereNumber('user');
         Route::patch('/admin/users/{user}/settings', [LocationTrackingController::class, 'updateSettings'])->whereNumber('user');
     });
+
 
     Route::prefix('attendance')->group(function () {
         Route::get('/matrix', [AttendanceWebController::class, 'matrix']);
@@ -316,8 +327,8 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::get('/kpi/daily/my-report', [DailyReportController::class, 'myReport']);
     Route::put('/kpi/daily/my-report/draft', [DailyReportController::class, 'saveMyReportDraft']);
     Route::post('/kpi/daily/my-report', [DailyReportController::class, 'submitMyReport']);
-    Route::get('/kpi/daily/report', [DailyReportController::class, 'scopeReport']);
-    Route::patch('/kpi/daily/report', [DailyReportController::class, 'updateScopeReport']);
+    Route::get('/kpi/daily/report', [DailyReportController::class, 'scopeReport'])->middleware('rop.branch.scope');
+    Route::patch('/kpi/daily/report', [DailyReportController::class, 'updateScopeReport'])->middleware('rop.branch.scope');
 
     Route::get('/user/profile', [UserController::class, 'profile']);
     Route::put('/user/profile', [UserController::class, 'updateProfile']);
@@ -394,8 +405,8 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::get('/crm/tasks/kpi-daily-summary', [KpiModuleController::class, 'crmTaskDailySummary'])->middleware('rop.branch.scope');
     Route::get('/crm/tasks/kpi-weekly-summary', [KpiModuleController::class, 'crmTaskWeeklySummary'])->middleware('rop.branch.scope');
     Route::post('/daily-reports', [DailyReportController::class, 'store']);
-    Route::put('/daily-reports/{dailyReport}', [DailyReportController::class, 'update']);
-    Route::patch('/daily-reports/{dailyReport}', [DailyReportController::class, 'update']);
+    Route::put('/daily-reports/{dailyReport}', [DailyReportController::class, 'update'])->middleware('rop.branch.scope');
+    Route::patch('/daily-reports/{dailyReport}', [DailyReportController::class, 'update'])->middleware('rop.branch.scope');
     Route::post('/telegram/auth/link', [TelegramAuthController::class, 'link']);
     Route::delete('/user/photo', [UserController::class, 'deleteMyPhoto']);
     Route::post('/user/update-password', [UserController::class, 'updatePassword']);
@@ -435,7 +446,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::post('/chat/escalate', [SupportConversationController::class, 'store']);
 
     // Избранное
-    Route::get('/favorites', [FavoriteController::class, 'index']);
+    Route::get('/favorites', [FavoriteController::class, 'index'])->middleware('rop.branch.scope');
     Route::get('/favorites/items', [\App\Http\Controllers\TypedFavoriteController::class, 'index']);
     Route::get('/favorites/keys', [\App\Http\Controllers\TypedFavoriteController::class, 'keys']);
     Route::get('new-buildings/{new_building}/reviews/mine', [\App\Http\Controllers\ResidentialReviewController::class, 'mine']);
@@ -463,8 +474,8 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::put('/favorites/items/{type}/{id}', [\App\Http\Controllers\TypedFavoriteController::class, 'store'])->whereIn('type', ['property', 'new_building', 'developer_unit'])->whereNumber('id');
     Route::delete('/favorites/items/{type}/{id}', [\App\Http\Controllers\TypedFavoriteController::class, 'destroy'])->whereIn('type', ['property', 'new_building', 'developer_unit'])->whereNumber('id');
     Route::post('/favorites/merge', [\App\Http\Controllers\TypedFavoriteController::class, 'merge'])->middleware('throttle:30,1');
-    Route::post('/favorites', [FavoriteController::class, 'store']);
-    Route::delete('/favorites/{property_id}', [FavoriteController::class, 'destroy']);
+    Route::post('/favorites', [FavoriteController::class, 'store'])->middleware('rop.branch.scope');
+    Route::delete('/favorites/{property_id}', [FavoriteController::class, 'destroy'])->middleware('rop.branch.scope');
 
     Route::get('/bookings', [BookingController::class, 'index']);
     Route::get('/bookings/{id}', [BookingController::class, 'show'])->whereNumber('id');
@@ -523,13 +534,13 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         Route::post('properties/{property}/photos', [PropertyPhotoController::class, 'store'])->middleware('moderation.idempotent');
         Route::put('properties/{property}/photos/reorder', [PropertyPhotoController::class, 'reorder'])->middleware('moderation.idempotent');
         Route::delete('properties/{property}/photos/{photo}', [PropertyPhotoController::class, 'destroy'])->whereNumber('photo')->middleware('moderation.idempotent');
-        Route::post('/reels/direct-upload', [ReelController::class, 'initDirectUpload']);
-        Route::post('/reels/{reel}/complete-upload', [ReelController::class, 'completeDirectUpload']);
-        Route::post('/reels', [ReelController::class, 'store']);
-        Route::put('/reels/{reel}', [ReelController::class, 'update']);
-        Route::patch('/reels/{reel}', [ReelController::class, 'update']);
-        Route::patch('/reels/{reel}/publish', [ReelController::class, 'publish']);
-        Route::delete('/reels/{reel}', [ReelController::class, 'destroy']);
+        Route::post('/reels/direct-upload', [ReelController::class, 'initDirectUpload'])->middleware('rop.branch.scope');
+        Route::post('/reels/{reel}/complete-upload', [ReelController::class, 'completeDirectUpload'])->middleware('rop.branch.scope');
+        Route::post('/reels', [ReelController::class, 'store'])->middleware('rop.branch.scope');
+        Route::put('/reels/{reel}', [ReelController::class, 'update'])->middleware('rop.branch.scope');
+        Route::patch('/reels/{reel}', [ReelController::class, 'update'])->middleware('rop.branch.scope');
+        Route::patch('/reels/{reel}/publish', [ReelController::class, 'publish'])->middleware('rop.branch.scope');
+        Route::delete('/reels/{reel}', [ReelController::class, 'destroy'])->middleware('rop.branch.scope');
 
         // Справочники (админ)
         Route::apiResource('property-types', PropertyTypeController::class)->except(['index']);
@@ -551,6 +562,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
 
         Route::apiResource('roles', RoleController::class);
         Route::post('/user/{user}/photo', [UserController::class, 'updatePhoto']);
+        Route::get('/user/{user}/dismissal-preview', [UserController::class, 'dismissalPreview']);
         Route::post('/user/{user}/restore', [UserController::class, 'restore']);
         Route::apiResource('user', UserController::class);
         Route::get('/clients/settings', [ClientController::class, 'settings']);
@@ -670,9 +682,9 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         });
 
         // Подборки внутренней CRM Aura.
-        Route::get('/selections', [SelectionController::class, 'index']);
-        Route::post('/selections', [SelectionController::class, 'store']);
-        Route::get('/selections/{id}', [SelectionController::class, 'show']);
+        Route::get('/selections', [SelectionController::class, 'index'])->middleware('rop.branch.scope');
+        Route::post('/selections', [SelectionController::class, 'store'])->middleware('rop.branch.scope');
+        Route::get('/selections/{id}', [SelectionController::class, 'show'])->middleware('rop.branch.scope');
     });
 });
 

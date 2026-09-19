@@ -69,6 +69,10 @@ class DealAccess
             'primaryProperty',
         ]);
 
+        if ($roleSlug === 'rop') {
+            return app(RopGroupAccess::class)->scope($query, $authUser, 'crm_deals.branch_group_id', 'crm_deals.branch_id');
+        }
+
         if ($this->isPrivilegedRole($roleSlug)) {
             return $query;
         }
@@ -117,6 +121,8 @@ class DealAccess
 
     public function ensureVisible(User $authUser, Deal $deal): void
     {
+        app(RopGroupAccess::class)->ensureVisible($authUser, $deal);
+
         $allowed = $this->visibleQuery($authUser)
             ->whereKey($deal->id)
             ->exists();

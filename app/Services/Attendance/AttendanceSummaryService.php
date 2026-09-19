@@ -20,8 +20,14 @@ final class AttendanceSummaryService
 
     public function recompute(User $user, string $workDate): AttendanceDailySummary
     {
+        $stored = AttendanceDailySummary::query()->where('user_id', $user->id)->whereDate('work_date', $workDate)->first();
         $settings = $this->settings($user);
-        $timezone = $this->timezone($settings);
+        $historicalContext = \Schema::hasColumn('attendance_daily_summaries', 'schedule_snapshot');
+        $scheduleSnapshot = $stored?->schedule_snapshot;
+        $timezone = $scheduleSnapshot['timezone'] ?? $this->timezone($settings);
+        if ($historicalContext && $scheduleSnapshot === null && $workDate === now($timezone)->toDateString()) {
+            $scheduleSnapshot = ['timezone' => $timezone, 'schedule' => $settings?->schedule ?? config('attendance.default_schedule', []), 'holidays' => $settings?->holidays ?? []];
+        }
         $localStart = CarbonImmutable::parse($workDate, $timezone)->startOfDay();
         $localEnd = $localStart->endOfDay();
         $events = AttendanceEvent::query()
@@ -53,17 +59,38 @@ final class AttendanceSummaryService
             $workedMinutes = max(0, $grossMinutes - $this->completedBreakMinutes($events, $firstAt->toImmutable(), $lastAt->toImmutable()));
         }
         $lateMinutes = $this->lateMinutes(
-            $settings?->schedule ?? config('attendance.default_schedule', []),
+            $scheduleSnapshot['schedule'] ?? ($historicalContext ? [] : ($settings?->schedule ?? config('attendance.default_schedule', []))),
             $firstAt?->toImmutable(),
             $localStart
         );
+        if ($historicalContext && $scheduleSnapshot === null) $lateMinutes = (int) ($stored?->late_minutes ?? 0);
         $status = $events->isEmpty()
             ? 'absent'
             : ($firstAt === null || $lastAt === null ? 'incomplete' : ($lateMinutes > 0 ? 'late' : 'present'));
 
+        $groupSnapshot = [];
+        if (\Schema::hasColumn('attendance_daily_summaries', 'branch_group_id')) {
+            $groups = $events->pluck('branch_group_id')->unique();
+            $group = $groups->count() === 1 ? $groups->first() : null;
+            if ($events->isEmpty()) {
+                $group = AttendanceDailySummary::query()->where('user_id', $user->id)->whereDate('work_date', $workDate)->value('branch_group_id');
+                $group ??= app(\App\Services\GroupAccess\HistoricalUserGroup::class)->at($user, $localEnd)['branch_group_id'];
+            }
+            $groupSnapshot = ['branch_group_id' => $group];
+        }
+        if ($historicalContext) {
+            $roles = $events->pluck('role_slug')->unique();
+            $role = $roles->count() === 1 ? $roles->first() : null;
+            if ($events->isEmpty()) {
+                $role = $stored?->role_slug ?? app(\App\Services\GroupAccess\HistoricalUserGroup::class)->roleAt($user, $localEnd);
+            }
+            $groupSnapshot += ['role_slug' => $role, 'schedule_snapshot' => $scheduleSnapshot];
+        }
+
         return AttendanceDailySummary::query()->updateOrCreate(
             ['user_id' => $user->id, 'work_date' => $workDate],
             [
+                ...$groupSnapshot,
                 'first_in_at' => $firstAt,
                 'last_out_at' => $lastAt,
                 'first_event_id' => $first?->id,
@@ -87,13 +114,14 @@ final class AttendanceSummaryService
             return false;
         }
         $settings = $this->settings($user);
-        $timezone = $this->timezone($settings);
+        $snapshot = AttendanceDailySummary::query()->where('user_id', $user->id)->whereDate('work_date', $workDate)->first()?->schedule_snapshot;
+        $timezone = $snapshot['timezone'] ?? $this->timezone($settings);
         $day = CarbonImmutable::parse($workDate, $timezone);
         if ($settings instanceof AttendanceWorkSchedule && in_array($day->toDateString(), $settings->holidays ?? [], true)) {
             return false;
         }
 
-        return is_array(($settings?->schedule ?? config('attendance.default_schedule', []))[(string) $day->dayOfWeekIso] ?? null);
+        return is_array(($snapshot['schedule'] ?? $settings?->schedule ?? config('attendance.default_schedule', []))[(string) $day->dayOfWeekIso] ?? null);
     }
 
     public function timezoneFor(User $user): string

@@ -10,6 +10,8 @@ use Illuminate\Support\Facades\Schema;
 
 class ClientNeed extends Model
 {
+    use \App\Models\Concerns\ProjectsRopRelations;
+
     use HasFactory, SoftDeletes;
 
     protected $appends = [

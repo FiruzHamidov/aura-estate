@@ -20,6 +20,8 @@ use Illuminate\Validation\ValidationException;
 
 class DailyReportController extends Controller
 {
+    private ?\Illuminate\Support\Collection $pagePlans = null;
+
     private const STRICT_KPI_KEYS = ['objects', 'shows', 'ads', 'calls', 'sales'];
 
     public function __construct(
@@ -36,8 +38,15 @@ class DailyReportController extends Controller
         $payload = $this->dailyReports->reportStatusPayload($user, $request->input('report_date'));
         $reportDate = (string) ($payload['report_date'] ?? $this->dailyReports->defaultReportDate($user));
         $report = $payload['report'] ?? null;
-        $workflow = $this->myReportWorkflow($user, $reportDate, $report instanceof DailyReport ? $report : null);
-        $payload['can_edit_submitted'] = $this->canEditSubmittedDailyReport($user, $user, $reportDate, $report);
+        if ($report instanceof DailyReport) {
+            app(\App\Support\RopGroupAccess::class)->ensureVisible($user, $report);
+            if ($this->preserveReportSnapshot($user, $report, $reportDate)) {
+                $payload['auto'] = $report->only(['ad_count', 'calls_count', 'meetings_count', 'shows_count', 'new_clients_count', 'new_properties_count', 'deals_count', 'sales_count']);
+            }
+        }
+        $context = $this->reportContextUser($user, $report);
+        $workflow = $this->myReportWorkflow($context, $reportDate, $report instanceof DailyReport ? $report : null);
+        $payload['can_edit_submitted'] = $this->canEditSubmittedDailyReport($user, $context, $reportDate, $report);
         $payload['report_state'] = $workflow['state'];
         $payload['can_save_draft'] = $workflow['can_save_draft'];
         $payload['can_submit'] = $workflow['can_submit'];
@@ -66,7 +75,7 @@ class DailyReportController extends Controller
         ]);
 
         $query = DailyReport::query()
-            ->with(['user.role', 'user.branch', 'user.branchGroup']);
+            ->with(['user.role', 'user.branch', 'user.branchGroup', 'branchGroup', 'historicalRole']);
 
         $this->validateScopeFilters($validated, $authUser);
         $this->applyVisibilityScope($query, $authUser);
@@ -100,11 +109,20 @@ class DailyReportController extends Controller
                 ? (int) $authUser->branch_id
                 : (int) $validated['branch_id'];
 
-            $query->whereHas('user', fn (Builder $userQuery) => $userQuery->where('branch_id', $effectiveBranchId));
+            if ($authUser->hasRole('rop')) {
+                $query->whereIn('daily_reports.branch_group_id', \App\Models\BranchGroup::query()
+                    ->where('branch_id', $effectiveBranchId)->select('id'));
+            } else {
+                $query->whereHas('user', fn (Builder $userQuery) => $userQuery->where('branch_id', $effectiveBranchId));
+            }
         }
 
         if (! empty($validated['branch_group_id'])) {
-            $query->whereHas('user', fn (Builder $userQuery) => $userQuery->where('branch_group_id', $validated['branch_group_id']));
+            if ($authUser->hasRole('rop')) {
+                $query->where('daily_reports.branch_group_id', $validated['branch_group_id']);
+            } else {
+                $query->whereHas('user', fn (Builder $userQuery) => $userQuery->where('branch_group_id', $validated['branch_group_id']));
+            }
         }
 
         /** @var LengthAwarePaginator $paginator */
@@ -114,13 +132,26 @@ class DailyReportController extends Controller
             ->paginate((int) ($validated['per_page'] ?? 15))
             ->withQueryString();
 
-        $paginator->setCollection(
-            $paginator->getCollection()->map(function (DailyReport $report) {
-                return $this->serializeTeamReportRow($report);
-            })
-        );
+        $this->serializeReportPage($paginator);
 
         return response()->json($paginator);
+    }
+
+    private function serializeReportPage(LengthAwarePaginator $paginator): void
+    {
+        $contexts = $paginator->getCollection()->filter(fn (DailyReport $report) => $report->user)
+            ->map(fn (DailyReport $report) => [$this->reportContextUser($report->user, $report), $report->report_date->toDateString()])->all();
+        $this->pagePlans = $this->loadReportPlans($contexts);
+        try {
+            $paginator->setCollection(
+                $paginator->getCollection()->map(function (DailyReport $report) {
+                    return $this->serializeTeamReportRow($report);
+                })
+            );
+        } finally {
+            $this->pagePlans = null;
+        }
+
     }
 
     public function my(Request $request)
@@ -132,9 +163,12 @@ class DailyReportController extends Controller
             'per_page' => 'nullable|integer|min:1|max:100',
         ]);
 
-        $query = DailyReport::query()
-            ->where('user_id', $this->authUser()->id)
+        $actor = $this->authUser();
+        $query = DailyReport::query()->with(['user.role', 'user.branch', 'user.branchGroup', 'branchGroup', 'historicalRole'])
+            ->where('user_id', $actor->id)
             ->orderByDesc('report_date');
+
+        if ($actor->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'daily_reports.branch_group_id');
 
         if (! empty($validated['date_from'])) {
             $query->whereDate('report_date', '>=', $validated['date_from']);
@@ -145,9 +179,7 @@ class DailyReportController extends Controller
         }
 
         $paginator = $query->paginate((int) ($validated['per_page'] ?? 15))->withQueryString();
-        $paginator->setCollection(
-            $paginator->getCollection()->map(fn (DailyReport $report) => $this->serializeTeamReportRow($report))
-        );
+        $this->serializeReportPage($paginator);
 
         return response()->json($paginator);
     }
@@ -162,9 +194,15 @@ class DailyReportController extends Controller
             ->whereDate('report_date', $date)
             ->first();
 
+        if ($report) app(\App\Support\RopGroupAccess::class)->ensureVisible($user, $report);
+        $context = $this->reportContextUser($user, $report);
+        $auto = $this->preserveReportSnapshot($user, $report, $date)
+            ? $report->only(['ad_count', 'calls_count', 'meetings_count', 'shows_count', 'new_clients_count', 'new_properties_count', 'deals_count', 'sales_count'])
+            : $this->dailyReports->autoMetrics($context, $date);
+
         return response()->json([
             'report_date' => $date,
-            'auto' => $this->dailyReports->autoMetrics($user, $date),
+            'auto' => $auto,
             'report' => $report,
             'manual' => [
                 'ads' => $report?->ad_count ?? 0,
@@ -172,7 +210,7 @@ class DailyReportController extends Controller
                 'comment' => $report?->comment ?? '',
                 'plans_for_tomorrow' => $report?->plans_for_tomorrow ?? '',
             ],
-            'can_edit_submitted' => $this->canEditSubmittedDailyReport($user, $user, $date, $report),
+            'can_edit_submitted' => $this->canEditSubmittedDailyReport($user, $context, $date, $report),
         ]);
     }
 
@@ -191,10 +229,15 @@ class DailyReportController extends Controller
             ->whereDate('report_date', $date)
             ->first();
 
-        $auto = $this->dailyReports->autoMetrics($user, $date);
+        if ($report) app(\App\Support\RopGroupAccess::class)->ensureVisible($user, $report);
+        $preserve = $this->preserveReportSnapshot($user, $report, $date);
+        $context = $this->reportContextUser($user, $report);
+        $auto = $preserve
+            ? $report->only(['ad_count', 'calls_count', 'meetings_count', 'shows_count', 'new_clients_count', 'new_properties_count', 'deals_count', 'sales_count'])
+            : $this->dailyReports->autoMetrics($context, $date);
 
-        $metricsBundle = $this->buildMetricsPayloadBundle($user, $date, $report, $auto);
-        $workflow = $this->myReportWorkflow($user, $date, $report);
+        $metricsBundle = $this->buildMetricsPayloadBundle($context, $date, $report, $auto);
+        $workflow = $this->myReportWorkflow($context, $date, $report);
 
         return response()->json([
             'report_date' => $date,
@@ -214,10 +257,10 @@ class DailyReportController extends Controller
             'submit_available_at' => $workflow['submit_available_at'],
             'auto_metrics_live_until' => $workflow['auto_metrics_live_until'],
             'meta' => [
-                'locked' => $this->isDateLocked($user, $date),
+                'locked' => $this->isDateLocked($context, $date),
                 'debug' => [
                     'plan_resolution' => $metricsBundle['plan_resolution_debug'],
-                    'auto_metrics' => $this->dailyReports->autoMetricsDebug($user, $date, $auto),
+                    'auto_metrics' => $this->dailyReports->autoMetricsDebug($context, $date, $auto, $preserve),
                 ],
             ],
         ]);
@@ -225,80 +268,43 @@ class DailyReportController extends Controller
 
     public function saveMyReportDraft(Request $request)
     {
-        $user = $this->authUser();
-        $this->ensureDailyMyReportEditRole($user);
-        $this->validateStrictMetricKeys($request);
-
-        $validated = $this->validateMyReportPayload($request);
-        $reportDate = (string) $validated['report_date'];
-        $this->ensureCanEditByPeriodRules($user, $user, $reportDate, null, false);
-
-        $existing = DailyReport::query()
-            ->where('user_id', $user->id)
-            ->whereDate('report_date', $reportDate)
-            ->first();
-
-        if ($existing?->submitted_at !== null) {
-            $this->denyKpi('KPI_SUBMITTED_EDIT_FORBIDDEN', 'Submitted daily report cannot be edited by current settings.');
-        }
-
-        $payload = $this->myReportPersistencePayload($user, $reportDate, $validated);
-        $report = $existing ?? new DailyReport([
-            'user_id' => $user->id,
-            'report_date' => $reportDate,
-        ]);
-        $report->fill(array_merge($payload, ['submitted_at' => null]));
-        $report->save();
-
-        return $this->myReport(new Request(['date' => $reportDate]));
+        return $this->persistMyReport($request, false);
     }
 
     public function submitMyReport(Request $request)
     {
-        $user = $this->authUser();
-        $this->ensureDailyMyReportEditRole($user);
+        return $this->persistMyReport($request, true);
+    }
 
+    private function persistMyReport(Request $request, bool $submit)
+    {
         $this->validateStrictMetricKeys($request);
-
         $validated = $this->validateMyReportPayload($request);
-
         $reportDate = (string) $validated['report_date'];
-        // For self-submission, allow submitting reports for any date (subject to lock rules).
-        $this->ensureCanEditByPeriodRules($user, $user, $reportDate, null, false);
-        $workflow = $this->myReportWorkflow($user, $reportDate, null);
-        if (! $workflow['can_submit']) {
-            $this->denyKpi(
-                'KPI_REPORT_SUBMIT_TOO_EARLY',
-                'Today\'s daily report can be submitted after the configured start time.',
-                422,
-                ['submit_available_at' => $workflow['submit_available_at']]
-            );
-        }
-
-        $payload = array_merge(
-            $this->myReportPersistencePayload($user, $reportDate, $validated),
-            ['submitted_at' => now()]
-        );
-
-        $existing = DailyReport::query()
-            ->where('user_id', $user->id)
-            ->whereDate('report_date', $reportDate)
-            ->first();
-
-        if ($existing?->submitted_at !== null) {
-            $this->denyKpi('KPI_SUBMITTED_EDIT_FORBIDDEN', 'Submitted daily report cannot be edited by current settings.');
-        }
-
-        DB::transaction(function () use ($existing, $payload, $user, $reportDate): void {
-            $report = $existing ?? new DailyReport([
-                'user_id' => $user->id,
-                'report_date' => $reportDate,
-            ]);
-            $report->fill($payload);
+        return DB::transaction(function () use ($validated, $reportDate, $submit) {
+            $user = $this->authUser();
+            [$user, $existing] = $this->lockOwnReport($user, $reportDate);
+            $this->ensureDailyMyReportEditRole($user);
+            $access = app(\App\Support\RopGroupAccess::class);
+            if ($existing) $access->ensureVisible($user, $existing);
+            $context = $this->reportContextUser($user, $existing);
+            $this->ensureCanEditByPeriodRules($user, $context, $reportDate, $existing, false);
+            if ($existing?->submitted_at !== null) {
+                $this->denyKpi('KPI_SUBMITTED_EDIT_FORBIDDEN', 'Submitted daily report cannot be edited by current settings.');
+            }
+            $workflow = $this->myReportWorkflow($context, $reportDate, $existing);
+            if ($submit && ! $workflow['can_submit']) {
+                $this->denyKpi('KPI_REPORT_SUBMIT_TOO_EARLY',
+                    "Today's daily report can be submitted after the configured start time.", 422,
+                    ['submit_available_at' => $workflow['submit_available_at']]);
+            }
+            $report = $existing ?? new DailyReport(['user_id' => $user->id, 'report_date' => $reportDate]);
+            $this->assignNewSelfReportGroup($user, $report, $reportDate);
+            $report->fill(array_merge($this->myReportPersistencePayload($user, $reportDate, $validated, $existing),
+                ['submitted_at' => $submit ? now() : null]));
             $report->save();
+            return $this->myReport(new Request(['date' => $reportDate]));
         });
-
-        return $this->myReport(new Request(['date' => $reportDate]));
     }
 
     private function validateMyReportPayload(Request $request): array
@@ -312,11 +318,14 @@ class DailyReportController extends Controller
         ]);
     }
 
-    private function myReportPersistencePayload(User $user, string $reportDate, array $validated): array
+    private function myReportPersistencePayload(User $user, string $reportDate, array $validated, ?DailyReport $existing = null): array
     {
-        $metrics = $this->dailyReports->autoMetrics($user, $reportDate);
+        $preserve = $this->preserveReportSnapshot($user, $existing, $reportDate);
+        $metrics = $preserve
+            ? $existing->only(['meetings_count', 'shows_count', 'new_clients_count', 'new_properties_count', 'deals_count', 'sales_count'])
+            : $this->dailyReports->autoMetrics($user, $reportDate);
         $payload = [
-            'role_slug' => $user->role?->slug,
+            'role_slug' => $preserve ? $existing->role_slug : $user->role?->slug,
             'ad_count' => (int) $validated['ads'],
             'calls_count' => (int) $validated['calls'],
             'meetings_count' => (int) ($metrics['meetings_count'] ?? 0),
@@ -344,7 +353,6 @@ class DailyReportController extends Controller
         ]);
 
         $targetUser = User::query()->with('role')->findOrFail((int) $validated['employee_id']);
-        $this->ensureCanReadScopedReport($actor, $targetUser);
 
         $date = (string) $validated['date'];
         $report = DailyReport::query()
@@ -352,7 +360,12 @@ class DailyReportController extends Controller
             ->whereDate('report_date', $date)
             ->first();
 
-        $auto = $this->dailyReports->autoMetrics($targetUser, $date);
+        $this->ensureScopedReportAccess($actor, $targetUser, $report, $date);
+        $preserveSnapshot = $this->preserveReportSnapshot($targetUser, $report, $date);
+        $targetUser = $this->reportContextUser($targetUser, $report);
+        $auto = $preserveSnapshot
+            ? $report->only(['ad_count', 'calls_count', 'meetings_count', 'shows_count', 'new_clients_count', 'new_properties_count', 'deals_count', 'sales_count'])
+            : $this->dailyReports->autoMetrics($targetUser, $date);
 
         $metricsBundle = $this->buildMetricsPayloadBundle($targetUser, $date, $report, $auto);
 
@@ -388,148 +401,184 @@ class DailyReportController extends Controller
 
     public function updateScopeReport(Request $request)
     {
-        $actor = $this->authUser();
-        $this->validateStrictMetricKeys($request, [
-            'report_date',
-            'employee_id',
-            'ads',
-            'calls',
-            'comment',
-            'plans_for_tomorrow',
-            'updated_reason',
-            'edit_source',
-        ]);
+        return DB::transaction(function () use ($request) {
+            $actor = $this->authUser();
+            $this->validateStrictMetricKeys($request, [
+                'report_date',
+                'employee_id',
+                'ads',
+                'calls',
+                'comment',
+                'plans_for_tomorrow',
+                'updated_reason',
+                'edit_source',
+            ]);
 
-        $validated = $request->validate([
-            'report_date' => 'required|date_format:Y-m-d',
-            'employee_id' => 'required|integer|exists:users,id',
-            'ads' => 'required|integer|min:0',
-            'calls' => 'required|integer|min:0',
-            'comment' => 'nullable|string|max:2000',
-            'plans_for_tomorrow' => 'nullable|string|max:2000',
-            'updated_reason' => 'nullable|string|max:500',
-            'edit_source' => 'nullable|string|max:64',
-        ]);
+            $validated = $request->validate([
+                'report_date' => 'required|date_format:Y-m-d',
+                'employee_id' => 'required|integer|exists:users,id',
+                'ads' => 'required|integer|min:0',
+                'calls' => 'required|integer|min:0',
+                'comment' => 'nullable|string|max:2000',
+                'plans_for_tomorrow' => 'nullable|string|max:2000',
+                'updated_reason' => 'nullable|string|max:500',
+                'edit_source' => 'nullable|string|max:64',
+            ]);
 
-        $targetUser = User::query()->with('role')->findOrFail((int) $validated['employee_id']);
-        $this->ensureCanEditScopedReport($actor, $targetUser);
+            $targetUser = User::query()->with('role')->findOrFail((int) $validated['employee_id']);
 
-        $reportDate = (string) $validated['report_date'];
-        $report = DailyReport::query()
-            ->where('user_id', $targetUser->id)
-            ->whereDate('report_date', $reportDate)
-            ->first();
+            $reportDate = (string) $validated['report_date'];
+            $report = DailyReport::query()
+                ->where('user_id', $targetUser->id)
+                ->whereDate('report_date', $reportDate)
+                ->first();
 
-        $this->ensureCanEditByPeriodRules($actor, $targetUser, $reportDate, $report, true);
-        if (! $this->canEditSubmittedDailyReport($actor, $targetUser, $reportDate, $report)) {
-            $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Submitted daily report cannot be edited by current settings.');
-        }
+            [$actor, $report] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)
+                ->acquire($actor, $report, (int) $targetUser->id, null);
+            $targetUser = User::query()->with('role')->lockForUpdate()->findOrFail($targetUser->id);
+            // A concurrent creator may have inserted the unique employee/day row while we waited.
+            $report ??= DailyReport::query()->where('user_id', $targetUser->id)
+                ->whereDate('report_date', $reportDate)->lockForUpdate()->first();
+            $this->ensureScopedReportAccess($actor, $targetUser, $report, $reportDate);
+            $preserveSnapshot = $this->preserveReportSnapshot($targetUser, $report, $reportDate);
+            $targetUser = $this->reportContextUser($targetUser, $report);
+            $this->ensureCanEditScopedReport($actor, $targetUser);
+            $this->ensureCanEditByPeriodRules($actor, $targetUser, $reportDate, $report, true);
+            if (! $this->canEditSubmittedDailyReport($actor, $targetUser, $reportDate, $report)) {
+                $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Submitted daily report cannot be edited by current settings.');
+            }
 
-        $metrics = $this->dailyReports->autoMetrics($targetUser, $reportDate);
-        $payload = [
-            'role_slug' => $targetUser->role?->slug,
-            'ad_count' => (int) $validated['ads'],
-            'calls_count' => (int) $validated['calls'],
-            'meetings_count' => (int) ($metrics['meetings_count'] ?? 0),
-            'shows_count' => (int) ($metrics['shows_count'] ?? 0),
-            'new_clients_count' => (int) ($metrics['new_clients_count'] ?? 0),
-            'new_properties_count' => (int) ($metrics['new_properties_count'] ?? 0),
-            'deals_count' => (int) ($metrics['deals_count'] ?? 0),
-            'comment' => $validated['comment'] ?? '',
-            'plans_for_tomorrow' => $validated['plans_for_tomorrow'] ?? '',
-            'submitted_at' => $report?->submitted_at ?? now(),
-            'updated_by' => $actor->id,
-            'updated_by_role' => (string) ($actor->role?->slug ?? ''),
-            'updated_reason' => $validated['updated_reason'] ?? null,
-            'edit_source' => $validated['edit_source'] ?? 'supervisor',
-        ];
+            $metrics = $preserveSnapshot
+                ? $report->only(['meetings_count', 'shows_count', 'new_clients_count', 'new_properties_count', 'deals_count', 'sales_count'])
+                : $this->dailyReports->autoMetrics($targetUser, $reportDate);
+            $payload = [
+                'role_slug' => $targetUser->role?->slug,
+                'ad_count' => (int) $validated['ads'],
+                'calls_count' => (int) $validated['calls'],
+                'meetings_count' => (int) ($metrics['meetings_count'] ?? 0),
+                'shows_count' => (int) ($metrics['shows_count'] ?? 0),
+                'new_clients_count' => (int) ($metrics['new_clients_count'] ?? 0),
+                'new_properties_count' => (int) ($metrics['new_properties_count'] ?? 0),
+                'deals_count' => (int) ($metrics['deals_count'] ?? 0),
+                'comment' => $validated['comment'] ?? '',
+                'plans_for_tomorrow' => $validated['plans_for_tomorrow'] ?? '',
+                'submitted_at' => $report?->submitted_at ?? now(),
+                'updated_by' => $actor->id,
+                'updated_by_role' => (string) ($actor->role?->slug ?? ''),
+                'updated_reason' => $validated['updated_reason'] ?? null,
+                'edit_source' => $validated['edit_source'] ?? 'supervisor',
+            ];
 
-        if (\Illuminate\Support\Facades\Schema::hasColumn('daily_reports', 'sales_count')) {
-            $payload['sales_count'] = (float) ($metrics['sales_count'] ?? 0);
-        }
+            if (\Illuminate\Support\Facades\Schema::hasColumn('daily_reports', 'sales_count')) {
+                $payload['sales_count'] = (float) ($metrics['sales_count'] ?? 0);
+            }
 
-        if ($report) {
-            $report->update($payload);
-        } else {
-            DailyReport::query()->create(array_merge($payload, [
-                'user_id' => $targetUser->id,
-                'report_date' => $reportDate,
+            if ($report) {
+                $report->update($payload);
+            } else {
+                DailyReport::query()->create(array_merge($payload, [
+                    'user_id' => $targetUser->id,
+                    'report_date' => $reportDate,
+                ]));
+            }
+
+            return $this->scopeReport(new Request([
+                'date' => $reportDate,
+                'employee_id' => $targetUser->id,
             ]));
-        }
-
-        return $this->scopeReport(new Request([
-            'date' => $reportDate,
-            'employee_id' => $targetUser->id,
-        ]));
+        });
     }
 
     public function store(Request $request)
     {
-        $user = $this->authUser();
-
         $validated = $this->validatedPayload($request, true);
-        $reportDate = $validated['report_date'] ?? $this->dailyReports->defaultReportDate($user);
-        $this->ensureCanEditByPeriodRules($user, $user, $reportDate, null);
-        $metrics = $this->dailyReports->autoMetrics($user, $reportDate);
-        $payload = array_merge($metrics, [
-            'role_slug' => $user->role?->slug,
-            'ad_count' => $validated['ads'] ?? $validated['ads_count'] ?? $validated['ad_count'] ?? 0,
-            'calls_count' => $validated['calls'] ?? $validated['calls_count'] ?? 0,
-            'meetings_count' => $validated['meetings_count'] ?? 0,
-            'comment' => $validated['comment'] ?? null,
-            'plans_for_tomorrow' => $validated['plans_for_tomorrow'] ?? null,
-            'submitted_at' => now(),
-        ]);
-        if (\Illuminate\Support\Facades\Schema::hasColumn('daily_reports', 'sales_count')) {
-            $payload['sales_count'] = $metrics['sales_count'] ?? 0;
-        } else {
-            unset($payload['sales_count']);
+        return DB::transaction(function () use ($validated) {
+            $user = $this->authUser();
+            $reportDate = $validated['report_date'] ?? $this->dailyReports->defaultReportDate($user);
+            [$user, $existing] = $this->lockOwnReport($user, $reportDate);
+            $access = app(\App\Support\RopGroupAccess::class);
+            if ($existing) $access->ensureVisible($user, $existing);
+            $context = $this->reportContextUser($user, $existing);
+            $this->ensureCanEditByPeriodRules($user, $context, $reportDate, $existing);
+            if (! $this->canEditSubmittedDailyReport($user, $context, $reportDate, $existing)) {
+                $this->denyKpi('KPI_SUBMITTED_EDIT_FORBIDDEN', 'Submitted daily report cannot be edited by current settings.');
+            }
+            $preserve = $this->preserveReportSnapshot($user, $existing, $reportDate);
+            $metrics = $preserve ? [] : $this->dailyReports->autoMetrics($context, $reportDate);
+            $payload = array_merge($metrics, [
+                'role_slug' => $preserve ? $existing->role_slug : $user->role?->slug,
+                'ad_count' => $validated['ads'] ?? $validated['ads_count'] ?? $validated['ad_count'] ?? 0,
+                'calls_count' => $validated['calls'] ?? $validated['calls_count'] ?? 0,
+                'meetings_count' => $validated['meetings_count'] ?? $existing?->meetings_count ?? 0,
+                'comment' => $validated['comment'] ?? null,
+                'plans_for_tomorrow' => $validated['plans_for_tomorrow'] ?? null,
+                'submitted_at' => $existing?->submitted_at ?? now(),
+            ]);
+            if (! \Illuminate\Support\Facades\Schema::hasColumn('daily_reports', 'sales_count')) unset($payload['sales_count']);
+            $report = $existing ?? new DailyReport(['user_id' => $user->id, 'report_date' => $reportDate]);
+            $this->assignNewSelfReportGroup($user, $report, $reportDate);
+            $report->fill($payload)->save();
+            return response()->json($report->fresh('user.role'), 201);
+        });
+    }
+
+    /** Caller owns the transaction; all self writers serialize on the same user. */
+    private function lockOwnReport(User $user, string $date): array
+    {
+        $report = DailyReport::query()->where('user_id', $user->id)->whereDate('report_date', $date)->first();
+        [$user, $report] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($user, $report, null, null);
+        $report ??= DailyReport::query()->where('user_id', $user->id)->whereDate('report_date', $date)->lockForUpdate()->first();
+        return [$user, $report];
+    }
+
+    private function assignNewSelfReportGroup(User $user, DailyReport $report, string $date): void
+    {
+        $access = app(\App\Support\RopGroupAccess::class);
+        if (! $report->exists && $access->applies($user)) {
+            abort_unless($date === Carbon::now($this->timezone())->toDateString(), 422, 'HISTORICAL_GROUP_UNCLASSIFIED');
+            $report->branch_group_id = $access->creationGroup($user, null);
         }
-
-        $report = DailyReport::query()->updateOrCreate(
-            [
-                'user_id' => $user->id,
-                'report_date' => $reportDate,
-            ],
-            $payload
-        );
-
-        return response()->json($report->fresh('user.role'), 201);
     }
 
     public function update(Request $request, DailyReport $dailyReport)
     {
-        $authUser = $this->authUser();
-        $targetUser = $dailyReport->user()->with('role')->first();
-        abort_unless($targetUser, 422, 'Daily report user not found.');
+        return DB::transaction(function () use ($request, $dailyReport) {
+            [$authUser, $dailyReport] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)
+                ->acquire($this->authUser(), $dailyReport, null, null);
+            app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $dailyReport);
+            $targetUser = $dailyReport->user()->with('role')->first();
+            abort_unless($targetUser, 422, 'Daily report user not found.');
 
-        $this->authorizeUpdateOrDeny($authUser, $targetUser);
+            $this->authorizeUpdateOrDeny($authUser, $targetUser, $dailyReport);
 
-        $validated = $this->validatedPayload($request, false);
-        $reportDate = $dailyReport->report_date->toDateString();
-        $this->ensureCanEditByPeriodRules($authUser, $targetUser, $reportDate, $dailyReport);
-        if (! $this->canEditSubmittedDailyReport($authUser, $targetUser, $reportDate, $dailyReport)) {
-            $this->denyKpi('KPI_SUBMITTED_EDIT_FORBIDDEN', 'Submitted daily report cannot be edited by current settings.');
-        }
-        $metrics = $this->dailyReports->autoMetrics($targetUser, $reportDate);
-        $payload = array_merge($metrics, [
-            'role_slug' => $targetUser->role?->slug,
-            'ad_count' => $validated['ads'] ?? $validated['ads_count'] ?? $validated['ad_count'] ?? $dailyReport->ad_count,
-            'calls_count' => $validated['calls'] ?? $validated['calls_count'] ?? $dailyReport->calls_count,
-            'meetings_count' => $validated['meetings_count'] ?? $dailyReport->meetings_count,
-            'comment' => $validated['comment'] ?? $dailyReport->comment,
-            'plans_for_tomorrow' => $validated['plans_for_tomorrow'] ?? $dailyReport->plans_for_tomorrow,
-            'submitted_at' => $dailyReport->submitted_at ?? now(),
-        ]);
-        if (\Illuminate\Support\Facades\Schema::hasColumn('daily_reports', 'sales_count')) {
-            $payload['sales_count'] = $metrics['sales_count'] ?? $dailyReport->sales_count;
-        } else {
-            unset($payload['sales_count']);
-        }
+            $validated = $this->validatedPayload($request, false);
+            $reportDate = $dailyReport->report_date->toDateString();
+            $this->ensureCanEditByPeriodRules($authUser, $targetUser, $reportDate, $dailyReport);
+            if (! $this->canEditSubmittedDailyReport($authUser, $targetUser, $reportDate, $dailyReport)) {
+                $this->denyKpi('KPI_SUBMITTED_EDIT_FORBIDDEN', 'Submitted daily report cannot be edited by current settings.');
+            }
+            // Historical facts keep the context in which the report was recorded.
+            $preserveSnapshot = $this->preserveReportSnapshot($targetUser, $dailyReport, $reportDate);
+            $metrics = $preserveSnapshot ? [] : $this->dailyReports->autoMetrics($targetUser, $reportDate);
+            $payload = array_merge($metrics, [
+                'role_slug' => $preserveSnapshot ? $dailyReport->role_slug : $targetUser->role?->slug,
+                'ad_count' => $validated['ads'] ?? $validated['ads_count'] ?? $validated['ad_count'] ?? $dailyReport->ad_count,
+                'calls_count' => $validated['calls'] ?? $validated['calls_count'] ?? $dailyReport->calls_count,
+                'meetings_count' => $validated['meetings_count'] ?? $dailyReport->meetings_count,
+                'comment' => $validated['comment'] ?? $dailyReport->comment,
+                'plans_for_tomorrow' => $validated['plans_for_tomorrow'] ?? $dailyReport->plans_for_tomorrow,
+                'submitted_at' => $dailyReport->submitted_at ?? now(),
+            ]);
+            if (\Illuminate\Support\Facades\Schema::hasColumn('daily_reports', 'sales_count')) {
+                $payload['sales_count'] = $metrics['sales_count'] ?? $dailyReport->sales_count;
+            } else {
+                unset($payload['sales_count']);
+            }
 
-        $dailyReport->update($payload);
+            $dailyReport->update($payload);
 
-        return response()->json($dailyReport->fresh('user.role'));
+            return response()->json($dailyReport->fresh('user.role'));
+        });
     }
 
     private function validatedPayload(Request $request, bool $allowReportDate): array
@@ -558,7 +607,8 @@ class DailyReportController extends Controller
 
         match ($authUser->role?->slug) {
             'admin', 'superadmin', 'owner' => null,
-            'rop', 'branch_director' => $query->whereHas('user', fn (Builder $userQuery) => $userQuery->where('branch_id', $authUser->branch_id)),
+            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'daily_reports.branch_group_id'),
+            'branch_director' => $query->whereHas('user', fn (Builder $userQuery) => $userQuery->where('branch_id', $authUser->branch_id)),
             'mop', 'intern' => $query->where('user_id', $authUser->id),
             default => $query->where('user_id', $authUser->id),
         };
@@ -576,7 +626,10 @@ class DailyReportController extends Controller
             }
 
             if (array_key_exists('user_id', $validated) && $validated['user_id'] !== null) {
-                $this->branchScope->ensureUserInUserBranchOrDeny((int) $validated['user_id'], $authUser);
+                if (! $authUser->hasRole('rop') || ! app(\App\Support\RopGroupAccess::class)
+                    ->hasVisibleDailyReportHistory($authUser, (int) $validated['user_id'])) {
+                    $this->branchScope->ensureUserInUserBranchOrDeny((int) $validated['user_id'], $authUser);
+                }
             }
 
             return;
@@ -597,7 +650,7 @@ class DailyReportController extends Controller
         }
     }
 
-    private function authorizeUpdateOrDeny(User $authUser, User $targetUser): void
+    private function authorizeUpdateOrDeny(User $authUser, User $targetUser, DailyReport $report): void
     {
         $role = $authUser->role?->slug;
 
@@ -605,7 +658,12 @@ class DailyReportController extends Controller
             return;
         }
 
-        if (in_array($role, ['rop', 'branch_director'], true) && (int) $authUser->branch_id === (int) $targetUser->branch_id) {
+        if ($role === 'rop') {
+            app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $report);
+            return;
+        }
+
+        if ($role === 'branch_director' && (int) $authUser->branch_id === (int) $targetUser->branch_id) {
             return;
         }
 
@@ -701,6 +759,44 @@ class DailyReportController extends Controller
         if (! in_array($user->role?->slug, ['agent', 'mop', 'intern', 'rop', 'branch_director', 'admin', 'superadmin', 'owner'], true)) {
             $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Role is not allowed for this action.');
         }
+    }
+
+    private function ensureScopedReportAccess(User $actor, User $employee, ?DailyReport $report, string $date): void
+    {
+        if (! $actor->hasRole('rop')) {
+            $this->ensureCanReadScopedReport($actor, $employee);
+            return;
+        }
+        $access = app(\App\Support\RopGroupAccess::class);
+        if ($report) {
+            $access->ensureVisible($actor, $report);
+            abort_unless(in_array($report->role_slug, ['agent', 'mop'], true), 403, 'KPI_FORBIDDEN_ROLE_ACTION');
+            return;
+        }
+        // A missing historical snapshot cannot be assigned to today's team.
+        abort_unless($date === Carbon::now($this->timezone())->toDateString(), 404, 'NOT_FOUND');
+        $access->ensureEmployee($actor, (int) $employee->id);
+    }
+
+    private function preserveReportSnapshot(User $employee, ?DailyReport $report, string $date): bool
+    {
+        return $report && ($date !== Carbon::now($this->timezone())->toDateString()
+            || (int) $report->branch_group_id !== (int) $employee->branch_group_id);
+    }
+
+    private function reportContextUser(User $employee, ?DailyReport $report): User
+    {
+        if (! $report || ! $report->branch_group_id) {
+            return $employee;
+        }
+        $report->loadMissing(['branchGroup', 'historicalRole']);
+        $context = clone $employee;
+        $context->branch_group_id = $report->branch_group_id;
+        $context->branch_id = $report->branchGroup?->branch_id;
+        $role = $report->historicalRole;
+        $context->role_id = $role?->id;
+        $context->setRelation('role', $role);
+        return $context;
     }
 
     private function ensureCanReadScopedReport(User $actor, User $targetUser): void
@@ -830,8 +926,45 @@ class DailyReportController extends Controller
         ];
     }
 
+    /** One authorized plan query for a page; each row is resolved against its own date/context below. */
+    private function loadReportPlans(array $contexts): \Illuminate\Support\Collection
+    {
+        if ($contexts === [] || ! \Illuminate\Support\Facades\Schema::hasTable('kpi_plans')) return collect();
+        $actor = $this->authUser();
+        $access = app(\App\Support\RopGroupAccess::class);
+        $query = KpiPlan::query()->whereIn('metric_key', self::STRICT_KPI_KEYS);
+        if ($access->applies($actor)) $access->scope($query, $actor, 'kpi_plans.branch_group_id', 'kpi_plans.branch_id');
+        $query->where(function (Builder $query) use ($contexts, $actor): void {
+            foreach ($contexts as [$user, $date]) {
+                $query->orWhere(function (Builder $context) use ($user, $date, $actor): void {
+                    $context->where(fn (Builder $q) => $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $date))
+                        ->where(fn (Builder $q) => $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $date));
+                    if ($actor->hasRole('rop')) {
+                        $context->where('branch_group_id', $user->branch_group_id)->where('role_slug', $user->role?->slug);
+                    }
+                    $context->where(function (Builder $q) use ($user): void {
+                        $q->where('user_id', $user->id)->orWhere(function (Builder $shared) use ($user): void {
+                            $shared->whereNull('user_id')->where('role_slug', $user->role?->slug)
+                                ->where(function (Builder $scope) use ($user): void {
+                                    $scope->where(fn (Builder $q) => $q->whereNull('branch_id')->whereNull('branch_group_id'));
+                                    if ($user->branch_id !== null) {
+                                        $scope->orWhere(fn (Builder $q) => $q->where('branch_id', $user->branch_id)->whereNull('branch_group_id'));
+                                        if ($user->branch_group_id !== null) {
+                                            $scope->orWhere(fn (Builder $q) => $q->where('branch_id', $user->branch_id)->where('branch_group_id', $user->branch_group_id));
+                                        }
+                                    }
+                                });
+                        });
+                    });
+                });
+            }
+        });
+        return $query->orderByDesc('id')->get();
+    }
+
     private function resolvePlanMap(User $user, string $reportDate): array
     {
+        $rop = $this->authUser()->hasRole('rop');
         $plans = [
             'objects' => ['target_value' => null, 'plan_source' => null, 'source_record_id' => null],
             'shows' => ['target_value' => null, 'plan_source' => null, 'source_record_id' => null],
@@ -846,73 +979,35 @@ class DailyReportController extends Controller
             $branchId = $user->branch_id ? (int) $user->branch_id : null;
             $branchGroupId = $user->branch_group_id ? (int) $user->branch_group_id : null;
 
+            $rows = ($this->pagePlans ?? $this->loadReportPlans([[$user, $reportDate]]))
+                ->filter(function (KpiPlan $plan) use ($user, $reportDate, $roleSlug, $branchGroupId, $rop): bool {
+                    if (($plan->effective_from && $plan->effective_from->toDateString() > $reportDate)
+                        || ($plan->effective_to && $plan->effective_to->toDateString() < $reportDate)) return false;
+                    if ($rop && ((int) $plan->branch_group_id !== (int) $branchGroupId || $plan->role_slug !== $roleSlug)) return false;
+                    return $plan->user_id !== null ? (int) $plan->user_id === (int) $user->id : $plan->role_slug === $roleSlug;
+                })->groupBy('metric_key');
+
             foreach (array_keys($plans) as $metricKey) {
-                $personal = KpiPlan::query()
-                    ->where('metric_key', $metricKey)
-                    ->where('user_id', (int) $user->id)
-                    ->where(function ($q) use ($reportDate) {
-                        $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $reportDate);
-                    })
-                    ->where(function ($q) use ($reportDate) {
-                        $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $reportDate);
-                    })
-                    ->orderByDesc('id')
-                    ->first();
-
-                if ($personal !== null) {
+                $candidates = $rows->get($metricKey, collect());
+                $chosen = $candidates->first(fn (KpiPlan $plan) => (int) $plan->user_id === (int) $user->id);
+                $source = 'personal';
+                if (! $chosen) {
+                    $shared = $candidates->filter(fn (KpiPlan $plan) => $plan->user_id === null);
+                    $chosen = $branchGroupId !== null && $branchId !== null
+                        ? $shared->first(fn (KpiPlan $plan) => (int) $plan->branch_group_id === $branchGroupId && (int) $plan->branch_id === $branchId)
+                        : null;
+                    $chosen ??= $branchId !== null
+                        ? $shared->first(fn (KpiPlan $plan) => $plan->branch_group_id === null && (int) $plan->branch_id === $branchId)
+                        : null;
+                    $chosen ??= $shared->first(fn (KpiPlan $plan) => $plan->branch_group_id === null && $plan->branch_id === null);
+                    $source = $chosen && ($chosen->branch_id !== null || $chosen->branch_group_id !== null) ? 'rop' : 'common';
+                }
+                if ($chosen) {
                     $plans[$metricKey] = [
-                        'target_value' => (float) $personal->daily_plan,
-                        'plan_source' => 'personal',
-                        'source_record_id' => (int) $personal->id,
+                        'target_value' => (float) $chosen->daily_plan,
+                        'plan_source' => $source,
+                        'source_record_id' => (int) $chosen->id,
                     ];
-                    continue;
-                }
-
-                $scopedQueryBase = KpiPlan::query()
-                    ->where('metric_key', $metricKey)
-                    ->whereNull('user_id')
-                    ->where('role_slug', $roleSlug)
-                    ->where(function ($q) use ($reportDate) {
-                        $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $reportDate);
-                    })
-                    ->where(function ($q) use ($reportDate) {
-                        $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $reportDate);
-                    });
-
-                $scopeCandidates = [];
-                if ($branchGroupId !== null && $branchId !== null) {
-                    $scopeCandidates[] = ['branch_group_id' => $branchGroupId, 'branch_id' => $branchId];
-                }
-                if ($branchId !== null) {
-                    $scopeCandidates[] = ['branch_group_id' => null, 'branch_id' => $branchId];
-                }
-                $scopeCandidates[] = ['branch_group_id' => null, 'branch_id' => null];
-
-                foreach ($scopeCandidates as $scope) {
-                    $query = clone $scopedQueryBase;
-                    if ($scope['branch_group_id'] === null) {
-                        $query->whereNull('branch_group_id');
-                    } else {
-                        $query->where('branch_group_id', (int) $scope['branch_group_id']);
-                    }
-
-                    if ($scope['branch_id'] === null) {
-                        $query->whereNull('branch_id');
-                    } else {
-                        $query->where('branch_id', (int) $scope['branch_id']);
-                    }
-
-                    $planRow = $query->orderByDesc('id')->first();
-                    if ($planRow === null) {
-                        continue;
-                    }
-
-                    $plans[$metricKey] = [
-                        'target_value' => (float) $planRow->daily_plan,
-                        'plan_source' => ($scope['branch_id'] !== null || $scope['branch_group_id'] !== null) ? 'rop' : 'common',
-                        'source_record_id' => (int) $planRow->id,
-                    ];
-                    break;
                 }
             }
         }
@@ -936,13 +1031,18 @@ class DailyReportController extends Controller
     {
         $report->loadMissing(['user.role', 'user.branch', 'user.branchGroup']);
         $user = $report->user;
+        $actor = $this->authUser();
+        $userPayload = $actor->hasRole('rop')
+            ? (app(\App\Services\GroupAccess\GroupDataProjection::class)->relations($report, $actor)['user'] ?? null)
+            : $user;
         $reportDate = $report->report_date->toDateString();
 
-        $autoMetrics = $user ? $this->dailyReports->autoMetrics($user, $reportDate) : [
-            'new_properties_count' => (int) ($report->new_properties_count ?? 0),
-            'shows_count' => (int) ($report->shows_count ?? 0),
-            'sales_count' => (float) ($report->sales_count ?? 0),
-        ];
+        $preserveSnapshot = ! $user || $this->preserveReportSnapshot($user, $report, $reportDate);
+        $user = $user ? $this->reportContextUser($user, $report) : null;
+        $autoMetrics = $preserveSnapshot
+            ? $report->only(['calls_count', 'meetings_count', 'shows_count', 'new_clients_count', 'new_properties_count', 'deals_count', 'sales_count'])
+            : $this->dailyReports->autoMetrics($user, $reportDate);
+
 
         return [
             'id' => $report->id,
@@ -977,7 +1077,7 @@ class DailyReportController extends Controller
             'submitted_at' => $report->submitted_at,
             'created_at' => $report->created_at,
             'updated_at' => $report->updated_at,
-            'user' => $user,
+            'user' => $userPayload,
         ];
     }
 

@@ -201,7 +201,7 @@ class ResidentialImportTest extends TestCase
             $path = '/api/admin/new-buildings/'.$building->id.'/imports';
             $payload = ['mode' => 'csv', 'file' => UploadedFile::fake()->createWithContent('scope.csv', "external_id;name;area;rooms;price_on_request\nQA-scope;QA unit;50;2;true\n")];
             $before = DeveloperUnit::count();
-            if (! $global && $buildingBranch === $foreignBranch) {
+            if ($role === 'rop' || (! $global && $buildingBranch === $foreignBranch)) {
                 $this->getJson($path)->assertForbidden();
                 $this->postJson($path.'/preview', $payload)->assertForbidden();
                 $this->assertDatabaseCount('developer_units', $before);
@@ -259,7 +259,7 @@ class ResidentialImportTest extends TestCase
         $foreignBranch = DB::table('branches')->insertGetId(['name' => 'QA foreign']);
         $this->building->update(['branch_id' => $branch]);
         $unit = $this->unit();
-        foreach (['rop', 'branch_director'] as $role) {
+        foreach (['branch_director'] as $role) {
             $actor = $this->actor($role, $branch);
             Sanctum::actingAs($actor);
             $id = $this->postJson($this->path.'/preview', ['mode' => 'bulk', 'unit_ids' => [$unit->id], 'changes' => ['total_price' => '90000']])->assertCreated()->json('id');

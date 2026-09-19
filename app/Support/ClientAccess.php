@@ -124,6 +124,10 @@ class ClientAccess
 
         $query = Client::query()->with(['branch', 'branchGroup', 'creator', 'responsibleAgent', 'type']);
 
+        if ($roleSlug === 'rop') {
+            return app(RopGroupAccess::class)->scope($query, $authUser, 'clients.branch_group_id', 'clients.branch_id');
+        }
+
         if ($this->isPrivilegedRole($roleSlug)) {
             return $query;
         }
@@ -184,6 +188,8 @@ class ClientAccess
 
     public function ensureVisible(User $authUser, Client $client, string $ability = 'clients.view'): void
     {
+        app(RopGroupAccess::class)->ensureVisible($authUser, $client);
+
         $allowed = $this->visibleQuery($authUser)
             ->whereKey($client->id)
             ->exists();
@@ -212,6 +218,10 @@ class ClientAccess
         }
 
         $authUser->loadMissing('branchGroup');
+
+        if ($roleSlug === 'rop') {
+            $data['branch_group_id'] = app(RopGroupAccess::class)->creationGroup($authUser, $data['branch_group_id'] ?? null);
+        }
 
         $data['created_by'] ??= $authUser->id;
 
@@ -320,8 +330,8 @@ class ClientAccess
     public function normalizeNeedMutationData(array $data, User $authUser, Client $client): array
     {
         $data['client_id'] = $client->id;
-        $data['created_by'] ??= $authUser->id;
-        $data['responsible_agent_id'] ??= $client->responsible_agent_id ?: $authUser->id;
+        $data['created_by'] = $authUser->id;
+        $data['responsible_agent_id'] ??= $client->responsible_agent_id ?: ($authUser->hasRole('rop') ? null : $authUser->id);
 
         return $data;
     }
@@ -336,6 +346,13 @@ class ClientAccess
         $this->ensureVisible($authUser, $client);
 
         $roleSlug = $this->roleSlug($authUser);
+
+        if ($roleSlug === 'rop') {
+            if (! empty($data['responsible_agent_id'])) {
+                app(RopGroupAccess::class)->ensureEmployee($authUser, (int) $data['responsible_agent_id'], (int) $client->branch_group_id, true);
+            }
+            return;
+        }
 
         if (!$this->isBranchScopedRole($roleSlug)) {
             return;

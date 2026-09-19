@@ -32,6 +32,7 @@ class PropertyPhotoController extends Controller
     private function authorizePropertyMutation(Property $property): User
     {
         $user = $this->crmAuthUser();
+        app(\App\Support\RopGroupAccess::class)->ensureVisible($user, $property);
 
         if (! $this->access->canEdit($user, $property)) {
             abort(403, 'Доступ запрещён');
@@ -53,7 +54,8 @@ class PropertyPhotoController extends Controller
         ]);
 
         DB::transaction(function () use ($request, $property, $actor): void {
-            $locked = Property::query()->lockForUpdate()->findOrFail($property->id);
+            [$actor, $locked] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($actor, $property, null, null);
+            app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $locked);
             $this->moderation->assertMutationVersion($request, $locked);
             abort_unless($this->access->canEdit($actor, $locked), 403);
             $beforePhotos = $this->moderation->photoSnapshot($locked);
@@ -88,7 +90,8 @@ class PropertyPhotoController extends Controller
         abort_unless($photo->property_id === $property->id, 404);
 
         DB::transaction(function () use ($request, $property, $photo, $actor): void {
-            $locked = Property::query()->lockForUpdate()->findOrFail($property->id);
+            [$actor, $locked] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($actor, $property, null, null);
+            app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $locked);
             $this->moderation->assertMutationVersion($request, $locked);
             abort_unless($this->access->canEdit($actor, $locked), 403);
             $beforePhotos = $this->moderation->photoSnapshot($locked);
@@ -122,17 +125,20 @@ class PropertyPhotoController extends Controller
 
         $data = $request->validate([
             'photo_order' => ['required', 'array'],
-            'photo_order.*' => ['integer', 'exists:property_photos,id'],
+            'photo_order.*' => ['integer', 'min:1', 'distinct'],
         ]);
 
         DB::transaction(function () use ($request, $data, $property, $actor): void {
-            $locked = Property::query()->lockForUpdate()->findOrFail($property->id);
+            [$actor, $locked] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($actor, $property, null, null);
+            app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $locked);
             $this->moderation->assertMutationVersion($request, $locked);
             abort_unless($this->access->canEdit($actor, $locked), 403);
             $beforePhotos = $this->moderation->photoSnapshot($locked);
+            $photos = $locked->photos()->whereKey($data['photo_order'])->lockForUpdate()->get()->keyBy('id');
+            abort_unless($photos->count() === count($data['photo_order']), 404);
             $changed = false;
             foreach ($data['photo_order'] as $pos => $id) {
-                $photo = $locked->photos()->whereKey($id)->first();
+                $photo = $photos->get($id);
 
                 if ($photo && (int) $photo->position !== $pos) {
                     $photo->update(['position' => $pos]);

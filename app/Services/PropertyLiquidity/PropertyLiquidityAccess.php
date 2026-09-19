@@ -34,6 +34,10 @@ class PropertyLiquidityAccess
     {
         $role = $this->role($user);
 
+        if ($role === 'rop') {
+            return app(\App\Support\RopGroupAccess::class)->scope($query, $user, 'properties.branch_group_id', 'properties.branch_id');
+        }
+
         if (in_array($role, ['admin', 'superadmin', 'marketing', 'reels_manager'], true)) {
             return $query;
         }

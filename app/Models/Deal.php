@@ -8,11 +8,14 @@ use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Deal extends Model
 {
+    use \App\Models\Concerns\ProjectsRopRelations;
+
     use HasFactory, SoftDeletes;
 
     protected $table = 'crm_deals';
 
     protected $fillable = [
+        'branch_group_id',
         'title',
         'client_id',
         'lead_id',

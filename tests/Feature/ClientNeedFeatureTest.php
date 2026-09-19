@@ -378,6 +378,33 @@ class ClientNeedFeatureTest extends TestCase
             ->assertJsonPath('repair_type_ids.0', 3);
     }
 
+    public function test_rop_need_assignment_matches_parent_group_and_authorship_is_immutable(): void
+    {
+        (require database_path('migrations/2026_03_09_120000_create_branch_groups_table.php'))->up();
+        Schema::table('users', function (Blueprint $t) { $t->unsignedBigInteger('branch_group_id')->nullable(); $t->timestamp('deleted_at')->nullable(); });
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
+        [$agent, $client] = $this->seedClientContext();
+        $branch = Branch::findOrFail($agent->branch_id);
+        $a = \App\Models\BranchGroup::create(['branch_id' => $branch->id, 'name' => 'A']);
+        $b = \App\Models\BranchGroup::create(['branch_id' => $branch->id, 'name' => 'B']);
+        $agent->forceFill(['branch_group_id' => $a->id])->save();
+        $client->forceFill(['branch_group_id' => $a->id])->save();
+        $rop = $this->createUser(Role::create(['name' => 'ROP', 'slug' => 'rop']), $branch, 'ROP');
+        $rop->supervisedGroups()->attach([$a->id, $b->id]);
+        $other = $this->createUser($agent->role, $branch, 'Agent B');
+        $other->forceFill(['branch_group_id' => $b->id])->save();
+        Sanctum::actingAs($rop);
+        $base = ['type_id' => 1, 'status_id' => 1, 'comment' => 'Scoped need'];
+        $this->postJson('/api/clients/'.$client->id.'/needs', $base + ['responsible_agent_id' => $other->id])->assertForbidden();
+        $need = $this->postJson('/api/clients/'.$client->id.'/needs', $base + ['created_by' => $other->id, 'responsible_agent_id' => $agent->id])
+            ->assertCreated()->assertJsonPath('created_by', $rop->id)->assertJsonPath('responsible_agent_id', $agent->id)->json('id');
+        $this->patchJson('/api/client-needs/'.$need, ['created_by' => $other->id, 'comment' => 'Edited'])
+            ->assertOk()->assertJsonPath('created_by', $rop->id)->assertJsonPath('responsible_agent_id', $agent->id);
+        $this->patchJson('/api/client-needs/'.$need, ['responsible_agent_id' => $rop->id])->assertForbidden();
+        $this->assertDatabaseCount('client_needs', 1);
+        $this->assertDatabaseHas('client_needs', ['id' => $need, 'created_by' => $rop->id, 'responsible_agent_id' => $agent->id]);
+    }
+
     private function seedClientContext(): array
     {
         $branch = Branch::create(['name' => 'Branch A']);

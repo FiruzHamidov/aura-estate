@@ -14,6 +14,7 @@ class KpiReportService
 {
     public function build(User $authUser, array $filters): array
     {
+        $historical = $authUser->hasRole('rop');
         $periodType = $filters['period_type'];
         $dateFrom = Carbon::parse($filters['date_from'])->startOfDay();
         $dateTo = Carbon::parse($filters['date_to'])->endOfDay();
@@ -24,32 +25,48 @@ class KpiReportService
             ->whereDate('report_date', '<=', $dateTo->toDateString());
 
         $this->applyVisibilityScope($query, $authUser);
+        if ($historical) $query->with('branchGroup')->whereIn('role_slug', ['agent', 'mop']);
 
         if (! empty($filters['user_id'])) {
             $query->where('user_id', (int) $filters['user_id']);
         }
 
         if (! empty($filters['branch_id'])) {
-            $query->whereHas('user', fn (Builder $q) => $q->where('branch_id', (int) $filters['branch_id']));
+            $historical
+                ? $query->whereHas('branchGroup', fn (Builder $q) => $q->where('branch_id', (int) $filters['branch_id']))
+                : $query->whereHas('user', fn (Builder $q) => $q->where('branch_id', (int) $filters['branch_id']));
         }
 
         if (! empty($filters['branch_group_id'])) {
-            $query->whereHas('user', fn (Builder $q) => $q->where('branch_group_id', (int) $filters['branch_group_id']));
+            $historical
+                ? $query->where('daily_reports.branch_group_id', (int) $filters['branch_group_id'])
+                : $query->whereHas('user', fn (Builder $q) => $q->where('branch_group_id', (int) $filters['branch_group_id']));
         }
 
         $reports = $query->get();
 
         $metricsConfig = (array) config('kpi.metrics', []);
         $availableColumns = $this->availableMetricColumns(array_keys($metricsConfig));
-        $grouped = $this->groupReports($reports, $periodType);
+        $grouped = $this->groupReports($reports, $periodType, $historical);
 
-        $rows = $grouped->map(function (Collection $bucketReports, string $bucketKey) use ($periodType, $metricsConfig, $availableColumns) {
+        $locks = collect();
+        if (Schema::hasTable('kpi_period_locks') && $grouped->isNotEmpty()) {
+            $lockQuery = KpiPeriodLock::query()->where('period_type', $periodType)
+                ->whereIn('period_key', $grouped->keys()->map(fn ($key) => explode('|', $key, 2)[0])->unique());
+            if ($historical) {
+                $lockQuery->where(fn ($q) => $q->whereNull('branch_id')->orWhere('branch_id', $authUser->branch_id))
+                    ->where(fn ($q) => $q->whereNull('branch_group_id')->orWhereIn('branch_group_id', app(\App\Support\RopGroupAccess::class)->groupsQuery($authUser)));
+            }
+            $locks = $lockQuery->orderByDesc('id')->get();
+        }
+
+        $rows = $grouped->map(function (Collection $bucketReports, string $bucketKey) use ($periodType, $metricsConfig, $availableColumns, $historical, $locks) {
             /** @var DailyReport $first */
             $first = $bucketReports->first();
             $user = $first->user;
             [$periodOnlyKey] = explode('|', $bucketKey, 2);
             $periodRange = $this->resolvePeriodRange($periodType, $bucketKey);
-            $lock = $this->resolveLock($periodType, $periodOnlyKey, $user?->branch_id, $user?->branch_group_id);
+            $lock = $this->resolveLock($locks, $periodOnlyKey, $historical ? $first->branchGroup?->branch_id : $user?->branch_id, $historical ? $first->branch_group_id : $user?->branch_group_id);
 
             $metrics = [];
             $kpiValue = 0.0;
@@ -85,7 +102,8 @@ class KpiReportService
                 'period_key' => $periodOnlyKey,
                 'period_start' => $periodRange['start']->toDateString(),
                 'period_end' => $periodRange['end']->toDateString(),
-                'user' => [
+                ...($historical ? ['branch_group_id' => $first->branch_group_id, 'role_slug' => $first->role_slug] : []),
+                'user' => $historical ? ['id' => $user?->id, 'name' => $user?->name] : [
                     'id' => $user?->id,
                     'name' => $user?->name,
                     'role_slug' => $user?->role?->slug,
@@ -119,15 +137,16 @@ class KpiReportService
 
         match ($authUser->role?->slug) {
             'admin', 'superadmin', 'owner' => null,
-            'rop', 'branch_director' => $query->whereHas('user', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id)),
+            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'daily_reports.branch_group_id'),
+            'branch_director' => $query->whereHas('user', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id)),
             'mop' => $query->whereHas('user', fn (Builder $q) => $q->where('branch_group_id', $authUser->branch_group_id)),
             default => $query->where('user_id', $authUser->id),
         };
     }
 
-    private function groupReports(Collection $reports, string $periodType): Collection
+    private function groupReports(Collection $reports, string $periodType, bool $historical = false): Collection
     {
-        return $reports->groupBy(function (DailyReport $report) use ($periodType) {
+        return $reports->groupBy(function (DailyReport $report) use ($periodType, $historical) {
             $date = $report->report_date instanceof Carbon
                 ? $report->report_date->copy()
                 : Carbon::parse((string) $report->report_date);
@@ -138,7 +157,7 @@ class KpiReportService
                 default => $date->toDateString(),
             };
 
-            return $periodKey.'|'.$report->user_id;
+            return $periodKey.'|'.$report->user_id.($historical ? '|'.$report->branch_group_id.'|'.$report->role_slug : '');
         });
     }
 
@@ -219,30 +238,10 @@ class KpiReportService
         return floor($rounded) == $rounded ? (int) $rounded : $rounded;
     }
 
-    private function resolveLock(string $periodType, string $periodKey, ?int $branchId, ?int $branchGroupId): ?KpiPeriodLock
+    private function resolveLock(Collection $locks, string $periodKey, ?int $branchId, ?int $branchGroupId): ?KpiPeriodLock
     {
-        if (! Schema::hasTable('kpi_period_locks')) {
-            return null;
-        }
-
-        return KpiPeriodLock::query()
-            ->where('period_type', $periodType)
-            ->where('period_key', $periodKey)
-            ->where(function ($query) use ($branchId) {
-                $query->whereNull('branch_id');
-
-                if ($branchId !== null) {
-                    $query->orWhere('branch_id', $branchId);
-                }
-            })
-            ->where(function ($query) use ($branchGroupId) {
-                $query->whereNull('branch_group_id');
-
-                if ($branchGroupId !== null) {
-                    $query->orWhere('branch_group_id', $branchGroupId);
-                }
-            })
-            ->orderByDesc('id')
-            ->first();
+        return $locks->first(fn ($lock) => $lock->period_key === $periodKey
+            && ($lock->branch_id === null || (int) $lock->branch_id === $branchId)
+            && ($lock->branch_group_id === null || (int) $lock->branch_group_id === $branchGroupId));
     }
 }

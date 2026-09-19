@@ -59,6 +59,8 @@ class UserIncludeUnassignedIndexTest extends TestCase
             $table->timestamps();
         });
 
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
+
         Schema::create('personal_access_tokens', function (Blueprint $table) {
             $table->id();
             $table->morphs('tokenable');
@@ -71,7 +73,7 @@ class UserIncludeUnassignedIndexTest extends TestCase
         });
     }
 
-    public function test_rop_include_unassigned_zero_keeps_old_scope(): void
+    public function test_rop_include_unassigned_zero_keeps_assigned_group_scope(): void
     {
         [$branchA, $branchB, $roles] = $this->seedBaseScopes();
 
@@ -84,13 +86,13 @@ class UserIncludeUnassignedIndexTest extends TestCase
 
         $response = $this->getJson('/api/user?include_unassigned=0');
         $response->assertOk();
-        $response->assertJsonCount(2, 'data');
+        $response->assertJsonCount(1, 'data');
         $response->assertJsonFragment(['id' => $inBranch->id]);
         $response->assertJsonMissing(['phone' => '910000003']);
         $response->assertJsonMissing(['phone' => '910000004']);
     }
 
-    public function test_rop_include_unassigned_one_includes_null_branch_and_counts_are_scoped(): void
+    public function test_rop_include_unassigned_does_not_expand_groups_and_counts_are_scoped(): void
     {
         [$branchA, $branchB, $roles] = $this->seedBaseScopes();
 
@@ -104,11 +106,11 @@ class UserIncludeUnassignedIndexTest extends TestCase
 
         $response = $this->getJson('/api/user?include_unassigned=1');
         $response->assertOk();
-        $response->assertJsonFragment(['id' => $unassigned->id]);
+        $response->assertJsonMissing(['phone' => $unassigned->phone]);
         $response->assertJsonMissing(['phone' => '910000015']);
-        $response->assertJsonPath('total', 4);
-        $response->assertJsonPath('active_count', 2);
-        $response->assertJsonPath('inactive_count', 2);
+        $response->assertJsonPath('total', 2);
+        $response->assertJsonPath('active_count', 1);
+        $response->assertJsonPath('inactive_count', 1);
     }
 
     public function test_rop_cannot_escape_scope_with_include_unassigned_and_foreign_branch_filter(): void
@@ -122,9 +124,8 @@ class UserIncludeUnassignedIndexTest extends TestCase
         Sanctum::actingAs($rop);
 
         $response = $this->getJson('/api/user?include_unassigned=1&branch_id='.$branchB->id);
-        $response->assertOk();
+        $response->assertForbidden();
         $response->assertJsonMissing(['phone' => '910000023']);
-        $response->assertJsonCount(2, 'data');
     }
 
     public function test_branch_director_has_same_include_unassigned_behavior(): void
@@ -186,7 +187,7 @@ class UserIncludeUnassignedIndexTest extends TestCase
         $response->assertOk();
         $response->assertJsonMissing(['phone' => '910000053']);
         $response->assertJsonMissing(['phone' => '910000054']);
-        $response->assertJsonCount(2, 'data');
+        $response->assertJsonCount(1, 'data');
     }
 
     public function test_branch_group_filter_with_include_unassigned_uses_variant_a_and_excludes_unassigned(): void
@@ -219,6 +220,25 @@ class UserIncludeUnassignedIndexTest extends TestCase
         $response->assertJsonMissing(['phone' => '910000063']);
     }
 
+    public function test_rop_flag_never_exposes_unassigned_or_other_group_in_same_branch(): void
+    {
+        [$branch, , $roles] = $this->seedBaseScopes();
+        $rop = $this->makeUser('ROP', '910000071', $roles['rop'], $branch->id, 'active');
+        $own = $this->makeUser('Own', '910000072', $roles['agent'], $branch->id, 'active');
+        $otherGroup = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Unassigned to ROP']);
+        $this->makeUser('Foreign', '910000073', $roles['agent'], $branch->id, 'active', $otherGroup->id);
+        $unassigned = $this->makeUser('Unassigned', '910000074', $roles['agent'], $branch->id, 'active');
+        $unassigned->update(['branch_group_id' => null]);
+        Sanctum::actingAs($rop);
+        foreach ([0, 1] as $flag) {
+            $this->getJson('/api/user?include_unassigned='.$flag)->assertOk()->assertJsonCount(1, 'data')
+                ->assertJsonPath('data.0.id', $own->id)->assertJsonPath('total', 1);
+        }
+        $this->getJson('/api/user?include_unassigned=1&branch_group_id='.$otherGroup->id)->assertForbidden();
+        $rop->supervisedGroups()->detach();
+        $this->getJson('/api/user?include_unassigned=1')->assertOk()->assertJsonCount(0, 'data');
+    }
+
     private function seedBaseScopes(): array
     {
         $branchA = Branch::create(['name' => 'Branch A']);
@@ -231,6 +251,8 @@ class UserIncludeUnassignedIndexTest extends TestCase
             'superadmin' => Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']),
         ];
 
+        foreach ([$branchA, $branchB] as $branch) BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Default fixture group']);
+
         return [$branchA, $branchB, $roles];
     }
 
@@ -242,7 +264,8 @@ class UserIncludeUnassignedIndexTest extends TestCase
         string $status,
         ?int $branchGroupId = null
     ): User {
-        return User::create([
+        $branchGroupId ??= $branchId ? BranchGroup::where('branch_id', $branchId)->value('id') : null;
+        $user = User::create([
             'name' => $name,
             'phone' => $phone,
             'password' => bcrypt('password'),
@@ -251,5 +274,8 @@ class UserIncludeUnassignedIndexTest extends TestCase
             'branch_group_id' => $branchGroupId,
             'status' => $status,
         ]);
+        // Explicit fixture assignment; production membership never follows the working group.
+        if ($role->slug === 'rop' && $branchGroupId) $user->supervisedGroups()->attach($branchGroupId);
+        return $user;
     }
 }

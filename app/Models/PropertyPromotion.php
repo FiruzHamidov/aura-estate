@@ -6,6 +6,8 @@ use Illuminate\Database\Eloquent\Model;
 
 class PropertyPromotion extends Model
 {
+    use \App\Models\Concerns\ProjectsRopRelations;
+
     public const TYPE_VIP = 'vip';
     public const TYPE_URGENT = 'urgent';
 

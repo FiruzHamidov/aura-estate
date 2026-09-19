@@ -64,6 +64,14 @@ final class EnsurePropertyModerationIdempotency
             }
 
             if ($record->status === 'completed') {
+                if ($request->user()?->hasRole('rop')) {
+                    // The saved body may contain a related card transferred since execution.
+                    // Never replay that private snapshot; the action must not execute twice.
+                    return response()->json([
+                        'code' => 'IDEMPOTENCY_RESULT_REQUIRES_REFRESH',
+                        'message' => 'Операция уже выполнена. Обновите карточку, чтобы получить актуальные данные.',
+                    ], 409);
+                }
                 return response((string) $record->response_body, (int) $record->response_status, [
                     'Content-Type' => $record->response_content_type ?: 'application/json',
                     'Idempotent-Replayed' => 'true',

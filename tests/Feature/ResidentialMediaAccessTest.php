@@ -36,7 +36,7 @@ class ResidentialMediaAccessTest extends TestCase
             $cases[$role.' global'] = [$role, 'foreign', true, true];
         }
         foreach (['rop', 'branch_director'] as $role) {
-            $cases[$role.' own branch'] = [$role, 'unrelated', true, true];
+            $cases[$role.' own branch'] = [$role, 'unrelated', $role === 'branch_director', $role === 'branch_director'];
             $cases[$role.' foreign'] = [$role, 'foreign', false, false];
             $cases[$role.' without branch'] = [$role, 'branchless', false, false];
         }

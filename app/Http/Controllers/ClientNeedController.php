@@ -332,31 +332,35 @@ class ClientNeedController extends Controller
 
     public function store(Request $request, Client $client)
     {
-        $authUser = $this->authUser();
-        $this->clientAccess->ensureCanMutateClients($authUser, 'client_needs.create');
+        return \DB::transaction(function () use ($request, $client) {
+            [$authUser, $client] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
+                $this->authUser(), $client, $request->integer('responsible_agent_id') ?: null, null
+            );
+            $this->clientAccess->ensureCanMutateClients($authUser, 'client_needs.create');
 
-        $validated = $this->validatePayload($request);
-        $validated = $this->normalizePropertyTypes($validated);
-        $validated = $this->normalizeRepairTypes($validated);
-        $validated = $this->normalizeCashOnHand($validated);
-        $validated = $this->normalizeFinance($validated);
-        $validated['status_id'] ??= ClientNeedStatus::defaultId();
-        $validated = $this->clientAccess->normalizeNeedMutationData($validated, $authUser, $client);
-        $this->clientAccess->validateNeedMutationTargets($authUser, $client, $validated, 'client_needs.create');
-        $validated = $this->applyClosedState($validated);
-        $validated['currency'] ??= 'TJS';
+            $validated = $this->validatePayload($request);
+            $validated = $this->normalizePropertyTypes($validated);
+            $validated = $this->normalizeRepairTypes($validated);
+            $validated = $this->normalizeCashOnHand($validated);
+            $validated = $this->normalizeFinance($validated);
+            $validated['status_id'] ??= ClientNeedStatus::defaultId();
+            $validated = $this->clientAccess->normalizeNeedMutationData($validated, $authUser, $client);
+            $this->clientAccess->validateNeedMutationTargets($authUser, $client, $validated, 'client_needs.create');
+            $validated = $this->applyClosedState($validated);
+            $validated['currency'] ??= 'TJS';
 
-        $propertyTypeIds = $validated['property_type_ids'] ?? [];
-        $repairTypeIds = $validated['repair_type_ids'] ?? [];
-        unset($validated['property_type_ids']);
-        unset($validated['repair_type_ids']);
-        $validated = $this->filterNeedColumns($validated);
+            $propertyTypeIds = $validated['property_type_ids'] ?? [];
+            $repairTypeIds = $validated['repair_type_ids'] ?? [];
+            unset($validated['property_type_ids']);
+            unset($validated['repair_type_ids']);
+            $validated = $this->filterNeedColumns($validated);
 
-        $need = ClientNeed::create($validated);
-        $this->syncPropertyTypes($need, $propertyTypeIds);
-        $this->syncRepairTypes($need, $repairTypeIds);
+            $need = ClientNeed::create($validated);
+            $this->syncPropertyTypes($need, $propertyTypeIds);
+            $this->syncRepairTypes($need, $repairTypeIds);
 
-        return response()->json($need->load($this->relations()), 201);
+            return response()->json($need->load($this->relations()), 201);
+        });
     }
 
     public function show(ClientNeed $clientNeed)
@@ -368,52 +372,72 @@ class ClientNeedController extends Controller
 
     public function update(Request $request, ClientNeed $clientNeed)
     {
-        $authUser = $this->authUser();
-        $this->clientAccess->ensureCanMutateClients($authUser, 'client_needs.update');
-        $clientNeed->loadMissing('client');
-        $this->clientAccess->ensureNeedVisible($authUser, $clientNeed);
+        return \DB::transaction(function () use ($request, $clientNeed) {
+            $clientNeed->loadMissing('client');
+            abort_unless($clientNeed->client, 404, 'NOT_FOUND');
+            [$authUser, $client] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
+                $this->authUser(), $clientNeed->client, $request->integer('responsible_agent_id') ?: $clientNeed->responsible_agent_id, null
+            );
+            $clientNeed = ClientNeed::query()->whereKey($clientNeed->id)->lockForUpdate()->firstOrFail();
+            abort_unless((int) $clientNeed->client_id === (int) $client->id, 409, 'RECORD_OWNERSHIP_CHANGED');
+            $clientNeed->setRelation('client', $client);
+            $this->clientAccess->ensureCanMutateClients($authUser, 'client_needs.update');
+            $clientNeed->loadMissing('client');
+            $this->clientAccess->ensureNeedVisible($authUser, $clientNeed);
 
-        $validated = $this->validatePayload($request, $clientNeed);
-        $validated = $this->normalizePropertyTypes($validated, $clientNeed);
-        $validated = $this->normalizeRepairTypes($validated);
-        $validated = $this->normalizeCashOnHand($validated, $clientNeed);
-        $validated = $this->normalizeFinance($validated, $clientNeed);
-        $validated = $this->clientAccess->normalizeNeedMutationData($validated, $authUser, $clientNeed->client);
-        $this->clientAccess->validateNeedMutationTargets($authUser, $clientNeed->client, $validated, 'client_needs.update');
-        $validated = $this->applyClosedState($validated, $clientNeed);
+            $validated = $this->validatePayload($request, $clientNeed);
+            $validated = $this->normalizePropertyTypes($validated, $clientNeed);
+            $validated = $this->normalizeRepairTypes($validated);
+            $validated = $this->normalizeCashOnHand($validated, $clientNeed);
+            $validated = $this->normalizeFinance($validated, $clientNeed);
+            $validated = $this->clientAccess->normalizeNeedMutationData($validated, $authUser, $clientNeed->client);
+            $validated['created_by'] = $clientNeed->created_by;
+            if (! $request->exists('responsible_agent_id')) $validated['responsible_agent_id'] = $clientNeed->responsible_agent_id;
+            $this->clientAccess->validateNeedMutationTargets($authUser, $clientNeed->client, $validated, 'client_needs.update');
+            $validated = $this->applyClosedState($validated, $clientNeed);
 
-        $propertyTypeIds = null;
-        $repairTypeIds = null;
-        if (array_key_exists('property_type_ids', $validated)) {
-            $propertyTypeIds = $validated['property_type_ids'];
-            unset($validated['property_type_ids']);
-        }
-        if (array_key_exists('repair_type_ids', $validated)) {
-            $repairTypeIds = $validated['repair_type_ids'];
-            unset($validated['repair_type_ids']);
-        }
-        $validated = $this->filterNeedColumns($validated);
+            $propertyTypeIds = null;
+            $repairTypeIds = null;
+            if (array_key_exists('property_type_ids', $validated)) {
+                $propertyTypeIds = $validated['property_type_ids'];
+                unset($validated['property_type_ids']);
+            }
+            if (array_key_exists('repair_type_ids', $validated)) {
+                $repairTypeIds = $validated['repair_type_ids'];
+                unset($validated['repair_type_ids']);
+            }
+            $validated = $this->filterNeedColumns($validated);
 
-        $clientNeed->update($validated);
+            $clientNeed->update($validated);
 
-        if ($propertyTypeIds !== null) {
-            $this->syncPropertyTypes($clientNeed, $propertyTypeIds);
-        }
-        if ($repairTypeIds !== null) {
-            $this->syncRepairTypes($clientNeed, $repairTypeIds);
-        }
+            if ($propertyTypeIds !== null) {
+                $this->syncPropertyTypes($clientNeed, $propertyTypeIds);
+            }
+            if ($repairTypeIds !== null) {
+                $this->syncRepairTypes($clientNeed, $repairTypeIds);
+            }
 
-        return response()->json($clientNeed->fresh($this->relations()));
+            return response()->json($clientNeed->fresh($this->relations()));
+        });
     }
 
     public function destroy(ClientNeed $clientNeed)
     {
-        $authUser = $this->authUser();
-        $this->clientAccess->ensureCanMutateClients($authUser, 'client_needs.delete');
-        $this->clientAccess->ensureNeedVisible($authUser, $clientNeed);
+        return \DB::transaction(function () use ($clientNeed) {
+            $clientNeed->loadMissing('client');
+            abort_unless($clientNeed->client, 404, 'NOT_FOUND');
+            [$authUser, $client] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
+                $this->authUser(), $clientNeed->client, $clientNeed->responsible_agent_id, null
+            );
+            $clientNeed = ClientNeed::query()->whereKey($clientNeed->id)->lockForUpdate()->firstOrFail();
+            abort_unless((int) $clientNeed->client_id === (int) $client->id, 409, 'RECORD_OWNERSHIP_CHANGED');
+            $clientNeed->setRelation('client', $client);
+            $this->clientAccess->ensureCanMutateClients($authUser, 'client_needs.delete');
+            $this->clientAccess->ensureNeedVisible($authUser, $clientNeed);
 
-        $clientNeed->delete();
+            $clientNeed->delete();
 
-        return response()->json(['message' => 'Client need deleted']);
+            return response()->json(['message' => 'Client need deleted']);
+        });
     }
 }

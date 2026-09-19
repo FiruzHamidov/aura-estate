@@ -75,6 +75,21 @@ class KpiPlanScopePolicy
         $this->denyScope();
     }
 
+    public function ensureTargetMatchesBulkScope(User $actor, User $target, array $scope): void
+    {
+        $target->loadMissing('role');
+        $this->ensureCanManageBulkScope($actor, array_merge($scope, ['role' => $target->role?->slug]));
+        foreach (['branch_id', 'branch_group_id'] as $field) {
+            if (isset($scope[$field]) && (int) $scope[$field] !== (int) $target->{$field}) {
+                $this->denyScope();
+            }
+        }
+        $roles = $scope['roles'] ?? (isset($scope['role']) ? [$scope['role']] : []);
+        if ($roles !== [] && ! in_array($target->role?->slug, $roles, true)) {
+            $this->denyScope();
+        }
+    }
+
     public function ensureCanReadUserPlan(User $actor, User $target): void
     {
         $this->ensureCanManageUserPlan($actor, $target, true);
@@ -89,7 +104,8 @@ class KpiPlanScopePolicy
 
         $allowed = match ($role) {
             'admin', 'superadmin', 'owner' => true,
-            'rop', 'branch_director' => (int) $actor->branch_id === (int) $target->branch_id,
+            'rop' => app(RopGroupAccess::class)->employees($actor)->whereKey($target->id)->exists(),
+            'branch_director' => (int) $actor->branch_id === (int) $target->branch_id,
             'mop' => (int) $actor->branch_group_id === (int) $target->branch_group_id,
             default => $allowSelf && (int) $actor->id === (int) $target->id,
         };
@@ -104,6 +120,10 @@ class KpiPlanScopePolicy
         $role = (string) ($actor->role?->slug ?? '');
         if (in_array($role, ['admin', 'superadmin', 'owner'], true)) {
             return;
+        }
+
+        if ($role === 'rop') {
+            app(RopGroupAccess::class)->ensureGroup($actor, isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null);
         }
 
         $branchId = isset($scope['branch_id']) ? (int) $scope['branch_id'] : null;

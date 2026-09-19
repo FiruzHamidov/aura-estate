@@ -366,7 +366,7 @@ final class PropertyModerationService
     public function approveCase(PropertyModerationCase $case, User $actor, ?string $comment = null, ?int $expectedVersion = null): Property
     {
         return DB::transaction(function () use ($case, $actor, $comment, $expectedVersion): Property {
-            $property = Property::query()->lockForUpdate()->findOrFail($case->property_id);
+            [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $case->property_id);
             $lockedCase = PropertyModerationCase::query()->lockForUpdate()->findOrFail($case->id);
             $lockedCase->setRelation('property', $property);
 
@@ -469,7 +469,7 @@ final class PropertyModerationService
         abort_unless(in_array($action, ['keep_hidden', 'restore_and_publish'], true), 422);
 
         return DB::transaction(function () use ($case, $actor, $comment, $expectedVersion, $action, $confirmedViolation): Property {
-            $property = Property::query()->lockForUpdate()->findOrFail($case->property_id);
+            [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $case->property_id);
             $lockedCase = PropertyModerationCase::query()->lockForUpdate()->findOrFail($case->id);
             $lockedCase->setRelation('property', $property);
 
@@ -542,7 +542,7 @@ final class PropertyModerationService
         abort_unless($actor->role?->slug === 'superadmin', 403, 'BREAK_GLASS_FORBIDDEN');
 
         return DB::transaction(function () use ($case, $actor, $reason, $expectedVersion): Property {
-            $property = Property::query()->lockForUpdate()->findOrFail($case->property_id);
+            [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $case->property_id);
             $lockedCase = PropertyModerationCase::query()->lockForUpdate()->findOrFail($case->id);
             abort_unless($lockedCase->status === PropertyModerationCase::STATUS_OPEN, 409, 'MODERATION_CASE_NOT_OPEN');
             abort_if($lockedCase->version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
@@ -576,7 +576,7 @@ final class PropertyModerationService
         abort_unless($this->access->canEdit($actor, $property), 403, 'Доступ запрещён');
 
         return DB::transaction(function () use ($property, $actor, $expectedVersion): Property {
-            $locked = Property::query()->lockForUpdate()->findOrFail($property->id);
+            [$actor, $locked] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, $property);
             abort_if(
                 Schema::hasColumn('properties', 'moderation_version')
                     && (int) $locked->moderation_version !== $expectedVersion,
@@ -615,7 +615,7 @@ final class PropertyModerationService
         abort_unless($this->access->canEdit($actor, $property), 403, 'MODERATION_PERMISSION_DENIED');
 
         return DB::transaction(function () use ($property, $actor, $qualityWarnings, $expectedVersion): Property {
-            $locked = Property::query()->lockForUpdate()->findOrFail($property->id);
+            [$actor, $locked] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, $property);
             abort_if($expectedVersion !== null && (int) $locked->moderation_version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
             abort_if($this->hasConfirmedDuplicate($locked), 409, 'DUPLICATE_BLOCK_ACTIVE');
 
@@ -672,7 +672,7 @@ final class PropertyModerationService
         abort_unless(in_array($target, [self::PUBLICATION_DRAFT, self::PUBLICATION_ARCHIVED], true), 422);
 
         return DB::transaction(function () use ($property, $actor, $target, $expectedVersion): Property {
-            $locked = Property::query()->lockForUpdate()->findOrFail($property->id);
+            [$actor, $locked] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, $property);
             abort_if($expectedVersion !== null && (int) $locked->moderation_version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
             $locked->forceFill([
                 'publication_status' => $target,
@@ -696,7 +696,7 @@ final class PropertyModerationService
         abort_unless($this->access->canEdit($actor, $case->property), 403, 'MODERATION_PERMISSION_DENIED');
 
         return DB::transaction(function () use ($case, $actor, $expectedVersion): Property {
-            $property = Property::query()->lockForUpdate()->findOrFail($case->property_id);
+            [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $case->property_id);
             $lockedCase = PropertyModerationCase::query()->lockForUpdate()->findOrFail($case->id);
             abort_unless($lockedCase->status === PropertyModerationCase::STATUS_OPEN, 409, 'MODERATION_CASE_NOT_OPEN');
             abort_if(in_array($lockedCase->type, [PropertyModerationCase::TYPE_DUPLICATE, PropertyModerationCase::TYPE_APPEAL], true), 409, 'MODERATION_WITHDRAW_NOT_ALLOWED');
@@ -742,6 +742,7 @@ final class PropertyModerationService
 
     public function transfer(Property $property, User $actor, array $changes, string $reason, int $expectedVersion): Property
     {
+        app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $property);
         $changesOnlyCoOwner = array_keys($changes) === ['co_owner_user_id'];
         abort_unless(
             $changesOnlyCoOwner
@@ -752,7 +753,7 @@ final class PropertyModerationService
         );
 
         return DB::transaction(function () use ($property, $actor, $changes, $reason, $expectedVersion, $changesOnlyCoOwner): Property {
-            $locked = Property::query()->lockForUpdate()->findOrFail($property->id);
+            [$actor, $locked] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, $property, array_values(array_intersect_key($changes, array_flip(['agent_id', 'co_owner_user_id']))));
             abort_if(
                 Schema::hasColumn('properties', 'moderation_version')
                     && (int) $locked->moderation_version !== $expectedVersion,
@@ -774,7 +775,7 @@ final class PropertyModerationService
                 }
                 $targetId = $changes[$field] !== null ? (int) $changes[$field] : null;
                 if ($targetId !== null) {
-                    $target = User::query()->where('status', User::STATUS_ACTIVE)->findOrFail($targetId);
+                    $target = User::query()->where('status', User::STATUS_ACTIVE)->lockForUpdate()->findOrFail($targetId);
                     $role = (string) $actor->role?->slug;
                     if (! in_array($role, config('property-moderation.global_moderator_roles', []), true)) {
                         abort_unless((int) $target->branch_id === (int) $actor->branch_id, 403, 'MODERATION_PERMISSION_DENIED');
@@ -813,9 +814,14 @@ final class PropertyModerationService
         abort_unless(in_array($decision, [PropertyDuplicateCandidate::DECISION_NOT_DUPLICATE, PropertyDuplicateCandidate::DECISION_CONFIRMED], true), 422);
 
         return DB::transaction(function () use ($candidate, $actor, $decision, $comment, $expectedVersion): Property {
-            $property = Property::query()->lockForUpdate()->findOrFail($candidate->moderationCase()->value('property_id'));
+            [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $candidate->moderationCase()->value('property_id'), [], [$candidate->candidate_property_id]);
             $case = PropertyModerationCase::query()->lockForUpdate()->findOrFail($candidate->moderation_case_id);
             $candidate = PropertyDuplicateCandidate::query()->lockForUpdate()->findOrFail($candidate->id);
+            if ($actor->hasRole('rop')) {
+                $target = Property::query()->lockForUpdate()->findOrFail($candidate->candidate_property_id);
+                app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $target);
+                app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $property);
+            }
             $case->setRelation('property', $property);
             abort_unless($case->status === PropertyModerationCase::STATUS_OPEN, 409, 'MODERATION_CASE_NOT_OPEN');
             abort_if($expectedVersion !== null && $case->version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
@@ -859,7 +865,7 @@ final class PropertyModerationService
     public function appeal(PropertyModerationCase $case, User $actor, string $comment, int $expectedVersion): PropertyModerationCase
     {
         return DB::transaction(function () use ($case, $actor, $comment, $expectedVersion): PropertyModerationCase {
-            $property = Property::query()->lockForUpdate()->findOrFail($case->property_id);
+            [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $case->property_id);
             $case = PropertyModerationCase::query()->lockForUpdate()->findOrFail($case->id);
             $case->setRelation('property', $property);
             abort_unless($this->access->canEdit($actor, $case->property), 403, 'Доступ запрещён');
@@ -896,9 +902,14 @@ final class PropertyModerationService
     public function mergeDuplicate(PropertyDuplicateCandidate $candidate, User $actor, string $comment, ?int $expectedVersion = null): Property
     {
         return DB::transaction(function () use ($candidate, $actor, $comment, $expectedVersion): Property {
-            $property = Property::query()->lockForUpdate()->findOrFail($candidate->moderationCase()->value('property_id'));
+            [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $candidate->moderationCase()->value('property_id'), [], [$candidate->candidate_property_id]);
             $case = PropertyModerationCase::query()->lockForUpdate()->findOrFail($candidate->moderation_case_id);
             $candidate = PropertyDuplicateCandidate::query()->lockForUpdate()->findOrFail($candidate->id);
+            if ($actor->hasRole('rop')) {
+                $target = Property::query()->lockForUpdate()->findOrFail($candidate->candidate_property_id);
+                app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $target);
+                app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $property);
+            }
             $case->setRelation('property', $property);
             abort_unless(in_array($case->status, [
                 PropertyModerationCase::STATUS_OPEN,
@@ -949,9 +960,14 @@ final class PropertyModerationService
     public function rejectDuplicate(PropertyDuplicateCandidate $candidate, User $actor, string $comment, ?int $expectedVersion = null): Property
     {
         return DB::transaction(function () use ($candidate, $actor, $comment, $expectedVersion): Property {
-            $property = Property::query()->lockForUpdate()->findOrFail($candidate->moderationCase()->value('property_id'));
+            [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $candidate->moderationCase()->value('property_id'), [], [$candidate->candidate_property_id]);
             $case = PropertyModerationCase::query()->lockForUpdate()->findOrFail($candidate->moderation_case_id);
             $candidate = PropertyDuplicateCandidate::query()->lockForUpdate()->findOrFail($candidate->id);
+            if ($actor->hasRole('rop')) {
+                $target = Property::query()->lockForUpdate()->findOrFail($candidate->candidate_property_id);
+                app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $target);
+                app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $property);
+            }
             $case->setRelation('property', $property);
             $case->setRelation('property', $property);
             abort_unless($candidate->decision === PropertyDuplicateCandidate::DECISION_CONFIRMED && ! $candidate->reversed_at, 409, 'DUPLICATE_CONFIRMATION_NOT_ACTIVE');
@@ -973,6 +989,9 @@ final class PropertyModerationService
             return $property->fresh();
         });
     }
+
+    /** Return an existing listing without rewriting its previous deal history. */
+
 
     public function publicOrFail(Property $property, ?User $viewer): void
     {
@@ -1010,7 +1029,7 @@ final class PropertyModerationService
         }
 
         DB::transaction(function () use ($property, $actor, $details): void {
-            $locked = Property::query()->lockForUpdate()->findOrFail($property->id);
+            [$actor, $locked] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, $property);
             $hasApprovedSnapshot = (array) $locked->approved_content_snapshot !== [];
             $baseline = (array) $locked->approved_content_snapshot;
             $proposed = $this->contentSnapshot($locked);

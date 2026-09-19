@@ -70,6 +70,11 @@ class RbacBranchScope
             return;
         }
 
+        if ($this->isRop($authUser)) {
+            app(RopGroupAccess::class)->ensureGroup($authUser, $branchGroupId);
+            return;
+        }
+
         $belongs = BranchGroup::query()
             ->whereKey($branchGroupId)
             ->where('branch_id', $authUser->branch_id)
@@ -83,6 +88,11 @@ class RbacBranchScope
     public function ensureUserInUserBranchOrDeny(?int $userId, User $authUser): void
     {
         if ($userId === null) {
+            return;
+        }
+
+        if ($this->isRop($authUser)) {
+            app(RopGroupAccess::class)->ensureEmployee($authUser, $userId);
             return;
         }
 

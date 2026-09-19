@@ -46,6 +46,7 @@ class ChatController extends Controller
         }
 
         $session = \App\Models\ChatSession::where('session_uuid', $sessionUuid)->first();
+        \App\Support\ChatSessionAccess::ensureVisible($request->user('sanctum') ?? $request->user(), $session);
         if (! $session) {
             return response()->json(['session_id' => $sessionUuid, 'messages' => []], 200);
         }

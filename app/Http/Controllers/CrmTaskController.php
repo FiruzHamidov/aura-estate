@@ -9,6 +9,7 @@ use App\Support\RbacBranchScope;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
 class CrmTaskController extends Controller
@@ -23,6 +24,7 @@ class CrmTaskController extends Controller
 
         $validated = $request->validate([
             'assignee_id' => 'nullable|integer|exists:users,id',
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'task_type_code' => 'nullable|string|max:64',
             'status' => 'nullable|string|max:32',
             'date_from' => 'nullable|date',
@@ -30,7 +32,8 @@ class CrmTaskController extends Controller
             'per_page' => 'nullable|integer|min:1|max:100',
         ]);
 
-        if (! empty($validated['assignee_id']) && $this->branchScope->isBranchScopedManager($authUser)) {
+        if (! empty($validated['assignee_id']) && $this->branchScope->isBranchScopedManager($authUser)
+            && ! app(\App\Support\RopGroupAccess::class)->hasVisibleTaskHistory($authUser, (int) $validated['assignee_id'])) {
             $this->branchScope->ensureUserInUserBranchOrDeny((int) $validated['assignee_id'], $authUser);
         }
 
@@ -39,6 +42,10 @@ class CrmTaskController extends Controller
 
         if (! empty($validated['assignee_id'])) {
             $query->where('assignee_id', (int) $validated['assignee_id']);
+        }
+
+        if (! empty($validated['branch_group_id'])) {
+            $query->where('crm_tasks.branch_group_id', (int) $validated['branch_group_id']);
         }
 
         if (! empty($validated['task_type_code'])) {
@@ -58,7 +65,10 @@ class CrmTaskController extends Controller
             $query->whereDate('created_at', '<=', $validated['date_to']);
         }
 
-        return response()->json($query->orderByDesc('id')->paginate((int) ($validated['per_page'] ?? 20))->withQueryString());
+        $page = $query->orderByDesc('id')->paginate((int) ($validated['per_page'] ?? 20))->withQueryString();
+        app(\App\Services\GroupAccess\GroupDataProjection::class)->prepareTasks($page->getCollection(), $authUser);
+
+        return response()->json($page);
     }
 
     public function store(Request $request)
@@ -67,6 +77,7 @@ class CrmTaskController extends Controller
 
         $validated = $request->validate([
             'task_type_id' => 'required|integer|exists:crm_task_types,id',
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'assignee_id' => 'required|integer|exists:users,id',
             'title' => 'required|string|max:255',
             'description' => 'nullable|string',
@@ -79,29 +90,32 @@ class CrmTaskController extends Controller
             'source' => ['nullable', Rule::in(['manual', 'system', 'integration'])],
         ]);
 
-        if ($this->branchScope->isBranchScopedManager($authUser)) {
-            $this->branchScope->ensureUserInUserBranchOrDeny((int) $validated['assignee_id'], $authUser);
-        }
+        return DB::transaction(function () use ($validated, $authUser) {
+            $taskType = CrmTaskType::query()->findOrFail((int) $validated['task_type_id']);
+            $this->validateTaskEntityBinding($taskType, $validated);
+            $this->validateCallTaskPayload($taskType, $validated);
 
-        $taskType = CrmTaskType::query()->findOrFail((int) $validated['task_type_id']);
-        $this->validateTaskEntityBinding($taskType, $validated);
-        $this->validateCallTaskPayload($taskType, $validated);
+            $parent = app(\App\Services\GroupAccess\TaskGroupOwnership::class)->parent(new CrmTask($validated));
+            [$authUser] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquireMany(
+                $authUser, $parent ? [$parent] : [], [$validated['assignee_id']], [$validated['branch_group_id'] ?? null]
+            );
+            $assignee = User::query()->findOrFail($validated['assignee_id']);
+            if ($this->branchScope->isBranchScopedManager($authUser)) {
+                $this->branchScope->ensureUserInUserBranchOrDeny((int) $assignee->id, $authUser);
+            }
 
-        $task = CrmTask::query()->create(array_merge($validated, [
-            'creator_id' => $authUser->id,
-            'status' => $validated['status'] ?? 'new',
-            'source' => $validated['source'] ?? 'manual',
-        ]));
+            $task = CrmTask::query()->create(array_merge($validated, [
+                'creator_id' => $authUser->id,
+                'status' => $validated['status'] ?? 'new',
+                'source' => $validated['source'] ?? 'manual',
+            ]));
 
-        return response()->json($task->fresh(['type', 'assignee.role']), 201);
+            return response()->json($task->fresh(['type', 'assignee.role']), 201);
+        });
     }
 
     public function update(Request $request, CrmTask $crmTask)
     {
-        $authUser = $this->authUser();
-
-        $this->ensureTaskVisible($crmTask, $authUser);
-
         $validated = $request->validate([
             'title' => 'nullable|string|max:255',
             'description' => 'nullable|string',
@@ -111,9 +125,23 @@ class CrmTaskController extends Controller
             'completed_at' => 'nullable|date',
         ]);
 
-        $crmTask->update($validated);
+        return DB::transaction(function () use ($validated, $crmTask) {
+            $ownership = app(\App\Services\GroupAccess\TaskGroupOwnership::class);
+            $draft = (clone $crmTask)->fill($validated);
+            $parent = $ownership->isReopening($draft) ? $ownership->parent($draft) : null;
+            [$authUser, $locked] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquireMany(
+                $this->authUser(), array_filter(['task' => $crmTask, 'parent' => $parent])
+            );
+            $crmTask = $locked['task'];
+            $this->ensureTaskVisible($crmTask, $authUser);
+            // A concurrent completion may turn this edit into a reopen after waiting.
+            $freshDraft = (clone $crmTask)->fill($validated);
+            abort_if($ownership->isReopening($freshDraft) !== $ownership->isReopening($draft), 409, 'TASK_STATE_CHANGED');
+            $this->validateCallTaskPayload($crmTask->type, array_merge($crmTask->getAttributes(), $validated));
+            $crmTask->update($validated);
 
-        return response()->json($crmTask->fresh(['type', 'assignee.role']));
+            return response()->json($crmTask->fresh(['type', 'assignee.role']));
+        });
     }
 
     private function applyVisibilityScope(Builder $query, User $authUser): void
@@ -122,7 +150,8 @@ class CrmTaskController extends Controller
 
         match ($authUser->role?->slug) {
             'admin', 'superadmin' => null,
-            'rop', 'branch_director' => $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id)),
+            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'crm_tasks.branch_group_id'),
+            'branch_director' => $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id)),
             'mop' => $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_group_id', $authUser->branch_group_id)),
             default => $query->where('assignee_id', $authUser->id),
         };
@@ -130,6 +159,7 @@ class CrmTaskController extends Controller
 
     private function ensureTaskVisible(CrmTask $task, User $authUser): void
     {
+        app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $task);
         $query = CrmTask::query()->whereKey($task->id);
         $this->applyVisibilityScope($query, $authUser);
         abort_unless($query->exists(), 403, 'Forbidden');

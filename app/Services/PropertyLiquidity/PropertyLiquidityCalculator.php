@@ -3,6 +3,8 @@
 namespace App\Services\PropertyLiquidity;
 
 use App\Models\ClientNeed;
+use App\Models\User;
+use App\Support\RopGroupAccess;
 use App\Models\Property;
 use App\Models\PropertyLiquiditySnapshot;
 use Carbon\CarbonInterface;
@@ -24,23 +26,36 @@ class PropertyLiquidityCalculator
 
     public function calculate(Property $property): ?PropertyLiquiditySnapshot
     {
+        return $this->buildSnapshot($property);
+    }
+
+    public function previewForRop(Property $property, User $actor): ?PropertyLiquiditySnapshot
+    {
+        abort_unless($actor->hasRole('rop'), 403, 'FORBIDDEN_ACTION');
+        app(RopGroupAccess::class)->ensureVisible($actor, $property);
+
+        return $this->buildSnapshot($property, $actor);
+    }
+
+    private function buildSnapshot(Property $property, ?User $actor = null): ?PropertyLiquiditySnapshot
+    {
         $property->loadMissing(['type', 'photos']);
 
         if ($this->eligibility($property)['status'] !== 'eligible') {
-            $this->clearScore($property);
+            if (! $actor) $this->clearScore($property);
 
             return null;
         }
 
-        $strictActive = $this->comparableQuery($property, true, false)->get();
-        $strictSold = $this->comparableQuery($property, true, true)->get();
+        $strictActive = $this->comparableQuery($property, true, false, 0.20, $actor)->get();
+        $strictSold = $this->comparableQuery($property, true, true, 0.20, $actor)->get();
         $usedCityFallback = $strictSold->count() < (int) config('property-liquidity.minimum_sold_for_prediction', 15);
 
         $active = $strictActive;
         $sold = $strictSold;
         if ($usedCityFallback) {
-            $active = $this->comparableQuery($property, false, false, 0.30)->get();
-            $sold = $this->comparableQuery($property, false, true, 0.30)->get();
+            $active = $this->comparableQuery($property, false, false, 0.30, $actor)->get();
+            $sold = $this->comparableQuery($property, false, true, 0.30, $actor)->get();
         }
 
         $priceSamples = $active->merge($sold)
@@ -49,7 +64,7 @@ class PropertyLiquidityCalculator
             ->values();
 
         if ($priceSamples->count() < 3) {
-            $this->clearScore($property);
+            if (! $actor) $this->clearScore($property);
 
             return null;
         }
@@ -57,7 +72,7 @@ class PropertyLiquidityCalculator
         $medianPriceSqm = (float) $priceSamples->median();
         $objectPriceSqm = $this->pricePerSquareMeter($property);
         if ($objectPriceSqm === null || $medianPriceSqm <= 0) {
-            $this->clearScore($property);
+            if (! $actor) $this->clearScore($property);
 
             return null;
         }
@@ -65,8 +80,8 @@ class PropertyLiquidityCalculator
         $priceDelta = round(($objectPriceSqm / $medianPriceSqm - 1) * 100, 2);
         $pricePosition = $this->pricePosition($priceDelta);
         $priceScore = $this->priceScore($priceDelta);
-        $districtMarket = $this->districtMarketScore($property, $strictActive, $strictSold);
-        [$demandScore, $matchingNeeds] = $this->demandScore($property, max(1, $strictActive->count()));
+        $districtMarket = $this->districtMarketScore($property, $strictActive, $strictSold, $actor);
+        [$demandScore, $matchingNeeds] = $this->demandScore($property, max(1, $strictActive->count()), $actor);
         $propertyFit = $this->propertyFitScore($property);
         $interest = $this->interest($property, $strictActive);
 
@@ -98,7 +113,7 @@ class PropertyLiquidityCalculator
         $now = now();
         $modelVersion = (string) config('property-liquidity.model_version');
 
-        $snapshot = PropertyLiquiditySnapshot::create([
+        $snapshot = new PropertyLiquiditySnapshot([
             'property_id' => $property->id,
             'score' => $score,
             'category' => $this->category($score),
@@ -141,6 +156,14 @@ class PropertyLiquidityCalculator
             'model_version' => $modelVersion,
             'calculated_at' => $now,
         ]);
+
+        if ($actor) {
+            return $snapshot->forceFill([
+                'promotion_priority_score' => $promotionPriority,
+                'promotion_eligibility' => $promotionEligibility,
+            ]);
+        }
+        $snapshot->save();
 
         $property->updateQuietly([
             'liquidity_score' => $score,
@@ -196,7 +219,7 @@ class PropertyLiquidityCalculator
         return ['status' => $reasons === [] ? 'eligible' : $state, 'reasons' => $reasons];
     }
 
-    private function comparableQuery(Property $property, bool $districtOnly, bool $sold, float $areaTolerance = 0.20): Builder
+    private function comparableQuery(Property $property, bool $districtOnly, bool $sold, float $areaTolerance = 0.20, ?User $actor = null): Builder
     {
         $area = (float) $property->total_area;
         $query = Property::query()
@@ -207,6 +230,8 @@ class PropertyLiquidityCalculator
             ->where('currency', $property->currency)
             ->whereBetween('total_area', [$area * (1 - $areaTolerance), $area * (1 + $areaTolerance)])
             ->where('created_at', '>=', now()->subMonths((int) config('property-liquidity.lookback_months', 12)));
+
+        if ($actor) app(RopGroupAccess::class)->scope($query, $actor, 'properties.branch_group_id', 'properties.branch_id');
 
         if ($this->usesRooms($property)) {
             $query->where('rooms', $property->rooms);
@@ -280,11 +305,11 @@ class PropertyLiquidityCalculator
         }));
     }
 
-    private function districtMarketScore(Property $property, Collection $active, Collection $sold): array
+    private function districtMarketScore(Property $property, Collection $active, Collection $sold, ?User $actor = null): array
     {
         $districtDom = $this->medianDom($sold);
-        $citySold = $this->comparableQuery($property, false, true, 0.30)->get();
-        $cityActive = $this->comparableQuery($property, false, false, 0.30)->get();
+        $citySold = $this->comparableQuery($property, false, true, 0.30, $actor)->get();
+        $cityActive = $this->comparableQuery($property, false, false, 0.30, $actor)->get();
         $cityDom = $this->medianDom($citySold);
 
         $domScore = $districtDom && $cityDom ? $this->clamp((int) round(50 * $cityDom / $districtDom)) : 50;
@@ -307,7 +332,7 @@ class PropertyLiquidityCalculator
         return $days->isEmpty() ? null : (int) round((float) $days->median());
     }
 
-    private function demandScore(Property $property, int $activeSupply): array
+    private function demandScore(Property $property, int $activeSupply, ?User $actor = null): array
     {
         if (! class_exists(ClientNeed::class)) {
             return [50, 0];
@@ -316,6 +341,7 @@ class PropertyLiquidityCalculator
         $price = $this->effectivePrice($property) ?? 0;
         $cutoff = now()->subDays((int) config('property-liquidity.demand_freshness_days', 90));
         $needs = ClientNeed::query()
+            ->when($actor, fn (Builder $needs) => $needs->whereHas('client', fn (Builder $clients) => app(RopGroupAccess::class)->scope($clients, $actor, 'clients.branch_group_id', 'clients.branch_id')))
             ->where('updated_at', '>=', $cutoff)
             ->whereNull('closed_at')
             ->where('currency', $property->currency)
@@ -468,7 +494,9 @@ class PropertyLiquidityCalculator
         $contentReadiness = (int) round($photoScore + (trim((string) $property->description) !== '' ? 20 : 0) + 30);
         $freshness = $property->listing_updated_at?->diffInDays(now()) <= 30 ? 100 : 50;
         $rotationDays = (int) config('property-liquidity.promotion.rotation_days', 14);
-        $lastPublished = $property->socialPromotions()->where('status', 'published')->max('published_at');
+        $lastPublished = array_key_exists('last_social_publication', $property->getAttributes())
+            ? $property->last_social_publication
+            : $property->socialPromotions()->where('status', 'published')->max('published_at');
         $rotation = ! $lastPublished || now()->diffInDays($lastPublished) >= $rotationDays ? 100 : 0;
         $opportunity = $interest['insufficient_exposure'] ? 50 : 100 - (int) $interest['percentile_in_district'];
         $weights = config('property-liquidity.promotion.weights');

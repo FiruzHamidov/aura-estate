@@ -13,6 +13,7 @@ use App\Support\LeadAccess;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
 class CrmActivityController extends Controller
@@ -121,30 +122,34 @@ class CrmActivityController extends Controller
             $query->where('created_at', '<=', Carbon::parse($validated['date_to']));
         }
 
-        return response()->json(
-            $query->paginate((int) ($validated['per_page'] ?? 20))
-                ->withQueryString()
-        );
+        $page = $query->paginate((int) ($validated['per_page'] ?? 20))->withQueryString();
+        app(\App\Services\GroupAccess\AuditSnapshotProjection::class)->prepare($page->getCollection(), $authUser);
+
+        return response()->json($page);
     }
 
     public function leadStore(Request $request, Lead $lead)
     {
-        $authUser = $this->authUser();
-        $this->leadAccess->ensureVisible($authUser, $lead);
+        return DB::transaction(function () use ($request, $lead) {
+            [$authUser, $lead] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
+                $this->authUser(), $lead, $request->integer('responsible_agent_id') ?: null, null
+            );
+            $this->leadAccess->ensureVisible($authUser, $lead);
 
-        $data = $this->validateActivity($request);
+            $data = $this->validateActivity($request);
 
-        match ($data['type']) {
-            'comment' => $this->leadComment($lead, $authUser, $data),
-            'tag_added' => $this->leadTagAdded($lead, $authUser, $data),
-            'tag_removed' => $this->leadTagRemoved($lead, $authUser, $data),
-            'call' => $this->leadCall($lead, $authUser, $data),
-            'status_change' => $this->leadStatusChange($lead, $authUser, $data),
-            'assignment' => $this->leadAssignment($lead, $authUser, $data),
-            'follow_up_changed' => $this->leadFollowUpChanged($lead, $authUser, $data),
-        };
+            match ($data['type']) {
+                'comment' => $this->leadComment($lead, $authUser, $data),
+                'tag_added' => $this->leadTagAdded($lead, $authUser, $data),
+                'tag_removed' => $this->leadTagRemoved($lead, $authUser, $data),
+                'call' => $this->leadCall($lead, $authUser, $data),
+                'status_change' => $this->leadStatusChange($lead, $authUser, $data),
+                'assignment' => $this->leadAssignment($lead, $authUser, $data),
+                'follow_up_changed' => $this->leadFollowUpChanged($lead, $authUser, $data),
+            };
 
-        return response()->json($lead->fresh($this->leadRelations()));
+            return response()->json($lead->fresh($this->leadRelations()));
+        });
     }
 
     public function dealIndex(Request $request, Deal $deal)
@@ -173,47 +178,51 @@ class CrmActivityController extends Controller
             $query->where('created_at', '<=', Carbon::parse($validated['date_to']));
         }
 
-        return response()->json(
-            $query->paginate((int) ($validated['per_page'] ?? 20))
-                ->withQueryString()
-        );
+        $page = $query->paginate((int) ($validated['per_page'] ?? 20))->withQueryString();
+        app(\App\Services\GroupAccess\AuditSnapshotProjection::class)->prepare($page->getCollection(), $authUser);
+
+        return response()->json($page);
     }
 
     public function dealStore(Request $request, Deal $deal)
     {
-        $authUser = $this->authUser();
-        $this->dealAccess->ensureVisible($authUser, $deal);
-
-        $data = $this->validateActivity($request, true);
-
-        $deal->loadMissing('pipeline');
-        if ($deal->isPropertyControl()) {
-            abort_unless(
-                in_array($data['type'], ['comment', 'follow_up_changed'], true),
-                422,
-                'CRM_PROPERTY_CONTROL_ACTIVITY_NOT_ALLOWED'
+        return DB::transaction(function () use ($request, $deal) {
+            [$authUser, $deal] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
+                $this->authUser(), $deal, $request->integer('responsible_agent_id') ?: null, null
             );
+            $this->dealAccess->ensureVisible($authUser, $deal);
 
-            if ($data['type'] === 'follow_up_changed') {
+            $data = $this->validateActivity($request, true);
+
+            $deal->loadMissing('pipeline');
+            if ($deal->isPropertyControl()) {
                 abort_unless(
-                    in_array($authUser->role?->slug, ['security', 'admin', 'superadmin'], true),
-                    403,
-                    'CRM_DEAL_FORBIDDEN'
+                    in_array($data['type'], ['comment', 'follow_up_changed'], true),
+                    422,
+                    'CRM_PROPERTY_CONTROL_ACTIVITY_NOT_ALLOWED'
                 );
+
+                if ($data['type'] === 'follow_up_changed') {
+                    abort_unless(
+                        in_array($authUser->role?->slug, ['security', 'admin', 'superadmin'], true),
+                        403,
+                        'CRM_DEAL_FORBIDDEN'
+                    );
+                }
             }
-        }
 
-        match ($data['type']) {
-            'comment' => $this->dealComment($deal, $authUser, $data),
-            'tag_added' => $this->dealTagAdded($deal, $authUser, $data),
-            'tag_removed' => $this->dealTagRemoved($deal, $authUser, $data),
-            'call' => $this->dealCall($deal, $authUser, $data),
-            'status_change' => $this->dealStatusChange($deal, $authUser, $data),
-            'assignment' => $this->dealAssignment($deal, $authUser, $data),
-            'follow_up_changed' => $this->dealFollowUpChanged($deal, $authUser, $data),
-        };
+            match ($data['type']) {
+                'comment' => $this->dealComment($deal, $authUser, $data),
+                'tag_added' => $this->dealTagAdded($deal, $authUser, $data),
+                'tag_removed' => $this->dealTagRemoved($deal, $authUser, $data),
+                'call' => $this->dealCall($deal, $authUser, $data),
+                'status_change' => $this->dealStatusChange($deal, $authUser, $data),
+                'assignment' => $this->dealAssignment($deal, $authUser, $data),
+                'follow_up_changed' => $this->dealFollowUpChanged($deal, $authUser, $data),
+            };
 
-        return response()->json($deal->fresh($this->dealRelations()));
+            return response()->json($deal->fresh($this->dealRelations()));
+        });
     }
 
     private function touchLead(Lead $lead, User $actor, array $payload = []): void

@@ -67,14 +67,21 @@ class BranchController extends Controller
 
     public function destroy(Branch $branch)
     {
-        if ($branch->users()->exists()) {
-            return response()->json([
-                'message' => 'Нельзя удалить филиал: к нему привязаны пользователи',
-            ], 409);
-        }
+        return \DB::transaction(function () use ($branch) {
+            $branch = Branch::query()->whereKey($branch->id)->lockForUpdate()->firstOrFail();
+            if ($branch->users()->exists()) {
+                return response()->json([
+                    'message' => 'Нельзя удалить филиал: к нему привязаны пользователи',
+                ], 409);
+            }
 
-        $branch->delete();
+            foreach (\App\Models\BranchGroup::query()->where('branch_id', $branch->id)->orderBy('id')->lockForUpdate()->get() as $group) {
+                abort_if($group->hasAssignedData(true) || (\Schema::hasTable('rop_branch_groups') && $group->hasAssignedRops(true)), 409, 'GROUP_HAS_ASSIGNED_DATA');
+            }
 
-        return response()->json(['message' => 'Филиал удален']);
+            $branch->delete();
+
+            return response()->json(['message' => 'Филиал удален']);
+        });
     }
 }

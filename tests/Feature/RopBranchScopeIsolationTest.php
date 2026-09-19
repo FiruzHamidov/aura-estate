@@ -93,6 +93,7 @@ class RopBranchScopeIsolationTest extends TestCase
         });
 
         (require database_path('migrations/2025_11_12_144557_create_property_logs_table.php'))->up();
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
 
         Schema::create('personal_access_tokens', function (Blueprint $table) {
             $table->id();
@@ -106,20 +107,20 @@ class RopBranchScopeIsolationTest extends TestCase
         });
     }
 
-    public function test_rop_gets_only_own_branch_data_for_groups_and_reports(): void
+    public function test_rop_gets_only_assigned_group_data_for_groups_and_reports(): void
     {
         [$branchA, $branchB, $users] = $this->seedContext();
         $rop = $users['ropA'];
         Sanctum::actingAs($rop);
 
         $groupsResponse = $this->getJson('/api/branch-groups');
-        $groupsResponse->assertOk()->assertJsonCount(2, 'data');
+        $groupsResponse->assertOk()->assertJsonCount(1, 'data');
 
         $dailyResponse = $this->getJson('/api/daily-reports');
-        $dailyResponse->assertOk()->assertJsonCount(3, 'data');
+        $dailyResponse->assertOk()->assertJsonCount(2, 'data');
 
         $summaryResponse = $this->getJson('/api/reports/properties/summary');
-        $summaryResponse->assertOk()->assertJsonPath('total', 2);
+        $summaryResponse->assertOk()->assertJsonPath('total', 1);
     }
 
     public function test_rop_foreign_branch_filter_returns_403_with_rbac_code(): void
@@ -129,7 +130,7 @@ class RopBranchScopeIsolationTest extends TestCase
 
         $this->getJson('/api/daily-reports?branch_id='.$branchB->id)
             ->assertStatus(403)
-            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+            ->assertJsonPath('code', 'RBAC_GROUP_SCOPE_VIOLATION');
     }
 
     public function test_rop_foreign_agent_filter_returns_403_with_rbac_code(): void
@@ -139,7 +140,7 @@ class RopBranchScopeIsolationTest extends TestCase
 
         $this->getJson('/api/reports/properties/summary?agent_id='.$users['agentB']->id)
             ->assertStatus(403)
-            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+            ->assertJsonPath('code', 'RBAC_GROUP_SCOPE_VIOLATION');
     }
 
     public function test_rop_foreign_branch_group_filter_returns_403_with_rbac_code(): void
@@ -149,7 +150,7 @@ class RopBranchScopeIsolationTest extends TestCase
 
         $this->getJson('/api/daily-reports?branch_group_id='.$groups['groupB']->id)
             ->assertStatus(403)
-            ->assertJsonPath('code', 'RBAC_BRANCH_SCOPE_VIOLATION');
+            ->assertJsonPath('code', 'RBAC_GROUP_SCOPE_VIOLATION');
     }
 
     public function test_admin_and_superadmin_keep_global_access(): void
@@ -212,6 +213,7 @@ class RopBranchScopeIsolationTest extends TestCase
         $groupB = BranchGroup::create(['branch_id' => $branchB->id, 'name' => 'B1']);
 
         $ropA = $this->createUser($roles['rop'], $branchA, 'ROP A');
+        $ropA->supervisedGroups()->attach($groupA1->id);
         $mopA = $this->createUser($roles['mop'], $branchA, 'MOP A', $groupA1);
         $agentA = $this->createUser($roles['agent'], $branchA, 'Agent A', $groupA1);
         $agentA2 = $this->createUser($roles['agent'], $branchA, 'Agent A2', $groupA2);
@@ -251,6 +253,7 @@ class RopBranchScopeIsolationTest extends TestCase
             'user_id' => $user->id,
             'role_slug' => $user->role->slug,
             'report_date' => '2026-04-30',
+            'branch_group_id' => $user->branch_group_id,
             'submitted_at' => now(),
         ]);
     }

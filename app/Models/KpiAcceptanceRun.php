@@ -9,7 +9,7 @@ class KpiAcceptanceRun extends Model
 {
     use HasFactory;
 
-    protected $fillable = ['run_type', 'status', 'started_at', 'finished_at', 'details'];
+    protected $fillable = ['branch_group_id', 'run_type', 'status', 'started_at', 'finished_at', 'details'];
 
     protected $casts = [
         'started_at' => 'datetime',

@@ -40,6 +40,12 @@ class EnforceRopBranchScope
         }
 
         $agentIds = $this->toArray($request->input('agent_id', $request->input('user_id')));
+        if ($request->isMethodSafe() && $request->is('api/daily-reports', 'api/kpi-reports', 'api/kpi/weekly', 'api/kpi/monthly', 'api/kpi/weekly-daily', 'api/kpi/daily', 'api/kpi/dashboard', 'api/kpi/dashboard/debug') && ! $request->has('agent_id')) {
+            $access = app(\App\Support\RopGroupAccess::class);
+            $agentIds = array_values(array_filter($agentIds,
+                fn ($id) => ! $access->hasVisibleDailyReportHistory($authUser, (int) $id)));
+        }
+
         $agentIds = array_merge(
             $agentIds,
             $this->toArray($request->input('responsible_user_id')),

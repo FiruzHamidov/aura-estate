@@ -243,6 +243,14 @@ class BookingController extends Controller
         $authUser = $this->authUser($request);
         $roleSlug = $this->roleSlug($authUser);
 
+        if ($roleSlug === 'rop') {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'bookings.branch_group_id');
+            if ($request->filled('branch_group_id')) {
+                $query->whereIn('bookings.branch_group_id', $this->toArray($request->input('branch_group_id')));
+            }
+            return;
+        }
+
         if ($this->isClientRole($roleSlug)) {
             $query->where('client_id', $authUser->id);
 
@@ -318,6 +326,9 @@ class BookingController extends Controller
 
     private function ensureBookingIsVisible(Request $request, Booking $booking): void
     {
+        if ($this->authUser($request)?->hasRole('rop')) {
+            app(\App\Support\RopGroupAccess::class)->ensureVisible($this->authUser($request), $booking);
+        }
         $visible = Booking::query()
             ->whereKey($booking->id)
             ->tap(fn ($query) => $this->applyBranchAccessForAgents($request, $query, 'agent_id'))
@@ -441,6 +452,7 @@ class BookingController extends Controller
         $authUser = $this->authUser($request);
 
         $validated = $request->validate([
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'property_id' => 'required|exists:properties,id',
             'agent_id' => [
                 'required',
@@ -458,35 +470,42 @@ class BookingController extends Controller
             'place' => 'nullable|string',
         ]);
 
-        $client = $this->resolveClient($validated['client_id']);
-        $this->ensureBookingAgentClientAccess($client, $validated['agent_id'] ?? null, $authUser);
-        $validated = $this->syncBookingSnapshot($validated, $client, $authUser);
-        unset($validated['client_id']);
+        return \DB::transaction(function () use ($request, $validated, $authUser) {
+            $client = $this->resolveClient($validated['client_id']);
+            $property = \App\Models\Property::findOrFail($validated['property_id']);
+            [$authUser, $records] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquireMany(
+                $authUser, [$client, $property], [$validated['agent_id']], [$validated['branch_group_id'] ?? null]
+            );
+            $client = $records[0];
+            $this->ensureBookingAgentClientAccess($client, $validated['agent_id'] ?? null, $authUser);
+            $validated = $this->syncBookingSnapshot($validated, $client, $authUser);
+            unset($validated['client_id']);
 
-        $startCarbon = $this->parseInputDateTimeToUtc($validated['start_time']);
-        $endCarbon   = $this->parseInputDateTimeToUtc($validated['end_time']);
+            $startCarbon = $this->parseInputDateTimeToUtc($validated['start_time']);
+            $endCarbon   = $this->parseInputDateTimeToUtc($validated['end_time']);
 
-        if ($endCarbon->lessThanOrEqualTo($startCarbon)) {
-            throw ValidationException::withMessages([
-                'end_time' => ['The end time must be a date after start time.'],
-            ]);
-        }
+            if ($endCarbon->lessThanOrEqualTo($startCarbon)) {
+                throw ValidationException::withMessages([
+                    'end_time' => ['The end time must be a date after start time.'],
+                ]);
+            }
 
-        // Сохраняем в формате, который БД корректно принимает
-        $validated['start_time'] = $startCarbon->toDateTimeString(); // "Y-m-d H:i:s" (UTC)
-        $validated['end_time']   = $endCarbon->toDateTimeString();
+            // Сохраняем в формате, который БД корректно принимает
+            $validated['start_time'] = $startCarbon->toDateTimeString(); // "Y-m-d H:i:s" (UTC)
+            $validated['end_time']   = $endCarbon->toDateTimeString();
 
-        $booking = Booking::create($validated);
-        $this->logClientBookingCreated($client, $authUser, $booking);
+            $booking = Booking::create($validated);
+            $this->logClientBookingCreated($client, $authUser, $booking);
 
-        // Ensure relations are available for subject/description
-        $booking->load(['property', 'agent', 'client.type']);
-        $this->transformBookingForResponse($booking);
-        $this->notifications->handleBookingCreated($booking, $authUser);
+            // Ensure relations are available for subject/description
+            $booking->load(['property', 'agent', 'client.type']);
+            $this->transformBookingForResponse($booking);
+            $this->notifications->handleBookingCreated($booking, $authUser);
 
-        return response()->json([
-            'booking' => $booking,
-        ], 201);
+            return response()->json([
+                'booking' => $booking,
+            ], 201);
+        });
     }
 
     public function show($id)
@@ -501,6 +520,7 @@ class BookingController extends Controller
     public function update(Request $request, $id)
     {
         $booking = Booking::findOrFail($id);
+        app(\App\Support\RopGroupAccess::class)->ensureVisible($request->user(), $booking);
 
         $validated = $request->validate([
             'start_time' => 'sometimes|date',
@@ -516,68 +536,74 @@ class BookingController extends Controller
             'client_phone' => 'prohibited',
         ]);
 
-        $authUser = $request->user();
-        $userRole = $authUser->role->slug ?? null;
+        return \DB::transaction(function () use ($request, $validated, $booking) {
+            $authUser = $request->user();
+            [$authUser, $booking] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
+                $authUser, $booking, $validated['agent_id'] ?? null, null
+            );
+            app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $booking);
+            $userRole = $authUser->role->slug ?? null;
 
-        // permission: privileged roles or the booking's agent can update
-        if (!($authUser && $this->isPrivilegedRole($userRole)) && $booking->agent_id !== ($authUser->id ?? null)) {
-            return response()->json(['error' => 'Forbidden'], 403);
-        }
+            // permission: privileged roles or the booking's agent can update
+            if (!($authUser && $this->isPrivilegedRole($userRole)) && $booking->agent_id !== ($authUser->id ?? null)) {
+                return response()->json(['error' => 'Forbidden'], 403);
+            }
 
-        $startCarbon = isset($validated['start_time'])
-            ? $this->parseInputDateTimeToUtc($validated['start_time'])
-            : Carbon::parse($booking->start_time, 'UTC');
+            $startCarbon = isset($validated['start_time'])
+                ? $this->parseInputDateTimeToUtc($validated['start_time'])
+                : Carbon::parse($booking->start_time, 'UTC');
 
-        $endCarbon = isset($validated['end_time'])
-            ? $this->parseInputDateTimeToUtc($validated['end_time'])
-            : Carbon::parse($booking->end_time, 'UTC');
+            $endCarbon = isset($validated['end_time'])
+                ? $this->parseInputDateTimeToUtc($validated['end_time'])
+                : Carbon::parse($booking->end_time, 'UTC');
 
-        if ($endCarbon->lessThanOrEqualTo($startCarbon)) {
-            throw ValidationException::withMessages([
-                'end_time' => ['The end time must be a date after start time.'],
-            ]);
-        }
+            if ($endCarbon->lessThanOrEqualTo($startCarbon)) {
+                throw ValidationException::withMessages([
+                    'end_time' => ['The end time must be a date after start time.'],
+                ]);
+            }
 
-        if (isset($validated['start_time'])) {
-            $booking->start_time = $startCarbon->toDateTimeString();
-        }
-        if (isset($validated['end_time'])) {
-            $booking->end_time = $endCarbon->toDateTimeString();
-        }
+            if (isset($validated['start_time'])) {
+                $booking->start_time = $startCarbon->toDateTimeString();
+            }
+            if (isset($validated['end_time'])) {
+                $booking->end_time = $endCarbon->toDateTimeString();
+            }
 
-        $currentClient = $booking->client;
-        $auditOldValues = [
-            'booking_id' => $booking->id,
-            'property_id' => $booking->property_id,
-            'agent_id' => $booking->agent_id,
-            'start_time' => $booking->start_time,
-            'end_time' => $booking->end_time,
-            'crm_client_id' => $booking->crm_client_id,
-            'note' => $booking->note,
-        ];
+            $currentClient = $booking->client;
+            $auditOldValues = [
+                'booking_id' => $booking->id,
+                'property_id' => $booking->property_id,
+                'agent_id' => $booking->agent_id,
+                'start_time' => $booking->start_time,
+                'end_time' => $booking->end_time,
+                'crm_client_id' => $booking->crm_client_id,
+                'note' => $booking->note,
+            ];
 
-        if (array_key_exists('client_id', $validated)) {
-            $client = $this->resolveVisibleClient($request, $validated['client_id']);
-            $snapshot = $this->syncBookingSnapshot([], $client, $authUser);
-            $booking->crm_client_id = $snapshot['crm_client_id'];
-            $booking->client_name = $snapshot['client_name'];
-            $booking->client_phone = $snapshot['client_phone'];
-            $currentClient = $client;
-        }
+            if (array_key_exists('client_id', $validated)) {
+                $client = $this->resolveVisibleClient($request, $validated['client_id']);
+                $snapshot = $this->syncBookingSnapshot([], $client, $authUser);
+                $booking->crm_client_id = $snapshot['crm_client_id'];
+                $booking->client_name = $snapshot['client_name'];
+                $booking->client_phone = $snapshot['client_phone'];
+                $currentClient = $client;
+            }
 
-        if (array_key_exists('note', $validated)) $booking->note = $validated['note'];
-        if (array_key_exists('agent_id', $validated) && $this->isPrivilegedRole($userRole)) {
-            $booking->agent_id = $validated['agent_id'];
-        }
+            if (array_key_exists('note', $validated)) $booking->note = $validated['note'];
+            if (array_key_exists('agent_id', $validated) && $this->isPrivilegedRole($userRole)) {
+                $booking->agent_id = $validated['agent_id'];
+            }
 
-        $booking->save();
+            $booking->save();
 
-        $booking->load(['property', 'agent', 'client.type']);
-        $this->transformBookingForResponse($booking);
-        $this->logClientBookingUpdated($currentClient, $authUser, $booking, $auditOldValues);
-        $this->notifications->handleBookingUpdated($booking, $authUser, $auditOldValues);
+            $booking->load(['property', 'agent', 'client.type']);
+            $this->transformBookingForResponse($booking);
+            $this->logClientBookingUpdated($currentClient, $authUser, $booking, $auditOldValues);
+            $this->notifications->handleBookingUpdated($booking, $authUser, $auditOldValues);
 
-        return response()->json($booking);
+            return response()->json($booking);
+        });
     }
 
     public function agentsReport(Request $request)
@@ -621,18 +647,17 @@ class BookingController extends Controller
                 default => 'SUM(TIMESTAMPDIFF(MINUTE, start_time, COALESCE(end_time, start_time))) as total_minutes',
             };
 
-            $rows = $q->select([
+            $q->select([
                 'agent_id',
                 DB::raw('COUNT(*) as shows_count'),
                 DB::raw($minutesExpr),
-                DB::raw('COUNT(DISTINCT COALESCE(crm_client_id, client_id)) as unique_clients'),
-                DB::raw('COUNT(DISTINCT property_id) as unique_properties'),
                 DB::raw('MIN(start_time) as first_show'),
                 DB::raw('MAX(start_time) as last_show'),
             ])
                 ->groupBy('agent_id')
-                ->orderByDesc('shows_count')
-                ->get();
+                ->orderByDesc('shows_count');
+            app(\App\Services\GroupAccess\BookingReportCounts::class)->select($q, $request->user());
+            $rows = $q->get();
 
             $users = User::whereIn('id', $rows->pluck('agent_id'))
                 ->get(['id', 'name'])

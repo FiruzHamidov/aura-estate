@@ -142,7 +142,7 @@ class ExternalPropertyRequestController extends Controller
         $created = [];
         $basePosition = (int) ($externalPropertyRequest->photos()->max('position') ?? -1) + 1;
         foreach ($validated['photos'] as $index => $file) {
-            $path = $file->store('external-property-requests/' . $externalPropertyRequest->id, 'public');
+            $path = $file->store('external-property-requests/' . $externalPropertyRequest->id, \App\Services\ExternalRequestMedia::DISK);
             $created[] = $externalPropertyRequest->photos()->create([
                 'file_path' => $path,
                 'position' => $basePosition + $index,
@@ -169,6 +169,7 @@ class ExternalPropertyRequestController extends Controller
         abort_unless((int) $photo->external_property_request_id === (int) $externalPropertyRequest->id, 404);
 
         Storage::disk('public')->delete($photo->file_path);
+        Storage::disk(\App\Services\ExternalRequestMedia::DISK)->delete($photo->file_path);
         $photo->delete();
 
         $this->service->log($externalPropertyRequest, $user, 'photo_deleted');
@@ -355,7 +356,7 @@ class ExternalPropertyRequestController extends Controller
             'property_payload' => $this->service->prefillPayload($externalPropertyRequest, $user),
             'photos' => $externalPropertyRequest->photos->map(fn (ExternalPropertyRequestPhoto $photo) => [
                 'id' => $photo->id,
-                'url' => Storage::disk('public')->url($photo->file_path),
+                'url' => $photo->url,
                 'position' => $photo->position,
             ])->values(),
             'source' => [
@@ -579,7 +580,7 @@ class ExternalPropertyRequestController extends Controller
         $payload['photos'] = $request->photos
             ->map(fn (ExternalPropertyRequestPhoto $photo) => [
                 'id' => $photo->id,
-                'url' => Storage::disk('public')->url($photo->file_path),
+                'url' => $photo->url,
                 'position' => $photo->position,
             ])
             ->values();

@@ -28,6 +28,7 @@ class LocationTrackingFeatureTest extends TestCase
 
         Schema::dropAllTables();
         $this->createBaseSchema();
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
         $migration = require database_path('migrations/2026_07_29_000001_create_user_location_tracking_tables.php');
         $migration->up();
         $metaMigration = require database_path('migrations/2026_07_29_000002_add_meta_to_user_location_points.php');
@@ -250,13 +251,13 @@ class LocationTrackingFeatureTest extends TestCase
 
         $allowedResponse = $this->postJson('/api/broadcasting/auth', [
             'socket_id' => '1234.5678',
-            'channel_name' => 'private-location.user.'.$context['agentA']->id,
+            'channel_name' => 'private-location.viewer.'.$context['mopA']->id.'.scope.0',
         ]);
         $allowedResponse->assertOk()->assertJsonStructure(['auth']);
 
         $this->postJson('/api/broadcasting/auth', [
             'socket_id' => '1234.5678',
-            'channel_name' => 'private-location.user.'.$context['agentB']->id,
+            'channel_name' => 'private-location.viewer.'.$context['agentB']->id.'.scope.0',
         ])->assertForbidden();
     }
 
@@ -374,7 +375,7 @@ class LocationTrackingFeatureTest extends TestCase
         }
     }
 
-    public function test_rop_sees_only_agents_and_mops_of_own_branch(): void
+    public function test_rop_sees_only_agents_and_mops_of_assigned_groups(): void
     {
         $context = $this->context();
         Sanctum::actingAs($context['ropA']);
@@ -383,7 +384,6 @@ class LocationTrackingFeatureTest extends TestCase
         $ids = collect($response->json('data'))->pluck('user.id')->sort()->values()->all();
         $expected = collect([
             $context['agentA']->id,
-            $context['agentOtherGroup']->id,
             $context['mopA']->id,
         ])->sort()->values()->all();
 
@@ -415,6 +415,70 @@ class LocationTrackingFeatureTest extends TestCase
         );
     }
 
+    public function test_queued_location_event_rechecks_recipients_and_never_reuses_revoked_channel(): void
+    {
+        $context = $this->context();
+        Sanctum::actingAs($context['agentA']);
+        $device = $this->devicePayload();
+        $this->putJson('/api/location-tracking/me/device', $device)->assertOk();
+        $this->postJson('/api/location-tracking/me/points', [
+            'device_uuid' => $device['device_uuid'],
+            'points' => [$this->pointPayload(now()->subMinute()->toISOString(), 38.56, 68.788)],
+        ])->assertOk();
+        $event = null;
+        Event::assertDispatched(UserLocationUpdated::class, function ($captured) use (&$event) {
+            $event = $captured;
+            return true;
+        });
+        $names = fn () => array_map(fn ($channel) => $channel->name, $event->broadcastOn());
+        $ropChannel = 'private-location.viewer.'.$context['ropA']->id.'.scope.0';
+        $this->assertContains($ropChannel, $names());
+        $this->assertContains('private-location.viewer.'.$context['admin']->id.'.scope.0', $names());
+        $this->assertNotContains('private-location.user.'.$context['agentA']->id, $names());
+        app(\App\Services\GroupAccess\RopGroupAssignments::class)->replace($context['admin'], $context['ropA']->id, [], 0);
+        $this->assertNotContains($ropChannel, $names());
+        Sanctum::actingAs($context['ropA']->fresh());
+        $this->postJson('/api/broadcasting/auth', ['socket_id' => '1234.5678', 'channel_name' => $ropChannel])->assertForbidden();
+        $this->postJson('/api/broadcasting/auth', ['socket_id' => '1234.5678',
+            'channel_name' => 'private-location.user.'.$context['agentA']->id])->assertForbidden();
+        app(\App\Services\GroupAccess\RopGroupAssignments::class)->replace($context['admin'], $context['ropA']->id, [$context['groupA1']->id], 1);
+        $this->assertNotContains($ropChannel, $names());
+        $this->assertContains('private-location.viewer.'.$context['ropA']->id.'.scope.2', $names());
+    }
+
+    public function test_transfer_preserves_old_location_history_and_hides_it_on_new_group_map(): void
+    {
+        $context = $this->context();
+        Sanctum::actingAs($context['agentA']);
+        $device = $this->devicePayload();
+        $this->putJson('/api/location-tracking/me/device', $device)->assertOk();
+        $this->postJson('/api/location-tracking/me/points', [
+            'device_uuid' => $device['device_uuid'],
+            'points' => [$this->pointPayload(now()->subMinute()->toISOString(), 38.56, 68.788)],
+        ])->assertOk();
+        $newRop = $this->user($context['roles']['rop'], $context['branchA'], null, 'New ROP');
+        $newRop->supervisedGroups()->attach($context['groupA2']->id);
+        $context['agentA']->forceFill(['branch_group_id' => $context['groupA2']->id])->save();
+        $historyUrl = '/api/location-tracking/users/'.$context['agentA']->id.'/history?'.http_build_query([
+            'from' => now()->subHour()->toISOString(), 'to' => now()->addMinute()->toISOString(),
+        ]);
+        Sanctum::actingAs($context['ropA']);
+        $this->getJson($historyUrl)->assertOk()->assertJsonPath('data.summary.points_count', 1);
+        Sanctum::actingAs($newRop);
+        $this->getJson($historyUrl)->assertOk()->assertJsonPath('data.summary.points_count', 0);
+        $map = $this->getJson('/api/location-tracking/map')->assertOk();
+        $row = collect($map->json('data'))->firstWhere('user.id', $context['agentA']->id);
+        $this->assertNotNull($row);
+        $this->assertNull($row['location']);
+        $this->assertSame('no_data', $row['tracking']['status']);
+        $point = UserLocationPoint::query()->firstOrFail();
+        $channels = app(\App\Services\LocationTracking\LocationBroadcastAudience::class)->channels([
+            'point_id' => $point->id, 'user_id' => $context['agentA']->id,
+        ]);
+        $this->assertNotContains('private-location.viewer.'.$newRop->id.'.scope.0', array_map(fn ($channel) => $channel->name, $channels));
+        $this->assertSame($context['groupA1']->id, (int) $point->branch_group_id);
+    }
+
     private function context(): array
     {
         $roles = collect(['agent', 'mop', 'rop', 'branch_director', 'admin'])
@@ -429,7 +493,7 @@ class LocationTrackingFeatureTest extends TestCase
         $groupA2 = BranchGroup::query()->create(['name' => 'Вторая группа Душанбе', 'branch_id' => $branchA->id]);
         $groupB = BranchGroup::query()->create(['name' => 'Группа Худжанд', 'branch_id' => $branchB->id]);
 
-        return [
+        $context = [
             'roles' => $roles,
             'branchA' => $branchA,
             'branchB' => $branchB,
@@ -444,6 +508,9 @@ class LocationTrackingFeatureTest extends TestCase
             'directorA' => $this->user($roles['branch_director'], $branchA, null, 'Director A'),
             'admin' => $this->user($roles['admin'], null, null, 'Admin'),
         ];
+        $context['ropA']->supervisedGroups()->attach($groupA1->id);
+
+        return $context;
     }
 
     private function user(Role $role, ?Branch $branch, ?BranchGroup $group, string $name): User

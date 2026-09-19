@@ -31,19 +31,27 @@ class KpiPeriodLockController extends Controller
         ]);
         $this->validatePeriodKeyFormat((string) $validated['period_type'], (string) $validated['period_key']);
 
-        $this->validateScopedValues($validated, $user);
+        return \Illuminate\Support\Facades\DB::transaction(function () use ($user, $validated) {
+            [$user] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($user, null, null, $validated['branch_group_id'] ?? null);
+            $this->ensureCanManage($user);
+            $this->validateScopedValues($validated, $user);
+            if ($user->hasRole('rop')) {
+                $validated['branch_group_id'] = app(\App\Support\RopGroupAccess::class)->creationGroup($user, $validated['branch_group_id'] ?? null);
+                $validated['branch_id'] = $user->branch_id;
+            }
 
-        $lock = KpiPeriodLock::query()->firstOrCreate([
-            'period_type' => $validated['period_type'],
-            'period_key' => $validated['period_key'],
-            'branch_id' => $validated['branch_id'] ?? null,
-            'branch_group_id' => $validated['branch_group_id'] ?? null,
-        ], [
-            'locked_by' => $user->id,
-            'locked_at' => now(),
-        ]);
+            $lock = KpiPeriodLock::query()->firstOrCreate([
+                'period_type' => $validated['period_type'],
+                'period_key' => $validated['period_key'],
+                'branch_id' => $validated['branch_id'] ?? null,
+                'branch_group_id' => $validated['branch_group_id'] ?? null,
+            ], [
+                'locked_by' => $user->id,
+                'locked_at' => now(),
+            ]);
 
-        return response()->json($lock->fresh(), 201);
+            return response()->json($lock->fresh(), 201);
+        });
     }
 
     public function adjustments(Request $request)
@@ -55,6 +63,7 @@ class KpiPeriodLockController extends Controller
             'period_type' => ['required', Rule::in(['day', 'week', 'month'])],
             'period_key' => 'required|string|max:32',
             'entity_id' => 'required|integer|exists:users,id',
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'field_name' => ['required', Rule::in(['objects', 'shows', 'ads', 'calls', 'sales'])],
             'new_value' => 'required|numeric|min:0',
             'distribution_mode' => ['nullable', Rule::in(['set_first_day', 'distribute_evenly'])],
@@ -62,68 +71,77 @@ class KpiPeriodLockController extends Controller
         ]);
         $this->validatePeriodKeyFormat((string) $validated['period_type'], (string) $validated['period_key']);
 
-        $isLocked = KpiPeriodLock::query()
-            ->where('period_type', $validated['period_type'])
-            ->where('period_key', $validated['period_key'])
-            ->exists();
-
-        abort_unless($isLocked, 422, 'Period is not locked.');
-
-        [$dateFrom, $dateTo] = $this->resolveDateRange($validated['period_type'], $validated['period_key']);
-
-        $reports = DailyReport::query()
-            ->where('user_id', $validated['entity_id'])
-            ->whereBetween('report_date', [$dateFrom, $dateTo])
-            ->orderBy('report_date')
-            ->get();
-
-        abort_unless($reports->isNotEmpty(), 404, 'Daily report row not found for selected period and user.');
-
-        $field = $this->resolveAdjustmentColumn($validated['field_name']);
-        $newValue = (float) $validated['new_value'];
-        $distributionMode = $validated['distribution_mode'] ?? ($validated['period_type'] === 'day' ? 'set_first_day' : 'distribute_evenly');
-
-        $updatedRows = 0;
-        $oldTotal = (float) $reports->sum($field);
-
-        if ($distributionMode === 'set_first_day') {
-            /** @var DailyReport $first */
-            $first = $reports->first();
-            $first->update([$field => $newValue]);
-            $updatedRows = 1;
-        } else {
-            $count = $reports->count();
-            $base = $count > 0 ? floor(($newValue / $count) * 10000) / 10000 : 0.0;
-            $allocated = 0.0;
-
-            foreach ($reports as $index => $report) {
-                $value = $index === ($count - 1)
-                    ? round($newValue - $allocated, 4)
-                    : $base;
-                $allocated += $value;
-                $report->update([$field => $value]);
-                $updatedRows++;
+        return \Illuminate\Support\Facades\DB::transaction(function () use ($user, $validated) {
+            $groupId = $validated['branch_group_id'] ?? null;
+            [$user] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquireMany($user, [], [$validated['entity_id']], [$groupId]);
+            $this->ensureCanManage($user);
+            if ($user->hasRole('rop')) {
+                $groupId = app(\App\Support\RopGroupAccess::class)->creationGroup($user, $groupId);
+                \App\Models\BranchGroup::whereKey($groupId)->lockForUpdate()->firstOrFail();
             }
-        }
+            $isLocked = KpiPeriodLock::query()
+                ->where('period_type', $validated['period_type'])
+                ->where('period_key', $validated['period_key'])
+                ->when($user->hasRole('rop'), fn ($q) => $q->where('branch_group_id', $groupId)->where('branch_id', $user->branch_id))
+                ->lockForUpdate()->get(['id'])->isNotEmpty();
 
-        $newTotal = (float) DailyReport::query()
-            ->where('user_id', $validated['entity_id'])
-            ->whereBetween('report_date', [$dateFrom, $dateTo])
-            ->sum($field);
+            abort_unless($isLocked, 422, 'Period is not locked.');
 
-        $log = KpiAdjustmentLog::query()->create([
-            'period_type' => $validated['period_type'],
-            'period_key' => $validated['period_key'],
-            'entity_id' => $validated['entity_id'],
-            'field_name' => $validated['field_name'],
-            'old_value' => $oldTotal,
-            'new_value' => $newTotal,
-            'reason' => $validated['reason'].'; mode='.$distributionMode.'; rows='.$updatedRows,
-            'changed_by' => $user->id,
-            'changed_at' => now(),
-        ]);
+            [$dateFrom, $dateTo] = $this->resolveDateRange($validated['period_type'], $validated['period_key']);
 
-        return response()->json($log, 201);
+            $reportsQuery = DailyReport::query()
+                ->where('user_id', $validated['entity_id'])
+                ->whereBetween('report_date', [$dateFrom, $dateTo])
+                ->when($user->hasRole('rop'), fn ($q) => $q->where('branch_group_id', $groupId)->whereIn('role_slug', ['agent', 'mop']));
+            $reports = (clone $reportsQuery)->orderBy('report_date')->orderBy('id')->lockForUpdate()->get();
+
+            abort_unless($reports->isNotEmpty(), 404, 'Daily report row not found for selected period and user.');
+
+            $field = $this->resolveAdjustmentColumn($validated['field_name']);
+            $newValue = (float) $validated['new_value'];
+            $distributionMode = $validated['distribution_mode'] ?? ($validated['period_type'] === 'day' ? 'set_first_day' : 'distribute_evenly');
+
+            $updatedRows = 0;
+            $oldTotal = (float) $reports->sum($field);
+
+            if ($distributionMode === 'set_first_day') {
+                /** @var DailyReport $first */
+                $first = $reports->first();
+                $first->update([$field => $newValue]);
+                $updatedRows = 1;
+            } else {
+                $count = $reports->count();
+                $base = $count > 0 ? floor(($newValue / $count) * 10000) / 10000 : 0.0;
+                $allocated = 0.0;
+
+                foreach ($reports as $index => $report) {
+                    $value = $index === ($count - 1)
+                        ? round($newValue - $allocated, 4)
+                        : $base;
+                    $allocated += $value;
+                    $report->update([$field => $value]);
+                    $updatedRows++;
+                }
+            }
+
+            $newTotal = (float) (clone $reportsQuery)->sum($field);
+
+            $groups = $reports->pluck('branch_group_id')->unique();
+            $log = KpiAdjustmentLog::query()->create([
+                'branch_group_id' => $groups->count() === 1 ? $groups->first() : null,
+                'period_type' => $validated['period_type'],
+                'period_key' => $validated['period_key'],
+                'entity_id' => $validated['entity_id'],
+                'field_name' => $validated['field_name'],
+                'old_value' => $oldTotal,
+                'new_value' => $newTotal,
+                'reason' => $validated['reason'].'; mode='.$distributionMode.'; rows='.$updatedRows,
+                'changed_by' => $user->id,
+                'changed_at' => now(),
+            ]);
+
+            return response()->json($log, 201);
+        });
     }
 
     public function adjustmentHistory(Request $request)
@@ -135,11 +153,14 @@ class KpiPeriodLockController extends Controller
             'period_type' => ['nullable', Rule::in(['day', 'week', 'month'])],
             'period_key' => 'nullable|string|max:32',
             'entity_id' => 'nullable|integer|exists:users,id',
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'page' => 'nullable|integer|min:1',
             'per_page' => 'nullable|integer|min:1|max:100',
         ]);
 
         $query = KpiAdjustmentLog::query()->orderByDesc('id');
+        if ($user->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->scope($query, $user, 'kpi_adjustment_logs.branch_group_id');
+        if ($user->hasRole('rop') && isset($validated['branch_group_id'])) $query->where('branch_group_id', $validated['branch_group_id']);
 
         if (! empty($validated['period_type'])) {
             $query->where('period_type', $validated['period_type']);
@@ -149,11 +170,40 @@ class KpiPeriodLockController extends Controller
             $query->where('period_key', $validated['period_key']);
         }
 
+        $entities = [];
+        if ($user->hasRole('rop')) {
+            $entities = \Illuminate\Support\Facades\DB::table('users')->select(['id', 'name'])
+                ->whereIn('id', (clone $query)->reorder()->select('entity_id'))
+                ->orderBy('name')->orderBy('id')->get()->all();
+        }
+
         if (! empty($validated['entity_id'])) {
             $query->where('entity_id', (int) $validated['entity_id']);
         }
 
-        return response()->json($query->paginate((int) ($validated['per_page'] ?? 20))->withQueryString());
+        $result = $query->paginate((int) ($validated['per_page'] ?? 20))->withQueryString()->toArray();
+        if ($user->hasRole('rop')) $result['entities'] = $entities;
+        return response()->json($result);
+    }
+
+    public function historicalEntities(Request $request)
+    {
+        $actor = $this->authUser();
+        $this->ensureCanManage($actor);
+        $validated = $request->validate([
+            'period_type' => ['required', Rule::in(['day', 'week', 'month'])],
+            'period_key' => 'required|string|max:32',
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
+        ]);
+        $this->validatePeriodKeyFormat($validated['period_type'], $validated['period_key']);
+        $groupId = app(\App\Support\RopGroupAccess::class)->creationGroup($actor, $validated['branch_group_id'] ?? null);
+        [$from, $to] = $this->resolveDateRange($validated['period_type'], $validated['period_key']);
+        $rows = \Illuminate\Support\Facades\DB::table('users')->select(['users.id', 'users.name'])->whereExists(function ($query) use ($groupId, $from, $to) {
+            $query->selectRaw('1')->from('daily_reports')->whereColumn('daily_reports.user_id', 'users.id')
+                ->where('daily_reports.branch_group_id', $groupId)->whereIn('daily_reports.role_slug', ['agent', 'mop'])
+                ->whereBetween('daily_reports.report_date', [$from, $to]);
+        })->orderBy('users.name')->orderBy('users.id')->get();
+        return response()->json(['data' => $rows]);
     }
 
     private function resolveDateRange(string $periodType, string $periodKey): array

@@ -20,6 +20,11 @@ class PropertyMyPropertiesBranchFilterTest extends TestCase
 
         Schema::dropAllTables();
 
+        Schema::create('branch_groups', function (Blueprint $table) { $table->id(); $table->unsignedBigInteger('branch_id'); $table->string('name'); $table->timestamps(); });
+        \Illuminate\Support\Facades\DB::table('branch_groups')->insert(['id' => 20, 'branch_id' => 2, 'name' => 'Group 20']);
+        \Illuminate\Support\Facades\DB::table('branch_groups')->insert(['id' => 21, 'branch_id' => 2, 'name' => 'Group 21']);
+        \Illuminate\Support\Facades\DB::table('branch_groups')->insert(['id' => 30, 'branch_id' => 3, 'name' => 'Group 30']);
+
         Schema::create('roles', function (Blueprint $table) {
             $table->id();
             $table->string('name');
@@ -294,7 +299,7 @@ class PropertyMyPropertiesBranchFilterTest extends TestCase
         ]);
 
         Property::create([
-            'title' => 'Branch 3 Group 20',
+            'title' => 'Branch 3 Group 30',
             'type_id' => $type->id,
             'status_id' => $status->id,
             'price' => 132000,
@@ -304,7 +309,7 @@ class PropertyMyPropertiesBranchFilterTest extends TestCase
             'created_by' => $agent->id,
             'agent_id' => $agent->id,
             'branch_id' => 3,
-            'branch_group_id' => 20,
+            'branch_group_id' => 30,
         ]);
 
         Sanctum::actingAs($admin);

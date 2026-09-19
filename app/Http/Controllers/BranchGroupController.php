@@ -7,6 +7,7 @@ use App\Models\User;
 use App\Support\RbacBranchScope;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
 class BranchGroupController extends Controller
@@ -39,7 +40,7 @@ class BranchGroupController extends Controller
 
     private function isBranchScopedManager(?string $roleSlug): bool
     {
-        return in_array($roleSlug, ['branch_director', 'rop'], true);
+        return $roleSlug === 'branch_director';
     }
 
     private function isBranchScopedRole(?string $roleSlug): bool
@@ -52,8 +53,17 @@ class BranchGroupController extends Controller
         $roleSlug = $this->roleSlug($authUser);
 
         $query = BranchGroup::query()
-            ->with('branch')
-            ->withCount(['users', 'clients']);
+            ->with(['branch', 'rops:id,name,branch_id']);
+
+        if ($roleSlug === 'rop') {
+            $query->withCount([
+                'users' => fn ($users) => $users->where('branch_id', $authUser->branch_id)
+                    ->whereHas('role', fn ($roles) => $roles->whereIn('slug', ['agent', 'mop'])),
+                'clients' => fn ($clients) => $clients->where('branch_id', $authUser->branch_id),
+            ]);
+            return app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'branch_groups.id', 'branch_groups.branch_id');
+        }
+        $query->withCount(['users', 'clients']);
 
         if ($this->isPrivilegedRole($roleSlug)) {
             return $query;
@@ -68,6 +78,10 @@ class BranchGroupController extends Controller
 
     private function ensureVisible(User $authUser, BranchGroup $branchGroup): void
     {
+        if ($authUser->hasRole('rop')) {
+            abort_unless(app(\App\Support\RopGroupAccess::class)->allowsGroup($authUser, $branchGroup->id), 404, 'NOT_FOUND');
+        }
+
         $allowed = $this->visibleQuery($authUser)
             ->whereKey($branchGroup->id)
             ->exists();
@@ -165,47 +179,49 @@ class BranchGroupController extends Controller
 
     public function store(Request $request)
     {
-        $authUser = $this->authUser();
-        $roleSlug = $this->roleSlug($authUser);
+        return DB::transaction(function () use ($request) {
+            $authUser = User::query()->lockForUpdate()->findOrFail($this->authUser()->id);
+            $roleSlug = $this->roleSlug($authUser);
 
-        abort_unless(
-            $this->isPrivilegedRole($roleSlug) || $this->isBranchScopedManager($roleSlug),
-            403,
-            'Forbidden'
-        );
+            abort_unless(
+                $this->isPrivilegedRole($roleSlug) || $this->isBranchScopedManager($roleSlug),
+                403,
+                'Forbidden'
+            );
 
-        $effectiveBranchId = $this->isPrivilegedRole($roleSlug)
-            ? $request->integer('branch_id')
-            : (int) $authUser->branch_id;
+            $effectiveBranchId = $this->isPrivilegedRole($roleSlug)
+                ? $request->integer('branch_id')
+                : (int) $authUser->branch_id;
 
-        $validated = $request->validate([
-            'branch_id' => 'nullable|integer|exists:branches,id',
-            'name' => [
-                'required',
-                'string',
-                'max:255',
-                Rule::unique('branch_groups', 'name')->where(
-                    fn ($query) => $query->where('branch_id', $effectiveBranchId)
-                ),
-            ],
-            'description' => 'nullable|string',
-            'contact_visibility_mode' => ['required', Rule::in(BranchGroup::contactVisibilityModes())],
-        ]);
+            $validated = $request->validate([
+                'branch_id' => 'nullable|integer|exists:branches,id',
+                'name' => [
+                    'required',
+                    'string',
+                    'max:255',
+                    Rule::unique('branch_groups', 'name')->where(
+                        fn ($query) => $query->where('branch_id', $effectiveBranchId)
+                    ),
+                ],
+                'description' => 'nullable|string',
+                'contact_visibility_mode' => ['required', Rule::in(BranchGroup::contactVisibilityModes())],
+            ]);
 
-        $branchId = $this->normalizedBranchId($validated, $authUser);
-        $this->ensureManageable($authUser, $branchId);
+            $branchId = $this->normalizedBranchId($validated, $authUser);
+            $this->ensureManageable($authUser, $branchId);
 
-        $branchGroup = BranchGroup::create([
-            'branch_id' => $branchId,
-            'name' => $validated['name'],
-            'description' => $validated['description'] ?? null,
-            'contact_visibility_mode' => $validated['contact_visibility_mode'],
-        ]);
+            $branchGroup = BranchGroup::create([
+                'branch_id' => $branchId,
+                'name' => $validated['name'],
+                'description' => $validated['description'] ?? null,
+                'contact_visibility_mode' => $validated['contact_visibility_mode'],
+            ]);
 
-        return response()->json(
-            $branchGroup->load('branch')->loadCount(['users', 'clients']),
-            201
-        );
+            return response()->json(
+                $branchGroup->load(['branch', 'rops:id,name,branch_id'])->loadCount(['users', 'clients']),
+                201
+            );
+        });
     }
 
     public function show(BranchGroup $branchGroup)
@@ -218,75 +234,83 @@ class BranchGroupController extends Controller
         $this->ensureVisible($authUser, $branchGroup);
 
         return response()->json(
-            $branchGroup->load('branch')->loadCount(['users', 'clients'])
+            $this->visibleQuery($authUser)->findOrFail($branchGroup->id)
         );
     }
 
     public function update(Request $request, BranchGroup $branchGroup)
     {
-        $authUser = $this->authUser();
-        $this->ensureVisible($authUser, $branchGroup);
-        $this->ensureManageable($authUser, branchGroup: $branchGroup);
+        return DB::transaction(function () use ($request, $branchGroup) {
+            $authUser = User::query()->lockForUpdate()->findOrFail($this->authUser()->id);
+            $branchGroup = BranchGroup::query()->lockForUpdate()->findOrFail($branchGroup->id);
+            $this->ensureVisible($authUser, $branchGroup);
+            $this->ensureManageable($authUser, branchGroup: $branchGroup);
 
-        $requestedBranchId = $request->has('branch_id')
-            ? $request->integer('branch_id')
-            : $branchGroup->branch_id;
+            $requestedBranchId = $request->has('branch_id')
+                ? $request->integer('branch_id')
+                : $branchGroup->branch_id;
 
-        $validated = $request->validate([
-            'branch_id' => 'sometimes|integer|exists:branches,id',
-            'name' => [
-                'sometimes',
-                'required',
-                'string',
-                'max:255',
-                Rule::unique('branch_groups', 'name')
-                    ->ignore($branchGroup->id)
-                    ->where(fn ($query) => $query->where('branch_id', $requestedBranchId)),
-            ],
-            'description' => 'sometimes|nullable|string',
-            'contact_visibility_mode' => ['sometimes', Rule::in(BranchGroup::contactVisibilityModes())],
-        ]);
+            $validated = $request->validate([
+                'branch_id' => 'sometimes|integer|exists:branches,id',
+                'name' => [
+                    'sometimes',
+                    'required',
+                    'string',
+                    'max:255',
+                    Rule::unique('branch_groups', 'name')
+                        ->ignore($branchGroup->id)
+                        ->where(fn ($query) => $query->where('branch_id', $requestedBranchId)),
+                ],
+                'description' => 'sometimes|nullable|string',
+                'contact_visibility_mode' => ['sometimes', Rule::in(BranchGroup::contactVisibilityModes())],
+            ]);
 
-        $nextBranchId = array_key_exists('branch_id', $validated)
-            ? $this->normalizedBranchId($validated, $authUser)
-            : (int) $branchGroup->branch_id;
+            $nextBranchId = array_key_exists('branch_id', $validated)
+                ? $this->normalizedBranchId($validated, $authUser)
+                : (int) $branchGroup->branch_id;
 
-        $this->ensureManageable($authUser, $nextBranchId, $branchGroup);
+            $this->ensureManageable($authUser, $nextBranchId, $branchGroup);
 
-        if (
-            $nextBranchId !== (int) $branchGroup->branch_id
-            && ($branchGroup->users()->exists() || $branchGroup->clients()->exists())
-        ) {
-            abort(422, 'Cannot change branch for a non-empty group.');
-        }
+            if (
+                $nextBranchId !== (int) $branchGroup->branch_id
+                && ($branchGroup->hasAssignedData(lock: true) || $branchGroup->hasAssignedRops(lock: true))
+            ) {
+                abort(422, 'Cannot change branch for a non-empty group.');
+            }
 
-        $data = $request->only(['name', 'description', 'contact_visibility_mode']);
+            $data = array_intersect_key($validated, array_flip(['name', 'description', 'contact_visibility_mode']));
 
-        if (array_key_exists('branch_id', $validated)) {
-            $data['branch_id'] = $nextBranchId;
-        }
+            if (array_key_exists('branch_id', $validated)) {
+                $data['branch_id'] = $nextBranchId;
+            }
 
-        $branchGroup->update($data);
+            $branchGroup->update($data);
 
-        return response()->json(
-            $branchGroup->fresh()->load('branch')->loadCount(['users', 'clients'])
-        );
+            return response()->json(
+                $branchGroup->fresh()->load(['branch', 'rops:id,name,branch_id'])->loadCount(['users', 'clients'])
+            );
+        });
     }
 
     public function destroy(BranchGroup $branchGroup)
     {
-        $authUser = $this->authUser();
-        $this->ensureVisible($authUser, $branchGroup);
-        $this->ensureManageable($authUser, branchGroup: $branchGroup);
+        return DB::transaction(function () use ($branchGroup) {
+            $authUser = User::query()->lockForUpdate()->findOrFail($this->authUser()->id);
+            $branchGroup = BranchGroup::query()->lockForUpdate()->findOrFail($branchGroup->id);
+            $this->ensureVisible($authUser, $branchGroup);
+            $this->ensureManageable($authUser, branchGroup: $branchGroup);
 
-        if ($branchGroup->users()->exists() || $branchGroup->clients()->exists()) {
-            return response()->json([
-                'message' => 'Нельзя удалить группу: к ней привязаны пользователи или контакты.',
-            ], 409);
-        }
+            if ($branchGroup->hasAssignedData(lock: true) || $branchGroup->hasAssignedRops(lock: true)) {
+                return response()->json([
+                    'message' => 'Нельзя удалить группу: к ней привязаны пользователи или контакты.',
+                ], 409);
+            }
 
-        $branchGroup->delete();
+            $branchGroup->delete();
 
-        return response()->json(['message' => 'Группа удалена']);
+            return response()->json(['message' => 'Группа удалена']);
+        });
     }
+
+
 }

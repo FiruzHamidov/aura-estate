@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\Branch;
+use App\Models\BranchGroup;
 use App\Models\Client;
 use App\Models\ClientType;
 use App\Models\Deal;
@@ -18,6 +19,7 @@ use App\Support\ClientAccess;
 use App\Support\ClientPhone;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\DB;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
@@ -45,6 +47,13 @@ class DealBoardFeatureTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('branch_groups', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('branch_id');
+            $table->string('name');
+            $table->timestamps();
+        });
+
         Schema::create('users', function (Blueprint $table) {
             $table->id();
             $table->string('name');
@@ -53,6 +62,7 @@ class DealBoardFeatureTest extends TestCase
             $table->string('password')->nullable();
             $table->unsignedBigInteger('role_id');
             $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('branch_group_id')->nullable();
             $table->enum('status', ['active', 'inactive'])->default('active');
             $table->enum('auth_method', ['password', 'sms'])->default('password');
             $table->rememberToken()->nullable();
@@ -135,6 +145,7 @@ class DealBoardFeatureTest extends TestCase
 
         Schema::create('properties', function (Blueprint $table) {
             $table->id();
+            $table->unsignedBigInteger('branch_group_id')->nullable();
             $table->string('title')->nullable();
             $table->string('object_key')->nullable();
             $table->string('moderation_status')->nullable();
@@ -256,6 +267,8 @@ class DealBoardFeatureTest extends TestCase
             $table->text('message')->nullable();
             $table->timestamps();
         });
+
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
 
         Schema::create('personal_access_tokens', function (Blueprint $table) {
             $table->id();
@@ -414,6 +427,25 @@ class DealBoardFeatureTest extends TestCase
             ->assertOk()
             ->assertJsonFragment(['id' => $foreignSameBranchDeal->id])
             ->assertJsonMissing(['title' => $foreignBranchDeal->title]);
+    }
+
+    public function test_board_search_does_not_match_private_names_of_a_foreign_related_card(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $agent = $this->createUser(Role::create(['name' => 'Agent', 'slug' => 'agent']), $branch, 'Agent');
+        $rop = $this->createUser(Role::create(['name' => 'ROP', 'slug' => 'rop']), $branch, 'ROP');
+        [$pipeline, $stage] = $this->createPipelineWithStages($branch);
+        $client = $this->createClient($branch, $agent, 'Unique private customer', '992960000027');
+        $deal = $this->createDeal($pipeline, $stage, $branch, $agent, $client, 'Visible deal');
+        $other = BranchGroup::create(['name' => 'Other group', 'branch_id' => $branch->id]);
+        DB::table('clients')->where('id', $client->id)->update(['branch_group_id' => $other->id]);
+        Sanctum::actingAs($rop);
+        $url = '/api/deal-pipelines/'.$pipeline->id.'/board';
+        $this->getJson($url.'?search=Unique')->assertOk()->assertJsonPath('stages.0.deals_count', 0);
+        $this->getJson($url.'?search=Visible')->assertOk()->assertJsonPath('stages.0.deals_count', 1)->assertDontSee('Unique private customer');
+        foreach ([$client->id, 999999] as $id) $this->getJson($url.'?client_id='.$id)->assertNotFound();
+        DB::table('clients')->where('id', $client->id)->update(['branch_group_id' => $agent->branch_group_id]);
+        $this->getJson($url.'?search=Unique')->assertOk()->assertJsonPath('stages.0.deals_count', 1);
     }
 
     public function test_agent_cannot_create_deal_for_another_agents_property(): void
@@ -848,14 +880,21 @@ class DealBoardFeatureTest extends TestCase
 
     private function createUser(Role $role, Branch $branch, string $name): User
     {
-        return User::create([
+        $group = BranchGroup::firstOrCreate(['branch_id' => $branch->id], ['name' => 'Team']);
+        $user = User::create([
             'name' => $name,
             'phone' => $this->nextPhone(),
             'role_id' => $role->id,
             'branch_id' => $branch->id,
+            'branch_group_id' => $group->id,
             'status' => 'active',
             'auth_method' => 'password',
         ]);
+        if ($role->slug === 'rop') {
+            $user->supervisedGroups()->attach($group->id);
+        }
+
+        return $user;
     }
 
     private function createClient(Branch $branch, User $agent, string $name, string $phone): Client
@@ -967,6 +1006,28 @@ class DealBoardFeatureTest extends TestCase
         ]);
 
         return [$pipeline, $newStage, $offerStage, $hiredStage];
+    }
+
+    public function test_control_card_group_cannot_be_transferred_independently_of_the_property(): void
+    {
+        $branch = Branch::create(['name' => 'Main']);
+        $admin = User::create(['name' => 'Admin', 'phone' => $this->nextPhone(),
+            'role_id' => Role::create(['name' => 'Admin', 'slug' => 'admin'])->id, 'branch_id' => $branch->id]);
+        [$pipeline, $stage] = $this->createPropertyControlPipeline($branch);
+        $control = $this->createControlDeal($pipeline, $stage, $branch, $admin, 'Inherited scope');
+        $group = BranchGroup::create(['name' => 'Destination', 'branch_id' => $branch->id]);
+        $target = User::create(['name' => 'Agent', 'phone' => $this->nextPhone(),
+            'role_id' => Role::create(['name' => 'Agent', 'slug' => 'agent'])->id,
+            'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+        $this->getJson('/api/group-transfers/deals/'.$control->id)->assertForbidden()->assertJsonPath('code', 'FORBIDDEN_ACTION');
+        $before = $control->refresh()->getRawOriginal();
+        $this->postJson('/api/group-transfers/deals/'.$control->id, [
+            'branch_group_id' => $group->id, 'responsible_user_id' => $target->id,
+            'revision' => app(\App\Services\GroupAccess\GroupRecordTransfer::class)->revision($control),
+            'reason' => 'Attempt independent control transfer',
+        ])->assertForbidden()->assertJsonPath('code', 'FORBIDDEN_ACTION');
+        $this->assertSame($before, $control->fresh()->getRawOriginal());
     }
 
     private function createPropertyControlPipeline(Branch $branch): array

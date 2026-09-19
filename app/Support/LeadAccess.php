@@ -40,6 +40,10 @@ class LeadAccess
 
         $query = Lead::query()->with(['branch', 'creator', 'responsibleAgent', 'client']);
 
+        if ($roleSlug === 'rop') {
+            return app(RopGroupAccess::class)->scope($query, $authUser, 'leads.branch_group_id', 'leads.branch_id');
+        }
+
         if ($this->isPrivilegedRole($roleSlug)) {
             return $query;
         }
@@ -63,6 +67,8 @@ class LeadAccess
 
     public function ensureVisible(User $authUser, Lead $lead): void
     {
+        app(RopGroupAccess::class)->ensureVisible($authUser, $lead);
+
         $allowed = $this->visibleQuery($authUser)
             ->whereKey($lead->id)
             ->exists();

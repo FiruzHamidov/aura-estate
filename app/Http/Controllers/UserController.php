@@ -73,6 +73,10 @@ class UserController extends Controller
             return $query;
         }
 
+        if ($roleSlug === 'rop') {
+            return app(\App\Support\RopGroupAccess::class)->employees($authUser)->with(['role', 'branch', 'branchGroup']);
+        }
+
         // Clients do not belong to branches. This does not expand employee access.
         if ($this->isBranchScopedManager($roleSlug) && $includeClients) {
             return $query->where(function (Builder $scope) use ($authUser, $includeUnassigned) {
@@ -232,7 +236,7 @@ class UserController extends Controller
             ->whereKey($targetUser->id)
             ->exists();
 
-        abort_unless($allowed, 403, 'Forbidden');
+        abort_unless($allowed, $authUser->hasRole('rop') ? 404 : 403, 'Forbidden');
     }
 
     private function allowedRoleSlugsForActor(User $authUser): ?array
@@ -259,6 +263,7 @@ class UserController extends Controller
     private function authorizeUserMutation(User $authUser, User $targetUser, string $operation): void
     {
         $actorRole = $this->roleSlug($authUser);
+        abort_if($actorRole === 'rop', 403, 'FORBIDDEN_ACTION');
 
         if ($this->isBranchScopedManager($actorRole)) {
             $targetUser->loadMissing('role');
@@ -394,7 +399,7 @@ class UserController extends Controller
             return $data;
         }
 
-        $branchGroup = BranchGroup::query()->find($data['branch_group_id']);
+        $branchGroup = BranchGroup::query()->lockForUpdate()->find($data['branch_group_id']);
 
         if (! $branchGroup) {
             abort(422, 'branch_group_id must exist.');
@@ -520,51 +525,53 @@ class UserController extends Controller
     // Создание пользователя
     public function store(Request $request)
     {
-        $authUser = $this->authUser();
+        return DB::transaction(function () use ($request) {
+            $authUser = User::query()->lockForUpdate()->findOrFail($this->authUser()->id);
+            abort_if($authUser->hasRole('rop'), 403, 'FORBIDDEN_ACTION');
 
-        $request->validate([
-            'name' => 'required|string',
-            'description' => 'nullable|string',
-            'birthday' => 'nullable|date',
-            'phone' => 'required|string|unique:users,phone',
-            'email' => 'nullable|email|unique:users,email',
-            'role_id' => 'required|exists:roles,id',
-            'branch_id' => 'nullable|exists:branches,id',
-            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
-            'auth_method' => 'nullable|in:password,sms',
-            'status' => ['nullable', Rule::in(['active', 'inactive'])],
-            'password' => 'nullable|string|min:6',
-            'security_attendance_branch_ids' => 'sometimes|array|max:100',
-            'security_attendance_branch_ids.*' => 'required|integer|distinct|exists:branches,id',
-        ]);
+            $request->validate([
+                'name' => 'required|string',
+                'description' => 'nullable|string',
+                'birthday' => 'nullable|date',
+                'phone' => 'required|string|unique:users,phone',
+                'email' => 'nullable|email|unique:users,email',
+                'role_id' => 'required|exists:roles,id',
+                'branch_id' => 'nullable|exists:branches,id',
+                'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
+                'auth_method' => 'nullable|in:password,sms',
+                'status' => ['nullable', Rule::in(['active', 'inactive'])],
+                'password' => 'nullable|string|min:6',
+                'security_attendance_branch_ids' => 'sometimes|array|max:100',
+                'security_attendance_branch_ids.*' => 'required|integer|distinct|exists:branches,id',
+            ]);
 
-        $targetRole = $this->resolveRequestedRole($request);
-        $this->authorizeHrCreationRole($authUser, $targetRole);
-        $this->authorizeAssignedRole($authUser, $targetRole);
+            $targetRole = $this->resolveRequestedRole($request);
+            $this->authorizeHrCreationRole($authUser, $targetRole);
+            $this->authorizeAssignedRole($authUser, $targetRole);
 
-        $data = $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'birthday', 'description']);
-        $data = $this->normalizeBranchIdForMutation($data, $authUser, $targetRole);
-        $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
-        if ($request->exists('security_attendance_branch_ids')) {
-            abort_unless(in_array($this->roleSlug($authUser), ['admin', 'superadmin'], true), 403, 'Только администратор может назначать филиалы посещаемости СБ.');
-            abort_unless($targetRole->slug === 'security', 422, 'Филиалы посещаемости назначаются только сотрудникам СБ.');
-            $data['security_attendance_branch_ids'] = array_values(array_map('intval', $request->input('security_attendance_branch_ids')));
-        }
+            $data = $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'birthday', 'description']);
+            $data = $this->normalizeBranchIdForMutation($data, $authUser, $targetRole);
+            $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
+            if ($request->exists('security_attendance_branch_ids')) {
+                abort_unless(in_array($this->roleSlug($authUser), ['admin', 'superadmin'], true), 403, 'Только администратор может назначать филиалы посещаемости СБ.');
+                abort_unless($targetRole->slug === 'security', 422, 'Филиалы посещаемости назначаются только сотрудникам СБ.');
+                $data['security_attendance_branch_ids'] = array_values(array_map('intval', $request->input('security_attendance_branch_ids')));
+            }
 
-        if (! $request->filled('auth_method')) {
-            unset($data['auth_method']);
-        }
+            if (! $request->filled('auth_method')) {
+                unset($data['auth_method']);
+            }
 
-        if ($request->filled('password')) {
-            $data['password'] = Hash::make($request->password);
-        }
+            if ($request->filled('password')) {
+                $data['password'] = Hash::make($request->password);
+            }
 
-        $user = User::create($data);
+            $user = User::create($data);
 
-        return response()->json($user->load(['role', 'branch', 'branchGroup']), 201);
+            return response()->json($user->load(['role', 'branch', 'branchGroup']), 201);
+        });
     }
 
-    // Просмотр конкретного пользователя
     public function show(User $user)
     {
         $this->ensureUserIsVisible($this->authUser(), $user);
@@ -578,6 +585,12 @@ class UserController extends Controller
 
         return response()->json(array_merge($user->toArray(), [
             'daily_report_status' => app(DailyReportService::class)->reportStatusPayload($user),
+            'access_scope' => [
+                'scope_type' => $user->hasRole('rop') ? 'groups' : 'role',
+                'branch_id' => $user->branch_id,
+                'branch_group_ids' => $user->hasRole('rop') ? app(\App\Support\RopGroupAccess::class)->groupIds($user) : [],
+                'version' => (int) $user->access_scope_version,
+            ],
         ]));
     }
 
@@ -601,63 +614,69 @@ class UserController extends Controller
     // Обновление пользователя
     public function update(Request $request, User $user)
     {
-        $authUser = $this->authUser();
-        $this->ensureUserIsVisible($authUser, $user);
-        $this->authorizeUserMutation($authUser, $user, 'update');
+        return DB::transaction(function () use ($request, $user) {
+            $actorId = $this->authUser()->id;
+            $lockedUsers = User::query()->whereIn('id', [$actorId, $user->id])->orderBy('id')->lockForUpdate()->get()->keyBy('id');
+            $authUser = $lockedUsers->get($actorId);
+            $user = $lockedUsers->get($user->id);
+            abort_unless($authUser && $user, 404, 'NOT_FOUND');
+            $this->ensureUserIsVisible($authUser, $user);
+            $this->authorizeUserMutation($authUser, $user, 'update');
 
-        $request->validate([
-            'name' => 'sometimes|string',
-            'description' => 'nullable|string',
-            'birthday' => 'nullable|date',
-            'phone' => 'sometimes|string|unique:users,phone,'.$user->id,
-            'email' => 'sometimes|nullable|email|unique:users,email,'.$user->id,
-            'role_id' => 'sometimes|exists:roles,id',
-            'branch_id' => 'sometimes|nullable|exists:branches,id',
-            'branch_group_id' => 'sometimes|nullable|integer|exists:branch_groups,id',
-            'auth_method' => 'sometimes|nullable|in:password,sms',
-            'status' => ['sometimes', Rule::in(['active', 'inactive'])],
-            'password' => 'nullable|string|min:6',
-            'security_attendance_branch_ids' => 'sometimes|array|max:100',
-            'security_attendance_branch_ids.*' => 'required|integer|distinct|exists:branches,id',
-        ]);
+            $request->validate([
+                'name' => 'sometimes|string',
+                'description' => 'nullable|string',
+                'birthday' => 'nullable|date',
+                'phone' => 'sometimes|string|unique:users,phone,'.$user->id,
+                'email' => 'sometimes|nullable|email|unique:users,email,'.$user->id,
+                'role_id' => 'sometimes|exists:roles,id',
+                'branch_id' => 'sometimes|nullable|exists:branches,id',
+                'branch_group_id' => 'sometimes|nullable|integer|exists:branch_groups,id',
+                'auth_method' => 'sometimes|nullable|in:password,sms',
+                'status' => ['sometimes', Rule::in(['active', 'inactive'])],
+                'password' => 'nullable|string|min:6',
+                'security_attendance_branch_ids' => 'sometimes|array|max:100',
+                'security_attendance_branch_ids.*' => 'required|integer|distinct|exists:branches,id',
+            ]);
 
-        $targetRole = $this->resolveRequestedRole($request, $user);
+            $targetRole = $this->resolveRequestedRole($request, $user);
 
-        if ($request->filled('role_id')) {
-            $this->authorizeAssignedRole($authUser, $targetRole, $user);
-            $this->authorizeHrRoleTransition($authUser, $user, $targetRole);
-        }
+            if ($request->filled('role_id')) {
+                $this->authorizeAssignedRole($authUser, $targetRole, $user);
+                $this->authorizeHrRoleTransition($authUser, $user, $targetRole);
+            }
 
-        if ($this->roleSlug($authUser) === 'hr' && $request->filled('status') && $request->input('status') !== $user->status) {
-            abort(422, 'Use the dismissal endpoint to deactivate an employee.');
-        }
+            if ($this->roleSlug($authUser) === 'hr' && $request->filled('status') && $request->input('status') !== $user->status) {
+                abort(422, 'Use the dismissal endpoint to deactivate an employee.');
+            }
 
-        $data = array_merge([
-            'branch_id' => $user->branch_id,
-            'branch_group_id' => $user->branch_group_id,
-        ], $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'description', 'birthday']));
-        $data = $this->normalizeBranchIdForMutation($data, $authUser, $targetRole);
-        $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
-        if ($request->exists('security_attendance_branch_ids')) {
-            abort_unless(in_array($this->roleSlug($authUser), ['admin', 'superadmin'], true), 403, 'Только администратор может назначать филиалы посещаемости СБ.');
-            abort_unless($targetRole->slug === 'security', 422, 'Филиалы посещаемости назначаются только сотрудникам СБ.');
-            $data['security_attendance_branch_ids'] = array_values(array_map('intval', $request->input('security_attendance_branch_ids')));
-        }
+            $data = array_merge([
+                'branch_id' => $user->branch_id,
+                'branch_group_id' => $user->branch_group_id,
+            ], $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'description', 'birthday']));
+            $data = $this->normalizeBranchIdForMutation($data, $authUser, $targetRole);
+            $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
+            if ($request->exists('security_attendance_branch_ids')) {
+                abort_unless(in_array($this->roleSlug($authUser), ['admin', 'superadmin'], true), 403, 'Только администратор может назначать филиалы посещаемости СБ.');
+                abort_unless($targetRole->slug === 'security', 422, 'Филиалы посещаемости назначаются только сотрудникам СБ.');
+                $data['security_attendance_branch_ids'] = array_values(array_map('intval', $request->input('security_attendance_branch_ids')));
+            }
 
-        if ($request->filled('password')) {
-            $data['password'] = Hash::make($request->password);
-        }
+            if ($request->filled('password')) {
+                $data['password'] = Hash::make($request->password);
+            }
 
-        if ($request->hasFile('photo')) {
-            $file = $request->file('photo');
-            $filename = 'users/'.uniqid().'.'.$file->getClientOriginalExtension();
-            $path = \Storage::disk('public')->put($filename, file_get_contents($file));
-            $data['photo'] = $filename;
-        }
+            if ($request->hasFile('photo')) {
+                $file = $request->file('photo');
+                $filename = 'users/'.uniqid().'.'.$file->getClientOriginalExtension();
+                $path = \Storage::disk('public')->put($filename, file_get_contents($file));
+                $data['photo'] = $filename;
+            }
 
-        $user->update($data);
+            $user = app(\App\Services\GroupAccess\UserOrganizationService::class)->update($authUser, $user, $data);
 
-        return response()->json($user->fresh(['role', 'branch', 'branchGroup']));
+            return response()->json($user->fresh(['role', 'branch', 'branchGroup']));
+        });
     }
 
     public function updatePhoto(Request $request, User $user)
@@ -701,7 +720,9 @@ class UserController extends Controller
 
         $status = $validated['status'] ?? 'active';
 
+        $actor = $request->user() ?? $request->user('sanctum');
         $agents = User::with(['role', 'branch', 'branchGroup'])
+            ->when($actor?->hasRole('rop'), fn ($query) => app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'users.branch_group_id', 'users.branch_id'))
             ->whereHas('role', function ($q) {
                 $q->whereIn('slug', self::PUBLIC_AGENT_ROLE_SLUGS);
             })
@@ -717,6 +738,15 @@ class UserController extends Controller
         return response()->json($agents);
     }
 
+    public function dismissalPreview(User $user, \App\Services\Users\DismissalTransfer $transfers)
+    {
+        $actor = $this->authUser();
+        $this->ensureUserIsVisible($actor, $user, false);
+        $this->authorizeUserMutation($actor, $user, 'dismiss');
+
+        return response()->json($transfers->preview($actor, $user));
+    }
+
     // Увольнение пользователя и перераспределения
     public function destroy(Request $request, User $user)
     {
@@ -727,15 +757,23 @@ class UserController extends Controller
 
         // Валидация входных параметров
         $request->validate([
+            'transfer_plan' => 'sometimes|array:revision,reason,records|required_array_keys:revision,reason,records',
+            'transfer_plan.revision' => 'required_with:transfer_plan|string|size:64',
+            'transfer_plan.reason' => 'required_with:transfer_plan|string|min:5|max:2000',
+            'transfer_plan.records' => 'present_with:transfer_plan|array',
+            'transfer_plan.records.*.type' => ['required', Rule::in(array_keys(\App\Services\GroupAccess\GroupRecordTransfer::MODELS))],
+            'transfer_plan.records.*.id' => 'required|integer|min:1',
+            'transfer_plan.records.*.responsible_user_id' => 'required|integer|min:1',
             'distribute_to_agents' => 'nullable|boolean',
             'agent_id' => 'nullable|integer|exists:users,id',
         ]);
 
+        $plan = $request->input('transfer_plan');
         $distribute = (bool) $request->boolean('distribute_to_agents');
         $agentId = $request->input('agent_id');
 
         // Нормы: либо distribute_to_agents=true, либо agent_id обязателен
-        if (! $distribute && ! $agentId) {
+        if ($plan === null && ! $distribute && ! $agentId) {
             return response()->json([
                 'message' => 'Укажите distribute_to_agents=true для авто-распределения ИЛИ передайте agent_id.',
             ], 422);
@@ -765,129 +803,148 @@ class UserController extends Controller
             'skipped_count' => 0,
         ];
 
-        DB::transaction(function () use ($user, $authUser, $distribute, $agentId, &$transferStats) {
-            // Передаём только активные объекты; закрытые остаются у уволенного пользователя.
-            $props = $this->transferablePropertiesQuery($user)
-                ->lockForUpdate()
-                ->get(['id', 'created_by', 'agent_id', 'co_owner_user_id']);
+        DB::transaction(function () use ($user, $authUser, $distribute, $agentId, $plan, &$transferStats) {
+            $participantIds = [$user->id, $authUser->id, ...array_column($plan['records'] ?? [], 'responsible_user_id')];
+            $lockedUsers = User::query()->whereIn('id', $participantIds)->orderBy('id')->lockForUpdate()->get()->keyBy('id');
+            $user = $lockedUsers->get($user->id);
+            $authUser = $lockedUsers->get($authUser->id);
+            abort_unless($user && $authUser, 404, 'NOT_FOUND');
+            $this->ensureUserIsVisible($authUser, $user, false);
+            $this->authorizeUserMutation($authUser, $user, 'dismiss');
+            if ($plan !== null) {
+                $counts = app(\App\Services\Users\DismissalTransfer::class)->apply($authUser, $user, $plan, $lockedUsers);
+                $transferStats['transferred_counts'] = $counts;
+                $transferStats['redistributed_count'] = $counts['properties'];
+                $transferStats['clients_transferred_count'] = $counts['clients'];
+            } else {
+                // Classified active records require the reviewed transfer plan first.
+                // The legacy redistribution must not bypass group/assignee invariants.
+                abort_if(app(\App\Services\GroupAccess\UserOrganizationService::class)
+                    ->hasActiveRecords($user->id, lock: true, classifiedOnly: true), 409, 'EMPLOYEE_TRANSFER_REQUIRED');
+                // Передаём только активные объекты; закрытые остаются у уволенного пользователя.
+                $props = $this->transferablePropertiesQuery($user)
+                    ->lockForUpdate()
+                    ->get(['id', 'created_by', 'agent_id', 'co_owner_user_id']);
 
-            if ($props->isNotEmpty()) {
-                $activeCoOwnerIds = $this->activeUserIds(
-                    $props
-                        ->pluck('co_owner_user_id')
-                        ->filter(fn ($coOwnerId) => (int) $coOwnerId !== (int) $user->id)
-                        ->all()
-                );
-                $activeCoOwnerLookup = array_fill_keys($activeCoOwnerIds, true);
+                if ($props->isNotEmpty()) {
+                    $activeCoOwnerIds = $this->activeUserIds(
+                        $props
+                            ->pluck('co_owner_user_id')
+                            ->filter(fn ($coOwnerId) => (int) $coOwnerId !== (int) $user->id)
+                            ->all()
+                    );
+                    $activeCoOwnerLookup = array_fill_keys($activeCoOwnerIds, true);
 
-                $remainingProps = collect();
+                    $remainingProps = collect();
 
-                foreach ($props->sortBy('id')->values() as $property) {
-                    $coOwnerId = (int) ($property->co_owner_user_id ?? 0);
+                    foreach ($props->sortBy('id')->values() as $property) {
+                        $coOwnerId = (int) ($property->co_owner_user_id ?? 0);
 
-                    if ($coOwnerId > 0 && isset($activeCoOwnerLookup[$coOwnerId])) {
-                        $this->transferPropertyToUser(
-                            $property,
-                            $coOwnerId,
-                            $user,
-                            $authUser,
-                            'owner_dismissed_transfer_to_co_owner'
-                        );
-                        $transferStats['transferred_to_co_owner_count']++;
-                        continue;
-                    }
-
-                    $remainingProps->push($property);
-                }
-
-                if ($remainingProps->isEmpty()) {
-                    $props = collect();
-                } else {
-                    $props = $remainingProps;
-                }
-            }
-
-            if ($props->isNotEmpty()) {
-                if ($distribute) {
-                    // Соберём список доступных агентов (кроме удаляемого)
-                    $agentIds = User::whereHas('role', fn ($q) => $q->where('slug', 'agent'))
-                        ->where(function (Builder $query) {
-                            $query->where('status', 'active')
-                                ->orWhereNull('status');
-                        })
-                        ->where('id', '!=', $user->id)
-                        ->orderBy('id')
-                        ->pluck('id')
-                        ->all();
-
-                    if (empty($agentIds)) {
-                        // Нет агентов — нельзя распределить
-                        throw new \RuntimeException('Нет доступных агентов для авто-распределения.');
-                    }
-
-                    // Справедливое распределение:
-                    // 1) выбираем агентa с минимальной текущей нагрузкой (approved объекты),
-                    // 2) при равной нагрузке используем циклический tie-break, чтобы не выигрывал первый в списке.
-                    $loadByAgent = array_fill_keys($agentIds, 0);
-                    $currentLoads = Property::query()
-                        ->selectRaw('agent_id, COUNT(*) as total')
-                        ->where('moderation_status', 'approved')
-                        ->whereIn('agent_id', $agentIds)
-                        ->groupBy('agent_id')
-                        ->pluck('total', 'agent_id')
-                        ->all();
-
-                    foreach ($currentLoads as $currentAgentId => $currentTotal) {
-                        $intAgentId = (int) $currentAgentId;
-                        if (array_key_exists($intAgentId, $loadByAgent)) {
-                            $loadByAgent[$intAgentId] = (int) $currentTotal;
+                        if ($coOwnerId > 0 && isset($activeCoOwnerLookup[$coOwnerId])) {
+                            $this->transferPropertyToUser(
+                                $property,
+                                $coOwnerId,
+                                $user,
+                                $authUser,
+                                'owner_dismissed_transfer_to_co_owner'
+                            );
+                            $transferStats['transferred_to_co_owner_count']++;
+                            continue;
                         }
+
+                        $remainingProps->push($property);
                     }
 
-                    $rotationIndex = 0;
-                    $agentCount = count($agentIds);
-                    foreach ($props->sortBy('id')->values() as $p) {
-                        $minLoad = min($loadByAgent);
-                        $nextAgentId = null;
+                    if ($remainingProps->isEmpty()) {
+                        $props = collect();
+                    } else {
+                        $props = $remainingProps;
+                    }
+                }
 
-                        for ($offset = 0; $offset < $agentCount; $offset++) {
-                            $candidateIndex = ($rotationIndex + $offset) % $agentCount;
-                            $candidateAgentId = $agentIds[$candidateIndex];
+                if ($props->isNotEmpty()) {
+                    if ($distribute) {
+                        // Соберём список доступных агентов (кроме удаляемого)
+                        $agentIds = User::whereHas('role', fn ($q) => $q->where('slug', 'agent'))
+                            ->where(function (Builder $query) {
+                                $query->where('status', 'active')
+                                    ->orWhereNull('status');
+                            })
+                            ->where('id', '!=', $user->id)
+                            ->orderBy('id')
+                            ->pluck('id')
+                            ->all();
 
-                            if (($loadByAgent[$candidateAgentId] ?? PHP_INT_MAX) === $minLoad) {
-                                $nextAgentId = $candidateAgentId;
-                                $rotationIndex = ($candidateIndex + 1) % $agentCount;
-                                break;
+                        if (empty($agentIds)) {
+                            // Нет агентов — нельзя распределить
+                            throw new \RuntimeException('Нет доступных агентов для авто-распределения.');
+                        }
+
+                        // Справедливое распределение:
+                        // 1) выбираем агентa с минимальной текущей нагрузкой (approved объекты),
+                        // 2) при равной нагрузке используем циклический tie-break, чтобы не выигрывал первый в списке.
+                        $loadByAgent = array_fill_keys($agentIds, 0);
+                        $currentLoads = Property::query()
+                            ->selectRaw('agent_id, COUNT(*) as total')
+                            ->where('moderation_status', 'approved')
+                            ->whereIn('agent_id', $agentIds)
+                            ->groupBy('agent_id')
+                            ->pluck('total', 'agent_id')
+                            ->all();
+
+                        foreach ($currentLoads as $currentAgentId => $currentTotal) {
+                            $intAgentId = (int) $currentAgentId;
+                            if (array_key_exists($intAgentId, $loadByAgent)) {
+                                $loadByAgent[$intAgentId] = (int) $currentTotal;
                             }
                         }
 
-                        if ($nextAgentId === null) {
-                            $nextAgentId = $agentIds[$rotationIndex % $agentCount];
-                            $rotationIndex = ($rotationIndex + 1) % $agentCount;
-                        }
+                        $rotationIndex = 0;
+                        $agentCount = count($agentIds);
+                        foreach ($props->sortBy('id')->values() as $p) {
+                            $minLoad = min($loadByAgent);
+                            $nextAgentId = null;
 
-                        $this->transferPropertyToUser(
-                            $p,
-                            $nextAgentId,
-                            $user,
-                            $authUser,
-                            'owner_dismissed_auto_redistribution'
-                        );
-                        $loadByAgent[$nextAgentId] = ($loadByAgent[$nextAgentId] ?? 0) + 1;
-                        $transferStats['redistributed_count']++;
-                    }
-                } else {
-                    foreach ($props as $property) {
-                        $this->transferPropertyToUser(
-                            $property,
-                            (int) $agentId,
-                            $user,
-                            $authUser,
-                            'owner_dismissed_manual_transfer'
-                        );
-                        $transferStats['redistributed_count']++;
+                            for ($offset = 0; $offset < $agentCount; $offset++) {
+                                $candidateIndex = ($rotationIndex + $offset) % $agentCount;
+                                $candidateAgentId = $agentIds[$candidateIndex];
+
+                                if (($loadByAgent[$candidateAgentId] ?? PHP_INT_MAX) === $minLoad) {
+                                    $nextAgentId = $candidateAgentId;
+                                    $rotationIndex = ($candidateIndex + 1) % $agentCount;
+                                    break;
+                                }
+                            }
+
+                            if ($nextAgentId === null) {
+                                $nextAgentId = $agentIds[$rotationIndex % $agentCount];
+                                $rotationIndex = ($rotationIndex + 1) % $agentCount;
+                            }
+
+                            $this->transferPropertyToUser(
+                                $p,
+                                $nextAgentId,
+                                $user,
+                                $authUser,
+                                'owner_dismissed_auto_redistribution'
+                            );
+                            $loadByAgent[$nextAgentId] = ($loadByAgent[$nextAgentId] ?? 0) + 1;
+                            $transferStats['redistributed_count']++;
+                        }
+                    } else {
+                        foreach ($props as $property) {
+                            $this->transferPropertyToUser(
+                                $property,
+                                (int) $agentId,
+                                $user,
+                                $authUser,
+                                'owner_dismissed_manual_transfer'
+                            );
+                            $transferStats['redistributed_count']++;
+                        }
                     }
                 }
+
             }
 
             // Увольняем пользователя: деактивация + отзыв всех токенов
@@ -904,22 +961,33 @@ class UserController extends Controller
         });
 
         return response()->json(array_merge([
-            'message' => 'Пользователь уволен, доступ в систему отключён, объекты переданы.',
+            'message' => 'Пользователь уволен, доступ в систему отключён, записи переданы.',
             'dismissed_user_id' => $user->id,
         ], $transferStats));
     }
 
     public function restore(User $user)
     {
-        $authUser = $this->authUser();
-        $authRole = $this->roleSlug($authUser);
+        return DB::transaction(function () use ($user) {
+            $authUser = $this->authUser();
+            $users = User::query()->whereIn('id', [$authUser->id, $user->id])->orderBy('id')->lockForUpdate()->get()->keyBy('id');
+            $authUser = $users->get($authUser->id);
+            $user = $users->get($user->id);
+            abort_unless($authUser && $user, 404, 'NOT_FOUND');
+            $authRole = $this->roleSlug($authUser);
+            abort_if($authRole === 'rop', 403, 'FORBIDDEN_ACTION');
 
-        $canRestore = in_array($authRole, ['superadmin', 'admin', 'rop', 'branch_director', 'hr'], true);
-        abort_unless($canRestore, 403, 'Forbidden');
+            $canRestore = in_array($authRole, ['superadmin', 'admin', 'branch_director', 'hr'], true);
+            abort_unless($canRestore, 403, 'Forbidden');
 
-        if ($this->isBranchScopedManager($authRole)) {
-            abort_unless((int) $user->branch_id === (int) $authUser->branch_id, 403, 'Forbidden');
-        }
+            if ($this->isBranchScopedManager($authRole)) {
+                abort_unless((int) $user->branch_id === (int) $authUser->branch_id, 403, 'Forbidden');
+            }
+
+            if ($authRole === 'hr') {
+                $this->ensureUserIsVisible($authUser, $user, false);
+                $this->authorizeUserMutation($authUser, $user, 'restore');
+            }
 
         if ($authRole === 'hr') {
             $this->ensureUserIsVisible($authUser, $user, false);
@@ -930,25 +998,26 @@ class UserController extends Controller
             return response()->json(['message' => 'Пользователь уже активен']);
         }
 
-        $oldStatus = $user->status;
-        $user->status = User::STATUS_ACTIVE;
-        $user->save();
+            $oldStatus = $user->status;
+            $user->status = User::STATUS_ACTIVE;
+            $user->save();
 
-        app(AuditLogger::class)->log(
-            subject: $user,
-            actor: $authUser,
-            event: 'user_restored',
-            oldValues: ['status' => $oldStatus],
-            newValues: ['status' => $user->status],
-            message: 'Пользователь восстановлен',
-            context: [
-                'restored_user_id' => $user->id,
-                'restored_by_user_id' => $authUser->id,
-                'restored_at' => now()->toIso8601String(),
-            ]
-        );
+            app(AuditLogger::class)->log(
+                subject: $user,
+                actor: $authUser,
+                event: 'user_restored',
+                oldValues: ['status' => $oldStatus],
+                newValues: ['status' => $user->status],
+                message: 'Пользователь восстановлен',
+                context: [
+                    'restored_user_id' => $user->id,
+                    'restored_by_user_id' => $authUser->id,
+                    'restored_at' => now()->toIso8601String(),
+                ]
+            );
 
-        return response()->json(['message' => 'Пользователь восстановлен']);
+            return response()->json(['message' => 'Пользователь восстановлен']);
+        });
     }
 
     public function updatePassword(Request $request)

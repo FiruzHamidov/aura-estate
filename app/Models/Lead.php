@@ -8,6 +8,8 @@ use Illuminate\Database\Eloquent\SoftDeletes;
 
 class Lead extends Model
 {
+    use \App\Models\Concerns\ProjectsRopRelations;
+
     use HasFactory, SoftDeletes;
 
     public const STATUS_NEW = 'new';
@@ -25,6 +27,7 @@ class Lead extends Model
     public const DEFAULT_FIRST_CONTACT_SLA_MINUTES = 15;
 
     protected $fillable = [
+        'branch_group_id',
         'full_name',
         'phone',
         'phone_normalized',

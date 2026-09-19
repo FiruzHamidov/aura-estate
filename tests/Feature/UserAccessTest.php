@@ -69,6 +69,8 @@ class UserAccessTest extends TestCase
             $table->timestamps();
         });
 
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
+
         Schema::create('personal_access_tokens', function (Blueprint $table) {
             $table->id();
             $table->morphs('tokenable');
@@ -122,7 +124,7 @@ class UserAccessTest extends TestCase
         });
     }
 
-    public function test_rop_user_index_includes_director_but_stays_in_own_branch(): void
+    public function test_rop_user_index_excludes_directors_and_uses_explicit_groups(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
         $branchB = Branch::create(['name' => 'Branch B']);
@@ -167,21 +169,25 @@ class UserAccessTest extends TestCase
             'status' => 'active',
         ]);
 
+        $group = BranchGroup::create(['branch_id' => $branchA->id, 'name' => 'Assigned']);
+        $rop->supervisedGroups()->attach($group->id);
+        $sameBranchAgent->update(['branch_group_id' => $group->id]);
+        $sameBranchDirector->update(['branch_group_id' => $group->id]);
         Sanctum::actingAs($rop);
 
-        $response = $this->getJson('/api/user?branch_id=' . $branchB->id);
+        $this->getJson('/api/user?branch_id=' . $branchB->id)->assertForbidden();
+        $response = $this->getJson('/api/user');
 
         $response->assertOk();
-        $response->assertJsonCount(3, 'data');
+        $response->assertJsonCount(1, 'data');
         $this->assertEqualsCanonicalizing(
-            [$rop->id, $sameBranchAgent->id, $sameBranchDirector->id],
+            [$sameBranchAgent->id],
             array_column($response->json('data'), 'id')
         );
         $response->assertJsonMissing(['phone' => '900000004']);
 
         $this->getJson('/api/user?role=branch_director')->assertOk()
-            ->assertJsonCount(1, 'data')
-            ->assertJsonPath('data.0.id', $sameBranchDirector->id);
+            ->assertJsonCount(0, 'data');
     }
 
     public static function directorBranchScopes(): array
@@ -190,7 +196,7 @@ class UserAccessTest extends TestCase
     }
 
     #[DataProvider('directorBranchScopes')]
-    public function test_rop_can_view_director_only_in_own_branch(bool $sameBranch): void
+    public function test_rop_cannot_view_director_in_either_branch(bool $sameBranch): void
     {
         $branch = Branch::create(['name' => 'Branch A']);
         $directorBranch = $sameBranch ? $branch : Branch::create(['name' => 'Branch B']);
@@ -219,15 +225,10 @@ class UserAccessTest extends TestCase
         Sanctum::actingAs($rop);
 
         $response = $this->getJson('/api/user/' . $director->id);
-        if ($sameBranch) {
-            $response->assertOk()->assertJsonPath('id', $director->id)
-                ->assertJsonPath('role.slug', 'branch_director');
-        } else {
-            $response->assertForbidden()->assertJsonMissing(['phone' => $director->phone]);
-        }
+        $response->assertNotFound()->assertJsonMissing(['phone' => $director->phone]);
     }
 
-    public function test_rop_user_index_can_include_unassigned_users_when_requested(): void
+    public function test_rop_cannot_include_unassigned_users_even_when_requested(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
         $branchB = Branch::create(['name' => 'Branch B']);
@@ -271,6 +272,9 @@ class UserAccessTest extends TestCase
             'status' => 'active',
         ]);
 
+        $group = BranchGroup::create(['branch_id' => $branchA->id, 'name' => 'Assigned']);
+        $rop->supervisedGroups()->attach($group->id);
+        $sameBranchUser->update(['branch_group_id' => $group->id]);
         Sanctum::actingAs($rop);
 
         $defaultResponse = $this->getJson('/api/user');
@@ -279,14 +283,14 @@ class UserAccessTest extends TestCase
 
         $response = $this->getJson('/api/user?include_unassigned=1');
         $response->assertOk();
-        $response->assertJsonCount(3, 'data');
+        $response->assertJsonCount(1, 'data');
         $response->assertJsonFragment(['id' => $sameBranchUser->id]);
-        $response->assertJsonFragment(['id' => $unassignedUser->id]);
+        $response->assertJsonMissing(['phone' => $unassignedUser->phone]);
         $response->assertJsonMissing(['phone' => '900000018']);
-        $response->assertJsonPath('total', 3);
+        $response->assertJsonPath('total', 1);
         $response->assertJsonPath('last_page', 1);
-        $response->assertJsonPath('active_count', 2);
-        $response->assertJsonPath('inactive_count', 1);
+        $response->assertJsonPath('active_count', 1);
+        $response->assertJsonPath('inactive_count', 0);
     }
 
     public function test_dismissal_transfers_properties_to_co_owner_before_redistribution(): void
@@ -425,7 +429,7 @@ class UserAccessTest extends TestCase
         $response->assertJsonPath('inactive_count', 1);
     }
 
-    public function test_rop_cannot_assign_privileged_role_and_branch_is_forced_for_branch_scoped_roles(): void
+    public function test_rop_cannot_create_users_of_any_role(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
         $branchB = Branch::create(['name' => 'Branch B']);
@@ -451,7 +455,7 @@ class UserAccessTest extends TestCase
             'phone' => '900000022',
             'role_id' => $directorRole->id,
             'branch_id' => $branchA->id,
-        ])->assertStatus(422);
+        ])->assertForbidden();
 
         $response = $this->postJson('/api/user', [
             'name' => 'Agent A',
@@ -460,8 +464,7 @@ class UserAccessTest extends TestCase
             'branch_id' => $branchB->id,
         ]);
 
-        $response->assertCreated();
-        $response->assertJsonPath('branch_id', $branchA->id);
+        $response->assertForbidden();
 
         $response = $this->postJson('/api/user', [
             'name' => 'External Agent A',
@@ -470,12 +473,10 @@ class UserAccessTest extends TestCase
             'branch_id' => $branchB->id,
         ]);
 
-        $response->assertCreated();
-        $response->assertJsonPath('role.slug', 'external_agent');
-        $response->assertJsonPath('branch_id', $branchA->id);
+        $response->assertForbidden();
     }
 
-    public function test_rop_can_create_and_update_mop_in_own_branch_group(): void
+    public function test_rop_cannot_create_or_update_mop_even_in_assigned_group(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
         $branchB = Branch::create(['name' => 'Branch B']);
@@ -503,6 +504,8 @@ class UserAccessTest extends TestCase
             'status' => 'active',
         ]);
 
+        $rop->supervisedGroups()->attach($groupA->id);
+        $existing = User::create(['name' => 'Existing MOP', 'phone' => '900009926', 'role_id' => $mopRole->id, 'branch_id' => $branchA->id, 'branch_group_id' => $groupA->id, 'status' => 'active']);
         Sanctum::actingAs($rop);
 
         $this->postJson('/api/user', [
@@ -510,7 +513,7 @@ class UserAccessTest extends TestCase
             'phone' => '900000025',
             'role_id' => $mopRole->id,
             'branch_group_id' => $groupB->id,
-        ])->assertStatus(422);
+        ])->assertForbidden();
 
         $response = $this->postJson('/api/user', [
             'name' => 'MOP A',
@@ -519,22 +522,9 @@ class UserAccessTest extends TestCase
             'branch_group_id' => $groupA->id,
         ]);
 
-        $createdUserId = $response->json('id');
-
-        $response->assertCreated();
-        $response->assertJsonPath('role.slug', 'mop');
-        $response->assertJsonPath('branch_id', $branchA->id);
-        $response->assertJsonPath('branch_group_id', $groupA->id);
-
-        $this->patchJson('/api/user/'.$createdUserId, [
-            'name' => 'MOP A Updated',
-            'status' => 'inactive',
-        ])->assertOk()
-            ->assertJsonPath('name', 'MOP A Updated')
-            ->assertJsonPath('status', 'inactive')
-            ->assertJsonPath('role.slug', 'mop')
-            ->assertJsonPath('branch_id', $branchA->id)
-            ->assertJsonPath('branch_group_id', $groupA->id);
+        $response->assertForbidden();
+        $this->patchJson('/api/user/'.$existing->id, ['name' => 'Blocked', 'status' => 'inactive'])->assertForbidden();
+        $this->assertSame('Existing MOP', $existing->fresh()->name);
     }
 
     public function test_branch_director_can_create_and_update_mop_in_own_branch_group(): void
@@ -1003,7 +993,7 @@ class UserAccessTest extends TestCase
         }
     }
 
-    public function test_rop_level_managers_edit_clients_and_users_only_through_rop(): void
+    public function test_director_preserves_employee_management_while_rop_has_read_only_group_scope(): void
     {
         $branch = Branch::create(['name' => 'Own branch']);
         $otherBranch = Branch::create(['name' => 'Other branch']);
@@ -1042,7 +1032,21 @@ class UserAccessTest extends TestCase
                 'name' => 'Actor '.$actorRole, 'phone' => '90115001'.$index,
                 'role_id' => $roles[$actorRole]->id, 'branch_id' => $branch->id, 'status' => 'active',
             ]);
+            if ($actorRole === 'rop') {
+                $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Assigned']);
+                $actor->supervisedGroups()->attach($group->id);
+                $ownAgent->update(['branch_group_id' => $group->id]);
+            }
             Sanctum::actingAs($actor);
+            if ($actorRole === 'rop') {
+                $this->getJson('/api/user?role=client')->assertOk()->assertJsonCount(0, 'data');
+                $this->patchJson('/api/user/'.$ownAgent->id, ['name' => 'Blocked'])->assertForbidden();
+                foreach ([$client, $ownRop, $ownDirector, $ownAdmin, $foreignAgent] as $hidden) {
+                    $this->getJson('/api/user/'.$hidden->id)->assertNotFound();
+                    $this->patchJson('/api/user/'.$hidden->id, ['name' => 'Blocked'])->assertNotFound();
+                }
+                continue;
+            }
 
             $this->getJson('/api/user?role=client')->assertOk()->assertJsonFragment(['id' => $client->id]);
             $this->patchJson('/api/user/'.$client->id, [
@@ -1440,6 +1444,26 @@ class UserAccessTest extends TestCase
         $this->getJson('/api/user/' . $createdUserId)
             ->assertOk()
             ->assertJsonPath('branch_group.id', $groupA->id);
+    }
+
+    public function test_dismissal_cannot_bypass_the_reviewed_transfer_of_classified_records(): void
+    {
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedBigInteger('branch_group_id')->nullable());
+        $branch = Branch::create(['name' => 'A']);
+        $group = BranchGroup::create(['name' => 'A', 'branch_id' => $branch->id]);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900000301', 'role_id' => $adminRole->id, 'status' => 'active']);
+        $employee = User::create(['name' => 'Employee', 'phone' => '900000302', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'active']);
+        $target = User::create(['name' => 'Target', 'phone' => '900000303', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'active']);
+        $propertyId = DB::table('properties')->insertGetId(['title' => 'Classified', 'moderation_status' => 'approved', 'agent_id' => $employee->id, 'created_by' => $employee->id, 'branch_group_id' => $group->id]);
+        $token = $employee->createToken('before-dismissal');
+        Sanctum::actingAs($admin);
+        $this->deleteJson('/api/user/'.$employee->id, ['agent_id' => $target->id])->assertConflict()->assertJsonPath('code', 'EMPLOYEE_TRANSFER_REQUIRED');
+        $this->assertDatabaseHas('users', ['id' => $employee->id, 'status' => 'active']);
+        $this->assertDatabaseHas('properties', ['id' => $propertyId, 'agent_id' => $employee->id, 'branch_group_id' => $group->id]);
+        $this->assertDatabaseHas('personal_access_tokens', ['id' => $token->accessToken->id]);
+        $this->assertDatabaseCount('crm_audit_logs', 0);
     }
 
     public function test_destroy_user_transfers_only_approved_properties(): void
@@ -1999,6 +2023,12 @@ class UserAccessTest extends TestCase
 
         Sanctum::actingAs($rop);
 
+        $this->postJson('/api/user/'.$inactiveUser->id.'/restore')->assertForbidden()->assertJsonPath('code', 'FORBIDDEN_ACTION');
+        $this->assertSame('inactive', $inactiveUser->fresh()->status);
+        $director = User::create(['name' => 'Director', 'phone' => '900000119',
+            'role_id' => Role::create(['name' => 'Director', 'slug' => 'branch_director'])->id,
+            'branch_id' => $branch->id, 'status' => 'active']);
+        Sanctum::actingAs($director);
         $response = $this->postJson('/api/user/'.$inactiveUser->id.'/restore');
 
         $response->assertOk()
@@ -2012,7 +2042,7 @@ class UserAccessTest extends TestCase
         $this->assertDatabaseHas('crm_audit_logs', [
             'auditable_id' => $inactiveUser->id,
             'auditable_type' => $inactiveUser->getMorphClass(),
-            'actor_id' => $rop->id,
+            'actor_id' => $director->id,
             'event' => 'user_restored',
             'message' => 'Пользователь восстановлен',
         ]);

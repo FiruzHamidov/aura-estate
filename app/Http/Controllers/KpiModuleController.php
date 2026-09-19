@@ -32,6 +32,7 @@ class KpiModuleController extends Controller
     {
         $validated = $request->validate([
             'role' => 'nullable|string|max:64',
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'user_id' => 'nullable|integer|exists:users,id',
             'date' => 'nullable|date_format:Y-m-d',
         ]);
@@ -58,7 +59,7 @@ class KpiModuleController extends Controller
 
         $role = (string) ($validated['role'] ?? 'mop');
 
-        return response()->json(['data' => $this->service->plans($role)]);
+        return response()->json(['data' => $this->service->plans($role, isset($validated['branch_group_id']) ? (int) $validated['branch_group_id'] : null)]);
     }
 
     public function updateUserPlans(Request $request, int $userId)
@@ -134,87 +135,98 @@ class KpiModuleController extends Controller
             }
         }
 
-        $results = [];
-        foreach ((array) $validated['rows'] as $index => $row) {
-            $userId = (int) $row['user_id'];
-            $items = $this->normalizePlanItems((array) ($row['items'] ?? []));
-            $rowRole = null;
-
-            try {
-                $target = User::query()->with('role')->findOrFail($userId);
-                $rowRole = (string) ($target->role?->slug ?? '');
-                $this->validateBulkRowItems($items);
-
-                $this->kpiPlanScopePolicy->ensureCanManageBulkScope($actor, array_merge($scope, ['role' => $rowRole]));
-
-                if ($scopeRoles !== [] && ! in_array($rowRole, $scopeRoles, true)) {
-                    $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'User role is out of requested scope.');
-                }
-
-                if ($scopeRoles === [] && isset($scope['role']) && $scope['role'] !== null && $rowRole !== (string) $scope['role']) {
-                    $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'User role is out of requested scope.');
-                }
-
-                $this->validateWeightSum($items);
-                $replaceIfConflict = (bool) ($validated['replace_if_conflict'] ?? false);
-                $conflictStrategy = (string) ($validated['conflict_strategy'] ?? ($replaceIfConflict ? 'replace' : 'error'));
-                $this->service->upsertUserPlans($actor, $userId, [
-                    'effective_from' => $validated['effective_from'],
-                    'effective_to' => $validated['effective_to'] ?? null,
-                    'items' => $items,
-                    'replace_if_conflict' => $replaceIfConflict,
-                    'conflict_strategy' => $conflictStrategy,
-                ]);
-
-                $results[] = ['user_id' => $userId, 'ok' => true];
-            } catch (ValidationException $e) {
-                $results[] = [
-                    'user_id' => $userId,
-                    'ok' => false,
-                    'code' => 'KPI_VALIDATION_FAILED',
-                    'message' => 'Validation failed.',
-                    'details' => ['row' => $index, 'role' => $rowRole, 'errors' => $e->errors()],
-                ];
-            } catch (\DomainException $e) {
-                $results[] = [
-                    'user_id' => $userId,
-                    'ok' => false,
-                    'code' => 'KPI_PLAN_PERIOD_CONFLICT',
-                    'message' => $e->getMessage(),
-                    'details' => ['row' => $index, 'role' => $rowRole, 'errors' => []],
-                ];
-            } catch (HttpResponseException $e) {
-                $response = $e->getResponse();
-                $payload = method_exists($response, 'getData')
-                    ? (array) $response->getData(true)
-                    : [];
-
-                $results[] = [
-                    'user_id' => $userId,
-                    'ok' => false,
-                    'code' => (string) ($payload['code'] ?? 'KPI_FORBIDDEN_SCOPE'),
-                    'message' => (string) ($payload['message'] ?? 'Forbidden in current scope.'),
-                    'details' => array_merge(['row' => $index, 'role' => $rowRole, 'errors' => []], (array) ($payload['details'] ?? [])),
-                ];
-            } catch (\Throwable $e) {
-                $results[] = [
-                    'user_id' => $userId,
-                    'ok' => false,
-                    'code' => 'KPI_CONFLICT',
-                    'message' => $e->getMessage() !== '' ? $e->getMessage() : 'KPI conflict.',
-                    'details' => ['row' => $index, 'role' => $rowRole, 'errors' => []],
-                ];
+        return \DB::transaction(function () use ($actor, $validated, $scope, $scopeRoles) {
+            if ($actor->hasRole('rop')) {
+                User::query()->whereIn('id', [$actor->id, ...array_column($validated['rows'], 'user_id')])
+                    ->orderBy('id')->lockForUpdate()->get();
             }
-        }
+            $results = [];
+            foreach ((array) $validated['rows'] as $index => $row) {
+                $userId = (int) $row['user_id'];
+                $items = $this->normalizePlanItems((array) ($row['items'] ?? []));
+                $rowRole = null;
 
-        $successCount = collect($results)->where('ok', true)->count();
-        $failedCount = collect($results)->where('ok', false)->count();
+                try {
+                    $target = User::query()->with('role')->findOrFail($userId);
+                    $rowRole = (string) ($target->role?->slug ?? '');
+                    $this->validateBulkRowItems($items);
 
-        return response()->json([
-            'success_count' => $successCount,
-            'failed_count' => $failedCount,
-            'results' => $results,
-        ]);
+                    $this->kpiPlanScopePolicy->ensureCanManageBulkScope($actor, array_merge($scope, ['role' => $rowRole]));
+
+                    if ($scopeRoles !== [] && ! in_array($rowRole, $scopeRoles, true)) {
+                        $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'User role is out of requested scope.');
+                    }
+
+                    if ($scopeRoles === [] && isset($scope['role']) && $scope['role'] !== null && $rowRole !== (string) $scope['role']) {
+                        $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'User role is out of requested scope.');
+                    }
+
+                    $this->validateWeightSum($items);
+                    $replaceIfConflict = (bool) ($validated['replace_if_conflict'] ?? false);
+                    $conflictStrategy = (string) ($validated['conflict_strategy'] ?? ($replaceIfConflict ? 'replace' : 'error'));
+                    $this->service->upsertUserPlans($actor, $userId, [
+                        'scope' => array_merge($scope, ['roles' => $scopeRoles]),
+                        'effective_from' => $validated['effective_from'],
+                        'effective_to' => $validated['effective_to'] ?? null,
+                        'items' => $items,
+                        'replace_if_conflict' => $replaceIfConflict,
+                        'conflict_strategy' => $conflictStrategy,
+                    ]);
+
+                    $results[] = ['user_id' => $userId, 'ok' => true];
+                } catch (ValidationException $e) {
+                    if ($actor->hasRole('rop')) throw $e;
+                    $results[] = [
+                        'user_id' => $userId,
+                        'ok' => false,
+                        'code' => 'KPI_VALIDATION_FAILED',
+                        'message' => 'Validation failed.',
+                        'details' => ['row' => $index, 'role' => $rowRole, 'errors' => $e->errors()],
+                    ];
+                } catch (\DomainException $e) {
+                    if ($actor->hasRole('rop')) throw new HttpResponseException($this->kpiError('KPI_PLAN_PERIOD_CONFLICT', $e->getMessage(), 409));
+                    $results[] = [
+                        'user_id' => $userId,
+                        'ok' => false,
+                        'code' => 'KPI_PLAN_PERIOD_CONFLICT',
+                        'message' => $e->getMessage(),
+                        'details' => ['row' => $index, 'role' => $rowRole, 'errors' => []],
+                    ];
+                } catch (HttpResponseException $e) {
+                    if ($actor->hasRole('rop')) throw $e;
+                    $response = $e->getResponse();
+                    $payload = method_exists($response, 'getData')
+                        ? (array) $response->getData(true)
+                        : [];
+
+                    $results[] = [
+                        'user_id' => $userId,
+                        'ok' => false,
+                        'code' => (string) ($payload['code'] ?? 'KPI_FORBIDDEN_SCOPE'),
+                        'message' => (string) ($payload['message'] ?? 'Forbidden in current scope.'),
+                        'details' => array_merge(['row' => $index, 'role' => $rowRole, 'errors' => []], (array) ($payload['details'] ?? [])),
+                    ];
+                } catch (\Throwable $e) {
+                    if ($actor->hasRole('rop')) throw $e;
+                    $results[] = [
+                        'user_id' => $userId,
+                        'ok' => false,
+                        'code' => 'KPI_CONFLICT',
+                        'message' => $e->getMessage() !== '' ? $e->getMessage() : 'KPI conflict.',
+                        'details' => ['row' => $index, 'role' => $rowRole, 'errors' => []],
+                    ];
+                }
+            }
+
+            $successCount = collect($results)->where('ok', true)->count();
+            $failedCount = collect($results)->where('ok', false)->count();
+
+            return response()->json([
+                'success_count' => $successCount,
+                'failed_count' => $failedCount,
+                'results' => $results,
+            ]);
+        });
     }
 
     public function updatePlans(Request $request)
@@ -223,6 +235,7 @@ class KpiModuleController extends Controller
 
         $validated = $request->validate([
             'role' => 'nullable|string|max:64',
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'items' => 'required|array|min:1',
             'items.*.metric_key' => ['required', 'string', 'max:64', Rule::in((array) config('kpi.v2.metric_keys', []))],
             'items.*.daily_plan' => 'nullable|required_without:items.*.monthly_plan|numeric|min:0',
@@ -233,7 +246,7 @@ class KpiModuleController extends Controller
 
         $role = (string) ($validated['role'] ?? 'mop');
 
-        return response()->json(['data' => $this->service->upsertPlans($role, $validated['items'])]);
+        return response()->json(['data' => $this->service->upsertPlans($role, $validated['items'], isset($validated['branch_group_id']) ? (int) $validated['branch_group_id'] : null)]);
     }
 
     public function commonPlans(Request $request)
@@ -326,8 +339,11 @@ class KpiModuleController extends Controller
             return $this->kpiError('KPI_PLAN_NOT_FOUND', 'KPI plan not found.', 404);
         }
 
-        $target = User::query()->findOrFail((int) $plan['user_id']);
-        $this->kpiPlanScopePolicy->ensureCanReadUserPlan($this->authUser(), $target);
+        // planById scopes persisted plan ownership for ROP, including transferred employees.
+        if (! $this->authUser()->hasRole('rop')) {
+            $target = User::query()->findOrFail((int) $plan['user_id']);
+            $this->kpiPlanScopePolicy->ensureCanReadUserPlan($this->authUser(), $target);
+        }
 
         return response()->json([
             'plans' => $plan['items'],
@@ -533,7 +549,7 @@ class KpiModuleController extends Controller
                 return response()->json($payload);
             }
 
-            return response()->json($this->service->weeklyStrict($this->authUser(), $day, $strictInput));
+            return response()->json($this->service->weeklyStrict($this->authUser(), $day, array_merge($baseFilters, $strictInput)));
         }
 
         $validated = array_merge($baseFilters, $request->validate([
@@ -607,7 +623,7 @@ class KpiModuleController extends Controller
             return response()->json($payload);
         }
 
-        return response()->json($this->service->monthlyStrict($this->authUser(), $start, $validated));
+        return response()->json($this->service->monthlyStrict($this->authUser(), $start, array_merge($baseFilters, $validated)));
     }
 
     public function metricMapping()
@@ -661,6 +677,7 @@ class KpiModuleController extends Controller
     {
         $validated = $request->validate(['date_from' => 'nullable|date', 'date_to' => 'nullable|date']);
         $query = KpiQualityIssue::query()->orderByDesc('detected_at');
+        $query->forRop($this->authUser(), $request->filled('branch_group_id') ? $request->integer('branch_group_id') : null);
 
         if (! empty($validated['date_from'])) {
             $query->whereDate('detected_at', '>=', $validated['date_from']);
@@ -670,7 +687,8 @@ class KpiModuleController extends Controller
             $query->whereDate('detected_at', '<=', $validated['date_to']);
         }
 
-        $rows = $query->get()->map(function (KpiQualityIssue $issue) {
+        $issues = app(\App\Services\GroupAccess\GroupDataProjection::class)->qualityIssues($query->get(), $this->authUser());
+        $rows = $issues->map(function (KpiQualityIssue $issue) {
             $details = (array) ($issue->details ?? []);
             $details['metric_key'] = $this->normalizeMetricKey($details['metric_key'] ?? null);
             $details['version'] = '2';
@@ -683,13 +701,18 @@ class KpiModuleController extends Controller
 
     public function earlyRiskAlerts(Request $request)
     {
-        $validated = $request->validate(['date' => 'nullable|date']);
+        $validated = $request->validate(['date' => 'nullable|date', 'branch_group_id' => 'nullable|integer|exists:branch_groups,id']);
         $query = KpiEarlyRiskAlert::query()->orderByDesc('id');
+        if ($this->authUser()->hasRole('rop')) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $this->authUser(), 'kpi_early_risk_alerts.branch_group_id');
+            if (isset($validated['branch_group_id'])) $query->where('branch_group_id', $validated['branch_group_id']);
+        }
+
         if (! empty($validated['date'])) {
             $query->whereDate('alert_date', $validated['date']);
         }
 
-        $rows = $query->get()->map(function (KpiEarlyRiskAlert $alert) {
+        $rows = app(\App\Services\GroupAccess\GroupDataProjection::class)->diagnostics($query->get(), $this->authUser(), 'meta', 'message')->map(function (KpiEarlyRiskAlert $alert) {
             $meta = (array) ($alert->meta ?? []);
             $meta['metric_key'] = $this->normalizeMetricKey($meta['metric_key'] ?? null);
             $meta['version'] = '2';
@@ -707,7 +730,14 @@ class KpiModuleController extends Controller
             'status' => ['required', Rule::in(['acknowledged', 'closed', 'escalated'])],
         ]);
 
-        KpiEarlyRiskAlert::query()->whereKey($validated['alert_id'])->update(['status' => $validated['status']]);
+        \Illuminate\Support\Facades\DB::transaction(function () use ($validated) {
+            $alert = KpiEarlyRiskAlert::findOrFail($validated['alert_id']);
+            [$actor, $alert] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
+                $this->authUser(), $alert, null, null
+            );
+            app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $alert);
+            $alert->update(['status' => $validated['status']]);
+        });
 
         return response()->json(['success' => true]);
     }
@@ -726,9 +756,15 @@ class KpiModuleController extends Controller
         return response()->json(['data' => $this->service->periodContract($this->authUser(), $from, $to, $validated)]);
     }
 
-    public function acceptanceRuns()
+    public function acceptanceRuns(Request $request)
     {
-        $rows = KpiAcceptanceRun::query()->orderByDesc('id')->get()->map(function (KpiAcceptanceRun $run) {
+        $validated = $request->validate(['branch_group_id' => 'nullable|integer|exists:branch_groups,id']);
+        $query = KpiAcceptanceRun::query()->orderByDesc('id');
+        if ($this->authUser()->hasRole('rop')) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $this->authUser(), 'kpi_acceptance_runs.branch_group_id');
+            if (isset($validated['branch_group_id'])) $query->where('branch_group_id', $validated['branch_group_id']);
+        }
+        $rows = app(\App\Services\GroupAccess\GroupDataProjection::class)->diagnostics($query->get(), $this->authUser(), 'details')->map(function (KpiAcceptanceRun $run) {
             $details = (array) ($run->details ?? []);
             if (isset($details['metric_key'])) {
                 $details['metric_key'] = $this->normalizeMetricKey($details['metric_key']);
@@ -771,6 +807,7 @@ class KpiModuleController extends Controller
 
     public function adjustmentEntities(Request $request)
     {
+        if ($this->authUser()->hasRole('rop')) return app(KpiPeriodLockController::class)->historicalEntities($request);
         $this->ensureManageAccess($this->authUser(), ['admin', 'superadmin', 'rop', 'branch_director']);
 
         $validated = $request->validate([

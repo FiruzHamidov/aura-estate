@@ -21,6 +21,7 @@ use App\Support\ClientPhone;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Database\QueryException;
 use Illuminate\Validation\Rule;
@@ -60,6 +61,10 @@ class ClientController extends Controller
         }
 
         $query = $modelClass::query();
+        $actor = $this->authUser();
+        if ($modelClass === BranchGroup::class && $actor->hasRole('rop')) {
+            $query->whereIn('id', app(\App\Support\RopGroupAccess::class)->groupsQuery($actor));
+        }
 
         if ($activeOnly && Schema::hasColumn($table, 'is_active')) {
             $query->where('is_active', true);
@@ -270,6 +275,14 @@ class ClientController extends Controller
                 'granted_by' => $collaborator->pivot->granted_by,
                 'is_primary' => false,
             ];
+        }
+
+        $actor = $this->authUser();
+        if ($actor->hasRole('rop')) {
+            $visibleIds = app(\App\Support\RopGroupAccess::class)->employees($actor)
+                ->whereIn('users.id', array_column($payload, 'user_id'))->pluck('users.id')->all();
+            $payload = array_map(fn ($row) => in_array($row['user_id'], $visibleIds, true)
+                ? $row : array_intersect_key($row, array_flip(['user_id', 'name', 'collaboration_role', 'is_primary'])), $payload);
         }
 
         return $payload;
@@ -626,6 +639,10 @@ class ClientController extends Controller
                 $agentsQuery->where('branch_id', $authUser->branch_id);
             }
 
+            if ($authUser->hasRole('rop')) {
+                $agentsQuery->whereIn('users.id', app(\App\Support\RopGroupAccess::class)->employees($authUser)->select('users.id'));
+            }
+
             $agents = $agentsQuery->get($agentColumns)->values()->all();
         }
 
@@ -653,114 +670,118 @@ class ClientController extends Controller
 
     public function store(Request $request)
     {
-        $authUser = $this->authUser();
-        $this->clientAccess->ensureCanMutateClients($authUser, 'clients.create');
+        return DB::transaction(function () use ($request) {
+            [$authUser] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
+                $this->authUser(), null, $request->integer('responsible_agent_id') ?: null, $request->integer('branch_group_id') ?: null
+            );
+            $this->clientAccess->ensureCanMutateClients($authUser, 'clients.create');
 
-        $request->validate([
-            'full_name' => 'required|string|max:255',
-            'phone' => 'nullable|string|max:50',
-            'email' => 'nullable|email|max:255',
-            'note' => 'nullable|string',
-            'branch_id' => 'nullable|integer|exists:branches,id',
-            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
-            'responsible_agent_id' => 'nullable|integer|exists:users,id',
-            'client_type_id' => 'nullable|integer|exists:client_types,id',
-            'source_id' => [
-                'nullable',
-                'integer',
-                Rule::exists('client_sources', 'id')->where(fn ($query) => $query->where('is_active', true)),
-            ],
-            'source_comment' => 'nullable|string',
-            'contact_kind' => ['nullable', Rule::in(Client::contactKinds())],
-            'status' => ['nullable', Rule::in(['active', 'inactive'])],
-            'status_id' => 'nullable|integer|exists:client_need_statuses,id',
-            'meta' => 'nullable|array',
-            'context_type' => ['nullable', Rule::in(ClientAttachService::contextTypes())],
-            'context_id' => 'nullable|integer',
-            'property_relation' => ['nullable', Rule::in(ClientAttachService::propertyRelations())],
-        ]);
+            $request->validate([
+                'full_name' => 'required|string|max:255',
+                'phone' => 'nullable|string|max:50',
+                'email' => 'nullable|email|max:255',
+                'note' => 'nullable|string',
+                'branch_id' => 'nullable|integer|exists:branches,id',
+                'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
+                'responsible_agent_id' => 'nullable|integer|exists:users,id',
+                'client_type_id' => 'nullable|integer|exists:client_types,id',
+                'source_id' => [
+                    'nullable',
+                    'integer',
+                    Rule::exists('client_sources', 'id')->where(fn ($query) => $query->where('is_active', true)),
+                ],
+                'source_comment' => 'nullable|string',
+                'contact_kind' => ['nullable', Rule::in(Client::contactKinds())],
+                'status' => ['nullable', Rule::in(['active', 'inactive'])],
+                'status_id' => 'nullable|integer|exists:client_need_statuses,id',
+                'meta' => 'nullable|array',
+                'context_type' => ['nullable', Rule::in(ClientAttachService::contextTypes())],
+                'context_id' => 'nullable|integer',
+                'property_relation' => ['nullable', Rule::in(ClientAttachService::propertyRelations())],
+            ]);
 
-        $data = $request->only([
-            'full_name',
-            'phone',
-            'email',
-            'email_normalized',
-            'note',
-            'branch_id',
-            'branch_group_id',
-            'responsible_agent_id',
-            'client_type_id',
-            'source_id',
-            'source_comment',
-            'contact_kind',
-            'status',
-            'status_id',
-            'meta',
-        ]);
+            $data = $request->only([
+                'full_name',
+                'phone',
+                'email',
+                'email_normalized',
+                'note',
+                'branch_id',
+                'branch_group_id',
+                'responsible_agent_id',
+                'client_type_id',
+                'source_id',
+                'source_comment',
+                'contact_kind',
+                'status',
+                'status_id',
+                'meta',
+            ]);
 
-        $data = $this->normalizeInput($data);
-        if (!Schema::hasColumn('clients', 'email_normalized')) {
-            unset($data['email_normalized']);
-        }
-        if (!Schema::hasColumn('clients', 'status_id')) {
-            unset($data['status_id']);
-        }
-        if (array_key_exists('status_id', $data)) {
-            $data['status'] = $this->mapLegacyClientStatusFromNeedStatusId($data['status_id']);
-        }
-        $data = $this->clientAccess->normalizeMutationData($data, $authUser);
-        $this->clientAccess->ensureCanCreateClientByContactKind($authUser, (string) ($data['contact_kind'] ?? Client::CONTACT_KIND_BUYER));
-        $this->clientAccess->validateMutationTargets($authUser, $data);
-        $attachContext = $this->attachService->normalizedContext($request->all());
+            $data = $this->normalizeInput($data);
+            if (!Schema::hasColumn('clients', 'email_normalized')) {
+                unset($data['email_normalized']);
+            }
+            if (!Schema::hasColumn('clients', 'status_id')) {
+                unset($data['status_id']);
+            }
+            if (array_key_exists('status_id', $data)) {
+                $data['status'] = $this->mapLegacyClientStatusFromNeedStatusId($data['status_id']);
+            }
+            $data = $this->clientAccess->normalizeMutationData($data, $authUser);
+            $this->clientAccess->ensureCanCreateClientByContactKind($authUser, (string) ($data['contact_kind'] ?? Client::CONTACT_KIND_BUYER));
+            $this->clientAccess->validateMutationTargets($authUser, $data);
+            $attachContext = $this->attachService->normalizedContext($request->all());
 
-        $duplicateSummary = $this->summarizeDuplicates(
-            $authUser,
-            $data,
-            null,
-            $attachContext
-        );
-        if ($duplicateSummary['has_duplicates']) {
-            if (
-                ($attachContext['type'] ?? null) === ClientAttachService::CONTEXT_PROPERTY
-                && !empty($attachContext['id'])
-                && in_array((string) ($attachContext['property_relation'] ?? ''), ClientAttachService::propertyRelations(), true)
-            ) {
-                $existingClientId = (int) (
-                    $duplicateSummary['top_visible_match']['id']
-                    ?? $duplicateSummary['top_attachable_match']['id']
-                    ?? 0
-                );
+            $duplicateSummary = $this->summarizeDuplicates(
+                $authUser,
+                $data,
+                null,
+                $attachContext
+            );
+            if ($duplicateSummary['has_duplicates']) {
+                if (
+                    ($attachContext['type'] ?? null) === ClientAttachService::CONTEXT_PROPERTY
+                    && !empty($attachContext['id'])
+                    && in_array((string) ($attachContext['property_relation'] ?? ''), ClientAttachService::propertyRelations(), true)
+                ) {
+                    $existingClientId = (int) (
+                        $duplicateSummary['top_visible_match']['id']
+                        ?? $duplicateSummary['top_attachable_match']['id']
+                        ?? 0
+                    );
 
-                if ($existingClientId > 0) {
-                    $existingClient = Client::query()->find($existingClientId);
+                    if ($existingClientId > 0) {
+                        $existingClient = Client::query()->find($existingClientId);
 
-                    if ($existingClient) {
-                        $attachResult = $this->attachService->attach($authUser, $existingClient, $attachContext);
+                        if ($existingClient) {
+                            $attachResult = $this->attachService->attach($authUser, $existingClient, $attachContext);
 
-                        return response()->json(array_merge($attachResult, [
-                            'message' => 'Клиент уже существует: привязали к объекту.',
-                            'attached_existing' => true,
-                            'duplicate_summary' => $duplicateSummary,
-                        ]));
+                            return response()->json(array_merge($attachResult, [
+                                'message' => 'Клиент уже существует: привязали к объекту.',
+                                'attached_existing' => true,
+                                'duplicate_summary' => $duplicateSummary,
+                            ]));
+                        }
                     }
                 }
+
+                return $this->duplicateConflictResponse($duplicateSummary);
             }
 
-            return $this->duplicateConflictResponse($duplicateSummary);
-        }
+            try {
+                $client = Client::create($data);
+            } catch (QueryException $exception) {
+                if ($this->isClientContactUniqueViolation($exception)) {
+                    return $this->uniqueConstraintDuplicateResponse();
+                }
 
-        try {
-            $client = Client::create($data);
-        } catch (QueryException $exception) {
-            if ($this->isClientContactUniqueViolation($exception)) {
-                return $this->uniqueConstraintDuplicateResponse();
+                throw $exception;
             }
+            $this->logClientCreated($client, $authUser);
 
-            throw $exception;
-        }
-        $this->logClientCreated($client, $authUser);
-
-        return response()->json($client->load($this->showRelations()), 201);
+            return response()->json($client->load($this->showRelations()), 201);
+        });
     }
 
     public function show(Request $request, Client $client)
@@ -802,103 +823,107 @@ class ClientController extends Controller
                 'phone' => $client->phone,
                 'contact_kind' => $client->contact_kind,
             ],
-            'needs' => $this->matcher->forClient($client, (int) ($validated['limit'] ?? 10)),
+            'needs' => $this->matcher->forClient($authUser, $client, (int) ($validated['limit'] ?? 10)),
         ]);
     }
 
     public function update(Request $request, Client $client)
     {
-        $authUser = $this->authUser();
-        $this->clientAccess->ensureCanMutateClients($authUser, 'clients.update');
-        $this->clientAccess->ensureVisible($authUser, $client, 'clients.update');
+        return DB::transaction(function () use ($request, $client) {
+            [$authUser, $client] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
+                $this->authUser(), $client, $request->integer('responsible_agent_id') ?: null, $request->integer('branch_group_id') ?: null
+            );
+            $this->clientAccess->ensureCanMutateClients($authUser, 'clients.update');
+            $this->clientAccess->ensureVisible($authUser, $client, 'clients.update');
 
-        $request->validate([
-            'full_name' => 'sometimes|string|max:255',
-            'phone' => 'sometimes|nullable|string|max:50',
-            'email' => 'sometimes|nullable|email|max:255',
-            'note' => 'nullable|string',
-            'branch_id' => 'sometimes|nullable|integer|exists:branches,id',
-            'branch_group_id' => 'sometimes|nullable|integer|exists:branch_groups,id',
-            'responsible_agent_id' => 'sometimes|nullable|integer|exists:users,id',
-            'client_type_id' => 'sometimes|nullable|integer|exists:client_types,id',
-            'source_id' => [
-                'sometimes',
-                'nullable',
-                'integer',
-                Rule::exists('client_sources', 'id')->where(fn ($query) => $query->where('is_active', true)),
-            ],
-            'source_comment' => 'sometimes|nullable|string',
-            'contact_kind' => ['sometimes', 'nullable', Rule::in(Client::contactKinds())],
-            'status' => ['sometimes', Rule::in(['active', 'inactive'])],
-            'status_id' => 'sometimes|nullable|integer|exists:client_need_statuses,id',
-            'meta' => 'sometimes|nullable|array',
-        ]);
+            $request->validate([
+                'full_name' => 'sometimes|string|max:255',
+                'phone' => 'sometimes|nullable|string|max:50',
+                'email' => 'sometimes|nullable|email|max:255',
+                'note' => 'nullable|string',
+                'branch_id' => 'sometimes|nullable|integer|exists:branches,id',
+                'branch_group_id' => 'sometimes|nullable|integer|exists:branch_groups,id',
+                'responsible_agent_id' => 'sometimes|nullable|integer|exists:users,id',
+                'client_type_id' => 'sometimes|nullable|integer|exists:client_types,id',
+                'source_id' => [
+                    'sometimes',
+                    'nullable',
+                    'integer',
+                    Rule::exists('client_sources', 'id')->where(fn ($query) => $query->where('is_active', true)),
+                ],
+                'source_comment' => 'sometimes|nullable|string',
+                'contact_kind' => ['sometimes', 'nullable', Rule::in(Client::contactKinds())],
+                'status' => ['sometimes', Rule::in(['active', 'inactive'])],
+                'status_id' => 'sometimes|nullable|integer|exists:client_need_statuses,id',
+                'meta' => 'sometimes|nullable|array',
+            ]);
 
-        $data = $request->only([
-            'full_name',
-            'phone',
-            'email',
-            'email_normalized',
-            'note',
-            'branch_id',
-            'branch_group_id',
-            'responsible_agent_id',
-            'client_type_id',
-            'source_id',
-            'source_comment',
-            'contact_kind',
-            'status',
-            'status_id',
-            'meta',
-        ]);
+            $data = $request->only([
+                'full_name',
+                'phone',
+                'email',
+                'email_normalized',
+                'note',
+                'branch_id',
+                'branch_group_id',
+                'responsible_agent_id',
+                'client_type_id',
+                'source_id',
+                'source_comment',
+                'contact_kind',
+                'status',
+                'status_id',
+                'meta',
+            ]);
 
-        $data = $this->normalizeInput($data);
-        $data = array_merge([
-            'branch_id' => $client->branch_id,
-            'branch_group_id' => $client->branch_group_id,
-            'created_by' => $client->created_by,
-            'responsible_agent_id' => $client->responsible_agent_id,
-            'client_type_id' => $client->client_type_id,
-            'source_id' => $client->source_id,
-            'source_comment' => $client->source_comment,
-            'contact_kind' => $client->contact_kind,
-            'status_id' => $client->status_id,
-        ], $data);
-        if (!Schema::hasColumn('clients', 'email_normalized')) {
-            unset($data['email_normalized']);
-        }
-        if (!Schema::hasColumn('clients', 'status_id')) {
-            unset($data['status_id']);
-        }
-        if (array_key_exists('status_id', $data)) {
-            $data['status'] = $this->mapLegacyClientStatusFromNeedStatusId($data['status_id']);
-        }
-        $data = $this->clientAccess->normalizeMutationData($data, $authUser);
-        $this->clientAccess->validateMutationTargets($authUser, $data);
+            $data = $this->normalizeInput($data);
+            $data = array_merge([
+                'branch_id' => $client->branch_id,
+                'branch_group_id' => $client->branch_group_id,
+                'created_by' => $client->created_by,
+                'responsible_agent_id' => $client->responsible_agent_id,
+                'client_type_id' => $client->client_type_id,
+                'source_id' => $client->source_id,
+                'source_comment' => $client->source_comment,
+                'contact_kind' => $client->contact_kind,
+                'status_id' => $client->status_id,
+            ], $data);
+            if (!Schema::hasColumn('clients', 'email_normalized')) {
+                unset($data['email_normalized']);
+            }
+            if (!Schema::hasColumn('clients', 'status_id')) {
+                unset($data['status_id']);
+            }
+            if (array_key_exists('status_id', $data)) {
+                $data['status'] = $this->mapLegacyClientStatusFromNeedStatusId($data['status_id']);
+            }
+            $data = $this->clientAccess->normalizeMutationData($data, $authUser);
+            $this->clientAccess->validateMutationTargets($authUser, $data);
 
-        $duplicateSummary = $this->summarizeDuplicates(
-            $authUser,
-            $data,
-            $client->id,
-            $this->attachService->normalizedContext([])
-        );
-        if ($duplicateSummary['has_duplicates']) {
-            return $this->duplicateConflictResponse($duplicateSummary);
-        }
-
-        $before = $client->getAttributes();
-        try {
-            $client->update($data);
-        } catch (QueryException $exception) {
-            if ($this->isClientContactUniqueViolation($exception)) {
-                return $this->uniqueConstraintDuplicateResponse();
+            $duplicateSummary = $this->summarizeDuplicates(
+                $authUser,
+                $data,
+                $client->id,
+                $this->attachService->normalizedContext([])
+            );
+            if ($duplicateSummary['has_duplicates']) {
+                return $this->duplicateConflictResponse($duplicateSummary);
             }
 
-            throw $exception;
-        }
-        $this->logClientUpdated($client, $authUser, $before);
+            $before = $client->getAttributes();
+            try {
+                $client->update($data);
+            } catch (QueryException $exception) {
+                if ($this->isClientContactUniqueViolation($exception)) {
+                    return $this->uniqueConstraintDuplicateResponse();
+                }
 
-        return response()->json($client->fresh($this->showRelations()));
+                throw $exception;
+            }
+            $this->logClientUpdated($client, $authUser, $before);
+
+            return response()->json($client->fresh($this->showRelations()));
+        });
     }
 
     private function mapLegacyClientStatusFromNeedStatusId(?int $statusId): string
@@ -976,111 +1001,123 @@ class ClientController extends Controller
     public function storeCollaborator(Request $request, Client $client)
     {
         $authUser = $this->authUser();
-        $this->clientAccess->ensureCanMutateClients($authUser, 'clients.collaborators.create');
         $this->clientAccess->ensureVisible($authUser, $client, 'clients.collaborators.create');
-        $this->clientAccess->ensureCanManageCollaborators($authUser, $client);
-
         $validated = $request->validate([
             'user_id' => 'required|integer|exists:users,id',
             'role' => ['nullable', Rule::in(Client::collaboratorRoles())],
         ]);
+        return DB::transaction(function () use ($client, $authUser, $validated) {
+            [$authUser, $client] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($authUser, $client, $validated['user_id'], null);
+            $this->clientAccess->ensureCanMutateClients($authUser, 'clients.collaborators.create');
+            $this->clientAccess->ensureVisible($authUser, $client, 'clients.collaborators.create');
+            $this->clientAccess->ensureCanManageCollaborators($authUser, $client);
 
-        $collaborator = User::query()->findOrFail($validated['user_id']);
+            $collaborator = User::query()->lockForUpdate()->findOrFail($validated['user_id']);
+            if ($authUser->hasRole('rop')) {
+                app(\App\Support\RopGroupAccess::class)->ensureEmployee($authUser, $collaborator->id, $client->branch_group_id, true);
+            }
 
-        if ((int) $collaborator->id === (int) $client->responsible_agent_id) {
-            abort(422, 'Primary responsible agent is already the owner of this client.');
-        }
+            if ((int) $collaborator->id === (int) $client->responsible_agent_id) {
+                abort(422, 'Primary responsible agent is already the owner of this client.');
+            }
 
-        if (!empty($client->branch_id) && (int) $collaborator->branch_id !== (int) $client->branch_id) {
-            abort(422, 'Collaborator must belong to the client branch.');
-        }
+            if (!empty($client->branch_id) && (int) $collaborator->branch_id !== (int) $client->branch_id) {
+                abort(422, 'Collaborator must belong to the client branch.');
+            }
 
-        $role = $validated['role'] ?? Client::COLLABORATOR_ROLE_COLLABORATOR;
+            $role = $validated['role'] ?? Client::COLLABORATOR_ROLE_COLLABORATOR;
 
-        $existing = $client->collaborators()->whereKey($collaborator->id)->exists();
+            $existing = $client->collaborators()->whereKey($collaborator->id)->exists();
 
-        if ($existing) {
-            $client->collaborators()->updateExistingPivot($collaborator->id, [
-                'role' => $role,
-                'granted_by' => $authUser->id,
-                'updated_at' => now(),
-            ]);
-        } else {
-            $client->collaborators()->attach($collaborator->id, [
-                'role' => $role,
-                'granted_by' => $authUser->id,
-                'created_at' => now(),
-                'updated_at' => now(),
-            ]);
-        }
+            if ($existing) {
+                $client->collaborators()->updateExistingPivot($collaborator->id, [
+                    'role' => $role,
+                    'granted_by' => $authUser->id,
+                    'updated_at' => now(),
+                ]);
+            } else {
+                $client->collaborators()->attach($collaborator->id, [
+                    'role' => $role,
+                    'granted_by' => $authUser->id,
+                    'created_at' => now(),
+                    'updated_at' => now(),
+                ]);
+            }
 
-        $this->auditLogger->log(
-            $client,
-            $authUser,
-            'collaborator_added',
-            [],
-            [
-                'user_id' => $collaborator->id,
-                'role' => $role,
-            ],
-            'Client collaborator added.',
-            [
-                'client_id' => $client->id,
-                'user_id' => $collaborator->id,
-                'role' => $role,
-            ]
-        );
+            $this->auditLogger->log(
+                $client,
+                $authUser,
+                'collaborator_added',
+                [],
+                [
+                    'user_id' => $collaborator->id,
+                    'role' => $role,
+                ],
+                'Client collaborator added.',
+                [
+                    'client_id' => $client->id,
+                    'user_id' => $collaborator->id,
+                    'role' => $role,
+                ]
+            );
 
-        return response()->json($this->loadCollaboratorPayload($client->fresh()));
+            return response()->json($this->loadCollaboratorPayload($client->fresh()));
+        });
     }
 
     public function destroyCollaborator(Request $request, Client $client, User $user)
     {
         $authUser = $this->authUser();
-        $this->clientAccess->ensureCanMutateClients($authUser, 'clients.collaborators.delete');
-        $this->clientAccess->ensureVisible($authUser, $client, 'clients.collaborators.delete');
-        $this->clientAccess->ensureCanManageCollaborators($authUser, $client);
+        return DB::transaction(function () use ($client, $user, $authUser) {
+            [$authUser, $client] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($authUser, $client, $user->id, null);
+            $this->clientAccess->ensureCanMutateClients($authUser, 'clients.collaborators.delete');
+            $this->clientAccess->ensureVisible($authUser, $client, 'clients.collaborators.delete');
+            $this->clientAccess->ensureCanManageCollaborators($authUser, $client);
 
-        if ((int) $user->id === (int) $client->responsible_agent_id) {
-            abort(422, 'Primary responsible agent cannot be removed from client owner role.');
-        }
+            if ((int) $user->id === (int) $client->responsible_agent_id) {
+                abort(422, 'Primary responsible agent cannot be removed from client owner role.');
+            }
 
-        $existing = $client->collaborators()
-            ->whereKey($user->id)
-            ->first();
+            $existing = $client->collaborators()
+                ->whereKey($user->id)
+                ->first();
 
-        abort_unless($existing, 404, 'Collaborator not found.');
+            abort_unless($existing, 404, 'Collaborator not found.');
 
-        $client->collaborators()->detach($user->id);
+            $client->collaborators()->detach($user->id);
 
-        $this->auditLogger->log(
-            $client,
-            $authUser,
-            'collaborator_removed',
-            [
-                'user_id' => $user->id,
-                'role' => $existing->pivot->role,
-            ],
-            [],
-            'Client collaborator removed.',
-            [
-                'client_id' => $client->id,
-                'user_id' => $user->id,
-            ]
-        );
+            $this->auditLogger->log(
+                $client,
+                $authUser,
+                'collaborator_removed',
+                [
+                    'user_id' => $user->id,
+                    'role' => $existing->pivot->role,
+                ],
+                [],
+                'Client collaborator removed.',
+                [
+                    'client_id' => $client->id,
+                    'user_id' => $user->id,
+                ]
+            );
 
-        return response()->json($this->loadCollaboratorPayload($client->fresh()));
+            return response()->json($this->loadCollaboratorPayload($client->fresh()));
+        });
     }
 
     public function destroy(Client $client)
     {
         $authUser = $this->authUser();
-        $this->clientAccess->ensureCanMutateClients($authUser, 'clients.delete');
-        $this->clientAccess->ensureVisible($authUser, $client, 'clients.delete');
+        return DB::transaction(function () use ($client, $authUser) {
+            [$authUser, $client] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($authUser, $client, null, null);
+            $this->clientAccess->ensureCanMutateClients($authUser, 'clients.delete');
+            $this->clientAccess->ensureVisible($authUser, $client, 'clients.delete');
 
-        $client->delete();
+            $client->delete();
 
-        return response()->json(['message' => 'Client deleted']);
+            return response()->json(['message' => 'Client deleted']);
+        });
     }
 
     public function settings()

@@ -29,16 +29,27 @@ class LeadConversionService
     public function convert(Lead $lead, User $actor): array
     {
         return DB::transaction(function () use ($lead, $actor) {
-            $lead = Lead::query()->whereKey($lead->id)->lockForUpdate()->firstOrFail();
             $existingDeal = $this->findExistingDeal($lead);
+            $client = $lead->client_id ? $lead->client()->first() : $this->deduplicator->findClientMatchForLead($lead);
+            $snapshots = array_filter(['lead' => $lead, 'client' => $client, 'deal' => $existingDeal]);
+            [$actor, $locked] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquireMany($actor, $snapshots);
+            // Candidate links and contact identifiers were selected before waiting for locks.
+            // Retry if any source changed rather than applying a stale conversion plan.
+            foreach ($snapshots as $key => $snapshot) {
+                abort_unless($snapshot->getRawOriginal() == $locked[$key]->getRawOriginal(), 409, 'CONVERSION_SOURCE_CHANGED');
+            }
+            $lead = $locked['lead'];
+            $client = $locked['client'] ?? null;
+            $existingDeal = $locked['deal'] ?? null;
+            app(\App\Support\LeadAccess::class)->ensureVisible($actor, $lead);
+            if ($client) $this->clientAccess->ensureVisible($actor, $client);
+            if ($existingDeal) app(\App\Support\DealAccess::class)->ensureVisible($actor, $existingDeal);
 
             if ($lead->status === Lead::STATUS_CONVERTED && $lead->client_id && $existingDeal) {
                 $existingDeal = $this->syncExistingDealLinks($existingDeal, $lead, (int) $lead->client_id);
 
                 return $this->conversionPayload($lead, $lead->client()->firstOrFail(), $existingDeal);
             }
-
-            $client = $lead->client_id ? $lead->client()->first() : null;
 
             if ($client) {
                 $client = $lead->status === Lead::STATUS_CONVERTED
@@ -47,17 +58,9 @@ class LeadConversionService
                 $clientEvent = 'lead_linked';
                 $clientMessage = 'Existing client linked to converted lead.';
             } else {
-                $client = $this->deduplicator->findClientMatchForLead($lead);
-
-                if ($client) {
-                    $client = $this->updateExistingClient($client, $lead);
-                    $clientEvent = 'lead_linked';
-                    $clientMessage = 'Existing client linked to converted lead.';
-                } else {
-                    $client = $this->createClientFromLead($lead, $actor);
-                    $clientEvent = 'created_from_lead';
-                    $clientMessage = 'New client created from lead conversion.';
-                }
+                $client = $this->createClientFromLead($lead, $actor);
+                $clientEvent = 'created_from_lead';
+                $clientMessage = 'New client created from lead conversion.';
             }
 
             $deal = $existingDeal ?: $this->createDealFromLead($lead, $client, $actor);
@@ -187,6 +190,7 @@ class LeadConversionService
             'client_id' => $client->id,
             'lead_id' => $lead->id,
             'branch_id' => $lead->branch_id ?: $actor->branch_id,
+            'branch_group_id' => $lead->branch_group_id,
             'created_by' => $actor->id,
             'updated_by' => $actor->id,
             'responsible_agent_id' => $lead->responsible_agent_id ?: $actor->id,
@@ -360,6 +364,7 @@ class LeadConversionService
             'email' => $lead->email,
             'note' => $lead->note,
             'branch_id' => $lead->branch_id ?: $actor->branch_id,
+            'branch_group_id' => $lead->branch_group_id,
             'responsible_agent_id' => $lead->responsible_agent_id ?: $actor->id,
             'contact_kind' => Client::CONTACT_KIND_BUYER,
             'status' => 'active',

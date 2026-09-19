@@ -158,9 +158,13 @@ final class PropertyModerationNotifier
         string $dedupe,
         ?string $actionUrl = null,
     ): void {
+        $access = app(\App\Services\GroupAccess\NotificationGroupAccess::class);
+        if (! $access->subjectAllowed($recipient, $property)) return;
+
         Notification::query()->firstOrCreate(
             ['dedupe_key' => $type.':'.$property->id.':'.$recipient->id.':'.$dedupe],
             [
+                ...(Schema::hasColumn('notifications', 'branch_group_id') ? ['branch_group_id' => $access->snapshot($property)] : []),
                 'user_id' => $recipient->id,
                 'actor_id' => $actor?->id,
                 'type' => $type,
