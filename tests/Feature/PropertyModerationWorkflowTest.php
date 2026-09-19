@@ -1277,4 +1277,36 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertSame('pending', $candidate->fresh()->decision);
     }
 
+    private function users(): array
+    {
+        $agentRole = Role::firstOrCreate(['slug' => 'agent'], ['name' => 'Agent']);
+        $ropRole = Role::firstOrCreate(['slug' => 'rop'], ['name' => 'ROP']);
+        $directorRole = Role::firstOrCreate(['slug' => 'branch_director'], ['name' => 'Director']);
+        $agent = User::forceCreate(['name' => 'Agent', 'phone' => '900000001', 'role_id' => $agentRole->id, 'branch_id' => 1, 'status' => 'active']);
+        $rop = User::forceCreate(['name' => 'ROP', 'phone' => '900000002', 'role_id' => $ropRole->id, 'branch_id' => 1, 'status' => 'active']);
+        $director = User::forceCreate(['name' => 'Director', 'phone' => '900000003', 'role_id' => $directorRole->id, 'branch_id' => 1, 'status' => 'active']);
+
+        $agent->forceFill(['branch_group_id' => 1])->save();
+        $rop->supervisedGroups()->attach(1);
+
+        return [$agent, $rop, $director];
+    }
+
+    private function propertyPayload(User $creator, array $overrides = []): array
+    {
+        return array_merge([
+            'title' => 'Квартира',
+            'price' => 100_000,
+            'currency' => 'TJS',
+            'offer_type' => 'sale',
+            'created_by' => $creator->id,
+            'agent_id' => $creator->id,
+            'branch_id' => 1,
+            'branch_group_id' => 1,
+            'moderation_status' => 'pending',
+            'publication_status' => 'pending',
+            'deal_status' => 'available',
+            'listing_type' => 'regular',
+        ], $overrides);
+    }
 }

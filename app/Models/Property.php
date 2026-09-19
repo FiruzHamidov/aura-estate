@@ -335,6 +335,11 @@ class Property extends Model
 
 
 
+    public function latestSocialPromotion()
+    {
+        return $this->hasOne(PropertySocialPromotion::class)->ofMany(['created_at' => 'max', 'id' => 'max']);
+    }
+
     public function socialPromotions()
     {
         return $this->hasMany(PropertySocialPromotion::class);
