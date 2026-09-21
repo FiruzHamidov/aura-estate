@@ -1351,6 +1351,123 @@ class ClientIntegrationTest extends TestCase
         $list->assertJsonPath('0.summary.contracts.none', 1);
     }
 
+    public function test_report_blocks_use_the_same_event_aware_period(): void
+    {
+        [$agent] = $this->seedClientContext(withProperty: false);
+        $otherCreator = User::create([
+            'name' => 'Other report creator',
+            'phone' => (string) ++$this->phoneCounter,
+            'password' => bcrypt('password'),
+            'role_id' => $agent->role_id,
+            'branch_id' => $agent->branch_id,
+            'status' => 'active',
+        ]);
+
+        $base = [
+            'type_id' => 1,
+            'status_id' => 1,
+            'price' => 100000,
+            'currency' => 'USD',
+            'offer_type' => 'sale',
+            'created_by' => $agent->id,
+            'agent_id' => $agent->id,
+            'listing_type' => 'regular',
+            'rooms' => 2,
+        ];
+
+        $openProperty = Property::forceCreate(array_merge($base, [
+            'title' => 'Open in period',
+            'moderation_status' => 'approved',
+            'created_at' => '2026-03-05 09:00:00',
+            'updated_at' => '2026-03-05 09:00:00',
+        ]));
+
+        DB::table('bookings')->insert([
+            'property_id' => $openProperty->id,
+            'agent_id' => $agent->id,
+            'start_time' => '2026-03-31 18:00:00',
+            'end_time' => '2026-03-31 19:00:00',
+            'status' => 'completed',
+            'created_at' => '2026-03-31 18:00:00',
+            'updated_at' => '2026-03-31 19:00:00',
+        ]);
+
+        Property::forceCreate(array_merge($base, [
+            'title' => 'Sold in period',
+            'moderation_status' => 'sold',
+            'created_by' => $otherCreator->id,
+            'agent_id' => $otherCreator->id,
+            'sale_user_id' => $agent->id,
+            'created_at' => '2026-02-05 09:00:00',
+            'updated_at' => '2026-03-15 09:00:00',
+            'sold_at' => '2026-03-15 09:00:00',
+        ]));
+
+        Property::forceCreate(array_merge($base, [
+            'title' => 'Deposit in period',
+            'moderation_status' => 'deposit',
+            'created_at' => '2026-02-06 09:00:00',
+            'updated_at' => '2026-03-16 09:00:00',
+            'deposit_received_at' => '2026-03-16 09:00:00',
+        ]));
+
+        Property::forceCreate(array_merge($base, [
+            'title' => 'Created in period but sold later',
+            'moderation_status' => 'sold',
+            'sale_user_id' => $agent->id,
+            'created_at' => '2026-03-07 09:00:00',
+            'updated_at' => '2026-04-02 09:00:00',
+            'sold_at' => '2026-04-02 09:00:00',
+        ]));
+
+        Sanctum::actingAs($agent);
+        $query = '?date_from=2026-03-01&date_to=2026-03-31&branch_id='.$agent->branch_id;
+
+        $summary = $this->getJson('/api/reports/properties/summary'.$query);
+        $summary->assertOk()
+            ->assertJsonPath('total', 3)
+            ->assertJsonPath('published_sale', 1)
+            ->assertJsonPath('by_status.0.moderation_status', 'deposit')
+            ->assertJsonPath('by_status.0.cnt', 1)
+            ->assertJsonPath('sold_status.0.moderation_status', 'sold')
+            ->assertJsonPath('sold_status.0.cnt', 1);
+
+        $sellerSummary = $this->getJson('/api/reports/properties/summary'.$query.'&agent_id='.$agent->id);
+        $sellerSummary->assertOk()->assertJsonPath('total', 3)->assertJsonPath('sold_status.0.cnt', 1);
+
+        $soldOnly = $this->getJson('/api/reports/properties/summary'.$query.'&moderation_status=sold');
+        $soldOnly->assertOk()->assertJsonPath('total', 1)->assertJsonPath('sold_status.0.cnt', 1);
+
+        $rentOnly = $this->getJson('/api/reports/properties/summary'.$query.'&offer_type=rent');
+        $rentOnly->assertOk()->assertJsonPath('total', 0);
+
+        $rooms = $this->getJson('/api/reports/properties/rooms-hist'.$query);
+        $rooms->assertOk()->assertJsonPath('0.rooms', 2)->assertJsonPath('0.cnt', 3);
+
+        $manager = $this->getJson('/api/reports/properties/manager-efficiency'.$query);
+        $manager->assertOk()
+            ->assertJsonPath('0.agent_id', $agent->id)
+            ->assertJsonPath('0.total', 3)
+            ->assertJsonPath('0.approved', 1)
+            ->assertJsonPath('0.sold', 1);
+
+        $soldManager = $this->getJson('/api/reports/properties/manager-efficiency'.$query.'&moderation_status=sold');
+        $soldManager->assertOk()
+            ->assertJsonPath('0.agent_id', $agent->id)
+            ->assertJsonPath('0.total', 1)
+            ->assertJsonPath('0.sold', 1);
+
+        $agentReport = $this->getJson('/api/reports/agents/'.$agent->id.'/properties'.$query);
+        $agentReport->assertOk()
+            ->assertJsonPath('summary.total_properties', 3)
+            ->assertJsonPath('summary.total_shows', 1);
+
+        $soldAgentReport = $this->getJson('/api/reports/agents/'.$agent->id.'/properties'.$query.'&moderation_status=sold');
+        $soldAgentReport->assertOk()
+            ->assertJsonPath('summary.total_properties', 1)
+            ->assertJsonPath('summary.by_status.sold', 1);
+    }
+
     public function test_marketing_cannot_access_agent_reports(): void
     {
         [$agent] = $this->seedClientContext();

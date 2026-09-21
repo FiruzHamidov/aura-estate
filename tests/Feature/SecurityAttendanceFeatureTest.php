@@ -23,6 +23,8 @@ class SecurityAttendanceFeatureTest extends \Tests\TestCase
             '2026_08_16_000004_create_attendance_holidays_table.php',
             '2026_08_16_000005_create_attendance_duties_table.php',
             '2026_08_16_000006_create_attendance_global_schedules_table.php',
+            '2026_09_08_120000_create_rop_group_access.php',
+            '2026_09_08_140000_add_attendance_context_groups.php',
         ] as $migration) (require database_path('migrations/'.$migration))->up();
         (require database_path('migrations/2026_09_17_120000_add_security_attendance_branches_to_users.php'))->up();
     }
