@@ -429,7 +429,7 @@ class UserAccessTest extends TestCase
         $response->assertJsonPath('inactive_count', 1);
     }
 
-    public function test_rop_cannot_create_users_of_any_role(): void
+    public function test_rop_cannot_create_privileged_roles_or_users_in_other_branches(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
         $branchB = Branch::create(['name' => 'Branch B']);
@@ -476,7 +476,7 @@ class UserAccessTest extends TestCase
         $response->assertForbidden();
     }
 
-    public function test_rop_cannot_create_or_update_mop_even_in_assigned_group(): void
+    public function test_rop_can_create_mop_in_assigned_group_but_cannot_update_users(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
         $branchB = Branch::create(['name' => 'Branch B']);
@@ -522,9 +522,49 @@ class UserAccessTest extends TestCase
             'branch_group_id' => $groupA->id,
         ]);
 
-        $response->assertForbidden();
+        $response->assertCreated()->assertJsonPath('branch_id', $branchA->id)->assertJsonPath('branch_group_id', $groupA->id);
         $this->patchJson('/api/user/'.$existing->id, ['name' => 'Blocked', 'status' => 'inactive'])->assertForbidden();
         $this->assertSame('Existing MOP', $existing->fresh()->name);
+    }
+
+    public function test_rop_creation_requires_current_group_assignment_and_safe_role(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $groups = collect(['First', 'Second', 'Unassigned'])->map(fn ($name) => BranchGroup::create([
+            'name' => $name, 'branch_id' => $branch->id,
+            'contact_visibility_mode' => BranchGroup::CONTACT_VISIBILITY_GROUP_ONLY,
+        ]));
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '900008000', 'role_id' => $ropRole->id, 'branch_id' => $branch->id, 'status' => 'active']);
+        $rop->supervisedGroups()->attach([$groups[0]->id, $groups[1]->id]);
+        Sanctum::actingAs($rop);
+        $payload = ['name' => 'New agent', 'phone' => '900008001', 'role_id' => $agentRole->id];
+
+        $this->postJson('/api/user', $payload)->assertUnprocessable()->assertJsonPath('details.errors.branch_group_id.0', 'Выберите закреплённую за вами группу для нового сотрудника.');
+        $this->postJson('/api/user', $payload + ['branch_group_id' => null])->assertUnprocessable();
+        $this->postJson('/api/user', $payload + ['branch_group_id' => $groups[2]->id])->assertForbidden();
+        foreach (['admin', 'superadmin', 'branch_director', 'client', 'security', 'external_agent', 'manager', 'intern'] as $slug) {
+            $role = Role::create(['name' => $slug, 'slug' => $slug]);
+            $this->postJson('/api/user', array_replace($payload, ['role_id' => $role->id, 'branch_group_id' => $groups[0]->id]))->assertForbidden();
+        }
+        $this->postJson('/api/user', array_replace($payload, ['role_id' => $ropRole->id, 'branch_group_id' => $groups[0]->id]))->assertForbidden();
+        $this->postJson('/api/user', $payload + ['branch_group_id' => $groups[0]->id, 'security_attendance_branch_ids' => [$branch->id]])->assertForbidden();
+        $this->assertDatabaseMissing('users', ['phone' => $payload['phone']]);
+
+        foreach ([0, 1] as $index) {
+            $response = $this->postJson('/api/user', array_replace($payload, [
+                'phone' => '90000800'.($index + 1), 'branch_group_id' => $groups[$index]->id,
+                'password' => 'test-password', 'supervised_group_ids' => [$groups[2]->id],
+            ]))->assertCreated()->assertJsonPath('branch_id', $branch->id)->assertJsonPath('branch_group_id', $groups[$index]->id);
+            $created = User::findOrFail($response->json('id'));
+            $this->assertTrue(\Illuminate\Support\Facades\Hash::check('test-password', $created->password));
+            $this->assertSame(0, $created->supervisedGroups()->count());
+            $this->getJson('/api/user/'.$created->id)->assertOk();
+        }
+        $rop->supervisedGroups()->detach();
+        $this->postJson('/api/user', array_replace($payload, ['phone' => '900008003', 'branch_group_id' => $groups[0]->id]))->assertForbidden();
+        $this->assertDatabaseMissing('users', ['phone' => '900008003']);
     }
 
     public function test_branch_director_can_create_and_update_mop_in_own_branch_group(): void

@@ -527,7 +527,7 @@ class UserController extends Controller
     {
         return DB::transaction(function () use ($request) {
             $authUser = User::query()->lockForUpdate()->findOrFail($this->authUser()->id);
-            abort_if($authUser->hasRole('rop'), 403, 'FORBIDDEN_ACTION');
+            $isRop = $authUser->hasRole('rop');
 
             $request->validate([
                 'name' => 'required|string',
@@ -546,6 +546,13 @@ class UserController extends Controller
             ]);
 
             $targetRole = $this->resolveRequestedRole($request);
+            if ($isRop) {
+                abort_unless(in_array($targetRole->slug, ['agent', 'mop'], true), 403, 'РОП может создавать только агентов и МОП в закреплённых группах.');
+                $request->validate(['branch_group_id' => 'required|integer|exists:branch_groups,id'], [
+                    'branch_group_id.required' => 'Выберите закреплённую за вами группу для нового сотрудника.',
+                ]);
+                app(\App\Support\RopGroupAccess::class)->ensureGroup($authUser, (int) $request->input('branch_group_id'));
+            }
             $this->authorizeHrCreationRole($authUser, $targetRole);
             $this->authorizeAssignedRole($authUser, $targetRole);
 
