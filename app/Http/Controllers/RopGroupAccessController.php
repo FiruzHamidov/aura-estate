@@ -34,11 +34,6 @@ final class RopGroupAccessController extends Controller
     {
         $actor = $request->user()->fresh('role');
 
-        return response()->json([
-            'scope_type' => $access->applies($actor) ? 'groups' : 'role',
-            'branch_id' => $actor->branch_id,
-            'branch_group_ids' => $access->applies($actor) ? $access->groupIds($actor) : [],
-            'version' => (int) $actor->access_scope_version,
-        ]);
+        return response()->json($access->describe($actor));
     }
 }

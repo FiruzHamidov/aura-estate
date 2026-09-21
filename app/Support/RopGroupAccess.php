@@ -34,6 +34,22 @@ final class RopGroupAccess
         return $this->groupsQuery($actor)->orderBy('rg.id')->pluck('rg.id')->map(fn ($id) => (int) $id)->all();
     }
 
+    public function describe(User $actor): array
+    {
+        $isRop = $this->applies($actor);
+        $ids = $isRop ? $this->groupIds($actor) : [];
+        $code = $isRop && $ids === []
+            ? ($actor->branch_id ? 'ROP_GROUPS_NOT_ASSIGNED' : 'ROP_BRANCH_NOT_ASSIGNED') : null;
+
+        return [
+            'scope_type' => $isRop ? 'groups' : 'role',
+            'branch_id' => $actor->branch_id,
+            'branch_group_ids' => $ids,
+            'version' => (int) $actor->access_scope_version,
+            'notice' => $code ? ['code' => $code, 'message' => config('moderation-messages.'.$code)] : null,
+        ];
+    }
+
     public function scope(Builder|QueryBuilder $query, User $actor, string $groupColumn, ?string $branchColumn = null): Builder|QueryBuilder
     {
         $query->whereIn($groupColumn, $this->groupsQuery($actor));
@@ -68,7 +84,7 @@ final class RopGroupAccess
     public function ensureVisible(User $actor, Model $record): void
     {
         if ($this->applies($actor)) {
-            abort_unless($this->allows($actor, $record), 404, 'NOT_FOUND');
+            abort_unless($this->allows($actor, $record), 404, 'ROP_RECORD_NOT_ACCESSIBLE');
         }
     }
 

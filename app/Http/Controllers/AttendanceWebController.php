@@ -69,6 +69,7 @@ final class AttendanceWebController extends Controller
                 'date_from' => $from->toDateString(),
                 'date_to' => $to->toDateString(),
                 'permissions' => $this->access->permissions($request->user()),
+                'access_scope' => app(\App\Support\RopGroupAccess::class)->describe($request->user()),
                 'selectable_branches' => $request->user()->hasRole('security')
                     ? \App\Models\Branch::query()->whereIn('id', $this->access->securityBranchIds($request->user()))->orderBy('name')->get(['id', 'name'])
                     : null,
@@ -113,7 +114,8 @@ final class AttendanceWebController extends Controller
             ->orderBy('occurred_at')->orderBy('id')->get();
         $comment = $this->comments()->with('author:id,name')->where('user_id', $user->id)->whereDate('work_date', $date)->first();
         if ($request->user()->hasRole('rop')) {
-            abort_unless($summary || $events->isNotEmpty() || $leave || $duty, 404, 'NOT_FOUND');
+            $currentEmployee = app(\App\Support\RopGroupAccess::class)->employees($request->user())->whereKey($user->id)->exists();
+            abort_unless($currentEmployee || $summary || $events->isNotEmpty() || $leave || $duty, 404, 'ROP_RECORD_NOT_ACCESSIBLE');
         }
 
         return response()->json(['data' => [
