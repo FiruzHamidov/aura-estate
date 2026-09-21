@@ -361,6 +361,7 @@ class ClientWorkflowFeatureTest extends TestCase
 
     public function test_booking_store_requires_client_picker_and_rejects_manual_client_fields(): void
     {
+        $this->travelTo(\Illuminate\Support\Carbon::parse('2026-03-01T00:00:00Z'));
         $branch = Branch::create(['name' => 'Branch A']);
         $group = $this->createBranchGroup($branch, 'Group A');
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
@@ -381,6 +382,7 @@ class ClientWorkflowFeatureTest extends TestCase
 
     public function test_booking_create_and_update_sync_snapshots_from_crm_client(): void
     {
+        $this->travelTo(\Illuminate\Support\Carbon::parse('2026-03-01T00:00:00Z'));
         $branch = Branch::create(['name' => 'Branch A']);
         $group = $this->createBranchGroup($branch, 'Group A');
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
@@ -420,6 +422,7 @@ class ClientWorkflowFeatureTest extends TestCase
 
     public function test_booking_can_be_created_for_client_without_phone(): void
     {
+        $this->travelTo(\Illuminate\Support\Carbon::parse('2026-03-01T00:00:00Z'));
         $branch = Branch::create(['name' => 'Branch A']);
         $group = $this->createBranchGroup($branch, 'Group A');
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
@@ -487,6 +490,7 @@ class ClientWorkflowFeatureTest extends TestCase
 
     public function test_booking_actions_create_client_audit_entries(): void
     {
+        $this->travelTo(\Illuminate\Support\Carbon::parse('2026-03-01T00:00:00Z'));
         $branch = Branch::create(['name' => 'Branch A']);
         $group = $this->createBranchGroup($branch, 'Group A');
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
@@ -606,6 +610,7 @@ class ClientWorkflowFeatureTest extends TestCase
 
     public function test_actions_of_different_agents_appear_in_one_client_history(): void
     {
+        $this->travelTo(\Illuminate\Support\Carbon::parse('2026-03-01T00:00:00Z'));
         Setting::create([
             'key' => ClientAccess::VISIBILITY_SETTING_KEY,
             'value' => ClientAccess::VISIBILITY_OWN_ONLY,
@@ -658,6 +663,7 @@ class ClientWorkflowFeatureTest extends TestCase
 
     public function test_booking_store_auto_adds_assigned_agent_as_client_viewer_when_client_is_not_visible(): void
     {
+        $this->travelTo(\Illuminate\Support\Carbon::parse('2026-03-01T00:00:00Z'));
         Setting::create([
             'key' => ClientAccess::VISIBILITY_SETTING_KEY,
             'value' => ClientAccess::VISIBILITY_OWN_ONLY,

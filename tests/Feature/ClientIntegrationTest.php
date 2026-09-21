@@ -317,6 +317,7 @@ class ClientIntegrationTest extends TestCase
 
     public function test_booking_store_uses_new_client_entity_and_fills_snapshot_fields(): void
     {
+        $this->travelTo(\Illuminate\Support\Carbon::parse('2026-03-01T00:00:00Z'));
         [$agent, $client, $property] = $this->seedClientContext();
 
         Sanctum::actingAs($agent);
@@ -336,6 +337,57 @@ class ClientIntegrationTest extends TestCase
 
         $client->refresh();
         $this->assertSame(Client::CONTACT_KIND_BUYER, $client->contact_kind);
+    }
+
+    public function test_booking_save_uses_server_clock_and_normalizes_timezones(): void
+    {
+        config(['app.timezone' => 'Asia/Dushanbe']);
+        $this->travelTo(\Illuminate\Support\Carbon::parse('2026-09-21T10:00:00Z'));
+        [$agent, $client, $property] = $this->seedClientContext();
+        Sanctum::actingAs($agent);
+        $payload = [
+            'property_id' => $property->id, 'agent_id' => $agent->id, 'client_id' => $client->id,
+            'end_time' => '2026-09-21T17:00:00+05:00',
+            'current_time' => '2020-01-01T00:00:00Z',
+        ];
+        foreach (['2026-09-21T14:59:59+05:00', '2026-09-21T09:59:59Z', '2026-09-21T14:59:59'] as $start) {
+            $this->postJson('/api/bookings', $payload + ['start_time' => $start])
+                ->assertUnprocessable()->assertJsonValidationErrors('start_time', 'details.errors')
+                ->assertJsonPath('details.errors.start_time.0', 'Нельзя назначить показ задним числом. Выберите время начала позже текущего времени сервера.');
+        }
+        $this->assertDatabaseCount('bookings', 0);
+        $this->assertDatabaseMissing('crm_audit_logs', ['event' => 'booking_created']);
+        $future = $payload + ['start_time' => '2026-09-21T15:01:00+05:00'];
+        $this->postJson('/api/bookings', $future)->assertCreated();
+        $this->assertDatabaseHas('bookings', ['start_time' => '2026-09-21 10:01:00']);
+        // The same form is no longer valid when saved after the selected time.
+        $this->travelTo(\Illuminate\Support\Carbon::parse('2026-09-21T10:01:01Z'));
+        $this->postJson('/api/bookings', $future)->assertUnprocessable()->assertJsonValidationErrors('start_time', 'details.errors');
+        $this->assertDatabaseCount('bookings', 1);
+    }
+
+    public function test_booking_reschedule_rejects_past_but_preserves_historical_note_edits(): void
+    {
+        $this->travelTo(\Illuminate\Support\Carbon::parse('2026-09-21T10:00:00Z'));
+        [$agent, $client, $property] = $this->seedClientContext();
+        Sanctum::actingAs($agent);
+        $id = $this->postJson('/api/bookings', [
+            'property_id' => $property->id, 'agent_id' => $agent->id, 'client_id' => $client->id,
+            'start_time' => '2026-09-21T11:00:00Z', 'end_time' => '2026-09-21T12:00:00Z',
+        ])->assertCreated()->json('booking.id');
+        $this->patchJson('/api/bookings/'.$id, ['start_time' => '2026-09-21T09:59:59Z', 'note' => 'must roll back'])
+            ->assertUnprocessable()->assertJsonValidationErrors('start_time', 'details.errors');
+        $this->assertDatabaseHas('bookings', ['id' => $id, 'start_time' => '2026-09-21 11:00:00', 'note' => null]);
+        $this->travelTo(\Illuminate\Support\Carbon::parse('2026-09-21T13:00:00Z'));
+        $this->patchJson('/api/bookings/'.$id, [
+            'start_time' => '2026-09-21T16:00:00+05:00', 'end_time' => '2026-09-21T17:00:00+05:00',
+            'note' => 'Historical note',
+        ])->assertOk()->assertJsonPath('note', 'Historical note');
+        $this->patchJson('/api/bookings/'.$id, ['end_time' => '2026-09-21T14:00:00Z'])
+            ->assertUnprocessable()->assertJsonValidationErrors('start_time', 'details.errors');
+        $this->patchJson('/api/bookings/'.$id, [
+            'start_time' => '2026-09-22T10:00:00Z', 'end_time' => '2026-09-22T11:00:00Z',
+        ])->assertOk();
     }
 
     public static function ownerContactKinds(): array

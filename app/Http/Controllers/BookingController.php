@@ -94,6 +94,16 @@ class BookingController extends Controller
         return $date->setTimezone('UTC');
     }
 
+    private function ensureBookingStartsInFuture(Carbon $start): void
+    {
+        // Read the server clock at persistence time, after acquiring write locks.
+        if ($start->lessThan(Carbon::now('UTC'))) {
+            throw ValidationException::withMessages([
+                'start_time' => ['Нельзя назначить показ задним числом. Выберите время начала позже текущего времени сервера.'],
+            ]);
+        }
+    }
+
     private function normalizeFilterBoundaryToUtc(?string $value, string $boundary): ?string
     {
         if (empty($value)) {
@@ -494,6 +504,7 @@ class BookingController extends Controller
             $validated['start_time'] = $startCarbon->toDateTimeString(); // "Y-m-d H:i:s" (UTC)
             $validated['end_time']   = $endCarbon->toDateTimeString();
 
+            $this->ensureBookingStartsInFuture($startCarbon);
             $booking = Booking::create($validated);
             $this->logClientBookingCreated($client, $authUser, $booking);
 
@@ -563,6 +574,9 @@ class BookingController extends Controller
                 ]);
             }
 
+            $scheduleChanged = !$startCarbon->equalTo(Carbon::parse($booking->start_time, 'UTC'))
+                || !$endCarbon->equalTo(Carbon::parse($booking->end_time, 'UTC'));
+
             if (isset($validated['start_time'])) {
                 $booking->start_time = $startCarbon->toDateTimeString();
             }
@@ -595,6 +609,9 @@ class BookingController extends Controller
                 $booking->agent_id = $validated['agent_id'];
             }
 
+            if ($scheduleChanged) {
+                $this->ensureBookingStartsInFuture($startCarbon);
+            }
             $booking->save();
 
             $booking->load(['property', 'agent', 'client.type']);
