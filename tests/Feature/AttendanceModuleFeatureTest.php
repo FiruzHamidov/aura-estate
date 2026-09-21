@@ -353,6 +353,58 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->assertNull($summary->worked_minutes);
     }
 
+    public function test_rop_matrix_explains_missing_group_assignments_and_recovers_after_assignment(): void
+    {
+        $context = $this->context();
+        $context['rop']->supervisedGroups()->detach();
+        Sanctum::actingAs($context['rop']);
+        $url = '/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17';
+        $this->getJson($url)->assertOk()->assertJsonCount(0, 'data')
+            ->assertJsonPath('meta.access_scope.notice.code', 'ROP_GROUPS_NOT_ASSIGNED');
+        $this->getJson('/api/me/access-scope')->assertOk()
+            ->assertJsonPath('notice.code', 'ROP_GROUPS_NOT_ASSIGNED');
+        app(\App\Services\GroupAccess\RopGroupAssignments::class)->replace(
+            $context['admin'], $context['rop']->id, [$context['group']->id], 0
+        );
+        Sanctum::actingAs($context['rop']->fresh());
+        $response = $this->getJson($url)->assertOk()->assertJsonPath('meta.access_scope.notice', null);
+        $ids = collect($response->json('data'))->pluck('user.id')->all();
+        $this->assertContains($context['agent']->id, $ids);
+        $this->assertNotContains($context['otherAgent']->id, $ids);
+    }
+
+    public function test_rop_without_primary_group_sees_all_assigned_groups_only(): void
+    {
+        $context = $this->context();
+        $secondGroup = BranchGroup::create(['branch_id' => $context['branch']->id, 'name' => 'Second assigned group']);
+        $secondEmployee = User::create(['name' => 'Second agent', 'phone' => '992999000555',
+            'role_id' => $context['agent']->role_id, 'branch_id' => $context['branch']->id,
+            'branch_group_id' => $secondGroup->id, 'status' => 'active']);
+        $context['rop']->forceFill(['branch_group_id' => null])->save();
+        $context['rop']->supervisedGroups()->attach($secondGroup->id);
+        Sanctum::actingAs($context['rop']);
+        $response = $this->getJson('/api/attendance/matrix?date_from=2026-09-01&date_to=2026-09-30')->assertOk();
+        $ids = collect($response->json('data'))->pluck('user.id')->all();
+        $this->assertContains($context['agent']->id, $ids);
+        $this->assertContains($secondEmployee->id, $ids);
+        $this->assertNotContains($context['otherAgent']->id, $ids);
+        $this->getJson('/api/attendance/matrix?date_from=2026-09-01&date_to=2026-09-30&branch_group_id='.$secondGroup->id)
+            ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.user.id', $secondEmployee->id);
+    }
+
+    public function test_rop_can_open_empty_attendance_day_of_current_group_employee(): void
+    {
+        $context = $this->context();
+        Sanctum::actingAs($context['rop']);
+        $this->getJson('/api/attendance/users/'.$context['agent']->id.'/days/2026-08-17')
+            ->assertOk()->assertJsonCount(0, 'data.events');
+        $this->getJson('/api/attendance/users/'.$context['otherAgent']->id.'/days/2026-08-17')
+            ->assertNotFound();
+        $response = $this->getJson('/api/attendance/matrix?branch_group_id='.$context['otherAgent']->branch_group_id)
+            ->assertForbidden()->assertJsonPath('code', 'RBAC_GROUP_SCOPE_VIOLATION');
+        $this->assertStringContainsString('назначенные вам группы', $response->json('message'));
+    }
+
     public function test_attendance_rbac_limits_agents_mop_and_rop_to_their_scope(): void
     {
         $context = $this->context();
