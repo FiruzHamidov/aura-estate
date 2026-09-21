@@ -650,4 +650,13 @@ class Property extends Model
 
         return (int) $branchGroupId;
     }
+
+    public function needsReopening(): bool
+    {
+        return $this->sold_at !== null
+            || in_array($this->deal_status, ['sold', 'sold_by_owner', 'rented', 'client_denied'], true)
+            || in_array($this->publication_status, ['archived', 'draft'], true)
+            || in_array($this->moderation_status, self::CLOSED_MODERATION_STATUSES, true)
+            || (Schema::hasTable('property_statuses') && $this->status()->whereIn('slug', self::CLOSED_STATUS_SLUGS)->exists());
+    }
 }

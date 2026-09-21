@@ -22,3 +22,6 @@
 Homestead.json
 Homestead.yaml
 Thumbs.db
+
+# Local QA evidence and isolated frontend builds
+/artifacts/

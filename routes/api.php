@@ -430,6 +430,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
 
     // Messaging
     Route::get('/conversations', [ConversationController::class, 'index']);
+    Route::get('/conversations/unread-count', [ConversationController::class, 'unreadSummary']);
     Route::post('/conversations', [ConversationController::class, 'store']);
     Route::get('/conversations/available-users', [ConversationController::class, 'availableUsers']);
     Route::post('/conversations/direct', [ConversationController::class, 'storeDirect']);
@@ -494,6 +495,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         Route::get('/properties/{property}/duplicate-candidates', [PropertyController::class, 'duplicateCandidates']);
         Route::get('/properties/{property}/matching-clients', [PropertyController::class, 'matchingClients']);
         Route::put('/properties/{property}', [PropertyController::class, 'update'])->middleware('moderation.idempotent');
+        Route::post('/properties/{property}/reopen', [\App\Http\Controllers\PropertyModerationController::class, 'reopen'])->middleware('moderation.idempotent')->middleware('moderation.payload');
         Route::post('/properties/{property}/refresh-listing-date', [PropertyController::class, 'refreshListingDate']);
         Route::patch('/properties/{property}/co-owner', [PropertyController::class, 'updateCoOwner'])->middleware('moderation.idempotent');
         Route::delete('/properties/{property}', [PropertyController::class, 'destroy']);

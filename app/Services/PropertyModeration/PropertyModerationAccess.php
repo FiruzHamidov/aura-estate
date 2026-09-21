@@ -197,6 +197,7 @@ final class PropertyModerationAccess
                 ->exists(),
             'can_resolve_appeal' => $decidableCases->contains('type', PropertyModerationCase::TYPE_APPEAL),
             'can_manage_deal' => $this->canManageDeal($user, $property),
+            'can_reopen_listing' => $canModerate && $property->needsReopening(),
             'can_request_promotion' => $canEdit && in_array($property->publication_status, ['published', 'pending'], true) && $requestedPromotions->isEmpty(),
             'can_approve_promotion' => $canModerate && $isPublished && $requestedPromotions->isNotEmpty(),
             'can_manage_promotion_directly' => $canModerate && $isPublished,

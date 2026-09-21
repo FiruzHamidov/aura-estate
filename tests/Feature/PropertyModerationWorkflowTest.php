@@ -1309,4 +1309,176 @@ class PropertyModerationWorkflowTest extends TestCase
             'listing_type' => 'regular',
         ], $overrides);
     }
+
+    public function test_reopen_preserves_previous_deal_clears_current_close_and_restores_guest_access(): void
+    {
+        [$property, $agent, $rop, , $service] = $this->reopeningFixture();
+        $property->saleAgents()->attach($agent->id, ['role' => 'main', 'agent_commission_amount' => 1500]);
+        $createdAt = $property->getRawOriginal('created_at');
+        $this->assertFalse($service->isPublic($property));
+        $version = (int) $property->moderation_version;
+        $result = $service->reopenListing($property, $rop, 'Владелец подтвердил повторную продажу', $version);
+        $this->assertNull($result->sold_at);
+        $this->assertNull($result->buyer_full_name);
+        $this->assertNull($result->actual_sale_price);
+        $this->assertSame('TJS', $result->actual_sale_currency);
+        $this->assertSame('available', $result->deal_status);
+        $this->assertSame('published', $result->publication_status);
+        $this->assertSame($createdAt, $result->getRawOriginal('created_at'));
+        $this->assertNotNull($result->getRawOriginal('listing_updated_at'));
+        $this->assertSame($version + 1, (int) $result->moderation_version);
+        $this->assertTrue($service->isPublic($result));
+        $service->publicOrFail($result, null);
+        $log = \App\Models\PropertyLog::where('action', 'listing_reopened')->sole();
+        $this->assertSame((int) $rop->id, (int) $log->user_id);
+        $this->assertSame('Владелец подтвердил повторную продажу', $log->comment);
+        $this->assertSame('2026-05-20 11:34:46', $log->changes['sold_at']['old']);
+        $this->assertSame('Прежний клиент', $log->changes['buyer_full_name']['old']);
+        $this->assertSame('USD', $log->changes['actual_sale_currency']['old']);
+        $this->assertSame(0, $result->saleAgents()->count());
+        $this->assertSame((int) $agent->id, $log->changes['sale_agents']['old'][0]['agent_id']);
+        $this->assertEquals(1500, $log->changes['sale_agents']['old'][0]['agent_commission_amount']);
+        $this->assertFalse(app(PropertyModerationAccess::class)->capabilities($rop, $result)['can_reopen_listing']);
+        // A later deal gets its own date; the old close remains in the immutable log.
+        $result->forceFill(['sold_at' => now(), 'deal_status' => 'rented', 'publication_status' => 'archived'])->save();
+        $this->assertFalse($service->isPublic($result));
+        $this->assertSame('2026-05-20 11:34:46', $log->fresh()->changes['sold_at']['old']);
+    }
+
+    public function test_reopen_repairs_legacy_available_with_remaining_close_date(): void
+    {
+        [$property, , , $director, $service] = $this->reopeningFixture();
+        $property->forceFill(['deal_status' => 'available', 'publication_status' => 'published', 'moderation_status' => 'approved'])->save();
+        $this->assertTrue($property->needsReopening());
+        $result = $service->reopenListing($property, $director, 'Исправление возврата старого объявления', (int) $property->moderation_version);
+        $this->assertTrue($service->isPublic($result));
+        $this->assertNull($result->sold_at);
+    }
+
+    public function test_reopen_rejects_agent_stale_version_repeat_and_empty_reason_without_mutation(): void
+    {
+        [$property, $agent, $rop, , $service] = $this->reopeningFixture();
+        foreach ([[$agent, 'Причина возврата объявления', (int) $property->moderation_version, 403],
+            [$rop, 'Причина возврата объявления', 999, 409]] as [$actor, $reason, $version, $status]) {
+            try { $service->reopenListing($property, $actor, $reason, $version); $this->fail('Must reject'); }
+            catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) { $this->assertSame($status, $e->getStatusCode()); }
+            $this->assertNotNull($property->fresh()->sold_at);
+        }
+        try { $service->reopenListing($property, $rop, '          ', (int) $property->moderation_version); $this->fail('Must require a reason'); }
+        catch (\Illuminate\Validation\ValidationException $e) { $this->assertArrayHasKey('reason', $e->errors()); }
+        $result = $service->reopenListing($property, $rop, 'Объект снова доступен для продажи', (int) $property->moderation_version);
+        try { $service->reopenListing($result, $rop, 'Повторный возврат того же объекта', (int) $result->moderation_version); $this->fail('Must reject repeat'); }
+        catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) { $this->assertSame(409, $e->getStatusCode()); }
+        $this->assertSame(1, \App\Models\PropertyLog::where('action', 'listing_reopened')->count());
+    }
+
+    public function test_reopen_does_not_bypass_blocking_case_or_rop_scope(): void
+    {
+        [$property, , $rop, , $service] = $this->reopeningFixture();
+        $case = PropertyModerationCase::forceCreate(['property_id' => $property->id, 'type' => 'initial_review', 'status' => 'rejected', 'blocking' => true, 'version' => 1, 'submitted_at' => now()]);
+        try { $service->reopenListing($property, $rop, 'Владелец подтвердил доступность', (int) $property->moderation_version); $this->fail('Must reject blocking case'); }
+        catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) { $this->assertSame(409, $e->getStatusCode()); }
+        $case->delete();
+        $rop->supervisedGroups()->detach();
+        try { $service->reopenListing($property, $rop->fresh(), 'Владелец подтвердил доступность', (int) $property->moderation_version); $this->fail('Must reject out of scope'); }
+        catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) { $this->assertSame(403, $e->getStatusCode()); }
+        $this->assertNotNull($property->fresh()->sold_at);
+        $this->assertSame(0, \App\Models\PropertyLog::count());
+    }
+
+    public function test_reopen_with_unapproved_content_returns_to_review_instead_of_publishing(): void
+    {
+        [$property, , $rop, , $service] = $this->reopeningFixture();
+        $property->forceFill(['price' => 200000])->save();
+        $result = $service->reopenListing($property, $rop, 'Владелец вернул объект с новой ценой', (int) $property->moderation_version);
+        $this->assertSame('available', $result->deal_status);
+        $this->assertNull($result->sold_at);
+        $this->assertSame('pending', $result->publication_status);
+        $this->assertFalse($service->isPublic($result));
+        $this->assertTrue($result->moderationCases()->where('status', 'open')->where('blocking', true)->exists());
+    }
+
+    public function test_reopen_http_contract_and_legacy_deal_endpoint_guard(): void
+    {
+        [$property, $agent, $rop] = $this->reopeningFixture();
+        $route = app('router')->getRoutes()->match(Request::create("/api/properties/{$property->id}/reopen", 'POST'));
+        $this->withoutMiddleware(array_values(array_filter(app('router')->gatherRouteMiddleware($route),
+            fn ($middleware) => $middleware !== \Illuminate\Routing\Middleware\SubstituteBindings::class)));
+        $this->actingAs($agent);
+        $this->postJson("/api/properties/{$property->id}/reopen", ['version' => $property->moderation_version, 'reason' => 'Объект возвращается в продажу'])->assertForbidden();
+        $this->actingAs($rop);
+        $this->postJson("/api/properties/{$property->id}/deal", ['version' => $property->moderation_version, 'deal_status' => 'available'])->assertConflict();
+        $this->postJson("/api/properties/{$property->id}/reopen", ['version' => $property->moderation_version, 'reason' => ''])->assertUnprocessable();
+        $this->postJson("/api/properties/{$property->id}/reopen", ['version' => $property->moderation_version, 'reason' => 'Объект возвращается в продажу'])
+            ->assertOk()->assertJsonPath('data.publication_status', 'published')->assertJsonPath('data.sold_at', null);
+    }
+
+    public function test_reopen_suspends_promotions_and_starts_normal_refresh_cooldown(): void
+    {
+        [$property, $agent, $rop, , $service] = $this->reopeningFixture();
+        $promotion = PropertyPromotion::forceCreate(['property_id' => $property->id, 'type' => 'vip', 'status' => 'active',
+            'requested_by' => $agent->id, 'requested_at' => now(), 'decided_by' => $rop->id, 'starts_at' => now()->subDay(), 'ends_at' => now()->addDays(5), 'version' => 1]);
+        $result = $service->reopenListing($property, $rop, 'Повторная продажа по просьбе владельца', (int) $property->moderation_version);
+        $this->assertSame('suspended', $promotion->fresh()->status);
+        $this->assertSame('regular', $result->listing_type);
+        $controller = app(\App\Http\Controllers\PropertyController::class);
+        $state = new \ReflectionMethod($controller, 'listingDateRefreshState');
+        $this->assertFalse($state->invoke($controller, $result)['available']);
+        $this->travel(25)->hours();
+        $this->assertTrue($state->invoke($controller, $result)['available']);
+        $this->travelBack();
+    }
+
+    public function test_reopen_clears_legacy_closed_catalog_status(): void
+    {
+        [$property, , $rop, , $service] = $this->reopeningFixture();
+        Schema::create('property_statuses', function (Blueprint $table): void { $table->id(); $table->string('slug'); });
+        $statusId = DB::table('property_statuses')->insertGetId(['slug' => 'rented']);
+        $property->forceFill(['status_id' => $statusId])->save();
+        $result = $service->reopenListing($property, $rop, 'Срок аренды закончился, сдаём повторно', (int) $property->moderation_version);
+        $this->assertNull($result->status_id);
+        $this->assertTrue($service->isPublic($result));
+        $this->assertSame($statusId, \App\Models\PropertyLog::where('action', 'listing_reopened')->sole()->changes['status_id']['old']);
+    }
+
+    public function test_reopen_rolls_back_deal_and_participants_when_history_cannot_be_saved(): void
+    {
+        [$property, $agent, $rop, , $service] = $this->reopeningFixture();
+        $property->saleAgents()->attach($agent->id, ['role' => 'main', 'agent_commission_amount' => 1500]);
+        Schema::rename('property_logs', 'unavailable_property_logs');
+        try { $service->reopenListing($property, $rop, 'Объект возвращается в продажу', (int) $property->moderation_version); $this->fail('Must roll back without history'); }
+        catch (\Illuminate\Database\QueryException) {
+            $this->assertNotNull($property->fresh()->sold_at);
+            $this->assertSame('sold', $property->fresh()->deal_status);
+            $this->assertSame(1, $property->saleAgents()->count());
+        }
+    }
+
+    private function reopeningFixture(): array
+    {
+        Schema::table('properties', function (Blueprint $table): void {
+            $table->timestamp('sold_at')->nullable();
+            $table->timestamp('listing_updated_at')->nullable();
+            $table->string('buyer_full_name')->nullable();
+            $table->decimal('actual_sale_price', 15, 2)->nullable();
+            $table->string('actual_sale_currency')->default('TJS');
+        });
+        Schema::create('property_logs', function (Blueprint $table): void {
+            $table->id(); $table->unsignedBigInteger('property_id'); $table->unsignedBigInteger('user_id')->nullable();
+            $table->string('action'); $table->text('comment')->nullable(); $table->json('changes'); $table->timestamps();
+        });
+        Schema::create('property_agent_sales', function (Blueprint $table): void {
+            $table->id(); $table->unsignedBigInteger('property_id'); $table->unsignedBigInteger('agent_id');
+            $table->string('role'); $table->decimal('agent_commission_amount', 15, 2)->nullable();
+            $table->string('agent_commission_currency')->default('TJS'); $table->timestamp('agent_paid_at')->nullable(); $table->timestamps();
+        });
+        [$agent, $rop, $director] = $this->users();
+        $service = app(PropertyModerationService::class);
+        $property = Property::forceCreate($this->propertyPayload($agent, ['publication_status' => 'published', 'moderation_status' => 'approved']));
+        $service->recordCreation($property, $agent, collect());
+        $property = $property->fresh();
+        $property->forceFill(['sold_at' => '2026-05-20 11:34:46', 'deal_status' => 'sold', 'publication_status' => 'archived',
+            'moderation_status' => 'sold', 'actual_sale_price' => 90000, 'actual_sale_currency' => 'USD', 'buyer_full_name' => 'Прежний клиент'])->save();
+        return [$property, $agent, $rop, $director, $service];
+    }
 }

@@ -235,6 +235,52 @@ class MessagingFeatureTest extends TestCase
         $this->getJson('/api/conversations/'.$conversationId)->assertForbidden();
     }
 
+    public function test_unread_count_returns_only_messages_visible_as_unread_to_current_user(): void
+    {
+        $this->getJson('/api/conversations/unread-count')->assertUnauthorized();
+
+        $admin = $this->createUser('admin', 'Admin', '991000014');
+        $manager = $this->createUser('manager', 'Manager', '991000015');
+        $outsider = $this->createUser('operator', 'Outsider', '991000016');
+        $conversation = Conversation::query()->create([
+            'type' => Conversation::TYPE_DIRECT,
+            'created_by' => $admin->id,
+        ]);
+        $conversation->participants()->createMany([
+            ['user_id' => $admin->id, 'role' => 'owner'],
+            ['user_id' => $manager->id, 'role' => 'member'],
+        ]);
+        $fromAdmin = $conversation->messages()->create([
+            'author_id' => $admin->id,
+            'body' => 'Unread for manager',
+        ]);
+        $conversation->messages()->create([
+            'author_id' => $manager->id,
+            'body' => 'Own message is not unread',
+        ]);
+        $conversation->messages()->create([
+            'author_id' => null,
+            'body' => 'System message is unread',
+        ]);
+
+        Sanctum::actingAs($manager);
+        $this->getJson('/api/conversations/unread-count')
+            ->assertOk()
+            ->assertExactJson(['unread_count' => 2]);
+
+        $conversation->participants()
+            ->where('user_id', $manager->id)
+            ->update(['last_read_message_id' => $fromAdmin->id]);
+        $this->getJson('/api/conversations/unread-count')
+            ->assertOk()
+            ->assertExactJson(['unread_count' => 1]);
+
+        Sanctum::actingAs($outsider);
+        $this->getJson('/api/conversations/unread-count')
+            ->assertOk()
+            ->assertExactJson(['unread_count' => 0]);
+    }
+
     public function test_chat_endpoints_include_ios_header_and_message_state_fields(): void
     {
         $agent = $this->createUser('agent', 'Ситора Рахмонова', '991000024');

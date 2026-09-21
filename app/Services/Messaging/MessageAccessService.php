@@ -253,6 +253,27 @@ class MessageAccessService
             ]);
     }
 
+    public function unreadMessageCount(User $user): int
+    {
+        return ConversationMessage::query()
+            ->join('conversation_participants as viewer_participants', function ($join) {
+                $join->on(
+                    'viewer_participants.conversation_id',
+                    '=',
+                    'conversation_messages.conversation_id'
+                );
+            })
+            ->where('viewer_participants.user_id', $user->id)
+            ->whereRaw(
+                'conversation_messages.id > COALESCE(viewer_participants.last_read_message_id, 0)'
+            )
+            ->where(function (Builder $messages) use ($user) {
+                $messages->whereNull('conversation_messages.author_id')
+                    ->orWhere('conversation_messages.author_id', '!=', $user->id);
+            })
+            ->count();
+    }
+
     public function ensureAccessible(User $actor, Conversation $conversation): void
     {
         abort_unless($this->canAccessConversation($actor, $conversation), 403, 'Forbidden');
