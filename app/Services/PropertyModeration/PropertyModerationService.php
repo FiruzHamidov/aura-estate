@@ -1589,4 +1589,90 @@ final class PropertyModerationService
             app(PropertyModerationNotifier::class)->trustDecreased($property, $employee, $actor, $points);
         }
     }
+
+    public function reopenListing(Property $property, User $actor, string $reason, int $expectedVersion): Property
+    {
+        abort_unless($this->access->canModerate($actor, $property), 403, 'Возврат доступен только РОП и выше в пределах их доступа.');
+        $reason = trim($reason);
+        if (mb_strlen($reason) < 10 || mb_strlen($reason) > 2000) {
+            throw \Illuminate\Validation\ValidationException::withMessages(['reason' => 'Укажите причину возврата (от 10 до 2000 символов).']);
+        }
+
+        return DB::transaction(function () use ($property, $actor, $reason, $expectedVersion): Property {
+            [$actor, $locked] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, $property);
+            abort_unless($this->access->canModerate($actor, $locked), 403);
+            abort_if((int) $locked->moderation_version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
+            abort_unless($locked->needsReopening(), 409, 'Объявление уже возвращено. Обновите карточку.');
+            abort_if($this->hasConfirmedDuplicate($locked), 409, 'Сначала отмените решение о подтверждённом дубле через модерацию.');
+            abort_if($this->hasOpenBlockingCases($locked), 409,
+                'Сначала завершите блокирующую модерацию объявления.');
+
+            $dealFields = [
+                'sold_at', 'sale_user_id', 'sale_agent_id', 'buyer_client_id', 'buyer_full_name', 'buyer_phone',
+                'actual_sale_price', 'actual_sale_currency', 'company_commission_amount', 'company_commission_currency',
+                'money_holder', 'money_received_at', 'contract_signed_at', 'deposit_amount', 'deposit_currency',
+                'deposit_received_at', 'deposit_taken_at', 'deposit_user_id', 'planned_contract_signed_at',
+                'company_expected_income', 'company_expected_income_currency', 'status_comment',
+            ];
+            $before = $locked->getAttributes();
+            $changes = [];
+            $reset = [];
+            foreach ($dealFields as $field) {
+                if (array_key_exists($field, $before)) {
+                    $reset[$field] = str_ends_with($field, '_currency') ? 'TJS' : null;
+                    $changes[$field] = ['old' => $before[$field], 'new' => $reset[$field]];
+                }
+            }
+            if (Schema::hasTable('property_agent_sales')) {
+                $changes['sale_agents'] = ['old' => DB::table('property_agent_sales')->where('property_id', $locked->id)->get()->map(fn ($row) => (array) $row)->all(), 'new' => []];
+                $locked->saleAgents()->detach();
+            }
+            // A legacy closed catalog status must not keep blocking public access.
+            if (Schema::hasTable('property_statuses') && $locked->status()->whereIn('slug', Property::CLOSED_STATUS_SLUGS)->exists()) {
+                $reset['status_id'] = null;
+            }
+            $locked->forceFill($reset);
+            $duplicates = $this->duplicates->find($locked->getAttributes(), (int) $locked->id);
+            $warnings = app(\App\Services\PropertyQualityService::class)->inspect($locked->getAttributes());
+            $baseline = (array) $locked->approved_content_snapshot;
+            $content = $this->contentSnapshot($locked);
+            // A return cannot approve content/price edits made while archived.
+            $contentChanged = $baseline === [];
+            foreach (array_unique([...array_keys($baseline), ...array_keys($content)]) as $field) {
+                if ($field !== 'status_id' && ($baseline[$field] ?? null) != ($content[$field] ?? null)) {
+                    $contentChanged = true;
+                }
+            }
+            $needsReview = $duplicates->isNotEmpty() || $warnings !== [] || $contentChanged || (float) $locked->price <= 0;
+            $locked->forceFill([
+                'deal_status' => 'available',
+                'publication_status' => $needsReview ? self::PUBLICATION_PENDING : self::PUBLICATION_PUBLISHED,
+                'moderation_status' => $needsReview ? 'pending' : Property::PUBLIC_MODERATION_STATUS,
+                'listing_type' => 'regular',
+                'moderation_version' => $expectedVersion + 1,
+            ]);
+            if (Schema::hasColumn('properties', 'listing_updated_at')) {
+                $locked->listing_updated_at = now();
+            }
+            $locked->save();
+            $this->suspendPromotions($locked, $actor);
+            if ($duplicates->isNotEmpty()) {
+                $case = $this->upsertOpenCase($locked, PropertyModerationCase::TYPE_DUPLICATE, $actor, $locked->approved_content_snapshot, $this->contentSnapshot($locked), ['reopened_duplicate_candidates']);
+                $this->syncDuplicateCandidates($case, $duplicates);
+            }
+            if ($needsReview && ($warnings !== [] || $contentChanged || (float) $locked->price <= 0)) {
+                $this->upsertOpenCase($locked, PropertyModerationCase::TYPE_INITIAL, $actor, $locked->approved_content_snapshot, $this->contentSnapshot($locked), ['reopened_listing_requires_review']);
+            }
+            foreach (['deal_status', 'publication_status', 'moderation_status', 'listing_type', 'status_id', 'listing_updated_at'] as $field) {
+                $changes[$field] = ['old' => $before[$field] ?? null, 'new' => $locked->getAttributes()[$field] ?? null];
+            }
+            \App\Models\PropertyLog::create([
+                'property_id' => $locked->id, 'user_id' => $actor->id, 'action' => 'listing_reopened',
+                'comment' => $reason, 'changes' => $changes,
+            ]);
+            $this->event($locked, null, 'listing_reopened', $actor, ['reason' => $reason, 'previous_deal' => $changes, 'requires_review' => $needsReview]);
+
+            return $locked->fresh();
+        }, 3);
+    }
 }

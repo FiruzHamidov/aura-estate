@@ -398,4 +398,14 @@ final class PropertyModerationController extends Controller
 
         return $this->revokePromotion($request, $promotion);
     }
+
+    public function reopen(Request $request, Property $property)
+    {
+        $data = $request->validate(['version' => 'required|integer|min:0', 'reason' => 'required|string|min:10|max:2000']);
+        $result = $this->moderation->reopenListing($property, $request->user(), $data['reason'], $data['version']);
+
+        return response()->json(['data' => $this->mutationData($result), 'message' => $result->publication_status === 'published'
+            ? 'Объявление возвращено и доступно посетителям.'
+            : 'Объявление возвращено в работу и направлено на модерацию.']);
+    }
 }

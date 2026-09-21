@@ -3060,6 +3060,8 @@ class PropertyController extends Controller
                 409,
                 'MODERATION_VERSION_CONFLICT'
             );
+            abort_if($request->deal_status === 'available' && $locked->needsReopening(), 409,
+                'Для закрытого объявления используйте «Вернуть в работу»: требуется РОП+ и причина возврата.');
             $this->ensureDealAssignmentUsersInScope($user, $request->validated(), $locked);
             $isDepositStatus = $request->deal_status === 'deposit';
             $isSaleStatus = in_array($request->deal_status, ['sold', 'sold_by_owner', 'rented'], true);
