@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\BranchGroup;
+use App\Models\CrmAuditLog;
 use App\Models\Property;
 use App\Models\Role;
 use App\Models\User;
@@ -585,6 +586,38 @@ class UserController extends Controller
         $this->ensureUserIsVisible($this->authUser(), $user);
 
         return response()->json($user->load(['role', 'branch', 'branchGroup']));
+    }
+
+    public function auditLogs(Request $request, User $user)
+    {
+        $authUser = $this->authUser();
+        $this->ensureUserIsVisible($authUser, $user);
+
+        $validated = $request->validate([
+            'page' => 'nullable|integer|min:1',
+            'per_page' => 'nullable|integer|min:1|max:100',
+        ]);
+
+        $logs = CrmAuditLog::query()
+            ->where('auditable_type', $user->getMorphClass())
+            ->where('auditable_id', $user->id)
+            ->with(['actor:id,name,role_id,branch_id,branch_group_id', 'actor.role:id,name,slug'])
+            ->orderByDesc('created_at')
+            ->orderByDesc('id')
+            ->paginate((int) ($validated['per_page'] ?? 10));
+
+        app(\App\Services\GroupAccess\AuditSnapshotProjection::class)
+            ->prepare($logs->getCollection(), $authUser);
+
+        return response()->json([
+            'data' => $logs->items(),
+            'meta' => [
+                'current_page' => $logs->currentPage(),
+                'last_page' => $logs->lastPage(),
+                'per_page' => $logs->perPage(),
+                'total' => $logs->total(),
+            ],
+        ]);
     }
 
     public function profile()
