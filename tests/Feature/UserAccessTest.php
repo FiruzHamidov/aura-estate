@@ -2142,6 +2142,82 @@ class UserAccessTest extends TestCase
             'event' => 'user_restored',
             'message' => 'Пользователь восстановлен',
         ]);
+        $this->getJson('/api/user/'.$inactiveUser->id.'/audit-logs')
+            ->assertOk()->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.event', 'user_restored')
+            ->assertJsonPath('data.0.actor.id', $director->id);
+    }
+
+    public function test_user_audit_history_is_scoped_paginated_and_does_not_expose_actor_contacts(): void
+    {
+        $role = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $actor = User::create(['name' => 'Audit admin', 'phone' => '900000301', 'role_id' => $role->id, 'status' => 'active']);
+        $subject = User::create(['name' => 'Audit subject', 'phone' => '900000302', 'role_id' => $role->id, 'status' => 'active']);
+        Sanctum::actingAs($actor);
+
+        $this->getJson('/api/user/'.$subject->id.'/audit-logs')
+            ->assertOk()->assertJsonCount(0, 'data')->assertJsonPath('meta.total', 0);
+
+        $attributes = ['auditable_type' => $subject->getMorphClass(), 'auditable_id' => $subject->id,
+            'actor_id' => $actor->id, 'event' => 'user_restored',
+            'old_values' => ['status' => 'inactive'], 'new_values' => ['status' => 'active']];
+        $older = \App\Models\CrmAuditLog::create($attributes);
+        $newer = \App\Models\CrmAuditLog::create($attributes);
+        // Ties must be stable, and matching IDs on another morph type must not leak.
+        $older->forceFill(['created_at' => '2026-01-01 10:00:00'])->save();
+        $newer->forceFill(['created_at' => '2026-01-01 10:00:00'])->save();
+        \App\Models\CrmAuditLog::create(array_replace($attributes, ['auditable_type' => (new Property)->getMorphClass()]));
+        \App\Models\CrmAuditLog::create(array_replace($attributes, ['auditable_id' => $actor->id]));
+
+        $this->getJson('/api/user/'.$subject->id.'/audit-logs?per_page=1')
+            ->assertOk()->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $newer->id)
+            ->assertJsonPath('data.0.actor.name', 'Audit admin')
+            ->assertJsonPath('data.0.actor.role.slug', 'admin')
+            ->assertJsonPath('data.0.old_values.status', 'inactive')
+            ->assertJsonPath('data.0.new_values.status', 'active')
+            ->assertJsonMissingPath('data.0.actor.phone')
+            ->assertJsonMissingPath('data.0.actor.password')
+            ->assertJsonPath('meta', ['current_page' => 1, 'last_page' => 2, 'per_page' => 1, 'total' => 2]);
+        $this->getJson('/api/user/'.$subject->id.'/audit-logs?per_page=1&page=2')
+            ->assertOk()->assertJsonPath('data.0.id', $older->id)->assertJsonPath('meta.current_page', 2);
+        $this->getJson('/api/user/'.$subject->id.'/audit-logs?per_page=101')->assertUnprocessable();
+        $this->getJson('/api/user/'.$subject->id.'/audit-logs?page=0')->assertUnprocessable();
+    }
+
+    public function test_user_audit_history_requires_authentication_and_user_visibility(): void
+    {
+        $branch = Branch::create(['name' => 'Audit branch']);
+        $otherBranch = Branch::create(['name' => 'Other audit branch']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Assigned']);
+        $otherGroup = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Not assigned']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $directorRole = Role::create(['name' => 'Director', 'slug' => 'branch_director']);
+        $employee = User::create(['name' => 'Employee', 'phone' => '900000310', 'role_id' => $agentRole->id,
+            'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'active']);
+        $url = '/api/user/'.$employee->id.'/audit-logs';
+        $this->getJson($url)->assertUnauthorized();
+
+        $director = User::create(['name' => 'Director', 'phone' => '900000311', 'role_id' => $directorRole->id,
+            'branch_id' => $otherBranch->id, 'status' => 'active']);
+        Sanctum::actingAs($director);
+        $this->getJson($url)->assertForbidden();
+
+        $rop = User::create(['name' => 'ROP', 'phone' => '900000312', 'role_id' => $ropRole->id,
+            'branch_id' => $branch->id, 'status' => 'active']);
+        $rop->supervisedGroups()->attach($otherGroup->id);
+        Sanctum::actingAs($rop);
+        $this->getJson($url)->assertNotFound();
+        $rop->supervisedGroups()->sync([$group->id]);
+        Sanctum::actingAs($rop->fresh());
+        $this->getJson($url)->assertOk();
+
+        $clientRole = Role::create(['name' => 'Client', 'slug' => 'client']);
+        $client = User::create(['name' => 'Client', 'phone' => '900000313', 'role_id' => $clientRole->id,
+            'branch_id' => $branch->id, 'status' => 'active']);
+        Sanctum::actingAs($client);
+        $this->getJson($url)->assertForbidden();
     }
 
     public function test_restore_user_is_idempotent_for_already_active_user(): void

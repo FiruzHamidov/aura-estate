@@ -568,6 +568,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         Route::post('/user/{user}/photo', [UserController::class, 'updatePhoto']);
         Route::get('/user/{user}/dismissal-preview', [UserController::class, 'dismissalPreview']);
         Route::post('/user/{user}/restore', [UserController::class, 'restore']);
+        Route::get('/user/{user}/audit-logs', [UserController::class, 'auditLogs']);
         Route::apiResource('user', UserController::class);
         Route::get('/clients/settings', [ClientController::class, 'settings']);
         Route::put('/clients/settings', [ClientController::class, 'updateSettings']);
