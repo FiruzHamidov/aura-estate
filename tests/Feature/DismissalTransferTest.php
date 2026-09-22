@@ -249,4 +249,118 @@ class DismissalTransferTest extends TestCase
         DB::table('clients')->update(['branch_group_id' => null]);
         $this->deleteJson('/api/user/'.$this->employee->id, $this->plan())->assertOk();
     }
+    public function test_preview_includes_workload_location_and_eligible_co_owner(): void
+    {
+        DB::table('properties')->insert(['title' => 'Recipient workload', 'agent_id' => $this->first->id,
+            'moderation_status' => 'approved', 'branch_id' => $this->group->branch_id, 'branch_group_id' => $this->group->id]);
+        $preview = $this->preview();
+        $this->assertSame($this->first->id, $preview['records'][0]['preferred_user_id']);
+        $recipient = collect($preview['recipients'])->firstWhere('id', $this->first->id);
+        $this->assertSame(1, $recipient['approved_properties_count']);
+        $this->assertSame('Branch', $recipient['branch_name']);
+        $this->assertSame('Group', $recipient['group_name']);
+    }
+
+    private function crossBranchTarget(): User
+    {
+        $branch = Branch::create(['name' => 'Destination']);
+        $group = BranchGroup::create(['name' => 'New team', 'branch_id' => $branch->id]);
+        $target = $this->person('agent');
+        DB::table('users')->where('id', $target->id)->update(['branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        return $target->fresh();
+    }
+
+    public function test_cross_branch_property_requires_explicit_destination_and_keeps_client_scope(): void
+    {
+        $target = $this->crossBranchTarget();
+        $preview = $this->preview();
+        $this->assertContains($target->id, $preview['records'][0]['eligible_user_ids']);
+        $this->assertNotContains($target->id, collect($preview['records'])->firstWhere('type', 'clients')['eligible_user_ids']);
+        $plan = $this->plan();
+        $plan['transfer_plan']['records'][0]['responsible_user_id'] = $target->id;
+        $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertUnprocessable();
+        $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $this->employee->id]);
+        $this->assertSame('active', $this->employee->fresh()->status);
+    }
+
+    public function test_director_and_hr_cannot_move_properties_to_another_branch(): void
+    {
+        $target = $this->crossBranchTarget();
+        foreach (['branch_director', 'hr'] as $role) {
+            Sanctum::actingAs($this->person($role));
+            $preview = $this->preview();
+            $this->assertNotContains($target->id, $preview['records'][0]['eligible_user_ids']);
+            $plan = $this->plan();
+            $plan['transfer_plan']['records'][0]['responsible_user_id'] = $target->id;
+            $plan['transfer_plan']['records'][0]['destination_branch_group_id'] = $target->branch_group_id;
+            $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertUnprocessable();
+            $this->assertSame('active', $this->employee->fresh()->status);
+        }
+    }
+
+    private function crossBranchTables(): void
+    {
+        Schema::create('property_logs', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('property_id'); $t->unsignedBigInteger('user_id')->nullable();
+            $t->string('action'); $t->json('changes')->nullable(); $t->text('comment')->nullable(); $t->timestamps();
+        });
+        Schema::create('crm_deals', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('primary_property_id')->nullable();
+            $t->string('control_kind')->nullable(); $t->timestamp('closed_at')->nullable(); $t->softDeletes();
+        });
+    }
+
+    public function test_admin_transfers_property_to_selected_branch_and_preserves_closed_history(): void
+    {
+        $this->crossBranchTables();
+        $target = $this->crossBranchTarget();
+        $plan = $this->plan();
+        $plan['transfer_plan']['records'][0]['responsible_user_id'] = $target->id;
+        $plan['transfer_plan']['records'][0]['destination_branch_group_id'] = $target->branch_group_id;
+        $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertOk();
+        $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $target->id,
+            'branch_id' => $target->branch_id, 'branch_group_id' => $target->branch_group_id]);
+        $this->assertDatabaseHas('properties', ['id' => 3, 'agent_id' => $this->employee->id,
+            'branch_id' => $this->group->branch_id, 'branch_group_id' => $this->group->id]);
+        $this->assertSame('inactive', $this->employee->fresh()->status);
+    }
+
+    public static function taskTransfers(): array { return [[true], [false]]; }
+
+    #[DataProvider('taskTransfers')]
+    public function test_linked_tasks_follow_property_group_or_entire_dismissal_rolls_back(bool $valid): void
+    {
+        $this->crossBranchTables();
+        Schema::create('crm_tasks', function (Blueprint $t) {
+            $t->id(); $t->string('title'); $t->unsignedBigInteger('assignee_id'); $t->unsignedBigInteger('branch_group_id');
+            $t->string('related_entity_type'); $t->unsignedBigInteger('related_entity_id');
+            $t->timestamp('completed_at')->nullable(); $t->string('status')->nullable(); $t->timestamps();
+        });
+        $target = $this->crossBranchTarget();
+        DB::table('crm_tasks')->insert(['id' => 1, 'title' => 'Follow property', 'assignee_id' => $this->employee->id,
+            'branch_group_id' => $this->group->id, 'related_entity_type' => 'property', 'related_entity_id' => 1]);
+        DB::table('crm_tasks')->insert(['id' => 2, 'title' => 'Closed history', 'assignee_id' => $this->employee->id,
+            'branch_group_id' => $this->group->id, 'related_entity_type' => 'property', 'related_entity_id' => 1, 'status' => 'done']);
+        $preview = $this->preview();
+        $task = collect($preview['records'])->firstWhere('type', 'tasks');
+        $this->assertSame(1, $task['follows_property_id']);
+        $this->assertContains($target->id, $task['eligible_user_ids']);
+        $plan = $this->plan();
+        foreach ($plan['transfer_plan']['records'] as &$row) {
+            if ($row['type'] === 'properties' && $row['id'] === 1) {
+                $row['responsible_user_id'] = $target->id;
+                $row['destination_branch_group_id'] = $target->branch_group_id;
+            }
+            if ($row['type'] === 'tasks') $row['responsible_user_id'] = $valid ? $target->id : $this->first->id;
+        }
+        unset($row);
+        $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertStatus($valid ? 200 : 422);
+        $this->assertDatabaseHas('crm_tasks', ['id' => 1, 'assignee_id' => $valid ? $target->id : $this->employee->id,
+            'branch_group_id' => $valid ? $target->branch_group_id : $this->group->id]);
+        $this->assertDatabaseHas('crm_tasks', ['id' => 2, 'assignee_id' => $this->employee->id, 'branch_group_id' => $this->group->id]);
+        $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $valid ? $target->id : $this->employee->id]);
+        $this->assertSame($valid ? 'inactive' : 'active', $this->employee->fresh()->status);
+        if (! $valid) $this->assertDatabaseCount('group_access_audit_logs', 0);
+    }
+
 }

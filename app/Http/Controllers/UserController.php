@@ -771,6 +771,7 @@ class UserController extends Controller
             'transfer_plan.records.*.type' => ['required', Rule::in(array_keys(\App\Services\GroupAccess\GroupRecordTransfer::MODELS))],
             'transfer_plan.records.*.id' => 'required|integer|min:1',
             'transfer_plan.records.*.responsible_user_id' => 'required|integer|min:1',
+            'transfer_plan.records.*.destination_branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'distribute_to_agents' => 'nullable|boolean',
             'agent_id' => 'nullable|integer|exists:users,id',
         ]);
