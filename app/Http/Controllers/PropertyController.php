@@ -735,6 +735,35 @@ class PropertyController extends Controller
         return response()->json($page);
     }
 
+    /** Aggregate public room counts with the same access scope and filters as the list. */
+    public function stats(Request $request)
+    {
+        $this->validateListFilters($request);
+        $query = $this->baseQuery($request, []);
+        $this->applyFilters($query, $request);
+
+        // Aggregate in SQL without loading listings, photos, or owner relations.
+        $groups = $query->reorder()->select(['rooms', 'apartment_type'])
+            ->selectRaw('COUNT(*) as aggregate_count')
+            ->groupBy('rooms', 'apartment_type')->toBase()->get();
+        $counts = ['studio' => 0, '1' => 0, '2' => 0, '3' => 0, '4' => 0, '5' => 0, '6+' => 0];
+        $total = 0;
+        foreach ($groups as $group) {
+            $count = (int) $group->aggregate_count;
+            $total += $count;
+            $rooms = is_numeric($group->rooms) ? (int) $group->rooms : null;
+            if ($rooms === null && preg_match('/^(\d+)/u', (string) $group->apartment_type, $matches)) {
+                $rooms = (int) $matches[1];
+            }
+            if ($rooms !== null && $rooms >= 0) {
+                $bucket = $rooms === 0 ? 'studio' : ($rooms > 5 ? '6+' : (string) $rooms);
+                $counts[$bucket] += $count;
+            }
+        }
+
+        return response()->json(['total' => $total, 'room_counts' => $counts]);
+    }
+
     /**
      * Count properties using the same filters and access scope as the list.
      * This deliberately uses SQL COUNT(*) and never eager-loads relations.
