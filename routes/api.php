@@ -137,6 +137,7 @@ Route::get('/client-need-statuses', [ClientNeedStatusController::class, 'index']
 
 Route::get('/user/agents', [UserController::class, 'agents']);
 Route::get('/public/realtors/{id}', [PublicRealtorController::class, 'show'])->whereNumber('id');
+Route::get('/public/team', [PublicTeamController::class, 'index']);
 Route::get('/public/team/hall-of-fame', [PublicTeamController::class, 'hallOfFame']);
 Route::get('/stories/feed', [StoryController::class, 'feed']);
 Route::get('/stories/{story}', [StoryController::class, 'show'])->whereNumber('story');
