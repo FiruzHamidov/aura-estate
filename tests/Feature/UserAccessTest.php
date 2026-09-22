@@ -124,6 +124,84 @@ class UserAccessTest extends TestCase
         });
     }
 
+    private function createRecordCountTables(): void
+    {
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedBigInteger('branch_group_id')->nullable());
+        foreach (['clients', 'crm_deals', 'bookings'] as $name) {
+            Schema::create($name, function (Blueprint $table) use ($name) {
+                $table->id();
+                $table->unsignedBigInteger($name === 'bookings' ? 'agent_id' : 'responsible_agent_id')->nullable();
+                $table->unsignedBigInteger('created_by')->nullable();
+                $table->unsignedBigInteger('branch_id')->nullable();
+                $table->unsignedBigInteger('branch_group_id')->nullable();
+                if ($name !== 'bookings') $table->softDeletes();
+            });
+        }
+    }
+
+    public function test_employee_record_counts_match_list_and_detail_and_follow_current_responsibility(): void
+    {
+        $this->createRecordCountTables();
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900010001', 'role_id' => $adminRole->id, 'status' => 'active']);
+        $employee = User::create(['name' => 'Former employee', 'phone' => '900010002', 'role_id' => $agentRole->id, 'status' => 'inactive']);
+        $empty = User::create(['name' => 'No records', 'phone' => '900010003', 'role_id' => $agentRole->id, 'status' => 'inactive']);
+        foreach (['approved', 'archived', 'deleted'] as $status) {
+            DB::table('properties')->insert(['title' => 'Listing', 'agent_id' => $employee->id, 'moderation_status' => $status]);
+        }
+        DB::table('properties')->insert(['title' => 'Transferred', 'agent_id' => $admin->id, 'created_by' => $employee->id]);
+        foreach (['clients', 'crm_deals'] as $table) {
+            DB::table($table)->insert(['responsible_agent_id' => $employee->id]);
+            DB::table($table)->insert(['responsible_agent_id' => $employee->id, 'deleted_at' => now()]);
+            DB::table($table)->insert(['responsible_agent_id' => $admin->id, 'created_by' => $employee->id]);
+        }
+        DB::table('bookings')->insert(['agent_id' => $employee->id]);
+        DB::table('bookings')->insert(['agent_id' => $admin->id, 'created_by' => $employee->id]);
+        Sanctum::actingAs($admin);
+        $expected = ['properties' => 2, 'clients' => 1, 'bookings' => 1, 'deals' => 1];
+        $this->getJson('/api/user/'.$employee->id.'?include_record_counts=1')
+            ->assertOk()->assertJsonPath('record_counts', $expected);
+        $response = $this->getJson('/api/user?status=inactive&include_record_counts=1')->assertOk();
+        $rows = collect($response->json('data'))->keyBy('id');
+        $this->assertSame($expected, $rows[$employee->id]['record_counts']);
+        $this->assertSame(['properties' => 0, 'clients' => 0, 'bookings' => 0, 'deals' => 0], $rows[$empty->id]['record_counts']);
+        $this->getJson('/api/user/'.$employee->id)->assertOk()->assertJsonMissingPath('record_counts');
+    }
+
+    public function test_employee_record_counts_respect_group_and_branch_boundaries(): void
+    {
+        $this->createRecordCountTables();
+        $branch = Branch::create(['name' => 'Own branch']);
+        $foreignBranch = Branch::create(['name' => 'Foreign branch']);
+        $group = BranchGroup::create(['name' => 'Own group', 'branch_id' => $branch->id]);
+        $peerGroup = BranchGroup::create(['name' => 'Other group', 'branch_id' => $branch->id]);
+        $foreignGroup = BranchGroup::create(['name' => 'Foreign group', 'branch_id' => $foreignBranch->id]);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $directorRole = Role::create(['name' => 'Director', 'slug' => 'branch_director']);
+        $employee = User::create(['name' => 'Employee', 'phone' => '900010011', 'role_id' => $agentRole->id,
+            'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'inactive']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '900010012', 'role_id' => $ropRole->id,
+            'branch_id' => $branch->id, 'status' => 'active']);
+        $rop->supervisedGroups()->attach($group->id);
+        foreach ([$group, $peerGroup, $foreignGroup] as $recordGroup) {
+            DB::table('properties')->insert(['title' => 'Listing', 'agent_id' => $employee->id, 'branch_group_id' => $recordGroup->id]);
+            foreach (['clients', 'crm_deals', 'bookings'] as $table) {
+                DB::table($table)->insert([$table === 'bookings' ? 'agent_id' : 'responsible_agent_id' => $employee->id,
+                    'branch_id' => $recordGroup->branch_id, 'branch_group_id' => $recordGroup->id]);
+            }
+        }
+        Sanctum::actingAs($rop);
+        $this->getJson('/api/user/'.$employee->id.'?include_record_counts=1')->assertOk()
+            ->assertJsonPath('record_counts', ['properties' => 1, 'clients' => 1, 'bookings' => 1, 'deals' => 1]);
+        $director = User::create(['name' => 'Director', 'phone' => '900010013', 'role_id' => $directorRole->id,
+            'branch_id' => $branch->id, 'status' => 'active']);
+        Sanctum::actingAs($director);
+        $this->getJson('/api/user/'.$employee->id.'?include_record_counts=1')->assertOk()
+            ->assertJsonPath('record_counts', ['properties' => 2, 'clients' => 2, 'bookings' => 2, 'deals' => 2]);
+    }
+
     public function test_rop_user_index_excludes_directors_and_uses_explicit_groups(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);

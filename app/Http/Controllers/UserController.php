@@ -491,6 +491,7 @@ class UserController extends Controller
             'roles' => 'nullable|array',
             'roles.*' => 'string|exists:roles,slug',
             'report_agents' => 'nullable|boolean',
+            'include_record_counts' => 'nullable|boolean',
             'include_unassigned' => 'nullable',
             'status' => ['nullable', Rule::in(['active', 'inactive', 'all'])],
             'page' => 'nullable|integer|min:1',
@@ -515,6 +516,10 @@ class UserController extends Controller
             ->orderByDesc('id')
             ->paginate((int) ($validated['per_page'] ?? 15))
             ->withQueryString();
+
+        if ($request->boolean('include_record_counts')) {
+            app(\App\Services\Users\UserRecordCounts::class)->attach($users->getCollection(), $authUser);
+        }
 
         $payload = $users->toArray();
         $meta = $this->paginationMeta($payload);
@@ -581,9 +586,14 @@ class UserController extends Controller
         });
     }
 
-    public function show(User $user)
+    public function show(Request $request, User $user)
     {
-        $this->ensureUserIsVisible($this->authUser(), $user);
+        $authUser = $this->authUser();
+        $this->ensureUserIsVisible($authUser, $user);
+        $request->validate(['include_record_counts' => 'nullable|boolean']);
+        if ($request->boolean('include_record_counts')) {
+            app(\App\Services\Users\UserRecordCounts::class)->attach(collect([$user]), $authUser);
+        }
 
         return response()->json($user->load(['role', 'branch', 'branchGroup']));
     }
