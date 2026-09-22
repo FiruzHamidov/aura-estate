@@ -74,7 +74,8 @@ class UserController extends Controller
         }
 
         if ($roleSlug === 'rop') {
-            return app(\App\Support\RopGroupAccess::class)->employees($authUser)->with(['role', 'branch', 'branchGroup']);
+            return app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'users.branch_group_id', 'users.branch_id')
+                ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop', 'intern']));
         }
 
         // Clients do not belong to branches. This does not expand employee access.
@@ -547,7 +548,7 @@ class UserController extends Controller
 
             $targetRole = $this->resolveRequestedRole($request);
             if ($isRop) {
-                abort_unless(in_array($targetRole->slug, ['agent', 'mop'], true), 403, 'РОП может создавать только агентов и МОП в закреплённых группах.');
+                abort_unless(in_array($targetRole->slug, ['agent', 'mop', 'intern'], true), 403, 'РОП может создавать только стажёров, агентов и МОП в закреплённых группах.');
                 $request->validate(['branch_group_id' => 'required|integer|exists:branch_groups,id'], [
                     'branch_group_id.required' => 'Выберите закреплённую за вами группу для нового сотрудника.',
                 ]);
