@@ -1920,6 +1920,35 @@ class UserAccessTest extends TestCase
         $response->assertJsonMissing(['phone' => '900000104']);
     }
 
+    public function test_public_team_is_the_same_for_guests_and_rop_without_expanding_crm_scope(): void
+    {
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $groups = [];
+        foreach (['Own', 'Foreign'] as $name) {
+            $branch = Branch::create(['name' => $name]);
+            $groups[] = BranchGroup::create(['name' => $name, 'branch_id' => $branch->id]);
+        }
+        $create = fn ($name, $phone, $role, $group, $status = 'active') => User::create([
+            'name' => $name, 'phone' => $phone, 'role_id' => $role->id,
+            'branch_id' => $group->branch_id, 'branch_group_id' => $group->id, 'status' => $status,
+        ]);
+        $rop = $create('ROP', '902180001', $ropRole, $groups[0]);
+        $rop->supervisedGroups()->attach($groups[0]->id);
+        $own = $create('Own agent', '902180002', $agentRole, $groups[0]);
+        $foreign = $create('Foreign agent', '902180003', $agentRole, $groups[1]);
+        $mop = $create('Foreign MOP', '902180004', $mopRole, $groups[1]);
+        $inactive = $create('Inactive', '902180005', $agentRole, $groups[1], 'inactive');
+        $guest = $this->getJson('/api/public/team')->assertOk()->assertJsonCount(3)
+            ->assertJsonPath('0.id', $mop->id)->assertJsonMissing(['id' => $inactive->id])->json();
+        $this->assertEqualsCanonicalizing(['id', 'name', 'phone', 'photo'], array_keys($guest[0]));
+        Sanctum::actingAs($rop);
+        $this->getJson('/api/public/team?status=all')->assertOk()->assertExactJson($guest);
+        $this->getJson('/api/user/agents')->assertOk()->assertJsonCount(1)->assertJsonPath('0.id', $own->id);
+        $this->getJson('/api/user/'.$foreign->id)->assertNotFound();
+    }
+
     public function test_public_user_agents_endpoint_returns_agents_and_mops(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);

@@ -17,6 +17,24 @@ class PublicTeamController extends Controller
 {
     private const PUBLIC_ROLE_SLUGS = ['agent', 'mop'];
 
+    public function index(): JsonResponse
+    {
+        $agents = $this->publicAgentsQuery()
+            ->select(['id', 'name', 'phone', 'photo', 'role_id'])
+            ->with('role:id,slug')
+            ->get()
+            ->sortBy(fn (User $user) => $user->role?->slug === 'mop' ? 0 : 1)
+            ->values()
+            ->map(fn (User $user) => [
+                'id' => $user->id,
+                'name' => $user->name,
+                'phone' => $user->phone,
+                'photo' => $user->photo,
+            ]);
+
+        return response()->json($agents);
+    }
+
     private function resolveSaleAgentColumn(): ?string
     {
         if (Schema::hasColumn('properties', 'sale_agent_id')) {
