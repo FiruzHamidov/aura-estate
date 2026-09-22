@@ -15,6 +15,7 @@ return [
     ))),
     'administrator_roles' => ['admin', 'superadmin', 'owner'],
     'table_roles' => ['security', 'rop', 'branch_director', 'hr', 'accountant', 'admin', 'superadmin', 'owner'],
+    'hr_report_roles' => ['hr', 'accountant', 'admin', 'superadmin', 'owner'],
     'all_branch_viewer_roles' => ['hr', 'accountant', 'admin', 'superadmin', 'owner'],
     'excluded_table_user_roles' => ['client', 'external_agent'],
     'mapping_roles' => ['hr', 'admin', 'superadmin', 'owner'],

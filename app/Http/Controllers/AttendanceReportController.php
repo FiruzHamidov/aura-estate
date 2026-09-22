@@ -34,6 +34,36 @@ final class AttendanceReportController extends Controller
         return response()->json($query->orderByDesc('occurred_at')->paginate($validated['per_page'] ?? 50));
     }
 
+    public function hrReport(Request $request, \App\Services\Attendance\AttendanceHrReport $report)
+    {
+        $this->access->assertCanViewHrReport($request->user());
+        $validated = $request->validate([
+            'date_from' => ['required', 'date_format:Y-m-d'],
+            'date_to' => ['required', 'date_format:Y-m-d', 'after_or_equal:date_from'],
+            'branch_id' => ['nullable', 'integer', 'exists:branches,id'],
+            'branch_group_id' => ['nullable', 'integer', 'exists:branch_groups,id'],
+            'role' => ['nullable', 'string', 'max:100'],
+            'search' => ['nullable', 'string', 'max:150'],
+            'format' => ['nullable', 'in:json,xlsx'],
+        ]);
+        $timezone = config('attendance.timezone', 'Asia/Dushanbe');
+        $from = CarbonImmutable::parse($validated['date_from'], $timezone)->startOfDay();
+        $to = CarbonImmutable::parse($validated['date_to'], $timezone)->startOfDay();
+        abort_if($from->diffInDays($to) > 365, 422, 'Период отчёта не может превышать 366 дней.');
+        $users = $this->access->visibleUsersQuery($request->user());
+        foreach (['branch_id', 'branch_group_id'] as $field) {
+            if (isset($validated[$field])) $users->where('users.'.$field, $validated[$field]);
+        }
+        if (! empty($validated['role'])) $users->whereHas('role', fn ($roles) => $roles->where('slug', $validated['role']));
+        if (! empty($validated['search'])) $users->where('users.name', 'like', '%'.trim($validated['search']).'%');
+        $payload = $report->build($users->orderBy('users.name')->get(), $from, $to);
+        if (($validated['format'] ?? 'json') !== 'xlsx') return response()->json($payload);
+        $path = $this->timesheetExporter->buildHrReport($payload);
+        return response()->download($path, 'Отчет_о_посещаемости_'.$from->format('Y-m-d').'_'.$to->format('Y-m-d').'.xlsx', [
+            'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        ])->deleteFileAfterSend(true);
+    }
+
     public function daily(Request $request)
     {
         $validated = $this->filters($request);

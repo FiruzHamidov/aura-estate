@@ -27,6 +27,40 @@ final class AttendanceTimesheetExporter
         'incomplete' => 'Нет ухода',
     ];
 
+    public function buildHrReport(array $report): string
+    {
+        $meta = $report['meta'];
+        $rows = [$this->row(1, [$this->textCell('A1', 'ОТЧЕТ О ПОСЕЩАЕМОСТИ', 1)], 30),
+            $this->row(2, [$this->textCell('A2', 'Период: '.$meta['date_from'].' — '.$meta['date_to'].' · По состоянию на '.$meta['as_of'], 2)], 24)];
+        $rows[] = $this->row(4, array_map(fn ($label, $index) => $this->textCell($this->columnName($index + 1).'4', $label, 4), AttendanceHrReport::HEADERS, range(0, 5)), 42);
+        $number = 5;
+        foreach ($report['data'] as $employee) {
+            $cells = [$this->textCell('A'.$number, $employee['name'], 7), $this->textCell('B'.$number, $employee['position'], 7)];
+            foreach (['working_days', 'present_days', 'absent_days', 'on_time_days'] as $index => $key) $cells[] = $this->numberCell($this->columnName($index + 3).$number, $employee[$key], 6);
+            $rows[] = $this->row($number++, $cells, 30);
+        }
+        $lastData = max(4, $number - 1);
+        $totalCells = [$this->textCell('A'.$number, 'ИТОГО', 9), $this->textCell('B'.$number, '', 9)];
+        foreach (['working_days', 'present_days', 'absent_days', 'on_time_days'] as $index => $key) $totalCells[] = $this->numberCell($this->columnName($index + 3).$number, $meta['totals'][$key], 9);
+        $rows[] = $this->row($number++, $totalCells, 28);
+        $merges = ['A1:F1', 'A2:F2'];
+        foreach ([AttendanceHrReport::RULES, 'Без данных: '.$meta['totals']['missing_days'].' дн. Ожидается (сегодня без явки и будущие дни): '.$meta['totals']['pending_days'].' дн. Показаны активные сотрудники.'] as $note) {
+            $rows[] = $this->row($number, [$this->textCell('A'.$number, $note, 7)], 46);
+            $merges[] = 'A'.$number.':F'.$number++;
+        }
+        $sheet = $this->worksheet('<cols><col min="1" max="1" width="32" customWidth="1"/><col min="2" max="2" width="24" customWidth="1"/><col min="3" max="6" width="21" customWidth="1"/></cols><sheetData>'.implode('', $rows).'</sheetData>', $merges, 'C5', 'A4:F'.$lastData);
+        $contentTypes = preg_replace('~<Override PartName="/xl/worksheets/sheet[23]\.xml"[^>]*/>~', '', $this->contentTypesXml());
+        $workbook = preg_replace('~<sheet name="(?:Детализация|Обозначения)"[^>]*/>~', '', str_replace('name="Табель"', 'name="Отчет о посещаемости"', $this->workbookXml()));
+        $relations = preg_replace('~<Relationship Id="rId[23]"[^>]*/>~', '', $this->workbookRelationshipsXml());
+        $path = tempnam(sys_get_temp_dir(), 'attendance-hr-');
+        if ($path === false) throw new RuntimeException('Не удалось создать файл отчёта.');
+        $zip = new ZipArchive;
+        if ($zip->open($path, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) { unlink($path); throw new RuntimeException('Не удалось сформировать Excel-файл.'); }
+        foreach (['[Content_Types].xml' => $contentTypes, '_rels/.rels' => $this->rootRelationshipsXml(), 'docProps/core.xml' => $this->corePropertiesXml(), 'docProps/app.xml' => $this->appPropertiesXml(), 'xl/workbook.xml' => $workbook, 'xl/_rels/workbook.xml.rels' => $relations, 'xl/styles.xml' => $this->stylesXml(), 'xl/worksheets/sheet1.xml' => $sheet] as $name => $xml) $zip->addFromString($name, $xml);
+        $zip->close();
+        return $path;
+    }
+
     public function build(Collection $users, CarbonImmutable $from, CarbonImmutable $to, ?\App\Models\User $viewer = null): string
     {
         $dates = collect(CarbonPeriod::create($from->startOfDay(), $to->startOfDay()))
