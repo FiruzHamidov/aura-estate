@@ -41,6 +41,11 @@ final class AttendanceAccessService
         $this->assertRoleIn($user, config('attendance.mapping_roles', []), 'ATTENDANCE_MAPPING_FORBIDDEN', 'Нет права управлять сопоставлениями терминала.');
     }
 
+    public function assertCanViewHrReport(User $user): void
+    {
+        $this->assertRoleIn($user, config('attendance.hr_report_roles', []), 'ATTENDANCE_HR_REPORT_FORBIDDEN', 'Нет права просматривать отчёт HR.');
+    }
+
     public function assertCanComment(User $user): void
     {
         $this->assertRoleIn($user, config('attendance.comment_roles', []), 'ATTENDANCE_COMMENT_FORBIDDEN', 'Нет права изменять HR-комментарий.');
@@ -76,6 +81,7 @@ final class AttendanceAccessService
         $role = $this->role($user);
 
         return [
+            'can_view_hr_report' => in_array($role, config('attendance.hr_report_roles', []), true),
             'can_view_attendance_table' => in_array($role, config('attendance.table_roles', []), true),
             'can_view_all_branches' => in_array($role, config('attendance.all_branch_viewer_roles', []), true),
             'can_comment_late_day' => in_array($role, config('attendance.comment_roles', []), true),

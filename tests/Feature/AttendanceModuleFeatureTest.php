@@ -443,7 +443,7 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->assertContains($context['agent']->id, $ids);
         $this->assertContains($context['otherAgent']->id, $ids);
         foreach ($matrix->json('meta.permissions') as $permission => $value) {
-            if (! in_array($permission, ['can_view_attendance_table', 'can_view_all_branches'], true)) {
+            if (! in_array($permission, ['can_view_attendance_table', 'can_view_all_branches', 'can_view_hr_report'], true)) {
                 $this->assertFalse($value, $permission);
             }
         }
@@ -1685,6 +1685,86 @@ class AttendanceModuleFeatureTest extends TestCase
         } finally {
             ob_end_clean();
         }
+    }
+
+    public function test_hr_report_counts_schedule_leave_holiday_lateness_and_missing_days(): void
+    {
+        $context = $this->context();
+        $this->travelTo(CarbonImmutable::parse('2026-08-22 12:00:00', 'Asia/Dushanbe'));
+        $agent = $context['agent'];
+        AttendanceWorkSchedule::query()->create(['user_id' => $agent->id, 'timezone' => 'Asia/Dushanbe', 'schedule' => config('attendance.default_schedule')]);
+        AttendanceHoliday::query()->create(['holiday_date' => '2026-08-19', 'name' => 'Праздник', 'created_by' => $context['hr']->id]);
+        AttendanceLeave::query()->create(['user_id' => $agent->id, 'date_from' => '2026-08-20', 'date_to' => '2026-08-20', 'created_by' => $context['hr']->id]);
+        foreach ([['2026-08-17', 'present', 0], ['2026-08-18', 'incomplete', 12], ['2026-08-19', 'absent', 0], ['2026-08-20', 'absent', 0], ['2026-08-21', 'absent', 0], ['2026-08-22', 'absent', 0], ['2026-08-24', 'absent', 0]] as [$date, $status, $late]) {
+            AttendanceDailySummary::query()->create(['user_id' => $agent->id, 'work_date' => $date, 'status' => $status, 'late_minutes' => $late]);
+        }
+        Sanctum::actingAs($context['hr']);
+        $url = '/api/attendance/hr-report?date_from=2026-08-17&date_to=2026-08-24&search=Agent%20A';
+        $response = $this->getJson($url)->assertOk()->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.working_days', 5)->assertJsonPath('data.0.present_days', 2)
+            ->assertJsonPath('data.0.absent_days', 1)->assertJsonPath('data.0.on_time_days', 1)
+            ->assertJsonPath('data.0.pending_days', 2)->assertJsonPath('data.0.missing_days', 0);
+        AttendanceDailySummary::query()->where('user_id', $agent->id)->where('work_date', '2026-08-21')->delete();
+        $this->getJson($url)->assertOk()->assertJsonPath('data.0.absent_days', 0)->assertJsonPath('data.0.missing_days', 1);
+        $this->travelBack();
+    }
+
+    public function test_hr_report_duties_and_schedule_snapshots_are_counted(): void
+    {
+        Schema::table('attendance_daily_summaries', fn (Blueprint $table) => $table->json('schedule_snapshot')->nullable());
+        $context = $this->context();
+        $agent = $context['agent'];
+        $this->travelTo(CarbonImmutable::parse('2026-09-01'));
+        AttendanceDuty::query()->create(['user_id' => $agent->id, 'date_from' => '2026-08-23', 'date_to' => '2026-08-23', 'created_by' => $context['hr']->id]);
+        foreach (['2026-08-22', '2026-08-23'] as $date) AttendanceDailySummary::query()->create([
+            'user_id' => $agent->id, 'work_date' => $date, 'status' => 'incomplete', 'late_minutes' => 0,
+            'schedule_snapshot' => ['schedule' => [], 'timezone' => 'Asia/Dushanbe'],
+        ]);
+        Sanctum::actingAs($context['hr']);
+        $this->getJson('/api/attendance/hr-report?date_from=2026-08-22&date_to=2026-08-23&search=Agent%20A')
+            ->assertOk()->assertJsonPath('data.0.working_days', 1)->assertJsonPath('data.0.present_days', 1)->assertJsonPath('data.0.on_time_days', 1);
+        $this->travelBack();
+    }
+
+    public function test_hr_report_enforces_roles_filters_and_period_limits(): void
+    {
+        $context = $this->context();
+        $url = '/api/attendance/hr-report?date_from=2026-08-01&date_to=2026-08-31';
+        foreach (['agent', 'mop', 'rop'] as $role) {
+            Sanctum::actingAs($context[$role]);
+            $this->getJson($url)->assertForbidden();
+            $this->getJson($url.'&format=xlsx')->assertForbidden();
+        }
+        Sanctum::actingAs($context['hr']);
+        $this->getJson($url.'&branch_id='.$context['otherAgent']->branch_id.'&role=agent')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.user_id', $context['otherAgent']->id);
+        $this->getJson($url.'&branch_group_id='.$context['group']->id.'&search=Agent')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.user_id', $context['agent']->id);
+        $context['agent']->update(['status' => User::STATUS_INACTIVE]);
+        $this->getJson($url.'&branch_group_id='.$context['group']->id.'&search=Agent')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/attendance/hr-report?date_from=2026-08-02&date_to=2026-08-01')->assertUnprocessable();
+        $this->getJson('/api/attendance/hr-report?date_from=2025-01-01&date_to=2026-08-01')->assertUnprocessable();
+    }
+
+    public function test_hr_report_excel_matches_json_and_has_six_template_columns(): void
+    {
+        $context = $this->context();
+        $this->travelTo(CarbonImmutable::parse('2026-09-01'));
+        AttendanceDailySummary::query()->create(['user_id' => $context['agent']->id, 'work_date' => '2026-08-17', 'status' => 'present', 'late_minutes' => 0]);
+        Sanctum::actingAs($context['hr']);
+        $url = '/api/attendance/hr-report?date_from=2026-08-17&date_to=2026-08-17&search=Agent%20A';
+        $json = $this->getJson($url)->assertOk()->json();
+        $response = $this->get($url.'&format=xlsx')->assertOk()->assertHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        $path = $response->baseResponse->getFile()->getPathname();
+        $zip = new \ZipArchive;
+        $this->assertTrue($zip->open($path));
+        $sheet = simplexml_load_string($zip->getFromName('xl/worksheets/sheet1.xml'));
+        $sheet->registerXPathNamespace('s', 'http://schemas.openxmlformats.org/spreadsheetml/2006/main');
+        $this->assertCount(6, $sheet->xpath('//s:row[@r="4"]/s:c'));
+        foreach (\App\Services\Attendance\AttendanceHrReport::HEADERS as $index => $header) $this->assertSame($header, (string) $sheet->xpath('//s:row[@r="4"]/s:c/s:is/s:t')[$index]);
+        foreach (['working_days', 'present_days', 'absent_days', 'on_time_days'] as $index => $key) $this->assertSame($json['data'][0][$key], (int) $sheet->xpath('//s:c[@r="'.chr(67 + $index).'5"]/s:v')[0]);
+        $this->assertFalse($zip->locateName('xl/worksheets/sheet2.xml'));
+        $zip->close();
+        unlink($path);
+        $this->travelBack();
     }
 
     private function context(): array

@@ -189,6 +189,7 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
 
     Route::prefix('attendance')->group(function () {
         Route::get('/matrix', [AttendanceWebController::class, 'matrix']);
+        Route::get('/hr-report', [AttendanceReportController::class, 'hrReport']);
         Route::get('/devices', [AttendanceDeviceController::class, 'index']);
         Route::post('/devices', [AttendanceDeviceController::class, 'store']);
         Route::patch('/devices/{device}', [AttendanceDeviceController::class, 'update']);
