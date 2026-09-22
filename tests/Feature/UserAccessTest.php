@@ -544,7 +544,7 @@ class UserAccessTest extends TestCase
         $this->postJson('/api/user', $payload)->assertUnprocessable()->assertJsonPath('details.errors.branch_group_id.0', 'Выберите закреплённую за вами группу для нового сотрудника.');
         $this->postJson('/api/user', $payload + ['branch_group_id' => null])->assertUnprocessable();
         $this->postJson('/api/user', $payload + ['branch_group_id' => $groups[2]->id])->assertForbidden();
-        foreach (['admin', 'superadmin', 'branch_director', 'client', 'security', 'external_agent', 'manager', 'intern'] as $slug) {
+        foreach (['admin', 'superadmin', 'branch_director', 'client', 'security', 'external_agent', 'manager'] as $slug) {
             $role = Role::create(['name' => $slug, 'slug' => $slug]);
             $this->postJson('/api/user', array_replace($payload, ['role_id' => $role->id, 'branch_group_id' => $groups[0]->id]))->assertForbidden();
         }
@@ -565,6 +565,33 @@ class UserAccessTest extends TestCase
         $rop->supervisedGroups()->detach();
         $this->postJson('/api/user', array_replace($payload, ['phone' => '900008003', 'branch_group_id' => $groups[0]->id]))->assertForbidden();
         $this->assertDatabaseMissing('users', ['phone' => '900008003']);
+    }
+
+    public function test_rop_can_create_and_view_interns_only_in_assigned_groups(): void
+    {
+        $branch = Branch::create(['name' => 'Intern branch']);
+        $own = BranchGroup::create(['name' => 'Own', 'branch_id' => $branch->id]);
+        $other = BranchGroup::create(['name' => 'Other', 'branch_id' => $branch->id]);
+        $foreignBranch = Branch::create(['name' => 'Foreign branch']);
+        $foreign = BranchGroup::create(['name' => 'Foreign', 'branch_id' => $foreignBranch->id]);
+        $ropRole = Role::create(['name' => 'РОП', 'slug' => 'rop']);
+        $internRole = Role::create(['name' => 'Стажёр', 'slug' => 'intern']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '901180001', 'role_id' => $ropRole->id, 'branch_id' => $branch->id, 'status' => 'active']);
+        $rop->supervisedGroups()->attach($own->id);
+        Sanctum::actingAs($rop);
+        $payload = ['name' => 'New intern', 'phone' => '901180002', 'role_id' => $internRole->id, 'password' => 'intern-test-password'];
+        $this->postJson('/api/user', $payload)->assertUnprocessable();
+        foreach ([$other->id, $foreign->id] as $groupId) $this->postJson('/api/user', $payload + ['branch_group_id' => $groupId])->assertForbidden();
+        $created = $this->postJson('/api/user', $payload + ['branch_group_id' => $own->id])->assertCreated()
+            ->assertJsonPath('role.slug', 'intern')->assertJsonPath('branch_id', $branch->id)->assertJsonPath('branch_group_id', $own->id)->json('id');
+        $this->getJson('/api/user/'.$created)->assertOk()->assertJsonPath('role.slug', 'intern');
+        $this->getJson('/api/user?role=intern')->assertOk()->assertJsonFragment(['id' => $created]);
+        $hidden = User::create(['name' => 'Hidden intern', 'phone' => '901180003', 'role_id' => $internRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $other->id, 'status' => 'active']);
+        $this->getJson('/api/user?role=intern')->assertOk()->assertJsonMissing(['id' => $hidden->id]);
+        $this->getJson('/api/user/'.$hidden->id)->assertNotFound();
+        $this->patchJson('/api/user/'.$created, ['role_id' => $ropRole->id])->assertForbidden();
+        $rop->supervisedGroups()->detach();
+        $this->postJson('/api/user', array_replace($payload, ['phone' => '901180004', 'branch_group_id' => $own->id]))->assertForbidden();
     }
 
     public function test_branch_director_can_create_and_update_mop_in_own_branch_group(): void
