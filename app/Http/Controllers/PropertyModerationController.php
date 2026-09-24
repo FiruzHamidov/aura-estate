@@ -166,6 +166,15 @@ final class PropertyModerationController extends Controller
         return response()->json(['data' => $this->mutationData($this->moderation->breakGlassApprove($case, $request->user(), $data['reason'], $data['version']))]);
     }
 
+    public function markDetectedDuplicate(Request $request, Property $property, Property $original)
+    {
+        $data = $request->validate(['version' => 'required|integer|min:0']);
+
+        return response()->json(['data' => $this->mutationData($this->moderation->markDetectedDuplicate(
+            $property, $original, $request->user(), $data['version'],
+        ))]);
+    }
+
     public function decideDuplicate(Request $request, PropertyDuplicateCandidate $candidate)
     {
         $data = $request->validate([
