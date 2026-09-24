@@ -804,6 +804,40 @@ final class PropertyModerationService
         });
     }
 
+    /** Confirm a currently detected match even when no duplicate case was created on submission. */
+    public function markDetectedDuplicate(Property $property, Property $original, User $actor, int $version): Property
+    {
+        abort_if($property->id === $original->id, 422, 'INVALID_DUPLICATE_TARGET');
+
+        return DB::transaction(function () use ($property, $original, $actor, $version): Property {
+            [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)
+                ->acquire($actor, $property, [], [$original->id]);
+            abort_unless($this->access->canModerate($actor, $property)
+                && $this->access->canModerate($actor, $original->fresh()), 403, 'FORBIDDEN_ACTION');
+            abort_if((int) $property->moderation_version !== $version, 409, 'MODERATION_VERSION_CONFLICT');
+            abort_unless($this->access->capabilities($actor, $property)['can_mark_duplicate'], 409, 'DUPLICATE_REVIEW_UNAVAILABLE');
+
+            $match = $this->duplicates->find($property->getAttributes(), (int) $property->id)
+                ->first(fn ($item) => (int) $item['id'] === (int) $original->id);
+            abort_unless($match, 409, 'DUPLICATE_MATCH_CHANGED');
+            // Respect a previous rejection of this match; it needs a separate review.
+            abort_if(PropertyDuplicateCandidate::query()->where('candidate_property_id', $original->id)
+                ->where('decision', PropertyDuplicateCandidate::DECISION_NOT_DUPLICATE)
+                ->whereHas('moderationCase', fn ($q) => $q->where('property_id', $property->id))->exists(),
+                409, 'DUPLICATE_ALREADY_REVIEWED');
+            $case = $this->upsertOpenCase($property, PropertyModerationCase::TYPE_DUPLICATE, $actor,
+                $property->approved_content_snapshot, $this->contentSnapshot($property), ['duplicate_candidates']);
+            if ($case->wasRecentlyCreated) {
+                // The moderator discovers the duplicate; the listing's author owns the submission.
+                $case->update(['submitted_by' => $property->created_by]);
+            }
+            $this->syncDuplicateCandidates($case, collect([$match]));
+            $candidate = $case->duplicateCandidates()->where('candidate_property_id', $original->id)->firstOrFail();
+
+            return $this->decideDuplicate($candidate, $actor, PropertyDuplicateCandidate::DECISION_CONFIRMED, '', (int) $case->version);
+        });
+    }
+
     public function decideDuplicate(
         PropertyDuplicateCandidate $candidate,
         User $actor,

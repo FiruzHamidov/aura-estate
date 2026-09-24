@@ -201,6 +201,73 @@ class PropertyShowAuthContactsTest extends TestCase
         });
     }
 
+    private function publicRopFixture(): array
+    {
+        Schema::create('branches', function (Blueprint $table) { $table->id(); $table->string('name'); $table->timestamps(); });
+        \Illuminate\Support\Facades\DB::table('branches')->insert([['id' => 10, 'name' => 'Own'], ['id' => 20, 'name' => 'Other']]);
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
+        (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '900111111', 'role_id' => $role->id, 'branch_id' => 10, 'status' => 'active']);
+        $rop->supervisedGroups()->attach(100);
+        $agent = User::create(['name' => 'Public agent', 'phone' => '900222222', 'role_id' => $agentRole->id, 'branch_id' => 20, 'branch_group_id' => 200]);
+        $property = Property::create(['title' => 'Public listing', 'type_id' => PropertyType::create(['name' => 'Apartment'])->id,
+            'status_id' => PropertyStatus::create(['name' => 'Available'])->id, 'price' => 100000, 'currency' => 'TJS',
+            'created_by' => $agent->id, 'agent_id' => $agent->id, 'branch_id' => 20, 'branch_group_id' => 200,
+            'moderation_status' => 'approved', 'publication_status' => 'published', 'deal_status' => 'available',
+            'owner_phone' => '900333333', 'owner_name' => 'Private owner', 'buyer_phone' => '900444444',
+            'buyer_full_name' => 'Private buyer', 'status_comment' => 'Internal note', 'company_commission_amount' => 200]);
+
+        return [$rop, $property, $agent];
+    }
+
+    public function test_rop_reads_public_foreign_listing_without_private_fields_or_actions(): void
+    {
+        [$rop, $property, $agent] = $this->publicRopFixture();
+        $guest = $this->getJson('/api/properties/'.$property->id)->assertOk()->json();
+        $this->withToken($rop->createToken('test')->plainTextToken);
+        $response = $this->getJson('/api/properties/'.$property->id)->assertOk()
+            ->assertJsonPath('public_view_only', true)->assertJsonPath('title', $guest['title'])
+            ->assertJsonPath('price', $guest['price'])->assertJsonPath('creator.name', $agent->name)
+            ->assertJsonPath('creator.phone', $agent->phone);
+        foreach (['owner_phone', 'owner_name', 'owner_client_id', 'owner_client', 'buyer_phone', 'buyer_full_name',
+            'buyer_client', 'company_commission_amount', 'status_comment', 'moderation_cases', 'moderation_version', 'external_source'] as $field) {
+            $this->assertArrayNotHasKey($field, $response->json());
+        }
+        foreach ($response->json('capabilities') as $value) $this->assertFalse($value);
+        $response->assertHeader('X-Access-Scope-Version', '0');
+        $this->assertStringContainsString('no-store', $response->headers->get('Cache-Control'));
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertNotFound();
+        $this->getJson('/api/properties/'.$property->id.'/duplicate-candidates')->assertNotFound();
+        $this->putJson('/api/properties/'.$property->id, ['title' => 'Changed'])->assertNotFound();
+        $this->deleteJson('/api/properties/'.$property->id)->assertNotFound();
+        $this->postJson('/api/properties/'.$property->id.'/moderation/approve-all', ['version' => 0])->assertNotFound();
+        $this->assertSame('Public listing', $property->fresh()->title);
+    }
+
+    public function test_rop_cannot_read_unpublished_foreign_listing(): void
+    {
+        [$rop, $property] = $this->publicRopFixture();
+        $this->withToken($rop->createToken('test')->plainTextToken);
+        foreach (['pending', 'draft', 'archived'] as $state) {
+            $property->forceFill(['publication_status' => $state, 'moderation_status' => 'pending'])->saveQuietly();
+            $this->getJson('/api/properties/'.$property->id)->assertNotFound();
+        }
+    }
+
+    public function test_group_revocation_downgrades_published_card_to_public_view_and_hides_pending_card(): void
+    {
+        [$rop, $property] = $this->publicRopFixture();
+        $property->forceFill(['branch_id' => 10, 'branch_group_id' => 100])->saveQuietly();
+        $this->withToken($rop->createToken('test')->plainTextToken);
+        $this->getJson('/api/properties/'.$property->id)->assertOk()->assertJsonPath('capabilities.can_edit', true);
+        $rop->supervisedGroups()->detach();
+        $this->getJson('/api/properties/'.$property->id)->assertOk()->assertJsonPath('public_view_only', true)->assertJsonPath('capabilities.can_edit', false);
+        $property->forceFill(['publication_status' => 'pending', 'moderation_status' => 'pending'])->saveQuietly();
+        $this->getJson('/api/properties/'.$property->id)->assertNotFound();
+    }
+
     public function test_security_can_read_closed_report_cards_and_history_but_cannot_edit(): void
     {
         $role = Role::create(['name' => 'Security', 'slug' => 'security']);

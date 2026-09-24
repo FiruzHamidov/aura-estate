@@ -18,7 +18,7 @@ final class EnforceRopBoundResourceScope
 
         $action = $request->route()?->getActionName();
         // These explicitly public endpoints retain their existing public projection.
-        if (in_array($action, ['App\\Http\\Controllers\\PropertyController@trackView', 'App\\Http\\Controllers\\PropertyController@similar', 'App\\Http\\Controllers\\ReelController@propertyIndex'], true)) return $next($request);
+        if (in_array($action, ['App\\Http\\Controllers\\PropertyController@show', 'App\\Http\\Controllers\\PropertyController@trackView', 'App\\Http\\Controllers\\PropertyController@similar', 'App\\Http\\Controllers\\ReelController@propertyIndex'], true)) return $next($request);
         foreach ($request->route()?->parameters() ?? [] as $record) {
             if ($record instanceof Property || $record instanceof Client || $record instanceof Lead
                 || $record instanceof Deal || $record instanceof Booking || $record instanceof CrmTask || $record instanceof DailyReport) {

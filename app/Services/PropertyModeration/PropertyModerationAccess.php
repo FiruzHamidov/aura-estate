@@ -148,6 +148,7 @@ final class PropertyModerationAccess
                 'can_approve' => false,
                 'can_approve_all' => false,
                 'can_resolve_duplicate' => false,
+                'can_mark_duplicate' => false,
                 'can_appeal' => false,
                 'can_resolve_appeal' => false,
                 'can_manage_deal' => false,
@@ -191,6 +192,10 @@ final class PropertyModerationAccess
                 && ! $openCases->contains(fn (PropertyModerationCase $case) => $case->type === PropertyModerationCase::TYPE_DUPLICATE
                     && $case->duplicateCandidates->contains('decision', PropertyDuplicateCandidate::DECISION_PENDING)
                 ),
+            'can_mark_duplicate' => $canModerate
+                && in_array($property->publication_status, ['published', 'pending'], true)
+                && ! $property->needsReopening()
+                && ! $openCases->contains('type', PropertyModerationCase::TYPE_APPEAL),
             'can_resolve_duplicate' => $decidableCases->contains('type', PropertyModerationCase::TYPE_DUPLICATE),
             'can_appeal' => $canEdit && Schema::hasTable('property_moderation_cases') && $property->moderationCases()
                 ->whereIn('status', [PropertyModerationCase::STATUS_REJECTED, PropertyModerationCase::STATUS_MERGED])

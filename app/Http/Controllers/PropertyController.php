@@ -22,6 +22,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Intervention\Image\Drivers\Gd\Driver;
 use Intervention\Image\Encoders\JpegEncoder;
@@ -2476,11 +2477,48 @@ class PropertyController extends Controller
         return $changed;
     }
 
+    private function serializePublicPropertyView(Property $property): array
+    {
+        // Explicit storefront fields: never serialize CRM contacts, financial records or moderation history.
+        $payload = $property->only([
+            'id', 'title', 'description', 'created_by', 'agent_id', 'type_id', 'status_id', 'location_id', 'repair_type_id',
+            'heating_type_id', 'parking_type_id', 'price', 'discount_price', 'currency', 'offer_type',
+            'rooms', 'youtube_link', 'instagram_link', 'total_area', 'land_size', 'living_area',
+            'floor', 'total_floors', 'year_built', 'condition', 'construction_status',
+            'renovation_permission_status', 'has_garden', 'has_parking', 'apartment_type',
+            'is_mortgage_available', 'is_from_developer', 'moderation_status', 'publication_status',
+            'deal_status', 'listing_type', 'is_full_apartment', 'developer_id', 'views_count',
+            'landmark', 'latitude', 'longitude', 'address', 'district', 'district_id',
+            'created_at', 'updated_at', 'listing_updated_at', 'listed_at', 'contract_type_id',
+            'document_type_id', 'public_price_badge',
+        ]);
+        $relations = array_diff($this->propertyDetailRelations(), [
+            'creator', 'ownerClient.type', 'buyerClient.type', 'depositUser', 'saleUser', 'coOwner.role', 'activePromotion',
+        ]);
+        $property->load($relations);
+        foreach ($relations as $relation) {
+            $payload[Str::snake($relation)] = $property->getRelation($relation)?->toArray();
+        }
+        $property->load('creator.role');
+        // The public listing contact is not a full employee profile.
+        $payload['creator'] = $property->creator?->only(['id', 'name', 'photo', 'phone', 'description']);
+        if ($payload['creator']) {
+            $payload['creator']['role'] = $property->creator->role?->only(['name', 'slug']);
+        }
+        $payload['public_view_only'] = true;
+        $payload['capabilities'] = $this->propertyCapabilities(null, $property);
+
+        return $payload;
+    }
+
     public function show(Request $request, Property $property)
     {
         $authUser = $this->propertyShowAuthUser($request);
-        if ($authUser) {
-            app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $property);
+        if ($authUser?->hasRole('rop') && ! app(\App\Support\RopGroupAccess::class)->allows($authUser, $property)) {
+            // The storefront is public. Group permissions still guard every internal endpoint.
+            $this->moderation->publicOrFail($property, null);
+
+            return response()->json($this->serializePublicPropertyView($property));
         }
         $this->moderation->publicOrFail($property, $authUser);
 

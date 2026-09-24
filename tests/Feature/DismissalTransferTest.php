@@ -56,6 +56,7 @@ class DismissalTransferTest extends TestCase
             $t->string('status')->default('active');
             $t->string('password')->nullable();
             $t->rememberToken();
+            $t->timestamp('deleted_at')->nullable();
             foreach (['telegram_id', 'telegram_username', 'telegram_photo_url', 'telegram_chat_id', 'telegram_linked_at'] as $field) {
                 $t->string($field)->nullable();
             }
@@ -97,7 +98,7 @@ class DismissalTransferTest extends TestCase
             $t->timestamps();
         });
         (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
-        foreach (['admin', 'agent', 'mop', 'hr', 'branch_director', 'rop'] as $role) {
+        foreach (['admin', 'agent', 'mop', 'hr', 'branch_director', 'rop', 'intern'] as $role) {
             Role::create(['name' => $role, 'slug' => $role]);
         }
         $branch = Branch::create(['name' => 'Branch']);
@@ -208,6 +209,89 @@ class DismissalTransferTest extends TestCase
         Sanctum::actingAs($this->person('rop'));
         $this->getJson('/api/user/'.$this->employee->id.'/dismissal-preview')->assertStatus(404);
         $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertForbidden();
+    }
+
+    private function actingAsGroupRop(): User
+    {
+        $rop = $this->person('rop');
+        $rop->supervisedGroups()->attach($this->group->id);
+        Sanctum::actingAs($rop);
+
+        return $rop;
+    }
+
+    public static function ropEmployeeRoles(): array
+    {
+        return [['agent'], ['mop'], ['intern']];
+    }
+
+    #[DataProvider('ropEmployeeRoles')]
+    public function test_rop_dismisses_own_group_employee_with_reviewed_transfer(string $role): void
+    {
+        $employeeRole = Role::firstOrCreate(['slug' => $role], ['name' => $role]);
+        $this->employee->update(['role_id' => $employeeRole->id]);
+        $this->actingAsGroupRop();
+        $this->test_dismissal_transfers_individual_records_clients_and_needs_atomically();
+    }
+
+    public function test_rop_can_dismiss_employee_without_records(): void
+    {
+        $this->actingAsGroupRop();
+        $this->employee = $this->person('intern');
+        $this->deleteJson('/api/user/'.$this->employee->id, $this->plan())->assertOk();
+        $this->assertSame('inactive', $this->employee->fresh()->status);
+    }
+
+    public function test_rop_preview_hides_unassigned_group_recipients_and_rejects_tampered_plan(): void
+    {
+        $other = BranchGroup::create(['name' => 'Other', 'branch_id' => $this->group->branch_id]);
+        $this->second->update(['branch_group_id' => $other->id]);
+        $this->actingAsGroupRop();
+        $preview = $this->preview();
+        $this->assertSame([$this->first->id], array_column($preview['recipients'], 'id'));
+        $this->deleteJson('/api/user/'.$this->employee->id, $this->plan())->assertForbidden();
+        $this->assertSame('active', $this->employee->fresh()->status);
+        $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $this->employee->id]);
+    }
+
+    public function test_rop_cannot_dismiss_foreign_group_employee_or_peer_or_self(): void
+    {
+        $rop = $this->actingAsGroupRop();
+        $peer = $this->person('rop');
+        $foreign = $this->person('agent');
+        $other = BranchGroup::create(['name' => 'Other', 'branch_id' => $this->group->branch_id]);
+        $foreign->update(['branch_group_id' => $other->id]);
+        foreach ([$rop, $peer, $foreign] as $target) {
+            $this->getJson('/api/user/'.$target->id.'/dismissal-preview')->assertNotFound();
+            $this->deleteJson('/api/user/'.$target->id, ['distribute_to_agents' => true])->assertNotFound();
+            $this->assertSame('active', $target->fresh()->status);
+        }
+    }
+
+    public function test_rop_scope_is_rechecked_after_preview_and_legacy_dismissal_is_blocked(): void
+    {
+        $rop = $this->actingAsGroupRop();
+        $plan = $this->plan();
+        $this->deleteJson('/api/user/'.$this->employee->id, ['distribute_to_agents' => true])->assertStatus(422);
+        $rop->supervisedGroups()->detach();
+        $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertForbidden();
+        $this->assertSame('active', $this->employee->fresh()->status);
+    }
+
+    public function test_rop_cannot_transfer_foreign_or_unclassified_records_or_edit_employee(): void
+    {
+        $this->actingAsGroupRop();
+        $plan = $this->plan();
+        $other = BranchGroup::create(['name' => 'Other', 'branch_id' => $this->group->branch_id]);
+        foreach ([$other->id, null] as $groupId) {
+            DB::table('clients')->where('id', 1)->update(['branch_group_id' => $groupId]);
+            $this->getJson('/api/user/'.$this->employee->id.'/dismissal-preview')->assertForbidden();
+            $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertForbidden();
+            $this->assertSame('active', $this->employee->fresh()->status);
+            $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $this->employee->id]);
+        }
+        $this->putJson('/api/user/'.$this->employee->id, ['name' => 'Changed'])->assertForbidden();
+        $this->postJson('/api/user/'.$this->employee->id.'/restore')->assertForbidden();
     }
 
     public function test_director_cannot_transfer_a_record_outside_their_branch(): void

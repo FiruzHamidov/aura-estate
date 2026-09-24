@@ -1277,6 +1277,80 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertSame('pending', $candidate->fresh()->decision);
     }
 
+    private function detectedDuplicateFixture(): array
+    {
+        Schema::table('properties', fn (Blueprint $table) => $table->string('landmark')->nullable());
+        [$agent, $rop] = $this->users();
+        $fields = ['type_id' => 1, 'location_id' => 1, 'rooms' => 2, 'total_area' => 65,
+            'floor' => 4, 'total_floors' => 14, 'address' => 'Рудаки 10 квартира 22', 'owner_phone' => '900111222'];
+        $original = $this->publishedProperty($agent, $fields);
+        $duplicate = $this->publishedProperty($agent, $fields);
+        $this->actingAs($rop);
+
+        return [$duplicate, $original, $rop, $agent];
+    }
+
+    public function test_rop_can_confirm_detected_duplicate_without_preexisting_case(): void
+    {
+        [$duplicate, $original, $rop, $agent] = $this->detectedDuplicateFixture();
+        $originalState = $original->getAttributes();
+        $this->assertSame(0, $duplicate->moderationCases()->count());
+        $this->assertFalse(app(PropertyModerationAccess::class)->capabilities($rop, $duplicate)['can_resolve_duplicate']);
+        $this->assertTrue(app(PropertyModerationAccess::class)->capabilities($rop, $duplicate)['can_mark_duplicate']);
+        $url = "/api/properties/{$duplicate->id}/detected-duplicates/{$original->id}/confirm";
+        $this->postJson($url, ['version' => $duplicate->moderation_version])->assertOk();
+        $this->assertSame('deleted', $duplicate->fresh()->moderation_status);
+        $this->assertSame($original->id, $duplicate->fresh()->duplicate_of_property_id);
+        $this->assertSame($originalState, $original->fresh()->getAttributes());
+        $this->assertSame('confirmed_duplicate', PropertyDuplicateCandidate::sole()->decision);
+        $this->assertDatabaseHas('employee_trust_events', ['property_id' => $duplicate->id, 'user_id' => $agent->id, 'type' => 'confirmed_duplicate']);
+        $this->assertDatabaseMissing('employee_trust_events', ['user_id' => $rop->id]);
+        $this->assertDatabaseHas('property_moderation_events', ['property_id' => $duplicate->id, 'event_type' => 'duplicate_confirmed']);
+        $this->postJson($url, ['version' => $duplicate->moderation_version])->assertConflict();
+        $this->assertSame(1, PropertyDuplicateCandidate::count());
+    }
+
+    public static function detectedDuplicateRejections(): array
+    {
+        return array_map(fn ($case) => [$case], ['foreign_original', 'foreign_source', 'foreign_branch', 'revoked', 'agent', 'stale', 'changed_match', 'self', 'appeal', 'previous_rejection']);
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('detectedDuplicateRejections')]
+    public function test_detected_duplicate_rejections_preserve_both_properties(string $scenario): void
+    {
+        [$duplicate, $original, $rop, $agent] = $this->detectedDuplicateFixture();
+        $version = (int) $duplicate->moderation_version;
+        $status = 409;
+        if (in_array($scenario, ['foreign_original', 'foreign_source', 'foreign_branch'], true)) {
+            DB::table('branch_groups')->insert(['id' => 2, 'name' => 'Other', 'branch_id' => $scenario === 'foreign_branch' ? 2 : 1]);
+            ($scenario === 'foreign_source' ? $duplicate : $original)->forceFill([
+                'branch_group_id' => 2, 'branch_id' => $scenario === 'foreign_branch' ? 2 : 1])->saveQuietly();
+            $status = 404;
+        } elseif ($scenario === 'revoked') {
+            $rop->supervisedGroups()->detach(); $status = 404;
+        } elseif ($scenario === 'agent') {
+            $this->actingAs($agent); $status = 403;
+        } elseif ($scenario === 'stale') {
+            $version += 100;
+        } elseif ($scenario === 'changed_match') {
+            $original->forceFill(['rooms' => 5])->saveQuietly();
+        } elseif ($scenario === 'self') {
+            $original = $duplicate; $status = 422;
+        } elseif ($scenario === 'appeal') {
+            PropertyModerationCase::create(['property_id' => $duplicate->id, 'type' => 'appeal', 'status' => 'open', 'blocking' => true, 'version' => 1, 'submitted_at' => now()]);
+        } elseif ($scenario === 'previous_rejection') {
+            $case = PropertyModerationCase::create(['property_id' => $duplicate->id, 'type' => 'duplicate_review', 'status' => 'approved', 'blocking' => false, 'version' => 2, 'submitted_at' => now()]);
+            PropertyDuplicateCandidate::create(['moderation_case_id' => $case->id, 'candidate_property_id' => $original->id, 'score' => 99, 'decision' => 'not_duplicate']);
+        }
+        $sourceState = $duplicate->fresh()->getAttributes();
+        $originalState = $original->fresh()->getAttributes();
+        $count = PropertyModerationCase::count();
+        $this->postJson("/api/properties/{$duplicate->id}/detected-duplicates/{$original->id}/confirm", ['version' => $version])->assertStatus($status);
+        $this->assertSame($sourceState, $duplicate->fresh()->getAttributes());
+        $this->assertSame($originalState, $original->fresh()->getAttributes());
+        $this->assertSame($count, PropertyModerationCase::count());
+    }
+
     private function users(): array
     {
         $agentRole = Role::firstOrCreate(['slug' => 'agent'], ['name' => 'Agent']);
