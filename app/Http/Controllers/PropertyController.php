@@ -854,7 +854,7 @@ class PropertyController extends Controller
     private function compactFeedProperty(Property $property): array
     {
         $item = $property->only([
-            'id', 'title', 'description', 'created_by', 'agent_id', 'type_id', 'status_id', 'location_id', 'repair_type_id',
+            'id', 'title', 'description', 'type_id', 'status_id', 'location_id', 'repair_type_id',
             'heating_type_id', 'parking_type_id', 'document_type_id', 'developer_id', 'created_by',
             'price', 'discount_price', 'currency', 'offer_type', 'rooms', 'total_area', 'land_size',
             'living_area', 'floor', 'total_floors', 'year_built', 'condition', 'construction_status',
@@ -2481,7 +2481,7 @@ class PropertyController extends Controller
     {
         // Explicit storefront fields: never serialize CRM contacts, financial records or moderation history.
         $payload = $property->only([
-            'id', 'title', 'description', 'type_id', 'status_id', 'location_id', 'repair_type_id',
+            'id', 'title', 'description', 'created_by', 'agent_id', 'type_id', 'status_id', 'location_id', 'repair_type_id',
             'heating_type_id', 'parking_type_id', 'price', 'discount_price', 'currency', 'offer_type',
             'rooms', 'youtube_link', 'instagram_link', 'total_area', 'land_size', 'living_area',
             'floor', 'total_floors', 'year_built', 'condition', 'construction_status',
