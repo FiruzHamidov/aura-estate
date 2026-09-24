@@ -494,6 +494,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         // Properties CRUD + photos
         Route::post('/properties', [PropertyController::class, 'store'])->middleware('moderation.idempotent');
         Route::get('/properties/{property}/logs', [PropertyController::class, 'logs']);
+        Route::post('/properties/{property}/detected-duplicates/{original}/confirm', [\App\Http\Controllers\PropertyModerationController::class, 'markDetectedDuplicate'])->whereNumber(['property', 'original'])->middleware('moderation.idempotent')->middleware('moderation.payload');
         Route::get('/properties/{property}/duplicate-candidates', [PropertyController::class, 'duplicateCandidates']);
         Route::get('/properties/{property}/matching-clients', [PropertyController::class, 'matchingClients']);
         Route::put('/properties/{property}', [PropertyController::class, 'update'])->middleware('moderation.idempotent');
