@@ -265,7 +265,15 @@ class UserController extends Controller
     private function authorizeUserMutation(User $authUser, User $targetUser, string $operation): void
     {
         $actorRole = $this->roleSlug($authUser);
-        abort_if($actorRole === 'rop', 403, 'FORBIDDEN_ACTION');
+        if ($actorRole === 'rop') {
+            abort_unless($operation === 'dismiss' && $authUser->id !== $targetUser->id
+                && $targetUser->status === User::STATUS_ACTIVE
+                && ! $targetUser->isDeletedAccount()
+                && in_array($this->roleSlug($targetUser), ['agent', 'mop', 'intern'], true), 403, 'FORBIDDEN_ACTION');
+            app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $targetUser);
+
+            return;
+        }
 
         if ($this->isBranchScopedManager($actorRole)) {
             $targetUser->loadMissing('role');
@@ -821,6 +829,9 @@ class UserController extends Controller
         ]);
 
         $plan = $request->input('transfer_plan');
+        // ROP dismissal must always use the reviewed inventory; legacy automatic
+        // redistribution can include unclassified or out-of-group records.
+        abort_if($authUser->hasRole('rop') && $plan === null, 422, 'COMPLETE_TRANSFER_PLAN_REQUIRED');
         $distribute = (bool) $request->boolean('distribute_to_agents');
         $agentId = $request->input('agent_id');
 

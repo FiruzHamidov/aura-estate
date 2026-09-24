@@ -5,6 +5,7 @@ namespace App\Services\Users;
 use App\Models\BranchGroup;
 use App\Models\User;
 use App\Observers\GroupOwnedRecordObserver;
+use App\Support\RopGroupAccess;
 use App\Services\GroupAccess\GroupAccessAudit;
 use App\Services\GroupAccess\GroupRecordTransfer;
 use App\Services\GroupAccess\UserOrganizationService;
@@ -64,12 +65,17 @@ final class DismissalTransfer
     {
         return User::query()->with(['role', 'branch', 'branchGroup'])->whereKeyNot($employee->id)->where('status', User::STATUS_ACTIVE)
             ->whereHas('role', fn ($q) => $q->whereIn('slug', ['agent', 'mop']))
+            ->when($actor->hasRole('rop'), fn ($q) => app(RopGroupAccess::class)->scope($q, $actor, 'users.branch_group_id', 'users.branch_id'))
             ->when($actor->hasRole('branch_director'), fn ($q) => $q->where('branch_id', $actor->branch_id))
             ->orderBy('id')->get()->reject(fn (User $user) => $user->isDeletedAccount());
     }
 
     private function eligible(User $actor, User $target, array $record): bool
     {
+        if ($actor->hasRole('rop') && ! app(RopGroupAccess::class)->allows($actor, $target)) {
+            return false;
+        }
+
         if ($record['type'] === 'properties' && $target->branch_group_id
             && in_array($actor->role?->slug, ['admin', 'superadmin', 'branch_director'], true)
             && (! $actor->hasRole('branch_director') || (int) $actor->branch_id === (int) $target->branch_id)) {
@@ -82,6 +88,14 @@ final class DismissalTransfer
 
     private function ensureRecordScope(User $actor, array $records): void
     {
+        if ($actor->hasRole('rop')) {
+            $access = app(RopGroupAccess::class);
+            foreach ($records as $record) {
+                abort_unless($actor->branch_id && (int) $record['branch_id'] === (int) $actor->branch_id
+                    && $access->allowsGroup($actor, $record['branch_group_id']), 403, 'RBAC_GROUP_SCOPE_VIOLATION');
+            }
+        }
+
         if ($actor->hasRole('branch_director')) {
             foreach ($records as $record) {
                 abort_unless($actor->branch_id && (int) $record['branch_id'] === (int) $actor->branch_id, 403, 'FORBIDDEN_ACTION');
