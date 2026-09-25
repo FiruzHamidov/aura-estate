@@ -43,10 +43,14 @@ class ExternalAgentController extends Controller
 
     public function store(Request $request)
     {
+        if (is_string($request->input('phone'))) {
+            $request->merge(['phone' => \App\Support\InternationalPhone::accountValue($request->input('phone'))]);
+        }
+
         $actor = $this->actor($request);
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
-            'phone' => ['required', 'string', 'max:255', Rule::unique('users', 'phone')],
+            'phone' => [new \App\Rules\InternationalPhoneNumber, 'required', 'string', 'max:255', Rule::unique('users', 'phone')],
             'email' => ['sometimes', 'nullable', 'email', 'max:255', Rule::unique('users', 'email')],
             'description' => ['sometimes', 'nullable', 'string'],
             'auth_method' => ['sometimes', Rule::in(['password', 'sms'])],

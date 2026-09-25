@@ -339,6 +339,19 @@ class ExternalPropertyRequestFeatureTest extends TestCase
         }
     }
 
+    public function test_external_request_rejects_incomplete_owner_phone_even_in_draft(): void
+    {
+        Sanctum::actingAs($this->user($this->externalRole, '930555001'));
+        $this->postJson('/api/external/property-requests?draft=1', ['owner_phone' => '+99290123456'])
+            ->assertUnprocessable()->assertJsonStructure(['details' => ['errors' => ['owner_phone']]]);
+        $this->postJson('/api/external/property-requests?draft=1', ['owner_phone' => '+77011234567'])
+            ->assertCreated();
+        $draft = ExternalPropertyRequest::firstOrFail();
+        $this->patchJson('/api/external/property-requests/'.$draft->id, ['owner_phone' => '+7912'])
+            ->assertUnprocessable();
+        $this->assertSame('+77011234567', $draft->fresh()->owner_phone);
+    }
+
     public function test_external_agent_creates_and_sees_only_own_requests(): void
     {
         $externalAgent = $this->user($this->externalRole, '930000001');

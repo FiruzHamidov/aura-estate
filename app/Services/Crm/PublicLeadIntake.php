@@ -26,7 +26,8 @@ class PublicLeadIntake
     public function accept(array $input): array
     {
         $input['name'] = is_string($input['name'] ?? null) ? trim($input['name']) : ($input['name'] ?? null);
-        $rawPhone = is_string($input['phone'] ?? null) ? trim($input['phone']) : '';
+        Validator::make($input, ['phone' => ['required', 'string', new \App\Rules\InternationalPhoneNumber]])->validate();
+        $rawPhone = trim($input['phone']);
         $input['phone'] = preg_match('/^[+\d\s().-]+$/', $rawPhone)
             ? ClientPhone::normalize($rawPhone) : '';
         $data = Validator::make($input, [

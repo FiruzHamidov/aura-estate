@@ -36,6 +36,7 @@ class SavePropertyDealRequest extends FormRequest
                 Rule::requiredIf(fn () => $this->input('deal_status') === 'deposit' && empty($this->input('buyer_client_id'))),
             ],
             'buyer_phone' => [
+                new \App\Rules\InternationalPhoneNumber,
                 'nullable',
                 'string',
                 'min:6',

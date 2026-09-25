@@ -2397,6 +2397,25 @@ class UserAccessTest extends TestCase
             ->assertJsonMissing(['id' => $otherBranch->id]);
     }
 
+    public function test_external_agent_phones_validate_length_and_preserve_login_identifiers(): void
+    {
+        $branch = Branch::create(['name' => 'Phone branch']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Phone group']);
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        Role::create(['name' => 'External agent', 'slug' => 'external_agent']);
+        $agent = User::create(['name' => 'Phone agent', 'phone' => '900000501', 'role_id' => $role->id,
+            'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'active']);
+        Sanctum::actingAs($agent);
+        $this->postJson('/api/external-agents', ['name' => 'Partner', 'phone' => '+99290123456'])
+            ->assertUnprocessable()->assertJsonStructure(['details' => ['errors' => ['phone']]]);
+        $this->postJson('/api/external-agents', ['name' => 'Partner TJ', 'phone' => '+992901234567'])
+            ->assertCreated()->assertJsonPath('phone', '901234567');
+        $this->postJson('/api/external-agents', ['name' => 'Partner RU', 'phone' => '+79123456789'])
+            ->assertCreated()->assertJsonPath('phone', '79123456789');
+        $this->postJson('/api/external-agents', ['name' => 'Same TJ', 'phone' => '901234567'])
+            ->assertUnprocessable();
+    }
+
     public function test_agents_and_mops_create_external_agents_only_in_their_scope(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);

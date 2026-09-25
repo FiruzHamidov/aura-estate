@@ -228,6 +228,29 @@ class ClientWorkflowFeatureTest extends TestCase
         ]);
     }
 
+    public function test_client_phone_length_is_checked_on_create_and_update(): void
+    {
+        $branch = Branch::create(['name' => 'Phone validation']);
+        $group = $this->createBranchGroup($branch, 'Phone group');
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = $this->createUser($role, $branch, 'Phone agent', $group);
+        Sanctum::actingAs($agent);
+
+        foreach (['+99290123456', '+9929012345678', '+7912345678', '+791234567890'] as $phone) {
+            $this->postJson('/api/clients', ['full_name' => 'Phone test', 'phone' => $phone])
+                ->assertUnprocessable()->assertJsonStructure(['details' => ['errors' => ['phone']]]);
+        }
+        $this->assertDatabaseCount('clients', 0);
+
+        $response = $this->postJson('/api/clients', ['full_name' => 'Phone test', 'phone' => '+7 (912) 345-67-89'])->assertCreated();
+        $response->assertJsonPath('phone_normalized', '79123456789');
+        $id = $response->json('id');
+        $this->patchJson('/api/clients/'.$id, ['phone' => '+99290'])->assertUnprocessable();
+        $this->assertDatabaseHas('clients', ['id' => $id, 'phone_normalized' => '79123456789']);
+        $this->patchJson('/api/clients/'.$id, ['phone' => '+992901234567'])->assertOk();
+        $this->assertDatabaseHas('clients', ['id' => $id, 'phone_normalized' => '992901234567']);
+    }
+
     public function test_visible_duplicate_does_not_block_create(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);

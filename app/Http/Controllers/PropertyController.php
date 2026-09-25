@@ -2760,7 +2760,7 @@ class PropertyController extends Controller
             'latitude' => 'nullable|numeric|between:-90,90',
             'longitude' => 'nullable|numeric|between:-180,180',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
-            'owner_phone' => 'nullable|string|max:30',
+            'owner_phone' => ['nullable', 'string', 'max:30', new \App\Rules\InternationalPhoneNumber],
             'owner_name' => 'nullable|string|max:255',
             'owner_client_id' => 'nullable|exists:clients,id',
             'object_key' => 'nullable|string|max:255',
