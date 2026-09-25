@@ -66,6 +66,17 @@ class PublicLeadIntakeTest extends TestCase
         $this->mock(NotificationService::class)->shouldReceive('handlePublicLeadCreated')->byDefault();
     }
 
+    public function test_public_leads_reject_short_numbers_and_accept_international_numbers(): void
+    {
+        foreach (['+99290123456', '+7912345678', '+99890123456'] as $phone) {
+            $this->postJson('/api/lead-requests', $this->payload(['phone' => $phone]))
+                ->assertUnprocessable()->assertJsonStructure(['details' => ['errors' => ['phone']]]);
+        }
+        $this->assertDatabaseCount('leads', 0);
+        $this->postJson('/api/lead-requests', $this->payload(['phone' => '+33 1 23 45 67 89']))->assertCreated();
+        $this->assertDatabaseHas('leads', ['phone' => '+33123456789', 'phone_normalized' => '33123456789']);
+    }
+
     private function prepareChat(): void
     {
         Http::swap(new \Illuminate\Http\Client\Factory);

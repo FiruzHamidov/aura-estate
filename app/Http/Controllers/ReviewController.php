@@ -24,7 +24,7 @@ class ReviewController extends Controller
     public function requestCode(Request $request, SmsAuthService $smsAuthService): JsonResponse
     {
         $data = $request->validate([
-            'phone' => ['required', 'string'],
+            'phone' => [new \App\Rules\InternationalPhoneNumber, 'required', 'string'],
         ]);
 
         // Можно нормализовать phone тут (убрать пробелы, +, тире)
@@ -55,7 +55,7 @@ class ReviewController extends Controller
 
         $data = $request->validate([
             'reviewer_name'  => ['required', 'string', 'max:255'],
-            'reviewer_phone' => ['required', 'string', 'max:64'],
+            'reviewer_phone' => [new \App\Rules\InternationalPhoneNumber, 'required', 'string', 'max:64'],
             'code'           => ['required', 'string', 'max:10'],
             'rating'         => ['required', 'integer', 'min:1', 'max:5'],
             'text'           => ['nullable', 'string', 'max:5000'],

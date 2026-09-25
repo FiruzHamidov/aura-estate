@@ -122,7 +122,7 @@ class ExternalPropertyRequestController extends Controller
             'type_id' => ['required', 'integer', 'exists:property_types,id'],
             'price' => ['required', 'numeric', 'min:0'],
             'currency' => ['required', Rule::in(['TJS', 'USD'])],
-            'owner_phone' => ['required', 'string', 'max:40'],
+            'owner_phone' => [new \App\Rules\InternationalPhoneNumber, 'required', 'string', 'max:40'],
         ])->validate();
 
         return response()->json($this->externalPayload($this->service->submitDraft($externalPropertyRequest, $user)));
@@ -411,7 +411,7 @@ class ExternalPropertyRequestController extends Controller
             'repair_type_id' => ['sometimes', 'nullable', 'integer', 'exists:repair_types,id'],
             'condition' => ['sometimes', 'nullable', 'string', 'max:255'],
             'owner_name' => ['sometimes', 'nullable', 'string', 'max:255'],
-            'owner_phone' => [$requiredWhenSubmitted, 'nullable', 'string', 'max:40'],
+            'owner_phone' => [new \App\Rules\InternationalPhoneNumber, $requiredWhenSubmitted, 'nullable', 'string', 'max:40'],
             'external_comment' => ['sometimes', 'nullable', 'string'],
             'meta' => ['sometimes', 'nullable', 'array'],
         ]);
@@ -440,7 +440,7 @@ class ExternalPropertyRequestController extends Controller
             'address' => ['nullable', 'string', 'max:255'],
             'landmark' => ['nullable', 'string', 'max:255'],
             'owner_name' => ['nullable', 'string', 'max:255'],
-            'owner_phone' => ['nullable', 'string', 'max:40'],
+            'owner_phone' => [new \App\Rules\InternationalPhoneNumber, 'nullable', 'string', 'max:40'],
             'owner_client_id' => ['nullable', 'integer', 'exists:clients,id'],
             'branch_id' => ['nullable', 'integer', 'exists:branches,id'],
             'branch_group_id' => ['nullable', 'integer', 'exists:branch_groups,id'],

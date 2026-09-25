@@ -163,7 +163,7 @@ class LeadController extends Controller
             'branch_group_id' => ['sometimes', 'nullable', 'integer', 'exists:branch_groups,id'],
             'name' => ($lead ? 'sometimes|' : '').'nullable|string|max:255',
             'full_name' => ($lead ? 'sometimes|' : '').'nullable|string|max:255',
-            'phone' => ($lead ? 'sometimes|' : '').'nullable|string|max:50',
+            'phone' => [($lead ? 'sometimes' : 'nullable'), 'nullable', 'string', 'max:50', new \App\Rules\InternationalPhoneNumber],
             'email' => ($lead ? 'sometimes|' : '').'nullable|email|max:255',
             'comment' => 'nullable|string',
             'note' => 'nullable|string',

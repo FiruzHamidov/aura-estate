@@ -59,7 +59,7 @@ class DeveloperController extends Controller
 
         $data = $request->validate([
             'name' => ['required', 'string', 'max:255'],
-            'phone' => ['nullable', 'string', 'max:50'],
+            'phone' => [new \App\Rules\InternationalPhoneNumber, 'nullable', 'string', 'max:50'],
             'under_construction_count' => ['nullable', 'integer', 'min:0'],
             'built_count' => ['nullable', 'integer', 'min:0'],
             'founded_year' => ['nullable', 'integer', 'min:1800', "max:{$nowYear}"],
@@ -110,7 +110,7 @@ class DeveloperController extends Controller
 
         $data = $request->validate([
             'name' => ['sometimes', 'required', 'string', 'max:255'],
-            'phone' => ['nullable', 'string', 'max:50'],
+            'phone' => [new \App\Rules\InternationalPhoneNumber, 'nullable', 'string', 'max:50'],
             'under_construction_count' => ['nullable', 'integer', 'min:0'],
             'built_count' => ['nullable', 'integer', 'min:0'],
             'founded_year' => ['nullable', 'integer', 'min:1800', "max:{$nowYear}"],

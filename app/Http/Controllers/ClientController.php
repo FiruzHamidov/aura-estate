@@ -678,7 +678,7 @@ class ClientController extends Controller
 
             $request->validate([
                 'full_name' => 'required|string|max:255',
-                'phone' => 'nullable|string|max:50',
+                'phone' => ['nullable', 'string', 'max:50', new \App\Rules\InternationalPhoneNumber],
                 'email' => 'nullable|email|max:255',
                 'note' => 'nullable|string',
                 'branch_id' => 'nullable|integer|exists:branches,id',
@@ -838,7 +838,7 @@ class ClientController extends Controller
 
             $request->validate([
                 'full_name' => 'sometimes|string|max:255',
-                'phone' => 'sometimes|nullable|string|max:50',
+                'phone' => ['sometimes', 'nullable', 'string', 'max:50', new \App\Rules\InternationalPhoneNumber],
                 'email' => 'sometimes|nullable|email|max:255',
                 'note' => 'nullable|string',
                 'branch_id' => 'sometimes|nullable|integer|exists:branches,id',

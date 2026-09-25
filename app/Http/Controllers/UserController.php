@@ -540,6 +540,10 @@ class UserController extends Controller
     // Создание пользователя
     public function store(Request $request)
     {
+        if (is_string($request->input('phone'))) {
+            $request->merge(['phone' => \App\Support\InternationalPhone::accountValue($request->input('phone'))]);
+        }
+
         return DB::transaction(function () use ($request) {
             $authUser = User::query()->lockForUpdate()->findOrFail($this->authUser()->id);
             $isRop = $authUser->hasRole('rop');
@@ -548,7 +552,7 @@ class UserController extends Controller
                 'name' => 'required|string',
                 'description' => 'nullable|string',
                 'birthday' => 'nullable|date',
-                'phone' => 'required|string|unique:users,phone',
+                'phone' => ['required', 'string', 'unique:users,phone', new \App\Rules\InternationalPhoneNumber],
                 'email' => 'nullable|email|unique:users,email',
                 'role_id' => 'required|exists:roles,id',
                 'branch_id' => 'nullable|exists:branches,id',
@@ -657,11 +661,15 @@ class UserController extends Controller
     {
         $user = $this->authUser();
 
+        if (is_string($request->input('phone')) && $request->input('phone') !== $user->phone) {
+            $request->merge(['phone' => \App\Support\InternationalPhone::accountValue($request->input('phone'))]);
+        }
+
         $data = $request->validate([
             'name' => 'sometimes|string',
             'description' => 'nullable|string',
             'birthday' => 'nullable|date',
-            'phone' => 'sometimes|string|unique:users,phone,'.$user->id,
+            'phone' => ['sometimes', 'string', 'unique:users,phone,'.$user->id, new \App\Rules\InternationalPhoneNumber],
             'email' => 'sometimes|email|unique:users,email,'.$user->id,
         ]);
 
@@ -682,11 +690,15 @@ class UserController extends Controller
             $this->ensureUserIsVisible($authUser, $user);
             $this->authorizeUserMutation($authUser, $user, 'update');
 
+            if (is_string($request->input('phone')) && $request->input('phone') !== $user->phone) {
+                $request->merge(['phone' => \App\Support\InternationalPhone::accountValue($request->input('phone'))]);
+            }
+
             $request->validate([
                 'name' => 'sometimes|string',
                 'description' => 'nullable|string',
                 'birthday' => 'nullable|date',
-                'phone' => 'sometimes|string|unique:users,phone,'.$user->id,
+                'phone' => ['sometimes', 'string', 'unique:users,phone,'.$user->id, new \App\Rules\InternationalPhoneNumber],
                 'email' => 'sometimes|nullable|email|unique:users,email,'.$user->id,
                 'role_id' => 'sometimes|exists:roles,id',
                 'branch_id' => 'sometimes|nullable|exists:branches,id',

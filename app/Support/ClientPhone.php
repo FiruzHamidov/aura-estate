@@ -10,6 +10,10 @@ class ClientPhone
             return null;
         }
 
+        if ($international = InternationalPhone::e164($raw)) {
+            return substr($international, 1);
+        }
+
         $digits = preg_replace('/\D+/', '', $raw);
 
         if ($digits === '') {
