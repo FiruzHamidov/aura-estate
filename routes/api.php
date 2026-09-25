@@ -585,6 +585,9 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         Route::get('/crm/property-control/report', [PropertyControlReportController::class, 'summary']);
         Route::get('/crm/property-control/export', [PropertyControlReportController::class, 'export']);
         Route::get('/crm/property-control/meta', [PropertyControlReportController::class, 'meta']);
+        Route::get('/crm/marketing-leads', [\App\Http\Controllers\MarketingLeadReportController::class, 'index'])->middleware('rop.branch.scope');
+        Route::post('/crm/marketing-leads/{lead}/sales/{property}/review', [\App\Http\Controllers\MarketingLeadReportController::class, 'review'])->middleware('rop.branch.scope');
+        Route::post('/crm/marketing-leads/{lead}/classification', [\App\Http\Controllers\MarketingLeadReportController::class, 'classify'])->middleware('rop.branch.scope');
         Route::post('/leads/{lead}/convert', [LeadController::class, 'convert'])->middleware('rop.branch.scope');
         Route::apiResource('leads', LeadController::class)->middleware('rop.branch.scope');
         Route::get('/crm/leads/{lead}/activities', [CrmActivityController::class, 'leadIndex'])->middleware('rop.branch.scope');

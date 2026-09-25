@@ -76,15 +76,17 @@ class CrmActivityController extends Controller
                     'tag_added',
                     'tag_removed',
                     'call',
+                    'show_completed',
                     'status_change',
                     'assignment',
                     'follow_up_changed',
                 ]),
             ],
-            'comment' => 'nullable|string',
+            'comment' => 'required_if:type,show_completed|nullable|string',
             'tag' => 'nullable|string|max:64',
             'result' => 'nullable|string|max:100',
             'duration_seconds' => 'nullable|integer|min:0',
+            'contact_outcome' => ['nullable', Rule::in(['connected', 'no_answer', 'invalid_number', 'callback'])],
             'note' => 'nullable|string',
             'status' => $forDeal ? 'nullable' : ['nullable', Rule::in(array_diff(Lead::statuses(), [Lead::STATUS_CONVERTED]))],
             'responsible_agent_id' => 'nullable|integer|exists:users,id',
@@ -142,6 +144,7 @@ class CrmActivityController extends Controller
                 'comment' => $this->leadComment($lead, $authUser, $data),
                 'tag_added' => $this->leadTagAdded($lead, $authUser, $data),
                 'tag_removed' => $this->leadTagRemoved($lead, $authUser, $data),
+                'show_completed' => app(\App\Services\Crm\AuditLogger::class)->log($lead, $authUser, 'show_completed', [], [], $data['comment']),
                 'call' => $this->leadCall($lead, $authUser, $data),
                 'status_change' => $this->leadStatusChange($lead, $authUser, $data),
                 'assignment' => $this->leadAssignment($lead, $authUser, $data),
@@ -215,6 +218,7 @@ class CrmActivityController extends Controller
                 'comment' => $this->dealComment($deal, $authUser, $data),
                 'tag_added' => $this->dealTagAdded($deal, $authUser, $data),
                 'tag_removed' => $this->dealTagRemoved($deal, $authUser, $data),
+                'show_completed' => app(\App\Services\Crm\AuditLogger::class)->log($deal, $authUser, 'show_completed', [], [], $data['comment']),
                 'call' => $this->dealCall($deal, $authUser, $data),
                 'status_change' => $this->dealStatusChange($deal, $authUser, $data),
                 'assignment' => $this->dealAssignment($deal, $authUser, $data),
@@ -288,7 +292,7 @@ class CrmActivityController extends Controller
             $lead->last_contact_result,
             $data['duration_seconds'] ?? null,
             $data['note'] ?? null,
-            ['lead_id' => $lead->id]
+            ['lead_id' => $lead->id, 'contact_outcome' => $data['contact_outcome'] ?? null]
         );
     }
 
@@ -435,7 +439,7 @@ class CrmActivityController extends Controller
             $deal->last_contact_result,
             $data['duration_seconds'] ?? null,
             $data['note'] ?? null,
-            ['deal_id' => $deal->id]
+            ['deal_id' => $deal->id, 'contact_outcome' => $data['contact_outcome'] ?? null]
         );
     }
 

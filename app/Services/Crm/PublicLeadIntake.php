@@ -119,6 +119,7 @@ class PublicLeadIntake
                 ],
             ]);
             DB::table('lead_intakes')->where('id', $receipt->id)->update(['lead_id' => $lead->id, 'updated_at' => now()]);
+            app(\App\Services\Marketing\LeadReceiptTracker::class)->capture($lead);
             $this->audit->log($lead, null, 'created', [], ['source' => $lead->source, 'status' => $lead->status], 'Заявка принята во внутреннюю CRM Aura.');
             DB::afterCommit(function () use ($lead) {
                 try {
