@@ -2426,6 +2426,23 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertIsNumeric(data_get($row, 'metrics.objects.target_value'));
     }
 
+    public function test_monthly_v2_user_ids_filter_is_applied_before_pagination_and_preserves_scope(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900008001', 'role_id' => $adminRole->id, 'branch_id' => $branch->id]);
+        $first = User::create(['name' => 'A', 'phone' => '900008002', 'role_id' => $agentRole->id, 'branch_id' => $branch->id]);
+        $second = User::create(['name' => 'Z', 'phone' => '900008003', 'role_id' => $agentRole->id, 'branch_id' => $branch->id]);
+        $url = '/api/kpi/monthly?year=2026&month=5&v=2&per_page=1&user_ids[]='.$second->id;
+        Sanctum::actingAs($admin);
+        $this->getJson($url)->assertOk()->assertJsonPath('meta.pagination.total', 1)
+            ->assertJsonPath('rows.0.employee_id', $second->id);
+        Sanctum::actingAs($first);
+        $this->getJson($url)->assertOk()->assertJsonPath('meta.pagination.total', 0)->assertJsonCount(0, 'rows');
+        $this->getJson('/api/kpi/monthly?year=2026&month=5&v=2&user_ids[]=bad')->assertStatus(422);
+    }
+
     public function test_monthly_v2_filter_returns_row_for_agent_without_reports(): void
     {
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
