@@ -62,7 +62,7 @@ class SmsAuthService
             return true;
         }
 
-        $record = SmsVerificationCode::where('phone', $phone)
+        $record = SmsVerificationCode::whereIn('phone', \App\Support\UserPhoneIdentity::variants($phone))
             ->where('purpose', $purpose)
             ->where('expires_at', '>', now())
             ->first();
@@ -80,15 +80,18 @@ class SmsAuthService
 
     public function clearCode(string $phone, string $purpose): void
     {
-        SmsVerificationCode::where('phone', $phone)
+        SmsVerificationCode::whereIn('phone', \App\Support\UserPhoneIdentity::variants($phone))
             ->where('purpose', $purpose)
             ->delete();
     }
 
     private function storeCode(string $phone, string $purpose, string $code): string
     {
+        // A reissued code replaces older codes stored under another phone format.
+        $this->clearCode($phone, $purpose);
+
         SmsVerificationCode::updateOrCreate(
-            ['phone' => $phone, 'purpose' => $purpose],
+            ['phone' => \App\Support\InternationalPhone::accountValue($phone), 'purpose' => $purpose],
             [
                 'code' => $code,
                 'expires_at' => now()->addMinutes(5),

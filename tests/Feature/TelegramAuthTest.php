@@ -304,7 +304,7 @@ class TelegramAuthTest extends TestCase
         ])->assertOk()->assertJsonPath('message', 'Код для сброса пароля отправлен в Telegram');
 
         $record = SmsVerificationCode::query()
-            ->where('phone', $user->phone)
+            ->where('phone', \App\Support\InternationalPhone::accountValue($user->phone))
             ->where('purpose', SmsVerificationCode::PURPOSE_PASSWORD_RESET)
             ->first();
 
