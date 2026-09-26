@@ -118,9 +118,9 @@ class AuthController extends Controller
         ], 403);
     }
 
-    private function findUserForPhoneLogin(string $phone): ?User
+    private function findUserForPhoneLogin(string $phone, ?string $password = null): ?User
     {
-        $user = UserPhoneIdentity::resolve($phone);
+        $user = UserPhoneIdentity::resolve($phone, $password);
 
         if ($user || ! Schema::hasColumn('users', 'deletion_phone_hash')) {
             return $user;
@@ -346,7 +346,7 @@ class AuthController extends Controller
             'app_version' => 'nullable|string|max:50',
         ]);
 
-        $user = $this->findUserForPhoneLogin($request->phone);
+        $user = $this->findUserForPhoneLogin($request->phone, $request->password);
 
         if (!$user) {
             return response()->json(['message' => 'Пользователь не найден'], 404);
