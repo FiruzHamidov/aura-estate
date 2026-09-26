@@ -266,8 +266,8 @@ class UserController extends Controller
     {
         $actorRole = $this->roleSlug($authUser);
         if ($actorRole === 'rop') {
-            abort_unless($operation === 'dismiss' && $authUser->id !== $targetUser->id
-                && $targetUser->status === User::STATUS_ACTIVE
+            abort_unless(in_array($operation, ['update', 'dismiss'], true) && $authUser->id !== $targetUser->id
+                && ($operation === 'update' || $targetUser->status === User::STATUS_ACTIVE)
                 && ! $targetUser->isDeletedAccount()
                 && in_array($this->roleSlug($targetUser), ['agent', 'mop', 'intern'], true), 403, 'FORBIDDEN_ACTION');
             app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $targetUser);
@@ -709,6 +709,14 @@ class UserController extends Controller
                 'security_attendance_branch_ids' => 'sometimes|array|max:100',
                 'security_attendance_branch_ids.*' => 'required|integer|distinct|exists:branches,id',
             ]);
+
+            if ($authUser->hasRole('rop')) {
+                // Profile editing must not bypass organization or dismissal workflows.
+                foreach (['role_id', 'branch_id', 'branch_group_id', 'status'] as $field) {
+                    abort_if($request->exists($field) && (string) $request->input($field) !== (string) $user->{$field},
+                        403, 'FORBIDDEN_ACTION');
+                }
+            }
 
             $targetRole = $this->resolveRequestedRole($request, $user);
 

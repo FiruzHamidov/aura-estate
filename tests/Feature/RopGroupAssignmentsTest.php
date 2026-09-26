@@ -61,6 +61,42 @@ class RopGroupAssignmentsTest extends TestCase
             'branch_group_id' => $group?->id, 'status' => 'active']);
     }
 
+    public function test_rop_can_edit_employee_details_only_in_assigned_groups(): void
+    {
+        Role::create(['name' => 'intern', 'slug' => 'intern']);
+        $this->rop->supervisedGroups()->attach([$this->a->id, $this->b->id]);
+        Sanctum::actingAs($this->rop);
+        foreach (['agent', 'mop', 'intern'] as $role) {
+            foreach ([$this->a, $this->b] as $group) {
+                $employee = $this->user($role, $group);
+                $this->patchJson('/api/user/'.$employee->id, ['name' => 'Updated employee',
+                    'role_id' => $employee->role_id, 'branch_id' => $employee->branch_id,
+                    'branch_group_id' => $employee->branch_group_id])->assertOk();
+                $this->assertSame('Updated employee', $employee->fresh()->name);
+            }
+        }
+        foreach ([$this->user('agent', $this->c), $this->user('agent'), $this->admin, $this->rop] as $foreign) {
+            $this->patchJson('/api/user/'.$foreign->id, ['name' => 'Forbidden'])->assertNotFound();
+            $this->assertNotSame('Forbidden', $foreign->fresh()->name);
+        }
+    }
+
+    public function test_rop_profile_edit_cannot_change_organization_or_bypass_dismissal(): void
+    {
+        $this->rop->supervisedGroups()->attach([$this->a->id, $this->b->id]);
+        $employee = $this->user('agent', $this->a);
+        Sanctum::actingAs($this->rop);
+        foreach ([['role_id' => $this->admin->role_id], ['role_id' => Role::where('slug', 'mop')->value('id')],
+            ['branch_group_id' => $this->b->id], ['branch_group_id' => null], ['status' => 'inactive']] as $changes) {
+            $this->patchJson('/api/user/'.$employee->id, ['name' => 'Forbidden'] + $changes)->assertForbidden();
+            $this->assertSame('agent', $employee->fresh()->name);
+        }
+        $employee->update(['status' => 'inactive']);
+        $this->patchJson('/api/user/'.$employee->id, ['name' => 'Inactive employee'])->assertOk();
+        $this->rop->supervisedGroups()->detach();
+        $this->patchJson('/api/user/'.$employee->id, ['name' => 'Revoked'])->assertNotFound();
+    }
+
     private function url(): string
     {
         return '/api/users/'.$this->rop->id.'/supervised-groups';
