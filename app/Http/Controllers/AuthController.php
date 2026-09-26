@@ -8,6 +8,8 @@ use App\Models\User;
 use App\Services\DailyReportService;
 use App\Services\SmsAuthService;
 use App\Services\TelegramBotService;
+use App\Support\InternationalPhone;
+use App\Support\UserPhoneIdentity;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
@@ -23,6 +25,10 @@ class AuthController extends Controller
 
     private function createClientUserFromPhone(string $phone): ?User
     {
+        if ($existing = UserPhoneIdentity::resolve($phone)) {
+            return $existing;
+        }
+
         if ($this->deletedAccountForPhone($phone)) {
             return null;
         }
@@ -34,7 +40,7 @@ class AuthController extends Controller
         }
 
         return User::query()->firstOrCreate(
-            ['phone' => $phone],
+            ['phone' => InternationalPhone::accountValue($phone)],
             [
                 'name' => 'Клиент ' . $phone,
                 'role_id' => $clientRole->id,
@@ -48,7 +54,7 @@ class AuthController extends Controller
     {
         $validated = $request->validate([
             'name' => 'required|string|max:255',
-            'phone' => 'required|string|max:255|unique:users,phone',
+            'phone' => ['required', 'string', 'max:255', new \App\Rules\InternationalPhoneNumber, new \App\Rules\UniqueUserPhone],
             'email' => 'nullable|email|max:255|unique:users,email',
             'password' => 'required|string|min:6|confirmed',
             'device_name' => 'nullable|string|max:255',
@@ -68,7 +74,7 @@ class AuthController extends Controller
 
         $user = User::query()->create([
             'name' => $validated['name'],
-            'phone' => $validated['phone'],
+            'phone' => InternationalPhone::accountValue($validated['phone']),
             'email' => $validated['email'] ?? null,
             'password' => Hash::make($validated['password']),
             'role_id' => $clientRole->id,
@@ -114,17 +120,14 @@ class AuthController extends Controller
 
     private function findUserForPhoneLogin(string $phone): ?User
     {
-        $user = User::query()
-            ->where('phone', $phone)
-            ->with('role')
-            ->first();
+        $user = UserPhoneIdentity::resolve($phone);
 
         if ($user || ! Schema::hasColumn('users', 'deletion_phone_hash')) {
             return $user;
         }
 
         return User::query()
-            ->where('deletion_phone_hash', User::accountDeletionPhoneHash($phone))
+            ->whereIn('deletion_phone_hash', array_map([User::class, 'accountDeletionPhoneHash'], UserPhoneIdentity::variants($phone)))
             ->with('role')
             ->first();
     }
@@ -136,7 +139,7 @@ class AuthController extends Controller
         }
 
         return User::query()
-            ->where('deletion_phone_hash', User::accountDeletionPhoneHash($phone))
+            ->whereIn('deletion_phone_hash', array_map([User::class, 'accountDeletionPhoneHash'], UserPhoneIdentity::variants($phone)))
             ->first();
     }
 

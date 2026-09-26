@@ -552,7 +552,7 @@ class UserController extends Controller
                 'name' => 'required|string',
                 'description' => 'nullable|string',
                 'birthday' => 'nullable|date',
-                'phone' => ['required', 'string', 'unique:users,phone', new \App\Rules\InternationalPhoneNumber],
+                'phone' => ['required', 'string', new \App\Rules\UniqueUserPhone, new \App\Rules\InternationalPhoneNumber],
                 'email' => 'nullable|email|unique:users,email',
                 'role_id' => 'required|exists:roles,id',
                 'branch_id' => 'nullable|exists:branches,id',
@@ -669,7 +669,7 @@ class UserController extends Controller
             'name' => 'sometimes|string',
             'description' => 'nullable|string',
             'birthday' => 'nullable|date',
-            'phone' => ['sometimes', 'string', 'unique:users,phone,'.$user->id, new \App\Rules\InternationalPhoneNumber],
+            'phone' => ['sometimes', 'string', new \App\Rules\UniqueUserPhone($user->id), new \App\Rules\InternationalPhoneNumber],
             'email' => 'sometimes|email|unique:users,email,'.$user->id,
         ]);
 
@@ -698,7 +698,7 @@ class UserController extends Controller
                 'name' => 'sometimes|string',
                 'description' => 'nullable|string',
                 'birthday' => 'nullable|date',
-                'phone' => ['sometimes', 'string', 'unique:users,phone,'.$user->id, new \App\Rules\InternationalPhoneNumber],
+                'phone' => ['sometimes', 'string', new \App\Rules\UniqueUserPhone($user->id), new \App\Rules\InternationalPhoneNumber],
                 'email' => 'sometimes|nullable|email|unique:users,email,'.$user->id,
                 'role_id' => 'sometimes|exists:roles,id',
                 'branch_id' => 'sometimes|nullable|exists:branches,id',

@@ -50,7 +50,7 @@ class ExternalAgentController extends Controller
         $actor = $this->actor($request);
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
-            'phone' => [new \App\Rules\InternationalPhoneNumber, 'required', 'string', 'max:255', Rule::unique('users', 'phone')],
+            'phone' => [new \App\Rules\InternationalPhoneNumber, 'required', 'string', 'max:255', new \App\Rules\UniqueUserPhone],
             'email' => ['sometimes', 'nullable', 'email', 'max:255', Rule::unique('users', 'email')],
             'description' => ['sometimes', 'nullable', 'string'],
             'auth_method' => ['sometimes', Rule::in(['password', 'sms'])],

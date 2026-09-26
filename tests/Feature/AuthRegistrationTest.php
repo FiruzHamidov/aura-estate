@@ -89,7 +89,7 @@ class AuthRegistrationTest extends TestCase
         $response->assertJsonPath('user.role.slug', 'client');
         $this->assertNotEmpty($response->json('token'));
 
-        $user = User::query()->where('phone', '992900001111')->first();
+        $user = User::query()->where('phone', '900001111')->first();
         $this->assertNotNull($user);
         $this->assertTrue(Hash::check('password123', (string) $user->password));
         $this->assertSame($clientRole->id, $user->role_id);
@@ -163,5 +163,75 @@ class AuthRegistrationTest extends TestCase
             'branch_groups',
             'responsible_agents',
         ]);
+    }
+
+    public function test_login_resolves_active_agent_instead_of_inactive_national_duplicate(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $client = Role::create(['name' => 'Client', 'slug' => 'client']);
+        $agent = User::create(['name' => 'Agent', 'phone' => '+992901234567', 'password' => Hash::make('agent-password'), 'role_id' => $role->id, 'status' => 'active']);
+        User::create(['name' => 'Old client', 'phone' => '901234567', 'password' => Hash::make('client-password'), 'role_id' => $client->id, 'status' => 'inactive']);
+        foreach (['901234567', '+992901234567', '992901234567', '+992 90 123-45-67'] as $phone) {
+            $this->postJson('/api/login', ['phone' => $phone, 'password' => 'agent-password'])
+                ->assertOk()->assertJsonPath('user.id', $agent->id);
+        }
+        $this->postJson('/api/login', ['phone' => '901234567', 'password' => 'client-password'])->assertUnauthorized();
+        $this->assertDatabaseCount('users', 2);
+    }
+
+    public function test_two_active_equivalent_accounts_require_manual_resolution(): void
+    {
+        $role = Role::create(['name' => 'Client', 'slug' => 'client']);
+        foreach (['901234567', '+992901234567'] as $phone) {
+            User::create(['name' => 'Duplicate', 'phone' => $phone, 'password' => Hash::make('password123'), 'role_id' => $role->id, 'status' => 'active']);
+        }
+        $this->postJson('/api/login', ['phone' => '901234567', 'password' => 'password123'])
+            ->assertStatus(409)->assertJsonPath('code', 'PHONE_IDENTITY_CONFLICT');
+        $this->postJson('/api/sms/request', ['phone' => '901234567'])
+            ->assertStatus(409)->assertJsonPath('code', 'PHONE_IDENTITY_CONFLICT');
+        $this->assertDatabaseCount('personal_access_tokens', 0);
+    }
+
+    public function test_registration_rejects_equivalent_formatted_existing_phone(): void
+    {
+        $role = Role::create(['name' => 'Client', 'slug' => 'client']);
+        User::create(['name' => 'Existing', 'phone' => '+992 90 123-45-67', 'role_id' => $role->id, 'status' => 'active']);
+        $this->postJson('/api/register', ['name' => 'New', 'phone' => '901234567', 'password' => 'password123', 'password_confirmation' => 'password123'])
+            ->assertUnprocessable()->assertJsonStructure(['details' => ['errors' => ['phone']]]);
+        $this->assertDatabaseCount('users', 1);
+    }
+
+    public function test_sms_with_changed_phone_format_uses_existing_agent_without_creating_client(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        Role::create(['name' => 'Client', 'slug' => 'client']);
+        $agent = User::create(['name' => 'Agent', 'phone' => '+992901234567', 'role_id' => $role->id, 'status' => 'active']);
+        $service = app(\App\Services\SmsAuthService::class);
+        $code = $service->storeVerificationCode('+992901234567', 'login');
+        $this->postJson('/api/sms/verify', ['phone' => '901234567', 'code' => $code])
+            ->assertOk()->assertJsonPath('user.id', $agent->id);
+        $this->assertDatabaseCount('users', 1);
+    }
+
+    public function test_inactive_account_remains_blocked_in_any_format(): void
+    {
+        $role = Role::create(['name' => 'Client', 'slug' => 'client']);
+        User::create(['name' => 'Inactive', 'phone' => '+992901234567', 'password' => Hash::make('password123'), 'role_id' => $role->id, 'status' => 'inactive']);
+        $this->postJson('/api/login', ['phone' => '901234567', 'password' => 'password123'])->assertForbidden();
+    }
+
+    public function test_reissued_sms_code_replaces_legacy_format_and_uniqueness_ignores_only_self(): void
+    {
+        $role = Role::create(['name' => 'Client', 'slug' => 'client']);
+        $user = User::create(['name' => 'Existing', 'phone' => '+992901234567', 'role_id' => $role->id, 'status' => 'active']);
+        $rule = new \App\Rules\UniqueUserPhone($user->id);
+        $this->assertTrue(\Illuminate\Support\Facades\Validator::make(['phone' => '901234567'], ['phone' => [$rule]])->passes());
+        $this->assertFalse(\Illuminate\Support\Facades\Validator::make(['phone' => '901234567'], ['phone' => [new \App\Rules\UniqueUserPhone]])->passes());
+        SmsVerificationCode::create(['phone' => '+992901234567', 'purpose' => 'login', 'code' => 'old-code', 'expires_at' => now()->addMinutes(5)]);
+        $service = app(\App\Services\SmsAuthService::class);
+        $code = $service->storeVerificationCode('901234567', 'login');
+        $this->assertFalse($service->verifyCode('+992901234567', 'old-code'));
+        $this->assertTrue($service->verifyCode('+992901234567', $code));
+        $this->assertDatabaseCount('sms_verification_codes', 1);
     }
 }
