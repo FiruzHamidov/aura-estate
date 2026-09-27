@@ -1138,7 +1138,7 @@ class UserAccessTest extends TestCase
         }
     }
 
-    public function test_director_preserves_employee_management_while_rop_has_read_only_group_scope(): void
+    public function test_director_preserves_employee_management_while_rop_edits_only_assigned_group_employees(): void
     {
         $branch = Branch::create(['name' => 'Own branch']);
         $otherBranch = Branch::create(['name' => 'Other branch']);
@@ -1185,7 +1185,7 @@ class UserAccessTest extends TestCase
             Sanctum::actingAs($actor);
             if ($actorRole === 'rop') {
                 $this->getJson('/api/user?role=client')->assertOk()->assertJsonCount(0, 'data');
-                $this->patchJson('/api/user/'.$ownAgent->id, ['name' => 'Blocked'])->assertForbidden();
+                $this->patchJson('/api/user/'.$ownAgent->id, ['name' => 'Agent by ROP'])->assertOk()->assertJsonPath('name', 'Agent by ROP');
                 foreach ([$client, $ownRop, $ownDirector, $ownAdmin, $foreignAgent] as $hidden) {
                     $this->getJson('/api/user/'.$hidden->id)->assertNotFound();
                     $this->patchJson('/api/user/'.$hidden->id, ['name' => 'Blocked'])->assertNotFound();
