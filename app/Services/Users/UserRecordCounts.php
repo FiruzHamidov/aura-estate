@@ -4,6 +4,7 @@ namespace App\Services\Users;
 
 use App\Models\{Booking, BranchGroup, Client, Deal, Property, User};
 use App\Support\RopGroupAccess;
+use App\Services\GroupAccess\UserOrganizationService;
 use Illuminate\Support\Collection;
 
 final class UserRecordCounts
@@ -35,6 +36,17 @@ final class UserRecordCounts
                 } else {
                     $query->whereIn('branch_group_id', BranchGroup::query()->where('branch_id', $actor->branch_id)->select('id'));
                 }
+            }
+            if ($type === 'properties') {
+                $closed = UserOrganizationService::CLOSED_PROPERTY_STATUSES;
+                $placeholders = implode(',', array_fill(0, count($closed), '?'));
+                $rows = $query->selectRaw($responsible.', COUNT(*) as total')
+                    ->selectRaw("SUM(CASE WHEN moderation_status IN ($placeholders) THEN 1 ELSE 0 END) as completed", $closed)
+                    ->groupBy($responsible)->get();
+                $counts[$type] = $rows->pluck('total', $responsible);
+                $counts['properties_active'] = $rows->mapWithKeys(fn ($row) => [$row->$responsible => (int) $row->total - (int) $row->completed]);
+                $counts['properties_completed'] = $rows->pluck('completed', $responsible);
+                continue;
             }
             $counts[$type] = $query->selectRaw($responsible.', COUNT(*) as total')
                 ->groupBy($responsible)->pluck('total', $responsible);
