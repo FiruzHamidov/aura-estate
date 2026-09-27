@@ -76,8 +76,9 @@ final class DismissalTransfer
             return false;
         }
 
-        if ($record['type'] === 'properties' && $target->branch_group_id
-            && in_array($actor->role?->slug, ['admin', 'superadmin', 'branch_director'], true)
+        if (in_array($record['type'], ['properties', 'clients'], true) && $target->branch_group_id
+            && (in_array($actor->role?->slug, ['admin', 'superadmin', 'branch_director'], true)
+                || ($record['type'] === 'clients' && $actor->hasRole('rop')))
             && (! $actor->hasRole('branch_director') || (int) $actor->branch_id === (int) $target->branch_id)) {
             return true;
         }
@@ -108,7 +109,8 @@ final class DismissalTransfer
         $records = $this->inventory($employee);
         $this->ensureRecordScope($actor, $records);
         $recipients = $this->recipients($actor, $employee);
-        $properties = collect($records)->where('type', 'properties')->keyBy('id');
+        $parents = collect($records)->keyBy(fn ($r) => $r['type'].':'.$r['id']);
+        $groups = BranchGroup::whereIn('id', array_filter(array_column($records, 'branch_group_id')))->pluck('name', 'id');
 
         $loads = [];
         if (Schema::hasTable('properties')) {
@@ -118,14 +120,20 @@ final class DismissalTransfer
         }
 
         return ['revision' => $this->revision($employee, $records),
-            'records' => array_map(function ($r) use ($actor, $recipients, $properties) {
-                $parent = $r['type'] === 'tasks' && in_array($r['attributes']['related_entity_type'] ?? null, ['property', 'ad'], true)
-                    ? $properties->get($r['attributes']['related_entity_id'] ?? 0) : null;
+            'records' => array_map(function ($r) use ($actor, $recipients, $parents, $groups) {
+                $parentType = match ($r['attributes']['related_entity_type'] ?? null) {
+                    'property', 'ad' => 'properties', 'client' => 'clients', default => null,
+                };
+                $parent = $r['type'] === 'tasks' && $parentType
+                    ? $parents->get($parentType.':'.($r['attributes']['related_entity_id'] ?? 0)) : null;
                 $scope = $parent ?? $r;
                 $eligible = $recipients->filter(fn ($u) => $this->eligible($actor, $u, $scope))->pluck('id')->values()->all();
                 $coOwner = (int) ($r['attributes']['co_owner_user_id'] ?? 0);
                 return [...array_intersect_key($r, array_flip(['type', 'id', 'title', 'branch_group_id', 'branch_id'])),
-                    'eligible_user_ids' => $eligible, 'follows_property_id' => $parent['id'] ?? null,
+                    'group_name' => $groups->get($r['branch_group_id']),
+                    'eligible_user_ids' => $eligible,
+                    'follows_property_id' => $parent && $parentType === 'properties' ? $parent['id'] : null,
+                    'follows_client_id' => $parent && $parentType === 'clients' ? $parent['id'] : null,
                     'preferred_user_id' => $r['type'] === 'properties' && in_array($coOwner, $eligible, true) ? $coOwner : null];
             }, $records),
             'recipients' => $recipients->map(fn ($u) => [...$u->only(['id', 'name', 'branch_id', 'branch_group_id']),
@@ -169,18 +177,18 @@ final class DismissalTransfer
             }
             $target = $targets->get($assignments[$record['type'].':'.$record['id']]);
             abort_unless($target && $this->eligible($actor, $target, $record), 422, 'INVALID_TRANSFER_TARGET');
-            if ($record['type'] === 'properties'
+            if (in_array($record['type'], ['properties', 'clients'], true)
                 && ((int) $target->branch_group_id !== (int) $record['branch_group_id']
                     || (int) $target->branch_id !== (int) $record['branch_id'])) {
-                abort_unless((int) ($destinations['properties:'.$record['id']] ?? 0) === (int) $target->branch_group_id,
+                abort_unless((int) ($destinations[$record['type'].':'.$record['id']] ?? 0) === (int) $target->branch_group_id,
                     422, 'TRANSFER_DESTINATION_CONFIRMATION_REQUIRED');
                 $transfer = app(GroupRecordTransfer::class);
-                $model = $transfer->model('properties', $record['id'], true);
-                $transfer->transfer($actor, 'properties', $record['id'], [
+                $model = $transfer->model($record['type'], $record['id'], true);
+                $transfer->transfer($actor, $record['type'], $record['id'], [
                     'branch_group_id' => $target->branch_group_id, 'responsible_user_id' => $target->id,
                     'revision' => $transfer->revision($model), 'reason' => $plan['reason'],
                 ]);
-                $counts['properties']++;
+                $counts[$record['type']]++;
                 continue;
             }
             $field = GroupOwnedRecordObserver::RESPONSIBLES[$record['table']];
