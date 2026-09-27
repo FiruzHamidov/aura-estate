@@ -4,6 +4,8 @@ namespace App\Services\Users;
 
 use App\Models\BranchGroup;
 use App\Models\User;
+use App\Models\DealStage;
+use App\Services\GroupAccess\TaskGroupOwnership;
 use App\Observers\GroupOwnedRecordObserver;
 use App\Support\RopGroupAccess;
 use App\Services\GroupAccess\GroupAccessAudit;
@@ -70,21 +72,58 @@ final class DismissalTransfer
             ->orderBy('id')->get()->reject(fn (User $user) => $user->isDeletedAccount());
     }
 
+    private function parentReference(array $record): ?array
+    {
+        $attributes = $record['attributes'];
+        if ($record['type'] === 'tasks') {
+            $type = match ($attributes['related_entity_type'] ?? null) {
+                'property', 'ad' => 'properties', 'client' => 'clients', 'deal' => 'deals',
+                'lead' => 'leads', 'showing' => 'bookings', default => null,
+            };
+            return $type && ! empty($attributes['related_entity_id']) ? ['type' => $type, 'id' => $attributes['related_entity_id']] : null;
+        }
+        if ($record['type'] === 'deals' && ! empty($attributes['primary_property_id'])) {
+            $control = ($attributes['control_kind'] ?? null) === 'security_property_closure';
+            if (! $control && ! empty($attributes['pipeline_id'])) {
+                $pipeline = \App\Models\DealPipeline::find($attributes['pipeline_id']);
+                $control = $pipeline?->isPropertyControl() ?? false;
+            }
+            if ($control) return ['type' => 'properties', 'id' => $attributes['primary_property_id']];
+        }
+        return null;
+    }
+
     private function eligible(User $actor, User $target, array $record): bool
     {
         if ($actor->hasRole('rop') && ! app(RopGroupAccess::class)->allows($actor, $target)) {
             return false;
         }
 
-        if (in_array($record['type'], ['properties', 'clients'], true) && $target->branch_group_id
+        if (empty($record['linked_task_fixed_group']) && $target->branch_group_id
             && (in_array($actor->role?->slug, ['admin', 'superadmin', 'branch_director'], true)
-                || ($record['type'] === 'clients' && $actor->hasRole('rop')))
+                || ($record['type'] !== 'properties' && $actor->hasRole('rop')))
             && (! $actor->hasRole('branch_director') || (int) $actor->branch_id === (int) $target->branch_id)) {
-            return true;
+            return $record['type'] !== 'deals' || $this->dealDestination($record, $target) !== null;
         }
 
         return (int) $target->branch_group_id === (int) $record['branch_group_id']
             && (int) $target->branch_id === (int) $record['branch_id'];
+    }
+
+    private function dealDestination(array $record, User $target): ?array
+    {
+        if ((int) $record['branch_id'] === (int) $target->branch_id) return [];
+        $stageId = $record['attributes']['stage_id'] ?? null;
+        if (! $stageId) return null;
+        $source = DealStage::with('pipeline')->find($stageId);
+        if (! $source?->pipeline) return null;
+        $matches = DealStage::query()->where('is_active', true)
+            ->where('slug', $source->slug)->where('is_closed', $source->is_closed)->where('is_lost', $source->is_lost)
+            ->whereHas('pipeline', fn ($q) => $q->where('branch_id', $target->branch_id)->where('is_active', true)
+                ->where('slug', $source->pipeline->slug)->where('type', $source->pipeline->type))
+            ->limit(2)->get();
+        if ($matches->count() !== 1) return null;
+        return ['pipeline_id' => $matches[0]->pipeline_id, 'stage_id' => $matches[0]->id];
     }
 
     private function ensureRecordScope(User $actor, array $records): void
@@ -121,17 +160,17 @@ final class DismissalTransfer
 
         return ['revision' => $this->revision($employee, $records),
             'records' => array_map(function ($r) use ($actor, $recipients, $parents, $groups) {
-                $parentType = match ($r['attributes']['related_entity_type'] ?? null) {
-                    'property', 'ad' => 'properties', 'client' => 'clients', default => null,
-                };
-                $parent = $r['type'] === 'tasks' && $parentType
-                    ? $parents->get($parentType.':'.($r['attributes']['related_entity_id'] ?? 0)) : null;
+                $reference = $this->parentReference($r);
+                $parentType = $reference['type'] ?? null;
+                $parent = $reference ? $parents->get($reference['type'].':'.$reference['id']) : null;
                 $scope = $parent ?? $r;
+                if ($reference && ! $parent) $scope['linked_task_fixed_group'] = true;
                 $eligible = $recipients->filter(fn ($u) => $this->eligible($actor, $u, $scope))->pluck('id')->values()->all();
                 $coOwner = (int) ($r['attributes']['co_owner_user_id'] ?? 0);
                 return [...array_intersect_key($r, array_flip(['type', 'id', 'title', 'branch_group_id', 'branch_id'])),
                     'group_name' => $groups->get($r['branch_group_id']),
                     'eligible_user_ids' => $eligible,
+                    'follows_record' => $parent ? ['type' => $parent['type'], 'id' => $parent['id']] : null,
                     'follows_property_id' => $parent && $parentType === 'properties' ? $parent['id'] : null,
                     'follows_client_id' => $parent && $parentType === 'clients' ? $parent['id'] : null,
                     'preferred_user_id' => $r['type'] === 'properties' && in_array($coOwner, $eligible, true) ? $coOwner : null];
@@ -169,13 +208,32 @@ final class DismissalTransfer
             && in_array($target->role?->slug, ['agent', 'mop'], true));
         $counts = array_fill_keys(array_keys(GroupRecordTransfer::MODELS), 0);
         foreach ($inventory as $record) {
+            $reference = $this->parentReference($record);
+            if ($record['type'] === 'deals' && $reference) {
+                $fresh = DB::table($record['table'])->where('id', $record['id'])->lockForUpdate()->first();
+                $record['attributes'] = (array) $fresh;
+                $record['branch_group_id'] = $fresh->branch_group_id;
+                $record['branch_id'] = $fresh->branch_id;
+            }
             if ($record['type'] === 'tasks') {
                 $fresh = DB::table($record['table'])->where('id', $record['id'])->lockForUpdate()->first();
                 $record['branch_group_id'] = $fresh->branch_group_id;
+                $record['attributes'] = (array) $fresh;
                 $record['branch_id'] = $fresh->branch_group_id
                     ? BranchGroup::whereKey($fresh->branch_group_id)->value('branch_id') : $record['branch_id'];
             }
             $target = $targets->get($assignments[$record['type'].':'.$record['id']]);
+            if ($record['type'] === 'deals' && $reference) {
+                $property = app(GroupRecordTransfer::class)->model('properties', $reference['id'], true);
+                abort_unless($target && (int) $target->branch_group_id === (int) $property->branch_group_id,
+                    422, 'TASK_MUST_FOLLOW_PARENT_GROUP');
+            }
+            if ($record['type'] === 'tasks' && ! empty($record['attributes']['related_entity_id'])) {
+                $task = app(GroupRecordTransfer::class)->model('tasks', $record['id'], true);
+                $parent = app(TaskGroupOwnership::class)->parent($task, true);
+                abort_unless($parent && $target && (int) $target->branch_group_id === (int) $parent->branch_group_id,
+                    422, 'TASK_MUST_FOLLOW_PARENT_GROUP');
+            }
             abort_unless($target && $this->eligible($actor, $target, $record), 422, 'INVALID_TRANSFER_TARGET');
             if (in_array($record['type'], ['properties', 'clients'], true)
                 && ((int) $target->branch_group_id !== (int) $record['branch_group_id']
@@ -193,6 +251,18 @@ final class DismissalTransfer
             }
             $field = GroupOwnedRecordObserver::RESPONSIBLES[$record['table']];
             $changes = [$field => $target->id, 'updated_at' => now()];
+            if (! in_array($record['type'], ['properties', 'clients'], true)
+                && ((int) $target->branch_group_id !== (int) $record['branch_group_id'] || (int) $target->branch_id !== (int) $record['branch_id'])) {
+                $destination = $destinations[$record['type'].':'.$record['id']] ?? null;
+                abort_if($destination !== null && (int) $destination !== (int) $target->branch_group_id, 422, 'INVALID_TRANSFER_TARGET');
+                $changes['branch_group_id'] = $target->branch_group_id;
+                if (array_key_exists('branch_id', $record['attributes'])) $changes['branch_id'] = $target->branch_id;
+                if ($record['type'] === 'deals') {
+                    $stage = $this->dealDestination($record, $target);
+                    abort_if($stage === null, 422, 'TRANSFER_PIPELINE_REQUIRED');
+                    $changes = [...$changes, ...$stage];
+                }
+            }
             if ($record['type'] === 'properties') {
                 if (in_array((int) ($record['attributes']['co_owner_user_id'] ?? 0), [$employee->id, $target->id], true)) {
                     $changes['co_owner_user_id'] = null;
@@ -202,6 +272,17 @@ final class DismissalTransfer
                 }
             }
             DB::table($record['table'])->where('id', $record['id'])->update($changes);
+            if (isset($changes['branch_group_id']) && $record['type'] !== 'tasks' && Schema::hasTable('crm_tasks')) {
+                $relatedType = match ($record['type']) { 'bookings' => 'showing', default => rtrim($record['type'], 's') };
+                $tasks = app(TaskGroupOwnership::class)->active(DB::table('crm_tasks'))
+                    ->where('related_entity_type', $relatedType)->where('related_entity_id', $record['id'])->lockForUpdate()->get();
+                foreach ($tasks as $task) {
+                    $taskChanges = ['branch_group_id' => $target->branch_group_id, 'assignee_id' => $target->id, 'updated_at' => now()];
+                    DB::table('crm_tasks')->where('id', $task->id)->update($taskChanges);
+                    $this->audit->record($actor, 'employee_dismissal_record_transferred', 'crm_tasks', $task->id,
+                        ['branch_group_id' => $task->branch_group_id, 'assignee_id' => $task->assignee_id], $taskChanges, $plan['reason']);
+                }
+            }
             if ($record['type'] === 'clients' && Schema::hasTable('client_needs')) {
                 DB::table('client_needs')->where('client_id', $record['id'])->update(['responsible_agent_id' => $target->id, 'updated_at' => now()]);
             }
