@@ -532,4 +532,97 @@ class DismissalTransferTest extends TestCase
         $this->assertDatabaseHas('crm_tasks', ['id' => 1, 'assignee_id' => $target->id, 'branch_group_id' => $target->branch_group_id]);
     }
 
+    public static function operationalRoles(): array { return [['admin'], ['branch_director'], ['rop']]; }
+
+    #[DataProvider('operationalRoles')]
+    public function test_all_operational_records_can_leave_an_empty_group_atomically(string $role): void
+    {
+        foreach (['leads', 'crm_deals'] as $table) {
+            Schema::create($table, function (Blueprint $t) {
+                $t->id(); $t->string('title')->nullable(); $t->unsignedBigInteger('responsible_agent_id');
+                $t->unsignedBigInteger('branch_group_id'); $t->unsignedBigInteger('branch_id');
+                $t->timestamp('closed_at')->nullable(); $t->timestamps(); $t->softDeletes();
+            });
+            foreach ([1, 2, 3] as $id) DB::table($table)->insert(['id' => $id, 'responsible_agent_id' => $this->employee->id,
+                'branch_group_id' => $this->group->id, 'branch_id' => $this->group->branch_id]);
+        }
+        Schema::create('bookings', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('agent_id'); $t->unsignedBigInteger('branch_group_id');
+            $t->timestamp('end_time'); $t->timestamps();
+        });
+        DB::table('bookings')->insert(['agent_id' => $this->employee->id, 'branch_group_id' => $this->group->id, 'end_time' => now()->addDay()]);
+        Schema::create('crm_tasks', function (Blueprint $t) {
+            $t->id(); $t->string('title'); $t->unsignedBigInteger('assignee_id'); $t->unsignedBigInteger('branch_group_id');
+            $t->string('related_entity_type')->nullable(); $t->unsignedBigInteger('related_entity_id')->nullable();
+            $t->string('status')->default('pending'); $t->timestamp('completed_at')->nullable(); $t->timestamps();
+        });
+        DB::table('crm_tasks')->insert(['title' => 'Deal follow-up', 'assignee_id' => $this->employee->id,
+            'branch_group_id' => $this->group->id, 'related_entity_type' => 'deal', 'related_entity_id' => 1]);
+        DB::table('crm_tasks')->insert(['title' => 'Standalone', 'assignee_id' => $this->employee->id, 'branch_group_id' => $this->group->id]);
+        $other = BranchGroup::create(['name' => 'Receiving group', 'branch_id' => $this->group->branch_id]);
+        $target = $this->person('agent'); $target->update(['branch_group_id' => $other->id]);
+        if ($role === 'rop') {
+            $actor = $this->actingAsGroupRop(); $actor->supervisedGroups()->attach($other->id);
+        } else { $actor = $this->person($role); }
+        Sanctum::actingAs($actor);
+        $preview = $this->preview();
+        foreach (collect($preview['records'])->whereIn('type', ['deals', 'leads', 'bookings', 'tasks']) as $row) {
+            $this->assertContains($target->id, $row['eligible_user_ids']);
+        }
+        $task = collect($preview['records'])->firstWhere('type', 'tasks');
+        $this->assertSame(['type' => 'deals', 'id' => 1], $task['follows_record']);
+        $plan = $this->plan();
+        foreach ($plan['transfer_plan']['records'] as &$row) {
+            if (in_array($row['type'], ['deals', 'leads', 'bookings', 'tasks'])) {
+                $row['responsible_user_id'] = $target->id;
+                $row['destination_branch_group_id'] = $other->id;
+            }
+        }
+        unset($row);
+        $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertOk()->assertJsonPath('transferred_counts.deals', 3);
+        foreach (['leads', 'crm_deals'] as $table) {
+            $this->assertSame(3, DB::table($table)->where('responsible_agent_id', $target->id)->where('branch_group_id', $other->id)->count());
+        }
+        $this->assertDatabaseHas('bookings', ['agent_id' => $target->id, 'branch_group_id' => $other->id]);
+        $this->assertSame(2, DB::table('crm_tasks')->where('assignee_id', $target->id)->where('branch_group_id', $other->id)->count());
+        $this->assertDatabaseHas('users', ['id' => $this->employee->id, 'status' => 'inactive']);
+    }
+
+    public function test_cross_branch_deal_preserves_matching_stage_and_rejects_missing_match(): void
+    {
+        Schema::create('crm_deal_pipelines', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('branch_id'); $t->string('slug'); $t->string('type'); $t->boolean('is_active')->default(true);
+        });
+        Schema::create('crm_deal_stages', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('pipeline_id'); $t->string('slug'); $t->boolean('is_active')->default(true);
+            $t->boolean('is_closed')->default(false); $t->boolean('is_lost')->default(false);
+        });
+        Schema::create('crm_deals', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('responsible_agent_id'); $t->unsignedBigInteger('branch_group_id');
+            $t->unsignedBigInteger('branch_id'); $t->unsignedBigInteger('pipeline_id'); $t->unsignedBigInteger('stage_id');
+            $t->timestamp('closed_at')->nullable(); $t->softDeletes(); $t->timestamps();
+        });
+        $target = $this->crossBranchTarget();
+        DB::table('crm_deal_pipelines')->insert([
+            ['id'=>1, 'branch_id'=>$this->group->branch_id, 'slug'=>'sales', 'type'=>'sales'],
+            ['id'=>2, 'branch_id'=>$target->branch_id, 'slug'=>'sales', 'type'=>'sales'],
+        ]);
+        DB::table('crm_deal_stages')->insert(['id'=>1, 'pipeline_id'=>1, 'slug'=>'negotiation']);
+        DB::table('crm_deals')->insert(['id'=>1, 'responsible_agent_id'=>$this->employee->id,
+            'branch_group_id'=>$this->group->id, 'branch_id'=>$this->group->branch_id, 'pipeline_id'=>1, 'stage_id'=>1]);
+        $deal = collect($this->preview()['records'])->firstWhere('type','deals');
+        $this->assertNotContains($target->id, $deal['eligible_user_ids']);
+        DB::table('crm_deal_stages')->insert(['id'=>2, 'pipeline_id'=>2, 'slug'=>'negotiation']);
+        $deal = collect($this->preview()['records'])->firstWhere('type','deals');
+        $this->assertContains($target->id, $deal['eligible_user_ids']);
+        $plan = $this->plan();
+        foreach ($plan['transfer_plan']['records'] as &$row) {
+            if ($row['type'] === 'deals') $row['responsible_user_id'] = $target->id;
+        }
+        unset($row);
+        $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertOk();
+        $this->assertDatabaseHas('crm_deals', ['id'=>1, 'responsible_agent_id'=>$target->id,
+            'branch_group_id'=>$target->branch_group_id, 'branch_id'=>$target->branch_id, 'pipeline_id'=>2, 'stage_id'=>2, 'closed_at'=>null]);
+    }
+
 }
