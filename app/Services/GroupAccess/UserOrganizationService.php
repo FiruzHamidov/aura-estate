@@ -8,6 +8,8 @@ use Illuminate\Support\Facades\Schema;
 
 final class UserOrganizationService
 {
+    public const CLOSED_PROPERTY_STATUSES = ['sold', 'rented', 'sold_by_owner', 'deleted', 'archived'];
+
     public function __construct(private readonly GroupAccessAudit $audit) {}
 
     public function update(User $actor, User $subject, array $data): User
@@ -92,7 +94,7 @@ final class UserOrganizationService
             match ($table) {
                 'properties' => $query->where(fn ($properties) => $properties
                     ->whereNull('moderation_status')
-                    ->orWhereNotIn('moderation_status', ['sold', 'rented', 'sold_by_owner', 'deleted', 'archived'])),
+                    ->orWhereNotIn('moderation_status', self::CLOSED_PROPERTY_STATUSES)),
                 'clients' => $query->where('status', 'active'),
                 'leads', 'crm_deals' => $query->whereNull('closed_at'),
                 'bookings' => $query->where('end_time', '>', now()),

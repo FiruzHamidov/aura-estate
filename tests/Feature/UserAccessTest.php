@@ -147,7 +147,7 @@ class UserAccessTest extends TestCase
         $admin = User::create(['name' => 'Admin', 'phone' => '900010001', 'role_id' => $adminRole->id, 'status' => 'active']);
         $employee = User::create(['name' => 'Former employee', 'phone' => '900010002', 'role_id' => $agentRole->id, 'status' => 'inactive']);
         $empty = User::create(['name' => 'No records', 'phone' => '900010003', 'role_id' => $agentRole->id, 'status' => 'inactive']);
-        foreach (['approved', 'archived', 'deleted'] as $status) {
+        foreach (['approved', 'draft', 'rejected', null, 'sold', 'rented', 'sold_by_owner', 'archived', 'deleted'] as $status) {
             DB::table('properties')->insert(['title' => 'Listing', 'agent_id' => $employee->id, 'moderation_status' => $status]);
         }
         DB::table('properties')->insert(['title' => 'Transferred', 'agent_id' => $admin->id, 'created_by' => $employee->id]);
@@ -159,13 +159,13 @@ class UserAccessTest extends TestCase
         DB::table('bookings')->insert(['agent_id' => $employee->id]);
         DB::table('bookings')->insert(['agent_id' => $admin->id, 'created_by' => $employee->id]);
         Sanctum::actingAs($admin);
-        $expected = ['properties' => 2, 'clients' => 1, 'bookings' => 1, 'deals' => 1];
+        $expected = ['properties' => 8, 'properties_active' => 4, 'properties_completed' => 4, 'clients' => 1, 'bookings' => 1, 'deals' => 1];
         $this->getJson('/api/user/'.$employee->id.'?include_record_counts=1')
             ->assertOk()->assertJsonPath('record_counts', $expected);
         $response = $this->getJson('/api/user?status=inactive&include_record_counts=1')->assertOk();
         $rows = collect($response->json('data'))->keyBy('id');
         $this->assertSame($expected, $rows[$employee->id]['record_counts']);
-        $this->assertSame(['properties' => 0, 'clients' => 0, 'bookings' => 0, 'deals' => 0], $rows[$empty->id]['record_counts']);
+        $this->assertSame(['properties' => 0, 'properties_active' => 0, 'properties_completed' => 0, 'clients' => 0, 'bookings' => 0, 'deals' => 0], $rows[$empty->id]['record_counts']);
         $this->getJson('/api/user/'.$employee->id)->assertOk()->assertJsonMissingPath('record_counts');
     }
 
@@ -194,12 +194,12 @@ class UserAccessTest extends TestCase
         }
         Sanctum::actingAs($rop);
         $this->getJson('/api/user/'.$employee->id.'?include_record_counts=1')->assertOk()
-            ->assertJsonPath('record_counts', ['properties' => 1, 'clients' => 1, 'bookings' => 1, 'deals' => 1]);
+            ->assertJsonPath('record_counts', ['properties' => 1, 'properties_active' => 1, 'properties_completed' => 0, 'clients' => 1, 'bookings' => 1, 'deals' => 1]);
         $director = User::create(['name' => 'Director', 'phone' => '900010013', 'role_id' => $directorRole->id,
             'branch_id' => $branch->id, 'status' => 'active']);
         Sanctum::actingAs($director);
         $this->getJson('/api/user/'.$employee->id.'?include_record_counts=1')->assertOk()
-            ->assertJsonPath('record_counts', ['properties' => 2, 'clients' => 2, 'bookings' => 2, 'deals' => 2]);
+            ->assertJsonPath('record_counts', ['properties' => 2, 'properties_active' => 2, 'properties_completed' => 0, 'clients' => 2, 'bookings' => 2, 'deals' => 2]);
     }
 
     public function test_rop_user_index_excludes_directors_and_uses_explicit_groups(): void
