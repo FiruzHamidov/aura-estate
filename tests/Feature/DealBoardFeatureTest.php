@@ -825,6 +825,48 @@ class DealBoardFeatureTest extends TestCase
         $this->assertNotSame($first->source_event_uuid, Deal::query()->latest('id')->firstOrFail()->source_event_uuid);
     }
 
+    public function test_rop_with_multiple_groups_can_confirm_duplicate_with_control_card_in_property_group(): void
+    {
+        (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
+        $branch = Branch::create(['name' => 'Branch A']);
+        $agent = $this->createUser(Role::create(['name' => 'Agent', 'slug' => 'agent']), $branch, 'Agent');
+        $rop = $this->createUser(Role::create(['name' => 'ROP', 'slug' => 'rop']), $branch, 'ROP');
+        $second = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Second team']);
+        $rop->supervisedGroups()->attach($second->id);
+        // The object's persisted group must win over both the moderator and the agent's current team.
+        $properties = collect([1, 2])->map(fn ($n) => Property::create([
+            'title' => 'Listing '.$n, 'branch_id' => $branch->id, 'branch_group_id' => $second->id,
+            'agent_id' => $agent->id, 'created_by' => $agent->id, 'moderation_status' => 'approved', 'publication_status' => 'published',
+        ]));
+        [$duplicate, $original] = $properties->all();
+        $case = \App\Models\PropertyModerationCase::create([
+            'property_id' => $duplicate->id, 'type' => 'duplicate_review', 'status' => 'open',
+            'blocking' => true, 'submitted_by' => $agent->id, 'submitted_at' => now(), 'version' => 1,
+        ]);
+        $candidate = \App\Models\PropertyDuplicateCandidate::create([
+            'moderation_case_id' => $case->id, 'candidate_property_id' => $original->id, 'score' => 100,
+        ]);
+        Sanctum::actingAs($rop);
+        $url = '/api/property-duplicate-candidates/'.$candidate->id.'/decision';
+        $payload = ['version' => 1, 'decision' => 'confirmed_duplicate'];
+        $foreign = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Unmanaged team']);
+        foreach ([$duplicate, $original] as $outside) {
+            DB::table('properties')->where('id', $outside->id)->update(['branch_group_id' => $foreign->id]);
+            $this->postJson($url, $payload)->assertNotFound();
+            $this->assertSame('pending', $candidate->fresh()->decision);
+            $this->assertDatabaseCount('crm_deals', 0);
+            DB::table('properties')->where('id', $outside->id)->update(['branch_group_id' => $second->id]);
+        }
+        $this->postJson($url, $payload)->assertOk()->assertJsonPath('data.moderation_status', 'deleted');
+        $control = Deal::where('primary_property_id', $duplicate->id)->sole();
+        $this->assertEquals($second->id, $control->branch_group_id);
+        $this->assertEquals($branch->id, $control->branch_id);
+        $this->assertEquals($rop->id, $control->created_by);
+        $this->assertSame('security_property_closure', $control->control_kind);
+        $this->assertSame('approved', $original->fresh()->moderation_status);
+        $this->assertSame('confirmed_duplicate', $candidate->fresh()->decision);
+    }
+
     public function test_all_trigger_statuses_create_control_cards_and_missing_branch_is_audited(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);

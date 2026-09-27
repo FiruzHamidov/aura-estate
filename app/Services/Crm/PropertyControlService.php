@@ -342,6 +342,8 @@ class PropertyControlService
             'title' => $property->title ?: ('Контроль объекта #'.$property->id),
             'client_id' => $property->owner_client_id,
             'branch_id' => $pipeline->branch_id,
+            // System-created control cards inherit the listing's ownership, not the moderator's default group.
+            'branch_group_id' => $property->branch_group_id,
             'created_by' => $actor?->id ?: $property->created_by ?: $property->agent_id,
             'responsible_agent_id' => null,
             'pipeline_id' => $pipeline->id,
