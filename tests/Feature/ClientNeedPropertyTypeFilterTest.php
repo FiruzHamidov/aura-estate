@@ -56,6 +56,11 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('locations', function (Blueprint $table) {
+            $table->id();
+            $table->string('city');
+        });
+
         Schema::create('settings', function (Blueprint $table) {
             $table->string('key')->primary();
             $table->text('value')->nullable();
@@ -710,6 +715,105 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             ->assertJsonPath('1.id', 2)
             ->assertJsonPath('1.code', 'instagram')
             ->assertJsonMissing(['id' => 3]);
+    }
+
+    public function test_catalog_shares_cross_branch_needs_without_contact_data(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $other = Branch::create(['name' => 'Other branch']);
+        $owner = $this->createUser($agent->role, $other, 'Other owner');
+        $client = $this->createClient($other, $owner, 'Shared client');
+        $client->update(['phone' => '073287321', 'email' => 'private@example.com', 'note' => 'secret note']);
+        $this->catalogNeed($client, 1200000, ['comment' => 'Ищет квартиру. Звонить +992 073 287 321 или private@example.com', 'meta' => json_encode(['phone' => '073287321'])]);
+        Sanctum::actingAs($agent);
+        $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 1, 'lists' => ['agents' => 1, 'interns' => 0]]);
+        $response = $this->getJson('/api/client-catalog?list=agents')->assertOk()
+            ->assertJsonPath('data.0.id', $client->id)
+            ->assertJsonPath('data.0.responsible_agent_name', 'Other owner')
+            ->assertJsonPath('data.0.needs.0.comment', 'Ищет квартиру. Звонить [номер скрыт] или [контакт скрыт]');
+        foreach (['073287321', 'private@example.com', 'secret note', '"phone"', '"email"'] as $secret) {
+            $this->assertStringNotContainsString($secret, $response->getContent());
+        }
+        $this->assertArrayNotHasKey('meta', $response->json('data.0.needs.0'));
+        $this->getJson('/api/clients/'.$client->id)->assertForbidden();
+        $this->assertEquals($owner->id, $client->fresh()->responsible_agent_id);
+    }
+
+    public function test_catalog_counts_unique_clients_and_excludes_unavailable_needs(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $client = $this->createClient($branch, $agent, 'Both lists');
+        $this->catalogNeed($client, 1000000);
+        $this->catalogNeed($client, 1000000);
+        $this->catalogNeed($client, 300000);
+        foreach ([['closed_at' => now()], ['currency' => 'USD'], ['has_cash_on_hand' => false], ['deleted_at' => now()]] as $attributes) {
+            $excluded = $this->createClient($branch, $agent, 'Excluded');
+            $this->catalogNeed($excluded, 1200000, $attributes);
+        }
+        $inactive = $this->createClient($branch, $agent, 'Inactive');
+        $this->catalogNeed($inactive, 1200000);
+        $inactive->update(['status' => 'inactive']);
+        $deleted = $this->createClient($branch, $agent, 'Deleted');
+        $this->catalogNeed($deleted, 1200000);
+        $deleted->delete();
+        Sanctum::actingAs($agent);
+        $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 1, 'lists' => ['agents' => 1, 'interns' => 1]]);
+        $this->getJson('/api/client-catalog?list=interns')->assertOk()->assertJsonCount(1, 'data.0.needs');
+    }
+
+    public function test_catalog_limits_interns_and_denies_other_roles(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $client = $this->createClient($branch, $agent, 'High budget');
+        $this->catalogNeed($client, 1000000);
+        foreach (['intern', 'rop', 'mop', 'admin', 'superadmin', 'client', 'marketing'] as $slug) {
+            $role = Role::create(['name' => $slug, 'slug' => $slug]);
+            $user = $this->createUser($role, $branch, $slug);
+            Sanctum::actingAs($user);
+            if (in_array($slug, ['client', 'marketing'])) {
+                $this->getJson('/api/client-catalog/counts')->assertForbidden();
+                $this->getJson('/api/client-catalog')->assertForbidden();
+            } elseif ($slug === 'intern') {
+                $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 0, 'lists' => ['interns' => 0]]);
+                $this->getJson('/api/client-catalog?list=agents')->assertUnprocessable();
+                $this->getJson('/api/client-catalog')->assertOk()->assertJsonCount(0, 'data');
+            } else {
+                $this->getJson('/api/client-catalog/counts')->assertOk()->assertJsonPath('total', 1);
+            }
+        }
+    }
+
+    public function test_catalog_paginates_oldest_clients_and_searches_only_names(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $new = $this->createClient($branch, $agent, 'New client');
+        $old = $this->createClient($branch, $agent, 'Old client');
+        $old->created_at = now()->subMonths(3);
+        $old->save();
+        $this->catalogNeed($new, 800000);
+        $this->catalogNeed($old, 300000);
+        Sanctum::actingAs($agent);
+        $this->getJson('/api/client-catalog?list=interns&per_page=1')->assertOk()->assertJsonPath('data.0.id', $old->id)->assertJsonPath('meta.last_page', 2);
+        $this->getJson('/api/client-catalog?list=interns&per_page=1&page=2')->assertOk()->assertJsonPath('data.0.id', $new->id);
+        $this->getJson('/api/client-catalog?list=interns&search=New')->assertOk()->assertJsonPath('meta.total', 1)->assertJsonPath('data.0.id', $new->id);
+        $this->getJson('/api/client-catalog?search=073287321')->assertUnprocessable();
+        $this->getJson('/api/client-catalog?search=private@example.com')->assertUnprocessable();
+        $this->getJson('/api/client-catalog?per_page=1000')->assertUnprocessable();
+    }
+
+    public function test_catalog_requires_authentication(): void
+    {
+        $this->getJson('/api/client-catalog')->assertUnauthorized();
+        $this->getJson('/api/client-catalog/counts')->assertUnauthorized();
+    }
+
+    private function catalogNeed(Client $client, int $amount, array $attributes = []): void
+    {
+        DB::table('client_needs')->insert(array_merge([
+            'client_id' => $client->id, 'type_id' => 1, 'status_id' => 1,
+            'has_cash_on_hand' => true, 'cash_on_hand_amount' => $amount,
+            'created_at' => now(), 'updated_at' => now(),
+        ], $attributes));
     }
 
     private function assertClientIds(\Illuminate\Testing\TestResponse $response, array $expectedIds): void
