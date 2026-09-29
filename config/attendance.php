@@ -34,7 +34,14 @@ return [
         '6' => ['start' => '09:00', 'end' => '15:00', 'grace_minutes' => 0],
         '7' => null,
     ],
-    // ZKTeco status codes used by TA PUSH. Unknown values remain "punch".
+    // Terminal labels changed on 28 September 2026 (Dushanbe local time).
+    // Keep earlier/offline history on the legacy map. Optional serial scope supports
+    // installations where only some terminals have been reconfigured.
+    'fieldwork_started_at' => env('ATTENDANCE_FIELDWORK_STARTED_AT', '2026-09-28T00:00:00+05:00'),
+    'fieldwork_device_serials' => array_values(array_filter(array_map(
+        'trim', explode(',', (string) env('ATTENDANCE_FIELDWORK_DEVICE_SERIALS', ''))
+    ))),
+    // Legacy ZKTeco TA PUSH status codes. Unknown values remain "punch".
     'status_map' => [
         '0' => 'check_in',
         '1' => 'check_out',

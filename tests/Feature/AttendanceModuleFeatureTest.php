@@ -56,6 +56,100 @@ class AttendanceModuleFeatureTest extends TestCase
         ]);
     }
 
+    public function test_fieldwork_codes_keep_working_time_and_only_real_arrival_and_departure(): void
+    {
+        $context = $this->context();
+        $device = $this->device('FIELDWORK', $context['branch'], $context['group']);
+        $this->map($device, $context['agent']);
+        $rows = [];
+        foreach ([['09:00:00', 0], ['10:00:00', 2], ['11:00:00', 3], ['12:00:00', 4], ['14:00:00', 5], ['18:00:00', 1]] as [$time, $code]) {
+            $rows[] = $context['agent']->id."\t2026-09-28 {$time}\t{$code}\t15\t0";
+        }
+        $this->postDevicePayload('/iclock/cdata?SN=FIELDWORK&table=ATTLOG', implode("\n", $rows))->assertOk();
+        $events = AttendanceEvent::query()->orderBy('occurred_at')->get();
+        $this->assertSame(['check_in', 'showing_out', 'showing_in', 'property_out', 'property_in', 'check_out'], $events->pluck('event_type')->all());
+        $this->assertSame(['in', 'out', 'in', 'out', 'in', 'out'], $events->pluck('direction')->all());
+        $summary = AttendanceDailySummary::query()->firstOrFail();
+        $this->assertSame(540, $summary->worked_minutes);
+        $this->assertSame('2026-09-28 04:00:00', $summary->first_in_at->format('Y-m-d H:i:s'));
+        $this->assertSame('2026-09-28 13:00:00', $summary->last_out_at->format('Y-m-d H:i:s'));
+
+        Sanctum::actingAs($context['hr']);
+        $this->getJson('/api/attendance/users/'.$context['agent']->id.'/days/2026-09-28')->assertOk()
+            ->assertJsonPath('data.summary.activity.state', 'left')
+            ->assertJsonPath('data.summary.activity.showing_count', 1)
+            ->assertJsonPath('data.summary.activity.property_count', 1)
+            ->assertJsonPath('data.events.4.event_type', 'property_in');
+    }
+
+    public function test_current_activity_tracks_fieldwork_returns_and_ignores_duplicates_and_future_marks(): void
+    {
+        $this->travelTo(CarbonImmutable::parse('2026-09-29T12:00:00+05:00'));
+        $context = $this->context();
+        $device = $this->device('FIELDWORK-NOW', $context['branch'], $context['group']);
+        $this->map($device, $context['agent']);
+        foreach ([['09:00:00', 0, 'office'], ['09:00:05', 2, 'showing'], ['10:00:00', 3, 'office'], ['10:30:00', 4, 'property'], ['10:30:05', 4, 'property'], ['13:00:00', 5, 'property']] as [$time, $code, $state]) {
+            $this->postDevicePayload('/iclock/cdata?SN=FIELDWORK-NOW&table=ATTLOG', $context['agent']->id."\t2026-09-29 {$time}\t{$code}\t15\t0")->assertOk();
+            Sanctum::actingAs($context['hr']);
+            $this->getJson('/api/attendance/users/'.$context['agent']->id.'/days/2026-09-29')->assertOk()
+                ->assertJsonPath('data.summary.activity.state', $state)
+                ->assertJsonPath('data.summary.last_out_at', null);
+        }
+        $this->assertSame(1, AttendanceEvent::query()->where('is_duplicate', true)->count());
+        $this->getJson('/api/attendance/matrix?date_from=2026-09-29&date_to=2026-09-29&user_id='.$context['agent']->id)->assertOk()
+            ->assertJsonPath('data.0.days.2026-09-29.activity.state', 'property')
+            ->assertJsonPath('data.0.days.2026-09-29.activity.since', '2026-09-29T05:30:00.000000Z')
+            ->assertJsonPath('data.0.days.2026-09-29.activity.showing_count', 1)
+            ->assertJsonPath('data.0.days.2026-09-29.activity.property_count', 1);
+        $this->getJson('/api/attendance/users/'.$context['agent']->id.'/days/2026-09-28')->assertOk()
+            ->assertJsonPath('data.summary.activity.state', 'unknown')
+            ->assertJsonPath('data.summary.activity.last_event_at', null);
+        Sanctum::actingAs($context['rop']);
+        $this->getJson('/api/attendance/users/'.$context['otherAgent']->id.'/days/2026-09-29')->assertNotFound();
+        $this->travelBack();
+    }
+
+    public function test_fieldwork_cutover_uses_occurrence_time_and_can_scope_terminals(): void
+    {
+        $context = $this->context();
+        $device = $this->device('FIELDWORK-CUTOVER', $context['branch'], $context['group']);
+        $this->map($device, $context['agent']);
+        $classifier = app(\App\Services\Attendance\AttendanceEventClassifier::class);
+        $this->assertSame('break_out', $classifier->classify($device, '2', CarbonImmutable::parse('2026-09-27T23:59:59+05:00')));
+        $this->assertSame('showing_out', $classifier->classify($device, '2', CarbonImmutable::parse('2026-09-28T00:00:00+05:00')));
+        $this->assertSame('punch', $classifier->classify($device, '99', CarbonImmutable::parse('2026-09-28T00:00:00+05:00')));
+        config(['attendance.fieldwork_device_serials' => ['OTHER-TERMINAL']]);
+        $this->assertSame('break_out', $classifier->classify($device, '2', CarbonImmutable::parse('2026-09-28T00:00:00+05:00')));
+    }
+
+    public function test_fieldwork_reclassification_previews_repairs_summaries_and_is_idempotent(): void
+    {
+        $context = $this->context();
+        $device = $this->device('FIELDWORK-REPLAY', $context['branch'], $context['group']);
+        $this->map($device, $context['agent']);
+        config(['attendance.fieldwork_started_at' => null]);
+        foreach (['2026-09-27', '2026-09-28'] as $date) {
+            $rows = [];
+            foreach ([['09:00:00', 0], ['09:00:05', 4], ['10:00:00', 2], ['11:00:00', 3], ['12:00:00', 4], ['14:00:00', 5], ['18:00:00', 1]] as [$time, $code]) {
+                $rows[] = $context['agent']->id."\t{$date} {$time}\t{$code}\t15\t0";
+            }
+            $this->postDevicePayload('/iclock/cdata?SN=FIELDWORK-REPLAY&table=ATTLOG', implode("\n", $rows))->assertOk();
+        }
+        config(['attendance.fieldwork_started_at' => '2026-09-28T00:00:00+05:00']);
+        $this->artisan('attendance:reclassify-fieldwork')->assertSuccessful();
+        $this->assertSame(0, AttendanceEvent::query()->where('event_type', 'showing_out')->count());
+        $this->artisan('attendance:reclassify-fieldwork', ['--apply' => true])->assertSuccessful();
+        $this->assertSame(1, AttendanceEvent::query()->where('event_type', 'showing_out')->count());
+        $this->assertSame(1, AttendanceEvent::query()->where('event_type', 'break_out')->count());
+        $this->assertSame(540, AttendanceDailySummary::query()->whereDate('work_date', '2026-09-28')->firstOrFail()->worked_minutes);
+        $this->assertSame(480, AttendanceDailySummary::query()->whereDate('work_date', '2026-09-27')->firstOrFail()->worked_minutes);
+        $this->assertDatabaseCount('attendance_audit_logs', 5);
+        $this->assertSame(1, AttendanceEvent::query()->where('is_duplicate', true)->count());
+        $this->artisan('attendance:reclassify-fieldwork', ['--apply' => true])->assertSuccessful();
+        $this->assertDatabaseCount('attendance_audit_logs', 5);
+        $this->assertSame(1, AttendanceEvent::query()->where('is_duplicate', true)->count());
+    }
+
     public function test_unknown_device_is_rejected_by_root_iclock_endpoint(): void
     {
         $this->get('/iclock/cdata?SN=UNKNOWN&options=all')

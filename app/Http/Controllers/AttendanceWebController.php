@@ -126,7 +126,7 @@ final class AttendanceWebController extends Controller
                 'ends_at' => $schedule['end'] ?? null,
                 'label' => isset($schedule['start'], $schedule['end']) ? $schedule['start'].'–'.$schedule['end'] : null,
             ] : null,
-            'summary' => $this->dayPayload($summary, $leave === null && $holiday === null && is_array($schedule), collect(), $comment, $leave, $holiday, $duty),
+            'summary' => $this->dayPayload($summary, $leave === null && $holiday === null && is_array($schedule), collect(), $comment, $leave, $holiday, $duty, $events),
             'events' => $events->map(fn (AttendanceEvent $event) => [
                 'id' => $event->id,
                 'occurred_at' => $event->occurred_at?->toISOString(),
@@ -287,7 +287,7 @@ final class AttendanceWebController extends Controller
 
                     $workingDay = $this->isWorkingDay($data['schedules']->get($user->id), $date, $data['holidays'], $summary?->schedule_snapshot);
                     if (request()->user()->hasRole('rop') && $summary?->schedule_snapshot === null) $workingDay = $summary !== null;
-                    return [$date => $this->dayPayload($summary, $leave === null && $workingDay, $methods, $comment, $leave, $holiday, $duty)];
+                    return [$date => $this->dayPayload($summary, $leave === null && $workingDay, $methods, $comment, $leave, $holiday, $duty, $data['events']->get($user->id, collect())->get($date, collect()))];
                 })->all(),
             ];
         });
@@ -327,7 +327,7 @@ final class AttendanceWebController extends Controller
     {
         $ids = $users->pluck('id');
         if ($ids->isEmpty()) {
-            return ['summaries' => collect(), 'comments' => collect(), 'methods' => collect(), 'schedules' => collect(), 'leaves' => collect(), 'duties' => collect(), 'holidays' => $this->holidays->between($from->toDateString(), $to->toDateString())];
+            return ['summaries' => collect(), 'comments' => collect(), 'methods' => collect(), 'events' => collect(), 'schedules' => collect(), 'leaves' => collect(), 'duties' => collect(), 'holidays' => $this->holidays->between($from->toDateString(), $to->toDateString())];
         }
         $summaries = $this->facts(AttendanceDailySummary::class)->whereIn('user_id', $ids)
             ->whereBetween('work_date', [$from->toDateString(), $to->toDateString()])->get()
@@ -336,10 +336,10 @@ final class AttendanceWebController extends Controller
             ->whereBetween('work_date', [$from->toDateString(), $to->toDateString()])->get()
             ->groupBy('user_id')->map(fn (Collection $rows) => $rows->keyBy(fn ($row) => $row->work_date->toDateString()));
         $timezone = (string) config('attendance.timezone', 'Asia/Dushanbe');
-        $methods = $this->facts(AttendanceEvent::class)->whereIn('user_id', $ids)->whereBetween('occurred_at', [$from->utc(), $to->utc()])
-            ->get(['user_id', 'occurred_at', 'verification_method'])->groupBy('user_id')
-            ->map(fn (Collection $rows) => $rows->groupBy(fn ($event) => $event->occurred_at->setTimezone($timezone)->toDateString())
-                ->map(fn (Collection $events) => $events->pluck('verification_method')->unique()->values()));
+        $events = $this->facts(AttendanceEvent::class)->whereIn('user_id', $ids)->whereBetween('occurred_at', [$from->utc(), $to->utc()])
+            ->get(['id', 'user_id', 'occurred_at', 'verification_method', 'event_type', 'is_duplicate'])->groupBy('user_id')
+            ->map(fn (Collection $rows) => $rows->groupBy(fn ($event) => $event->occurred_at->copy()->setTimezone($timezone)->toDateString()));
+        $methods = $events->map(fn (Collection $days) => $days->map(fn (Collection $rows) => $rows->pluck('verification_method')->unique()->values()));
         $schedules = AttendanceWorkSchedule::query()->whereIn('user_id', $ids)->get()->keyBy('user_id');
         $leaves = $this->facts(AttendanceLeave::class)->whereIn('user_id', $ids)
             ->whereDate('date_from', '<=', $to->toDateString())
@@ -351,12 +351,13 @@ final class AttendanceWebController extends Controller
             ->orderBy('date_from')->get()->groupBy('user_id');
         $holidays = $this->holidays->between($from->toDateString(), $to->toDateString());
 
-        return compact('summaries', 'comments', 'methods', 'schedules', 'leaves', 'duties', 'holidays');
+        return compact('summaries', 'comments', 'methods', 'events', 'schedules', 'leaves', 'duties', 'holidays');
     }
 
-    private function dayPayload(?AttendanceDailySummary $summary, bool $workingDay, Collection $methods, ?AttendanceDailyComment $comment, ?AttendanceLeave $leave = null, ?AttendanceHoliday $holiday = null, ?AttendanceDuty $duty = null): array
+    private function dayPayload(?AttendanceDailySummary $summary, bool $workingDay, Collection $methods, ?AttendanceDailyComment $comment, ?AttendanceLeave $leave = null, ?AttendanceHoliday $holiday = null, ?AttendanceDuty $duty = null, ?Collection $events = null): array
     {
         return [
+            'activity' => app(\App\Services\Attendance\AttendanceActivityService::class)->summarize($events ?? collect()),
             'status' => $summary?->status,
             'is_working_day' => $workingDay,
             'first_in_at' => $summary?->first_in_at?->toISOString(),
