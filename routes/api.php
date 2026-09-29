@@ -147,6 +147,8 @@ Route::get('/agents/{agent}/reviews', [ReviewController::class, 'index'])->where
 Route::post('/agents/{agent}/reviews', [ReviewController::class, 'store'])->middleware('throttle:10,1')->whereNumber('agent');
 
 Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
+    Route::get('/client-catalog/counts', [\App\Http\Controllers\ClientCatalogController::class, 'counts']);
+    Route::get('/client-catalog', [\App\Http\Controllers\ClientCatalogController::class, 'index']);
     Route::get('/external-request-photos/{photo}', [\App\Http\Controllers\ExternalRequestMediaController::class, 'show'])
         ->whereNumber('photo')->name('external-request-photo');
     Route::get('/users/{user}/group-transfer', [\App\Http\Controllers\EmployeeGroupTransferController::class, 'preview'])->whereNumber('user');

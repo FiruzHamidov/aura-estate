@@ -70,6 +70,20 @@ class ClientAccessTest extends TestCase
             $table->timestamps();
         });
 
+        // ClientNeed serialization includes repair_type_ids in the current schema.
+        Schema::create('repair_types', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->nullable();
+            $table->timestamps();
+        });
+        Schema::create('client_need_repair_type', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('client_need_id');
+            $table->unsignedBigInteger('repair_type_id');
+            $table->timestamps();
+        });
+
         Schema::create('settings', function (Blueprint $table) {
             $table->string('key')->primary();
             $table->text('value')->nullable();
