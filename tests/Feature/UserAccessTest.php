@@ -1055,6 +1055,33 @@ class UserAccessTest extends TestCase
         $this->deleteJson('/api/user/'.$client->id, ['distribute_to_agents' => true])->assertStatus(403);
     }
 
+    public function test_hr_can_convert_clients_only_to_creatable_roles_with_required_scope(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $group = BranchGroup::create(['name' => 'Group', 'branch_id' => $branch->id]);
+        $hrRole = Role::create(['name' => 'HR', 'slug' => 'hr']);
+        $clientRole = Role::create(['name' => 'Client', 'slug' => 'client']);
+        $hr = User::create(['name' => 'HR', 'phone' => '900080001', 'role_id' => $hrRole->id, 'status' => 'active']);
+        Sanctum::actingAs($hr);
+        $client = User::create(['name' => 'Client', 'phone' => '900080002', 'role_id' => $clientRole->id, 'status' => 'active']);
+        foreach (['admin', 'superadmin', 'branch_director', 'marketing', 'accountant', 'external_agent'] as $slug) {
+            $role = Role::create(['name' => $slug, 'slug' => $slug]);
+            $this->patchJson('/api/user/'.$client->id, ['role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id])->assertUnprocessable();
+            $this->assertSame($clientRole->id, $client->fresh()->role_id);
+        }
+        foreach (['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop'] as $index => $slug) {
+            $role = Role::create(['name' => $slug, 'slug' => $slug]);
+            $candidate = User::create(['name' => 'Candidate', 'phone' => '90008001'.$index, 'role_id' => $clientRole->id, 'status' => 'active']);
+            if ($slug === 'intern') {
+                $this->patchJson('/api/user/'.$candidate->id, ['role_id' => $role->id])->assertUnprocessable();
+                $this->assertSame($clientRole->id, $candidate->fresh()->role_id);
+            }
+            $this->patchJson('/api/user/'.$candidate->id, ['role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id])
+                ->assertOk()->assertJsonPath('role.slug', $slug)->assertJsonPath('id', $candidate->id);
+            $this->patchJson('/api/user/'.$candidate->id, ['role_id' => $clientRole->id])->assertUnprocessable();
+        }
+    }
+
     public function test_hr_can_edit_and_transfer_employees_through_director_but_not_admins(): void
     {
         $branchA = Branch::create(['name' => 'A']);
