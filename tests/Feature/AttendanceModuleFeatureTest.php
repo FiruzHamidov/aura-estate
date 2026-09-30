@@ -56,6 +56,43 @@ class AttendanceModuleFeatureTest extends TestCase
         ]);
     }
 
+    public function test_presence_uses_today_marks_and_respects_roles_and_group_scope(): void
+    {
+        $this->travelTo(CarbonImmutable::parse('2026-09-30T12:00:00+05:00'));
+        $c = $this->context();
+        $device = $this->device('PRESENCE', $c['branch'], $c['group']);
+        $this->map($device, $c['agent']);
+        $this->postDevicePayload('/iclock/cdata?SN=PRESENCE&table=ATTLOG', $c['agent']->id."\t2026-09-30 10:00:00\t2\t15\t0")->assertOk();
+        // Already imported old classifications are read using the raw terminal code.
+        AttendanceEvent::query()->update(['event_type' => 'break_out']);
+        $this->postDevicePayload('/iclock/cdata?SN=PRESENCE&table=ATTLOG', $c['agent']->id."\t2026-09-30 13:00:00\t3\t15\t0")->assertOk();
+        foreach (['agent', 'mop', 'hr'] as $role) {
+            Sanctum::actingAs($c[$role]);
+            $this->getJson('/api/attendance/presence')->assertForbidden();
+        }
+        Sanctum::actingAs($c['admin']);
+        $data = collect($this->getJson('/api/attendance/presence')->assertOk()->assertJsonPath('meta.date', '2026-09-30')->json('data'))->keyBy('user.id');
+        $this->assertSame('showing', $data[$c['agent']->id]['activity']['state']);
+        $this->assertSame('unknown', $data[$c['otherAgent']->id]['activity']['state']);
+        $directorRole = Role::create(['name' => 'Director', 'slug' => 'branch_director']);
+        $director = User::create(['name' => 'Director', 'phone' => '900000991', 'role_id' => $directorRole->id, 'branch_id' => $c['branch']->id, 'status' => 'active']);
+        Sanctum::actingAs($director);
+        $directorRows = collect($this->getJson('/api/attendance/presence')->assertOk()->json('data'))->keyBy('user.id');
+        $this->assertTrue($directorRows->has($c['agent']->id));
+        $this->assertFalse($directorRows->has($c['otherAgent']->id));
+        Sanctum::actingAs($c['rop']);
+        $data = collect($this->getJson('/api/attendance/presence')->assertOk()->json('data'))->keyBy('user.id');
+        $this->assertTrue($data->has($c['agent']->id));
+        $this->assertFalse($data->has($c['otherAgent']->id));
+        $c['rop']->supervisedGroups()->detach();
+        $this->getJson('/api/attendance/presence')->assertOk()->assertJsonCount(0, 'data');
+        $this->travelTo(CarbonImmutable::parse('2026-10-01T00:00:00+05:00'));
+        Sanctum::actingAs($c['admin']);
+        $data = collect($this->getJson('/api/attendance/presence')->assertOk()->json('data'))->keyBy('user.id');
+        $this->assertSame('unknown', $data[$c['agent']->id]['activity']['state']);
+        $this->travelBack();
+    }
+
     public function test_fieldwork_codes_keep_working_time_and_only_real_arrival_and_departure(): void
     {
         $context = $this->context();

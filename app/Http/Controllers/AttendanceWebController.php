@@ -80,6 +80,40 @@ final class AttendanceWebController extends Controller
         ]);
     }
 
+    public function presence(Request $request)
+    {
+        $viewer = $request->user();
+        $this->access->assertCanViewPresence($viewer);
+        $now = CarbonImmutable::now(config('attendance.timezone', 'Asia/Dushanbe'));
+        $users = $this->access->visibleUsersQuery($viewer)->with(['role', 'branch', 'branchGroup'])->orderBy('users.name')->get();
+        $events = $this->facts(AttendanceEvent::class)->with('device')
+            ->whereIn('user_id', $users->modelKeys())
+            ->whereBetween('occurred_at', [$now->startOfDay()->utc(), $now->utc()])
+            ->orderBy('occurred_at')->orderBy('id')->get();
+        // Read saved terminal codes as well, so already imported marks use the new labels
+        // without rewriting history or requiring a backfill to view today's locations.
+        foreach ($events as $event) {
+            if ($event->device && isset($event->meta['attendance_status'])) {
+                $event->event_type = app(\App\Services\Attendance\AttendanceEventClassifier::class)
+                    ->classify($event->device, (string) $event->meta['attendance_status'], $event->occurred_at);
+            }
+        }
+        $byUser = $events->groupBy('user_id');
+        $rows = $users->map(function (User $user) use ($byUser) {
+            $marks = $byUser->get($user->id, collect());
+            $last = $marks->where('is_duplicate', false)->last();
+            return [
+                'user' => $this->userPayload($user),
+                'activity' => app(\App\Services\Attendance\AttendanceActivityService::class)->summarize($marks),
+                'device_name' => $last?->device?->name,
+                'device_last_seen_at' => $last?->device?->last_seen_at?->toISOString(),
+            ];
+        });
+        return response()->json(['data' => $rows, 'meta' => [
+            'date' => $now->toDateString(), 'timezone' => $now->timezoneName, 'as_of' => $now->toISOString(),
+        ]])->header('Cache-Control', 'private, no-store');
+    }
+
     public function day(Request $request, User $user, string $date)
     {
         $this->access->assertCanViewTable($request->user());
