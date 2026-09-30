@@ -8,6 +8,19 @@ use PHPUnit\Framework\TestCase;
 
 class InternationalPhoneTest extends TestCase
 {
+    public function test_leading_zero_account_numbers_survive_repeated_normalization(): void
+    {
+        foreach (['001103103', '000123456', '012345678'] as $national) {
+            foreach ([$national, '+992'.$national, '992'.$national, '00992'.$national] as $input) {
+                $this->assertSame('+992'.$national, InternationalPhone::e164($input));
+                $account = InternationalPhone::accountValue($input);
+                $this->assertSame($national, $account);
+                $this->assertSame('+992'.$national, InternationalPhone::e164($account));
+                $this->assertSame('992'.$national, ClientPhone::normalize($input));
+            }
+        }
+    }
+
     public function test_country_lengths_and_legacy_formats(): void
     {
         foreach (['+99290123456', '+9929012345678', '+7912345678', '+791234567890', '+99890123456', '+999123456789', 'abc', '+992901234567 ext 1', '+99290+1234567'] as $invalid) {

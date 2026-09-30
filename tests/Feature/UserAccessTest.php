@@ -139,6 +139,23 @@ class UserAccessTest extends TestCase
         }
     }
 
+    public function test_create_and_update_employee_preserves_leading_zero_phone(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Group']);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900010001', 'role_id' => $adminRole->id, 'status' => 'active']);
+        Sanctum::actingAs($admin);
+        $payload = ['name' => 'Employee', 'phone' => '+992001103103', 'role_id' => $agentRole->id,
+            'branch_id' => $branch->id, 'branch_group_id' => $group->id];
+        $created = $this->postJson('/api/user', $payload)->assertCreated()->assertJsonPath('phone', '001103103');
+        $this->postJson('/api/user', array_replace($payload, ['phone' => '001103103']))->assertUnprocessable();
+        $this->patchJson('/api/user/'.$created->json('id'), ['phone' => '+992000123456'])
+            ->assertOk()->assertJsonPath('phone', '000123456');
+        $this->assertDatabaseHas('users', ['id' => $created->json('id'), 'phone' => '000123456']);
+    }
+
     public function test_employee_record_counts_match_list_and_detail_and_follow_current_responsibility(): void
     {
         $this->createRecordCountTables();
