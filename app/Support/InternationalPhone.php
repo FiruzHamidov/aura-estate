@@ -30,6 +30,9 @@ final class InternationalPhone
         $digits = preg_replace('/\D/', '', $raw);
         if (str_starts_with($raw, '+')) {
             $input = '+'.$digits;
+        } elseif (strlen($digits) === 9) {
+            // A Tajik national number may start with 00; keep all nine digits.
+            $input = '+992'.$digits;
         } elseif (str_starts_with($digits, '00')) {
             $input = '+'.substr($digits, 2);
         } elseif ((strlen($digits) === 12 && str_starts_with($digits, '992'))
