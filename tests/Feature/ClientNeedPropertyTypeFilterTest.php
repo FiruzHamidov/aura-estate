@@ -24,6 +24,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         parent::setUp();
 
         Schema::dropAllTables();
+        (require database_path('migrations/2026_09_29_120000_create_client_catalog_claims_table.php'))->up();
 
         Schema::create('roles', function (Blueprint $table) {
             $table->id();
@@ -54,6 +55,11 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             $table->enum('auth_method', ['password', 'sms'])->default('password');
             $table->rememberToken()->nullable();
             $table->timestamps();
+        });
+
+        Schema::create('locations', function (Blueprint $table) {
+            $table->id();
+            $table->string('city');
         });
 
         Schema::create('settings', function (Blueprint $table) {
@@ -710,6 +716,220 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             ->assertJsonPath('1.id', 2)
             ->assertJsonPath('1.code', 'instagram')
             ->assertJsonMissing(['id' => 3]);
+    }
+
+    public function test_catalog_shares_cross_branch_needs_without_contact_data(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $other = Branch::create(['name' => 'Other branch']);
+        $owner = $this->createUser($agent->role, $other, 'Other owner');
+        $client = $this->createClient($other, $owner, 'Shared client');
+        $client->update(['phone' => '073287321', 'email' => 'private@example.com', 'note' => 'secret note']);
+        $this->catalogNeed($client, 1200000, ['comment' => 'Ищет квартиру. Звонить +992 073 287 321 или private@example.com', 'meta' => json_encode(['phone' => '073287321'])]);
+        Sanctum::actingAs($agent);
+        $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 1, 'lists' => ['agents' => 1, 'interns' => 0]]);
+        $response = $this->getJson('/api/client-catalog?list=agents')->assertOk()
+            ->assertJsonPath('data.0.id', $client->id)
+            ->assertJsonPath('data.0.responsible_agent_name', 'Other owner')
+            ->assertJsonPath('data.0.needs.0.comment', 'Ищет квартиру. Звонить [номер скрыт] или [контакт скрыт]');
+        foreach (['073287321', 'private@example.com', 'secret note', '"phone"', '"email"'] as $secret) {
+            $this->assertStringNotContainsString($secret, $response->getContent());
+        }
+        $this->assertArrayNotHasKey('meta', $response->json('data.0.needs.0'));
+        $this->getJson('/api/clients/'.$client->id)->assertForbidden();
+        $this->assertEquals($owner->id, $client->fresh()->responsible_agent_id);
+    }
+
+    public function test_catalog_counts_unique_clients_and_excludes_unavailable_needs(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $client = $this->createClient($branch, $agent, 'Both lists');
+        $this->catalogNeed($client, 1000000);
+        $this->catalogNeed($client, 1000000);
+        $this->catalogNeed($client, 300000);
+        foreach ([['closed_at' => now()], ['currency' => 'USD'], ['has_cash_on_hand' => false], ['deleted_at' => now()]] as $attributes) {
+            $excluded = $this->createClient($branch, $agent, 'Excluded');
+            $this->catalogNeed($excluded, 1200000, $attributes);
+        }
+        $inactive = $this->createClient($branch, $agent, 'Inactive');
+        $this->catalogNeed($inactive, 1200000);
+        $inactive->update(['status' => 'inactive']);
+        $deleted = $this->createClient($branch, $agent, 'Deleted');
+        $this->catalogNeed($deleted, 1200000);
+        $deleted->delete();
+        Sanctum::actingAs($agent);
+        $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 1, 'lists' => ['agents' => 1, 'interns' => 1]]);
+        $this->getJson('/api/client-catalog?list=interns')->assertOk()->assertJsonCount(1, 'data.0.needs');
+    }
+
+    public function test_catalog_limits_interns_and_denies_other_roles(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $client = $this->createClient($branch, $agent, 'High budget');
+        $this->catalogNeed($client, 1000000);
+        foreach (['intern', 'rop', 'mop', 'admin', 'superadmin', 'client', 'marketing'] as $slug) {
+            $role = Role::create(['name' => $slug, 'slug' => $slug]);
+            $user = $this->createUser($role, $branch, $slug);
+            Sanctum::actingAs($user);
+            if (in_array($slug, ['client', 'marketing'])) {
+                $this->getJson('/api/client-catalog/counts')->assertForbidden();
+                $this->getJson('/api/client-catalog')->assertForbidden();
+            } elseif ($slug === 'intern') {
+                $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 0, 'lists' => ['interns' => 0]]);
+                $this->getJson('/api/client-catalog?list=agents')->assertUnprocessable();
+                $this->getJson('/api/client-catalog')->assertOk()->assertJsonCount(0, 'data');
+            } else {
+                $this->getJson('/api/client-catalog/counts')->assertOk()->assertJsonPath('total', 1);
+            }
+        }
+    }
+
+    public function test_catalog_paginates_oldest_clients_and_searches_only_names(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $new = $this->createClient($branch, $agent, 'New client');
+        $old = $this->createClient($branch, $agent, 'Old client');
+        $old->created_at = now()->subMonths(3);
+        $old->save();
+        $this->catalogNeed($new, 800000);
+        $this->catalogNeed($old, 300000);
+        Sanctum::actingAs($agent);
+        $this->getJson('/api/client-catalog?list=interns&per_page=1')->assertOk()->assertJsonPath('data.0.id', $old->id)->assertJsonPath('meta.last_page', 2);
+        $this->getJson('/api/client-catalog?list=interns&per_page=1&page=2')->assertOk()->assertJsonPath('data.0.id', $new->id);
+        $this->getJson('/api/client-catalog?list=interns&search=New')->assertOk()->assertJsonPath('meta.total', 1)->assertJsonPath('data.0.id', $new->id);
+        $this->getJson('/api/client-catalog?search=073287321')->assertUnprocessable();
+        $this->getJson('/api/client-catalog?search=private@example.com')->assertUnprocessable();
+        $this->getJson('/api/client-catalog?per_page=1000')->assertUnprocessable();
+    }
+
+    public function test_catalog_requires_authentication(): void
+    {
+        $this->getJson('/api/client-catalog')->assertUnauthorized();
+        $this->getJson('/api/client-catalog/counts')->assertUnauthorized();
+    }
+
+    public function test_claim_transfers_client_and_open_needs_and_reveals_phone_only_to_claimant(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $otherBranch = Branch::create(['name' => 'Other']);
+        $owner = $this->createUser($agent->role, $otherBranch, 'Previous owner');
+        $client = $this->createClient($otherBranch, $owner, 'Claim me');
+        $this->catalogNeed($client, 1200000, ['responsible_agent_id' => $owner->id]);
+        $this->catalogNeed($client, 1200000, ['responsible_agent_id' => $owner->id, 'closed_at' => now()]);
+        Sanctum::actingAs($agent);
+        $this->getJson('/api/client-catalog')->assertOk()->assertJsonMissingPath('data.0.phone');
+        $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertOk()->assertJsonPath('data.phone', $client->phone);
+        $this->assertDatabaseHas('clients', ['id' => $client->id, 'responsible_agent_id' => $agent->id, 'branch_id' => $branch->id, 'created_by' => $owner->id]);
+        $this->assertDatabaseHas('client_needs', ['client_id' => $client->id, 'closed_at' => null, 'responsible_agent_id' => $agent->id]);
+        $this->assertDatabaseHas('client_needs', ['client_id' => $client->id, 'responsible_agent_id' => $owner->id]);
+        $this->assertDatabaseHas('crm_audit_logs', ['auditable_id' => $client->id, 'actor_id' => $agent->id, 'event' => 'responsible_agent_changed']);
+        $this->getJson('/api/client-catalog/counts')->assertOk()->assertJsonPath('total', 0);
+        $this->getJson('/api/client-catalog/mine')->assertOk()->assertJsonPath('data.0.phone', $client->phone);
+        $other = $this->createUser($agent->role, $branch, 'Other agent');
+        Sanctum::actingAs($other);
+        $this->getJson('/api/client-catalog/mine')->assertOk()->assertJsonCount(0, 'data');
+        $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertConflict()->assertJsonMissingPath('data.phone');
+        $this->getJson('/api/client-catalog/claim-status')->assertOk()->assertJsonPath('can_claim', true);
+    }
+
+    public function test_claim_limit_is_one_per_dushanbe_day_with_idempotent_retries(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $first = $this->createClient($branch, $agent, 'First');
+        $second = $this->createClient($branch, $agent, 'Second');
+        $this->catalogNeed($first, 1000000);
+        $this->catalogNeed($second, 1000000);
+        $this->travelTo(\Carbon\Carbon::parse('2026-09-29 18:59:59', 'UTC'));
+        Sanctum::actingAs($agent);
+        $this->postJson('/api/client-catalog/'.$first->id.'/claim')->assertOk();
+        $this->postJson('/api/client-catalog/'.$first->id.'/claim')->assertOk();
+        $this->assertDatabaseCount('client_catalog_claims', 1);
+        $this->getJson('/api/client-catalog/claim-status')->assertOk()->assertJsonPath('used_today', true)->assertJsonPath('next_available_at', '2026-09-30T00:00:00+05:00');
+        $this->postJson('/api/client-catalog/'.$second->id.'/claim')->assertConflict();
+        $this->travelTo(\Carbon\Carbon::parse('2026-09-29 19:00:00', 'UTC'));
+        $this->getJson('/api/client-catalog/claim-status')->assertOk()->assertJsonPath('can_claim', true);
+        $this->postJson('/api/client-catalog/'.$second->id.'/claim')->assertOk();
+        $this->getJson('/api/client-catalog/mine')->assertOk()->assertJsonCount(2, 'data');
+        $this->assertDatabaseCount('client_catalog_claims', 2);
+        $this->travelBack();
+    }
+
+    public function test_claim_checks_roles_budget_and_branch_before_consuming_quota(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $high = $this->createClient($branch, $agent, 'High');
+        $low = $this->createClient($branch, $agent, 'Low');
+        $this->catalogNeed($high, 1000000);
+        $this->catalogNeed($low, 300000);
+        foreach (['admin', 'superadmin', 'rop', 'mop', 'client'] as $slug) {
+            $role = Role::create(['slug' => $slug, 'name' => $slug]);
+            Sanctum::actingAs($this->createUser($role, $branch, $slug));
+            $this->postJson('/api/client-catalog/'.$low->id.'/claim')->assertForbidden();
+            $this->getJson('/api/client-catalog/mine')->assertForbidden();
+        }
+        $role = Role::create(['slug' => 'intern', 'name' => 'Intern']);
+        $intern = $this->createUser($role, $branch, 'Intern');
+        Sanctum::actingAs($intern);
+        $this->postJson('/api/client-catalog/'.$high->id.'/claim')->assertConflict();
+        $this->assertDatabaseCount('client_catalog_claims', 0);
+        $intern->update(['branch_id' => null]);
+        $this->postJson('/api/client-catalog/'.$low->id.'/claim')->assertUnprocessable();
+        $intern->update(['branch_id' => $branch->id]);
+        $this->postJson('/api/client-catalog/'.$low->id.'/claim')->assertOk();
+        $this->getJson('/api/client-catalog/mine')->assertOk()->assertJsonPath('data.0.id', $low->id);
+    }
+
+    public function test_reassignment_revokes_catalog_phone_but_does_not_reset_quota(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $other = $this->createUser($agent->role, $branch, 'Next owner');
+        $client = $this->createClient($branch, $agent, 'Transferred');
+        $this->catalogNeed($client, 1000000);
+        Sanctum::actingAs($agent);
+        $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertOk();
+        $client->update(['responsible_agent_id' => $other->id]);
+        $this->getJson('/api/client-catalog/mine')->assertOk()->assertJsonCount(0, 'data');
+        $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertConflict();
+        $client->delete();
+        $this->getJson('/api/client-catalog/claim-status')->assertOk()->assertJsonPath('used_today', true);
+        $this->assertDatabaseCount('client_catalog_claims', 1);
+    }
+
+    public function test_failed_transfer_rolls_back_claim_and_daily_quota(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $owner = $this->createUser($agent->role, $branch, 'Owner');
+        $client = $this->createClient($branch, $owner, 'Rollback');
+        $this->catalogNeed($client, 1000000);
+        $this->mock(\App\Services\Crm\AuditLogger::class, fn ($mock) => $mock->shouldReceive('log')->once()->andThrow(new \RuntimeException('Audit unavailable')));
+        Sanctum::actingAs($agent);
+        $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertStatus(500);
+        $this->assertDatabaseCount('client_catalog_claims', 0);
+        $this->assertEquals($owner->id, $client->fresh()->responsible_agent_id);
+        $this->getJson('/api/client-catalog/claim-status')->assertOk()->assertJsonPath('can_claim', true);
+    }
+
+    public function test_claim_ledger_has_database_uniqueness_guards(): void
+    {
+        DB::table('client_catalog_claims')->insert(['client_id' => 1, 'user_id' => 1, 'claimed_on' => '2026-09-29', 'created_at' => now()]);
+        foreach ([['client_id' => 2, 'user_id' => 1], ['client_id' => 1, 'user_id' => 2]] as $collision) {
+            try {
+                DB::table('client_catalog_claims')->insert($collision + ['claimed_on' => '2026-09-29', 'created_at' => now()]);
+                $this->fail('The database must reject duplicate client/day claims.');
+            } catch (\Illuminate\Database\QueryException $exception) {
+                $this->assertStringContainsString('UNIQUE', $exception->getMessage());
+            }
+        }
+        $this->assertDatabaseCount('client_catalog_claims', 1);
+    }
+
+    private function catalogNeed(Client $client, int $amount, array $attributes = []): void
+    {
+        DB::table('client_needs')->insert(array_merge([
+            'client_id' => $client->id, 'type_id' => 1, 'status_id' => 1,
+            'has_cash_on_hand' => true, 'cash_on_hand_amount' => $amount,
+            'created_at' => now(), 'updated_at' => now(),
+        ], $attributes));
     }
 
     private function assertClientIds(\Illuminate\Testing\TestResponse $response, array $expectedIds): void

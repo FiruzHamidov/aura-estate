@@ -139,6 +139,23 @@ class UserAccessTest extends TestCase
         }
     }
 
+    public function test_create_and_update_employee_preserves_leading_zero_phone(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Group']);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900010001', 'role_id' => $adminRole->id, 'status' => 'active']);
+        Sanctum::actingAs($admin);
+        $payload = ['name' => 'Employee', 'phone' => '+992001103103', 'role_id' => $agentRole->id,
+            'branch_id' => $branch->id, 'branch_group_id' => $group->id];
+        $created = $this->postJson('/api/user', $payload)->assertCreated()->assertJsonPath('phone', '001103103');
+        $this->postJson('/api/user', array_replace($payload, ['phone' => '001103103']))->assertUnprocessable();
+        $this->patchJson('/api/user/'.$created->json('id'), ['phone' => '+992000123456'])
+            ->assertOk()->assertJsonPath('phone', '000123456');
+        $this->assertDatabaseHas('users', ['id' => $created->json('id'), 'phone' => '000123456']);
+    }
+
     public function test_employee_record_counts_match_list_and_detail_and_follow_current_responsibility(): void
     {
         $this->createRecordCountTables();
@@ -1036,6 +1053,33 @@ class UserAccessTest extends TestCase
         $this->patchJson('/api/user/'.$superadmin->id, ['name' => 'Blocked'])->assertStatus(403);
         $this->deleteJson('/api/user/'.$admin->id, ['distribute_to_agents' => true])->assertStatus(403);
         $this->deleteJson('/api/user/'.$client->id, ['distribute_to_agents' => true])->assertStatus(403);
+    }
+
+    public function test_hr_can_convert_clients_only_to_creatable_roles_with_required_scope(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $group = BranchGroup::create(['name' => 'Group', 'branch_id' => $branch->id]);
+        $hrRole = Role::create(['name' => 'HR', 'slug' => 'hr']);
+        $clientRole = Role::create(['name' => 'Client', 'slug' => 'client']);
+        $hr = User::create(['name' => 'HR', 'phone' => '900080001', 'role_id' => $hrRole->id, 'status' => 'active']);
+        Sanctum::actingAs($hr);
+        $client = User::create(['name' => 'Client', 'phone' => '900080002', 'role_id' => $clientRole->id, 'status' => 'active']);
+        foreach (['admin', 'superadmin', 'branch_director', 'marketing', 'accountant', 'external_agent'] as $slug) {
+            $role = Role::create(['name' => $slug, 'slug' => $slug]);
+            $this->patchJson('/api/user/'.$client->id, ['role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id])->assertUnprocessable();
+            $this->assertSame($clientRole->id, $client->fresh()->role_id);
+        }
+        foreach (['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop'] as $index => $slug) {
+            $role = Role::create(['name' => $slug, 'slug' => $slug]);
+            $candidate = User::create(['name' => 'Candidate', 'phone' => '90008001'.$index, 'role_id' => $clientRole->id, 'status' => 'active']);
+            if ($slug === 'intern') {
+                $this->patchJson('/api/user/'.$candidate->id, ['role_id' => $role->id])->assertUnprocessable();
+                $this->assertSame($clientRole->id, $candidate->fresh()->role_id);
+            }
+            $this->patchJson('/api/user/'.$candidate->id, ['role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id])
+                ->assertOk()->assertJsonPath('role.slug', $slug)->assertJsonPath('id', $candidate->id);
+            $this->patchJson('/api/user/'.$candidate->id, ['role_id' => $clientRole->id])->assertUnprocessable();
+        }
     }
 
     public function test_hr_can_edit_and_transfer_employees_through_director_but_not_admins(): void
