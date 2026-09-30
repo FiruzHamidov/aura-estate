@@ -308,7 +308,11 @@ class UserController extends Controller
         $currentIsClient = $this->roleSlug($targetUser) === 'client';
         $nextIsClient = $targetRole->slug === 'client';
 
-        abort_if($currentIsClient !== $nextIsClient, 422, 'HR cannot change a client into an employee or an employee into a client.');
+        if ($currentIsClient && ! $nextIsClient) {
+            $this->authorizeHrCreationRole($authUser, $targetRole);
+        }
+
+        abort_if(! $currentIsClient && $nextIsClient, 422, 'HR cannot change an employee into a client.');
     }
 
     private function resolveRequestedRole(Request $request, ?User $targetUser = null): ?Role
