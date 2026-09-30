@@ -20,6 +20,7 @@ final class AttendanceIngestionService
         private readonly AttendanceDeviceProtocol $protocol,
         private readonly AttendanceSummaryService $summaries,
         private readonly AttendanceParticipantService $participants,
+        private readonly AttendanceEventClassifier $classifier,
     ) {}
 
     /** @return array{accepted:int,duplicates:int,unmapped:int,rejected:list<array<string,mixed>>} */
@@ -186,11 +187,12 @@ final class AttendanceIngestionService
     private function createNormalizedEvent(AttendanceRawEvent $raw, AttendanceDeviceUser $mapping): AttendanceEvent
     {
         $user = $mapping->user;
-        $eventType = (string) (config('attendance.status_map.'.(string) $raw->attendance_status) ?? 'punch');
+        $eventType = $this->classifier->classify($raw->device, $raw->attendance_status, $raw->occurred_at_utc);
         $verificationMethod = (string) (config('attendance.verification_map.'.(string) $raw->verify_mode) ?? 'unknown');
         $window = max(0, (int) config('attendance.duplicate_window_seconds', 10));
         $isDuplicate = AttendanceEvent::query()
             ->where('user_id', $user->id)
+            ->where('event_type', $eventType)
             ->whereBetween('occurred_at', [
                 $raw->occurred_at_utc->copy()->subSeconds($window),
                 $raw->occurred_at_utc->copy()->addSeconds($window),
@@ -210,11 +212,7 @@ final class AttendanceIngestionService
             'event_type' => $eventType,
             'occurred_at' => $raw->occurred_at_utc,
             'verification_method' => $verificationMethod,
-            'direction' => match ($eventType) {
-                'check_in', 'break_in' => 'in',
-                'check_out', 'break_out' => 'out',
-                default => null,
-            },
+            'direction' => $this->classifier->direction($eventType),
             'is_duplicate' => $isDuplicate,
             'meta' => ['attendance_status' => $raw->attendance_status, 'verify_mode' => $raw->verify_mode],
         ]);
