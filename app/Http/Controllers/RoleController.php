@@ -73,9 +73,27 @@ class RoleController extends Controller
     {
         abort_unless($request->user()?->hasPermission('roles.manage'), 403);
         abort_if(in_array($role->slug, [...array_column(Role::systemRoles(), 'slug'), 'owner'], true), 409, 'Системную роль нельзя удалить.');
-        \Illuminate\Support\Facades\DB::transaction(function () use ($role) {
-            $locked = Role::whereKey($role->id)->lockForUpdate()->firstOrFail();
+        \Illuminate\Support\Facades\DB::transaction(function () use ($role, $request) {
+            $roles = Role::orderBy('id')->lockForUpdate()->get();
+            $actor = $request->user()->fresh();
+            abort_unless($actor && $roles->firstWhere('id', $actor->role_id)?->hasPermission('roles.manage'), 403);
+            $locked = $roles->firstWhere('id', $role->id);
+            abort_unless($locked, 404);
             abort_if($locked->users()->exists(), 409, 'Нельзя удалить роль: к ней привязаны пользователи');
+            $assignmentKey = 'users.assign_role.'.$locked->slug;
+            foreach ($roles as $affected) {
+                if ($affected->id === $locked->id || !in_array($assignmentKey, $affected->permissions ?? [], true)) continue;
+                $before = $affected->permissions;
+                $after = array_values(array_diff($before, [$assignmentKey]));
+                $affected->permissions = $after;
+                $affected->permissions_version++;
+                $affected->save();
+                \Illuminate\Support\Facades\DB::table('role_permission_audits')->insert([
+                    'role_id' => $affected->id, 'role_name' => $affected->name, 'actor_id' => $request->user()->id,
+                    'before' => json_encode($before, JSON_THROW_ON_ERROR), 'after' => json_encode($after, JSON_THROW_ON_ERROR),
+                    'version' => $affected->permissions_version, 'created_at' => now(),
+                ]);
+            }
             $locked->delete();
         });
 

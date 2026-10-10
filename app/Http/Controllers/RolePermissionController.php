@@ -23,15 +23,16 @@ class RolePermissionController extends Controller
     public function update(Request $request, Role $role, PermissionCatalog $catalog)
     {
         $this->authorizeManager($request);
+        $definitions = $catalog->definitions();
         $data = $request->validate([
             'version' => ['required', 'integer', 'min:1'],
             'permissions' => ['present', 'array', 'max:1000'],
-            'permissions.*' => ['required', 'string', 'distinct', Rule::in(array_keys($catalog->definitions()))],
+            'permissions.*' => ['required', 'string', 'distinct', Rule::in(array_keys($definitions))],
         ]);
 
         $exclusive = [];
         foreach ($data['permissions'] as $permission) {
-            $group = $catalog->definitions()[$permission]['exclusive_group'] ?? null;
+            $group = $definitions[$permission]['exclusive_group'] ?? null;
             if ($group !== null && isset($exclusive[$group])) {
                 throw \Illuminate\Validation\ValidationException::withMessages([
                     'permissions' => ['Для одного раздела можно выбрать только одну область данных.'],
@@ -95,6 +96,6 @@ class RolePermissionController extends Controller
 
     private function serialize(Role $role): array
     {
-        return [...$role->toArray(), 'permissions' => $role->permissionKeys(), 'system' => in_array($role->slug, array_column(Role::systemRoles(), 'slug'), true)];
+        return [...$role->toArray(), 'permissions' => array_values(array_filter($role->permissionKeys(), fn (string $key) => $role->hasPermission($key))), 'system' => in_array($role->slug, array_column(Role::systemRoles(), 'slug'), true)];
     }
 }

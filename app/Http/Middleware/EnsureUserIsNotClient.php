@@ -59,6 +59,13 @@ class EnsureUserIsNotClient
             return $next($request);
         }
 
+        if ($request->is('api/user') && $request->isMethod('GET') && $request->boolean('report_agents') && $user?->hasPermission('users.report_agents.view_all')) return $next($request);
+        if ($request->is('api/user', 'api/user/*')) {
+            foreach (['users.scope.all', 'users.scope.branch', 'users.clients.view', 'users.create', 'users.update', 'users.dismiss', 'users.restore'] as $permission) {
+                if ($user?->hasPermission($permission)) return $next($request);
+            }
+        }
+
         // HR can select existing roles/groups, but cannot change these dictionaries.
         if ($user?->role?->slug === 'hr'
             && $request->is('api/roles', 'api/roles/*', 'api/branch-groups', 'api/branch-groups/*')

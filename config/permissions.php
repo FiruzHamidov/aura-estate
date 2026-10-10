@@ -2,7 +2,7 @@
 
 // Defaults are used for migration and for compatibility with an older database.
 // Runtime changes live on roles; editing this file must never reset saved grants.
-return [
+$permissions = [
     'roles.manage' => [
         'group' => 'Администрирование', 'name' => 'Управление ролями и правами',
         'description' => 'Создание ролей, изменение их разрешений и назначение прав управления доступом. Даёт возможность расширять права других ролей.',
@@ -429,4 +429,74 @@ return [
     'bookings.reports.view' => [
         'group' => 'Показы и бронирования', 'name' => 'Отчёт по показам', 'description' => 'Просмотр отчёта по агентам в пределах области видимости показов.', 'roles' => ['admin', 'superadmin', 'hr', 'security', 'manager', 'operator', 'reels_manager', 'intern', 'rop', 'branch_director', 'mop', 'agent', 'owner'],
     ],
+    'users.scope.all' => [
+        'group' => 'Сотрудники', 'name' => 'Пользователи всех филиалов', 'description' => 'Просмотр пользователей всех филиалов. Изменение учётных записей требует отдельных прав.', 'roles' => ['admin', 'superadmin', 'marketing', 'hr'], 'exclusive_group' => 'users.scope', 'sensitive' => true,
+    ],
+    'users.scope.branch' => [
+        'group' => 'Сотрудники', 'name' => 'Пользователи своего филиала', 'description' => 'Просмотр пользователей своего филиала. Для РОП дополнительно действуют закреплённые группы и допустимые роли сотрудников.', 'roles' => ['branch_director', 'rop', 'mop', 'agent'], 'exclusive_group' => 'users.scope',
+    ],
+    'users.clients.view' => [
+        'group' => 'Сотрудники', 'name' => 'Просмотр клиентских аккаунтов', 'description' => 'Дополнительно показывает клиентские аккаунты без привязки к филиалу. Для РОП сохраняются групповые ограничения.', 'roles' => ['branch_director'],
+    ],
+    'users.unassigned.view' => [
+        'group' => 'Сотрудники', 'name' => 'Сотрудники без филиала', 'description' => 'Разрешает включать сотрудников без назначенного филиала в списки своего филиала.', 'roles' => ['branch_director'],
+    ],
+    'users.create' => [
+        'group' => 'Сотрудники', 'name' => 'Создание сотрудников', 'description' => 'Создание учётных записей в пределах правил назначения ролей и филиала.', 'roles' => ['admin', 'superadmin', 'marketing', 'hr', 'branch_director', 'rop'], 'sensitive' => true,
+    ],
+    'users.update' => [
+        'group' => 'Сотрудники', 'name' => 'Редактирование сотрудников', 'description' => 'Действие с доступной учётной записью в пределах политики управления ролями. Редактирование включает контактные данные и сброс пароля; увольнение сохраняет обязательное перераспределение записей.', 'roles' => ['admin', 'superadmin', 'marketing', 'hr', 'branch_director', 'rop', 'mop', 'agent'], 'sensitive' => true,
+    ],
+    'users.dismiss' => [
+        'group' => 'Сотрудники', 'name' => 'Увольнение сотрудников', 'description' => 'Действие с доступной учётной записью в пределах политики управления ролями. Редактирование включает контактные данные и сброс пароля; увольнение сохраняет обязательное перераспределение записей.', 'roles' => ['admin', 'superadmin', 'marketing', 'hr', 'branch_director', 'rop', 'mop', 'agent'], 'sensitive' => true,
+    ],
+    'users.restore' => [
+        'group' => 'Сотрудники', 'name' => 'Восстановление сотрудников', 'description' => 'Восстановление уволенных сотрудников в пределах области и политики управления.', 'roles' => ['admin', 'superadmin', 'hr', 'branch_director'], 'sensitive' => true,
+    ],
+    'users.manage_all_roles' => [
+        'group' => 'Сотрудники', 'name' => 'Управление аккаунтами любых ролей', 'description' => 'Разрешает действия с аккаунтами любых ролей, включая администраторов, в доступной области. Требуются отдельные права изменения или увольнения. Это чувствительное право позволяет влиять на доступ других пользователей.', 'roles' => ['admin', 'superadmin', 'marketing', 'mop', 'agent'], 'exclusive_group' => 'users.management_policy', 'sensitive' => true,
+    ],
+    'users.manage_hr_roles' => [
+        'group' => 'Сотрудники', 'name' => 'Кадровая политика управления', 'description' => 'Сохраняет кадровые ограничения: редактирование сотрудников до директора филиала, увольнение и восстановление только сотруднических ролей, ограничения создания и превращения сотрудника в клиента.', 'roles' => ['hr'], 'exclusive_group' => 'users.management_policy',
+    ],
+    'users.manage_branch_roles' => [
+        'group' => 'Сотрудники', 'name' => 'Политика руководителя филиала', 'description' => 'Управление допустимыми ролями до уровня РОП включительно. Для РОП дополнительно действуют закреплённые группы, запрет управления собой и отдельные процедуры переноса и увольнения.', 'roles' => ['branch_director', 'rop'], 'exclusive_group' => 'users.management_policy',
+    ],
+    'users.security_attendance.assign' => [
+        'group' => 'Сотрудники', 'name' => 'Назначение филиалов посещаемости СБ', 'description' => 'Назначение филиалов, посещаемость которых видит сотрудник службы безопасности. Не изменяет его основную роль и филиал.', 'roles' => ['admin', 'superadmin'], 'sensitive' => true,
+    ],
+    'users.report_agents.view_all' => [
+        'group' => 'Сотрудники', 'name' => 'Список агентов для отчёта по объектам', 'description' => 'Просмотр краткого списка агентов для фильтров отчёта по объектам без общего доступа к карточкам сотрудников.', 'roles' => ['accountant'],
+    ],
 ];
+
+
+$permissions['users.directory.view'] = [
+    'group' => 'Сотрудники', 'name' => 'Раздел управления сотрудниками',
+    'description' => 'Открывает раздел сотрудников на сайте. Состав списка определяется областью видимости; изменение аккаунтов требует отдельных прав. Краткие списки сотрудников в других формах сохраняют свои правила.',
+    'roles' => ['admin', 'superadmin', 'marketing', 'hr', 'branch_director', 'rop'],
+];
+
+$assignments = [
+    'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
+    'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],
+    'rop' => ['mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
+    'branch_director' => ['mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
+];
+$permissions['users.assign_any_role'] = [
+    'group' => 'Назначение ролей', 'name' => 'Назначение любой роли',
+    'description' => 'Разрешает назначать любые существующие и будущие роли, включая административные. Создание или редактирование учётной записи требует отдельных прав.',
+    'roles' => ['admin', 'superadmin'], 'sensitive' => true,
+];
+foreach ((require __DIR__.'/roles.php')['system'] as $role) {
+    $actors = [];
+    foreach ($assignments as $actor => $targets) {
+        if (in_array($role['slug'], $targets, true)) $actors[] = $actor;
+    }
+    $permissions['users.assign_role.'.$role['slug']] = [
+        'group' => 'Назначение ролей', 'name' => 'Назначение роли «'.$role['name'].'»',
+        'description' => 'Разрешает назначать эту роль при создании и редактировании доступных пользователей. Кадровые ограничения, группы и защита дополнительных привилегий сохраняются.',
+        'roles' => $actors, 'sensitive' => true,
+    ];
+}
+return $permissions;

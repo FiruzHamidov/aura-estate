@@ -22,8 +22,10 @@ class Role extends Model
 
     public function hasPermission(string $permission): bool
     {
-        return array_key_exists($permission, config('permissions', []))
-            && in_array($permission, $this->permissionKeys(), true);
+        if (!in_array($permission, $this->permissionKeys(), true)) return false;
+        if (array_key_exists($permission, config('permissions', []))) return true;
+        return str_starts_with($permission, 'users.assign_role.')
+            && self::query()->where('slug', substr($permission, strlen('users.assign_role.')))->exists();
     }
 
     public static function systemRoles(): array

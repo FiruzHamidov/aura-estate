@@ -21,6 +21,7 @@ final class RoleAssignmentGuard
         foreach (Role::whereIn('id', $ids)->get() as $role) {
             $added = array_diff($role->permissionKeys(), app(PermissionCatalog::class)->defaults($role->slug));
             foreach ($added as $permission) {
+                if (!$role->hasPermission($permission)) continue;
                 abort_unless($actor->hasPermission($permission), 403, 'Нельзя управлять учётной записью с дополнительными правами, которых у вас нет.');
             }
         }

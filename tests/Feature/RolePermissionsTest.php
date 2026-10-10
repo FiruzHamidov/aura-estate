@@ -308,4 +308,50 @@ class RolePermissionsTest extends TestCase
         $access->ensureCanMutateClients($actor, 'clients.update');
     }
 
+    public function test_custom_roles_get_individual_assign_permissions_and_deleted_roles_lose_them(): void
+    {
+        $this->actor('admin');
+        $custom = Role::create(['name' => 'Coordinator', 'slug' => 'coordinator']);
+        $agent = Role::where('slug', 'agent')->firstOrFail();
+        $key = 'users.assign_role.coordinator';
+        $this->assertContains($key, array_column($this->getJson('/api/rbac')->assertOk()->json('permissions'), 'key'));
+        $this->putJson('/api/rbac/roles/'.$agent->id, ['version' => 1, 'permissions' => [$key]])->assertOk();
+        $this->assertTrue($agent->fresh()->hasPermission($key));
+        $this->assertFalse($agent->fresh()->hasPermission('users.assign_any_role'));
+        $this->deleteJson('/api/roles/'.$custom->id)->assertOk();
+        $this->assertFalse($agent->fresh()->hasPermission($key));
+        $this->assertSame([], $agent->fresh()->permissions);
+        $this->assertSame(3, $agent->fresh()->permissions_version);
+        Role::create(['name' => 'New coordinator', 'slug' => 'coordinator']);
+        $this->assertFalse($agent->fresh()->hasPermission($key));
+        $data = collect($this->getJson('/api/rbac')->assertOk()->json('roles'))->firstWhere('id', $agent->id);
+        $this->assertSame([], $data['permissions']);
+    }
+
+    public function test_user_listing_scopes_and_mutation_grants_are_separate(): void
+    {
+        Schema::table('users', fn (Blueprint $table) => $table->unsignedBigInteger('branch_id')->nullable());
+        $actor = $this->actor('agent');
+        $actor->branch_id = 10;
+        DB::table('users')->where('id', $actor->id)->update(['branch_id' => 10]);
+        $agentRole = $actor->role_id;
+        foreach ([10, 20, null] as $index => $branch) {
+            DB::table('users')->insert(['name' => 'U'.$index, 'role_id' => $agentRole, 'branch_id' => $branch]);
+        }
+        $controller = app(\App\Http\Controllers\UserController::class);
+        $query = new \ReflectionMethod($controller, 'visibleUsersQuery');
+        foreach ([
+            [['users.scope.branch'], [1, 2]],
+            [['users.scope.all'], [1, 2, 3, 4]],
+            [[], []],
+        ] as [$permissions, $ids]) {
+            $actor->role->permissions = $permissions;
+            $this->assertSame($ids, $query->invoke($controller, $actor)->orderBy('id')->pluck('id')->all());
+        }
+        $actor->role->permissions = ['users.scope.all', 'users.manage_all_roles'];
+        $authorize = new \ReflectionMethod($controller, 'authorizeUserMutation');
+        $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);
+        $authorize->invoke($controller, $actor, $actor, 'update');
+    }
+
 }

@@ -6,13 +6,24 @@ class PermissionCatalog
 {
     public function definitions(): array
     {
-        return config('permissions', []);
+        $definitions = config('permissions', []);
+        if (\Illuminate\Support\Facades\Schema::hasTable('roles')) {
+            foreach (\App\Models\Role::query()->get(['slug', 'name']) as $role) {
+                $key = 'users.assign_role.'.$role->slug;
+                $definitions[$key] ??= [
+                    'group' => 'Назначение ролей', 'name' => 'Назначение роли «'.$role->name.'»',
+                    'description' => 'Разрешает назначать эту роль доступным пользователям. Создание и редактирование требуют отдельных прав; защита дополнительных привилегий сохраняется.',
+                    'roles' => [], 'sensitive' => true,
+                ];
+            }
+        }
+        return $definitions;
     }
 
     public function defaults(?string $roleSlug): array
     {
         $permissions = [];
-        foreach ($this->definitions() as $key => $definition) {
+        foreach (config('permissions', []) as $key => $definition) {
             if (in_array($roleSlug, ($definition['roles'] ?? config($definition['roles_config'], [])), true)) {
                 $permissions[] = $key;
             }
