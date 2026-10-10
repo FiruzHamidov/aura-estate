@@ -62,6 +62,8 @@ class BranchGroupController extends Controller
         }
 
         $allowed = $this->visibleQuery($authUser)
+            // Authorization only needs the group id, not related directory counts.
+            ->select('branch_groups.id')
             ->whereKey($branchGroup->id)
             ->exists();
 
