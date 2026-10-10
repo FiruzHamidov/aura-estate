@@ -250,7 +250,7 @@ class MotivationController extends Controller
 
     private function ensureManageAccess(User $user): void
     {
-        if (! in_array($user->role?->slug, ['rop', 'branch_director', 'admin', 'superadmin', 'owner'], true)) {
+        if (! $user->hasPermission('motivation.manage')) {
             abort(response()->json([
                 'code' => 'KPI_FORBIDDEN_ROLE_ACTION',
                 'message' => 'Role is not allowed to perform this action.',
@@ -272,7 +272,7 @@ class MotivationController extends Controller
 
     private function ensureOverviewAccess(User $user): void
     {
-        if (! in_array($user->role?->slug, ['agent', 'mop'], true)) {
+        if (! $user->hasPermission('motivation.own.view')) {
             abort(response()->json([
                 'code' => 'KPI_FORBIDDEN_ROLE_ACTION',
                 'message' => 'Role is not allowed to perform this action.',

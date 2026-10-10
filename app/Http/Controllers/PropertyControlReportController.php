@@ -134,7 +134,7 @@ class PropertyControlReportController extends Controller
         $user = Auth::user();
         abort_unless($user, 401, 'Unauthenticated.');
         $user->loadMissing('role');
-        abort_unless(in_array($user->role?->slug, ['security', 'admin', 'superadmin'], true), 403, 'CRM_DEAL_FORBIDDEN');
+        abort_unless($user->hasPermission('properties.control_report.view'), 403, 'CRM_DEAL_FORBIDDEN');
 
         $validated = $request->validate($this->dealListQuery->rules());
         $validated['pipeline_type'] = 'property_control';

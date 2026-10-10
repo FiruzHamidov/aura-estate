@@ -59,7 +59,7 @@ final class PropertyModerationController extends Controller
     public function queue(Request $request)
     {
         $user = $request->user();
-        abort_unless(in_array($user->role?->slug, config('property-moderation.moderator_roles', []), true), 403);
+        abort_unless($user->hasPermission('properties.moderate'), 403);
         $data = $request->validate(['type' => 'nullable|in:initial_review,price_increase,duplicate_review,content_review,appeal', 'per_page' => 'nullable|integer|min:1|max:100']);
         $query = PropertyModerationCase::query()->open()->with(['property.photos', 'parentCase', 'submitter.role', 'duplicateCandidates.candidateProperty.photos'])->oldest('submitted_at');
         $query->whereHas('property', fn ($properties) => $this->access->scopeModeratable($properties, $user));
@@ -78,7 +78,7 @@ final class PropertyModerationController extends Controller
     public function promotionQueue(Request $request)
     {
         $user = $request->user();
-        abort_unless(in_array($user->role?->slug, config('property-moderation.moderator_roles', []), true), 403);
+        abort_unless($user->hasPermission('properties.moderate'), 403);
         $query = PropertyPromotion::query()->where('status', PropertyPromotion::STATUS_REQUESTED)->with(['property.photos', 'requester.role'])->oldest('requested_at');
         $query->whereHas('property', fn ($properties) => $this->access->scopeModeratable($properties, $user));
 
@@ -88,7 +88,7 @@ final class PropertyModerationController extends Controller
     public function trustReport(Request $request)
     {
         $user = $request->user();
-        abort_unless(in_array($user->role?->slug, config('property-moderation.moderator_roles', []), true), 403);
+        abort_unless($user->hasPermission('properties.moderate'), 403);
         $data = $request->validate(['per_page' => 'nullable|integer|min:1|max:100']);
         $query = EmployeeTrustEvent::query()
             ->select('user_id')
@@ -103,7 +103,7 @@ final class PropertyModerationController extends Controller
         if ($user->hasRole('rop')) {
             $query->whereIn('user_id', app(\App\Support\RopGroupAccess::class)->employees($user)->select('users.id'));
             $query->whereIn('property_id', $this->access->scopeModeratable(Property::query(), $user)->select('properties.id'));
-        } elseif (! in_array($user->role?->slug, config('property-moderation.global_moderator_roles', []), true)) {
+        } elseif (! $user->hasPermission('properties.manage_all')) {
             $query->whereHas('user', fn ($employees) => $employees->where('branch_id', $user->branch_id));
         }
         $page = $query->paginate($data['per_page'] ?? 25);

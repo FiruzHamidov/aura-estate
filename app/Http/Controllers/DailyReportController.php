@@ -749,14 +749,14 @@ class DailyReportController extends Controller
 
     private function ensureDailyMyReportReadRole(User $user): void
     {
-        if (! in_array($user->role?->slug, ['agent', 'mop', 'intern', 'rop', 'branch_director', 'admin', 'superadmin', 'owner'], true)) {
+        if (! $user->hasPermission('daily_reports.own.view')) {
             $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Role is not allowed for this action.');
         }
     }
 
     private function ensureDailyMyReportEditRole(User $user): void
     {
-        if (! in_array($user->role?->slug, ['agent', 'mop', 'intern', 'rop', 'branch_director', 'admin', 'superadmin', 'owner'], true)) {
+        if (! $user->hasPermission('daily_reports.own.edit')) {
             $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Role is not allowed for this action.');
         }
     }

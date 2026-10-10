@@ -148,6 +148,9 @@ Route::get('/agents/{agent}/reviews', [ReviewController::class, 'index'])->where
 Route::post('/agents/{agent}/reviews', [ReviewController::class, 'store'])->middleware('throttle:10,1')->whereNumber('agent');
 
 Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
+    Route::get('/rbac', [\App\Http\Controllers\RolePermissionController::class, 'index']);
+    Route::put('/rbac/roles/{role}', [\App\Http\Controllers\RolePermissionController::class, 'update']);
+    Route::get('/rbac/roles/{role}/history', [\App\Http\Controllers\RolePermissionController::class, 'history']);
     Route::get('/client-catalog/counts', [\App\Http\Controllers\ClientCatalogController::class, 'counts']);
     Route::get('/client-catalog', [\App\Http\Controllers\ClientCatalogController::class, 'index']);
     Route::get('/client-catalog/claim-status', [\App\Http\Controllers\ClientCatalogController::class, 'claimStatus']);

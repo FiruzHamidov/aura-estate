@@ -16,7 +16,7 @@ final class PropertyModerationAccess
 {
     public function canCreate(User $user): bool
     {
-        return in_array($this->role($user), config('property-moderation.creator_roles', []), true);
+        return $user->hasPermission('properties.create');
     }
 
     /** Read-only access to the same closed stages exposed by the SB report. */
@@ -32,11 +32,11 @@ final class PropertyModerationAccess
             return false;
         }
         $role = $this->role($user);
-        if (! in_array($role, config('property-moderation.creator_roles', []), true)) {
+        if (! $user->hasPermission('properties.edit')) {
             return false;
         }
 
-        if (in_array($role, config('property-moderation.global_moderator_roles', []), true)) {
+        if ($user->hasPermission('properties.manage_all')) {
             return true;
         }
 
@@ -65,7 +65,7 @@ final class PropertyModerationAccess
     {
         $role = $this->role($user);
 
-        return in_array($role, config('property-moderation.creator_roles', []), true)
+        return $user->hasPermission('properties.deal.manage')
             && ($this->canEdit($user, $property) || $role === 'agent');
     }
 
@@ -75,11 +75,11 @@ final class PropertyModerationAccess
             return false;
         }
         $role = $this->role($user);
-        if (! in_array($role, config('property-moderation.moderator_roles', []), true)) {
+        if (! $user->hasPermission('properties.moderate')) {
             return false;
         }
 
-        if (in_array($role, config('property-moderation.global_moderator_roles', []), true)) {
+        if ($user->hasPermission('properties.manage_all')) {
             return true;
         }
 
@@ -89,10 +89,10 @@ final class PropertyModerationAccess
 
     public function scopeModeratable(Builder $query, User $user): Builder
     {
-        if (in_array($this->role($user), config('property-moderation.global_moderator_roles', []), true)) {
+        if ($user->hasPermission('properties.manage_all')) {
             return $query;
         }
-        if (! $user->branch_id || ! in_array($this->role($user), config('property-moderation.moderator_roles', []), true)) {
+        if (! $user->branch_id || ! $user->hasPermission('properties.moderate')) {
             return $query->whereRaw('1 = 0');
         }
 

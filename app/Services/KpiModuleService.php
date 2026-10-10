@@ -94,7 +94,7 @@ class KpiModuleService
             $actor = auth()->user();
             if ($actor) {
                 [$actor] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($actor, null, null, $groupId);
-                abort_unless(in_array($actor->role?->slug, ['admin', 'superadmin', 'rop', 'branch_director', 'mop'], true), 403, 'KPI_FORBIDDEN_ROLE_ACTION');
+                abort_unless($actor->hasPermission('kpi.plans.manage'), 403, 'KPI_FORBIDDEN_ROLE_ACTION');
             }
             $scope = [];
             if ($actor?->hasRole('rop')) {

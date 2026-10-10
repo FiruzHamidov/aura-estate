@@ -13,6 +13,10 @@ class EnsureUserIsNotClient
         $user = $request->user();
         $user?->loadMissing('role');
 
+        if ($request->is('api/roles', 'api/roles/*') && $user?->hasPermission('roles.manage')) {
+            return $next($request);
+        }
+
         // HR can select existing roles/groups, but cannot change these dictionaries.
         if ($user?->role?->slug === 'hr'
             && $request->is('api/roles', 'api/roles/*', 'api/branch-groups', 'api/branch-groups/*')

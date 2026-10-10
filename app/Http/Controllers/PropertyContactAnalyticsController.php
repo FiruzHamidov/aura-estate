@@ -21,7 +21,7 @@ class PropertyContactAnalyticsController extends Controller
 
     public function index(Request $request)
     {
-        abort_unless(in_array($request->user()?->role?->slug, ['marketing', 'admin', 'superadmin'], true), 403);
+        abort_unless($request->user()?->hasPermission('properties.analytics.view'), 403);
         $data = $request->validate([
             'sort' => ['sometimes', Rule::in(['views_count', 'phone_clicks', 'chat_clicks', 'whatsapp_clicks', 'total_clicks'])],
             'search' => ['nullable', 'string', 'max:150'],

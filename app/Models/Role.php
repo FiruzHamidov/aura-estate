@@ -12,6 +12,20 @@ class Role extends Model
 
     protected $fillable = ['name', 'description', 'slug'];
 
+    protected $casts = ['permissions' => 'array', 'permissions_version' => 'integer'];
+
+    public function permissionKeys(): array
+    {
+        // An explicit empty array revokes every grant. Null preserves pre-migration behavior.
+        return $this->permissions ?? app(\App\Services\Rbac\PermissionCatalog::class)->defaults($this->slug);
+    }
+
+    public function hasPermission(string $permission): bool
+    {
+        return array_key_exists($permission, config('permissions', []))
+            && in_array($permission, $this->permissionKeys(), true);
+    }
+
     public static function systemRoles(): array
     {
         return config('roles.system', []);

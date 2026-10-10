@@ -55,7 +55,7 @@ class ApiRequestLogController extends Controller
     {
         $role = $request->user()?->role?->slug;
 
-        abort_unless(in_array($role, ['admin', 'superadmin'], true), 403, 'Forbidden');
+        abort_unless($request->user()?->hasPermission('audit.api.view'), 403, 'Forbidden');
     }
 
     private function serializeSummary(ApiRequestLog $log): array

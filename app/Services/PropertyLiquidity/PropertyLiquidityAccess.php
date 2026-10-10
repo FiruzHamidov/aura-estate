@@ -17,17 +17,17 @@ class PropertyLiquidityAccess
 
     public function isInternal(?User $user): bool
     {
-        return in_array($this->role($user), self::INTERNAL_ROLES, true);
+        return ($user?->hasPermission('liquidity.view') ?? false);
     }
 
     public function canManagePromotion(?User $user): bool
     {
-        return in_array($this->role($user), self::MARKETING_WRITE_ROLES, true);
+        return ($user?->hasPermission('liquidity.promotion.manage') ?? false);
     }
 
     public function canSetBusinessPriority(?User $user): bool
     {
-        return in_array($this->role($user), ['mop', 'rop', 'branch_director', 'admin', 'superadmin'], true);
+        return ($user?->hasPermission('liquidity.priority.manage') ?? false);
     }
 
     public function scope(Builder $query, User $user): Builder

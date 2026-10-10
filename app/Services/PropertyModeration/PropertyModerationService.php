@@ -539,7 +539,7 @@ final class PropertyModerationService
 
     public function breakGlassApprove(PropertyModerationCase $case, User $actor, string $reason, int $expectedVersion): Property
     {
-        abort_unless($actor->role?->slug === 'superadmin', 403, 'BREAK_GLASS_FORBIDDEN');
+        abort_unless($actor->hasPermission('properties.break_glass'), 403, 'BREAK_GLASS_FORBIDDEN');
 
         return DB::transaction(function () use ($case, $actor, $reason, $expectedVersion): Property {
             [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $case->property_id);
@@ -777,7 +777,7 @@ final class PropertyModerationService
                 if ($targetId !== null) {
                     $target = User::query()->where('status', User::STATUS_ACTIVE)->lockForUpdate()->findOrFail($targetId);
                     $role = (string) $actor->role?->slug;
-                    if (! in_array($role, config('property-moderation.global_moderator_roles', []), true)) {
+                    if (! $actor->hasPermission('properties.manage_all')) {
                         abort_unless((int) $target->branch_id === (int) $actor->branch_id, 403, 'MODERATION_PERMISSION_DENIED');
                     }
                     if ($field === 'co_owner_user_id') {

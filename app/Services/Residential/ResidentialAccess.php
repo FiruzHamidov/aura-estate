@@ -21,13 +21,13 @@ final class ResidentialAccess
 
     public function global(?User $user): bool
     {
-        return in_array($this->role($user), self::GLOBAL_ROLES, true);
+        return ($user?->hasPermission('new_buildings.manage_all') ?? false);
     }
 
     public function canCreate(?User $user): bool
     {
         return $user && $user->status === User::STATUS_ACTIVE && ! $user->isDeletedAccount()
-            && in_array($this->role($user), [...self::GLOBAL_ROLES, ...self::BRANCH_ROLES, ...self::AUTHOR_ROLES], true);
+            && $user->hasPermission('new_buildings.manage');
     }
 
     public function visible(User $user): Builder
@@ -53,7 +53,7 @@ final class ResidentialAccess
 
     public function canPublish(User $user, NewBuilding $building): bool
     {
-        return $this->canManage($user, $building) && ($this->global($user) || in_array($this->role($user), self::BRANCH_ROLES, true));
+        return $this->canManage($user, $building) && $user->hasPermission('new_buildings.publish');
     }
 
     public function ensureManage(?User $user, NewBuilding $building): void

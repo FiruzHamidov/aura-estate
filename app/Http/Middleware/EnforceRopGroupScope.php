@@ -31,7 +31,7 @@ final class EnforceRopGroupScope
             'App\\Http\\Controllers\\KpiModuleController@updateTelegramConfig',
         ], true), 403, 'FORBIDDEN_ACTION');
         abort_if(! $request->isMethodSafe() && $controller
-            && (str_starts_with($controller, 'App\\Http\\Controllers\\RoleController@')
+            && ((str_starts_with($controller, 'App\\Http\\Controllers\\RoleController@') && ! $actor->hasPermission('roles.manage'))
                 || str_starts_with($controller, 'App\\Http\\Controllers\\BranchController@')), 403, 'FORBIDDEN_ACTION');
         $publicStory = in_array($controller, [
             'App\\Http\\Controllers\\StoryController@feed',

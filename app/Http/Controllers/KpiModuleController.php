@@ -64,7 +64,7 @@ class KpiModuleController extends Controller
 
     public function updateUserPlans(Request $request, int $userId)
     {
-        $this->ensureManageAccess($this->authUser(), ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
+        $this->ensureManageAccess($this->authUser(), 'kpi.plans.manage');
 
         $validated = $request->validate([
             'effective_from' => 'required|date',
@@ -99,7 +99,7 @@ class KpiModuleController extends Controller
     public function bulkUpsertUserPlans(Request $request)
     {
         $actor = $this->authUser();
-        $this->ensureManageAccess($actor, ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
+        $this->ensureManageAccess($actor, 'kpi.plans.manage');
 
         $validated = $request->validate([
             'effective_from' => 'required|date',
@@ -231,7 +231,7 @@ class KpiModuleController extends Controller
 
     public function updatePlans(Request $request)
     {
-        $this->ensureManageAccess($this->authUser(), ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
+        $this->ensureManageAccess($this->authUser(), 'kpi.plans.manage');
 
         $validated = $request->validate([
             'role' => 'nullable|string|max:64',
@@ -382,7 +382,7 @@ class KpiModuleController extends Controller
 
     public function upsertCommonPlans(Request $request)
     {
-        $this->ensureManageAccess($this->authUser(), ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
+        $this->ensureManageAccess($this->authUser(), 'kpi.plans.manage');
 
         $validated = $request->validate([
             'role' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
@@ -419,7 +419,7 @@ class KpiModuleController extends Controller
     public function applyCommonPlansToUsers(Request $request)
     {
         $actor = $this->authUser();
-        $this->ensureManageAccess($actor, ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
+        $this->ensureManageAccess($actor, 'kpi.plans.manage');
 
         $validated = $request->validate([
             'role' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
@@ -450,7 +450,7 @@ class KpiModuleController extends Controller
     public function eligibleUsers(Request $request)
     {
         $actor = $this->authUser();
-        $this->ensureManageAccess($actor, ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
+        $this->ensureManageAccess($actor, 'kpi.plans.manage');
 
         $validated = $request->validate([
             'role' => ['nullable', Rule::in(['agent', 'intern', 'mop', 'rop'])],
@@ -659,7 +659,7 @@ class KpiModuleController extends Controller
 
     public function updateTelegramConfig(Request $request)
     {
-        $this->ensureManageAccess($this->authUser(), ['admin', 'superadmin', 'rop', 'branch_director']);
+        $this->ensureManageAccess($this->authUser(), 'kpi.operations.manage');
 
         $validated = $request->validate([
             'daily_enabled' => 'sometimes|boolean',
@@ -808,7 +808,7 @@ class KpiModuleController extends Controller
     public function adjustmentEntities(Request $request)
     {
         if ($this->authUser()->hasRole('rop')) return app(KpiPeriodLockController::class)->historicalEntities($request);
-        $this->ensureManageAccess($this->authUser(), ['admin', 'superadmin', 'rop', 'branch_director']);
+        $this->ensureManageAccess($this->authUser(), 'kpi.operations.manage');
 
         $validated = $request->validate([
             'role' => 'nullable|string|max:128',
@@ -909,7 +909,7 @@ class KpiModuleController extends Controller
             $role = (string) ($this->authUser()->role?->slug ?? '');
             $allowed = ['admin', 'superadmin', 'owner', 'rop', 'branch_director'];
 
-            if (! in_array($role, $allowed, true)) {
+            if (! $this->authUser()->hasPermission('kpi.inactive.view')) {
                 abort(response()->json([
                     'code' => 'KPI_FORBIDDEN_INCLUDE_INACTIVE',
                     'message' => 'Forbidden include_inactive scope.',
@@ -928,9 +928,9 @@ class KpiModuleController extends Controller
             || (string) $request->header('X-KPI-Version', '') === '2';
     }
 
-    private function ensureManageAccess(User $user, array $allowed): void
+    private function ensureManageAccess(User $user, string $permission): void
     {
-        if (! in_array($user->role?->slug, $allowed, true)) {
+        if (! $user->hasPermission($permission)) {
             abort(response()->json([
                 'code' => 'KPI_FORBIDDEN',
                 'message' => 'Forbidden.',

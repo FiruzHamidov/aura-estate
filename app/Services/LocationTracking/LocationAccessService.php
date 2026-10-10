@@ -20,14 +20,14 @@ class LocationAccessService
 
     public function assertCanTransmit(User $user): void
     {
-        if (! in_array($this->role($user), config('location_tracking.tracked_roles', []), true)) {
+        if (! $user->hasPermission('locations.transmit')) {
             $this->deny(self::FORBIDDEN_ROLE, 'Передача местоположения доступна только агентам и МОПам.');
         }
     }
 
     public function assertCanViewModule(User $user): void
     {
-        if (! in_array($this->role($user), config('location_tracking.viewer_roles', []), true)) {
+        if (! $user->hasPermission('locations.view')) {
             $this->deny(self::FORBIDDEN_ROLE, 'Нет доступа к модулю местоположения.');
         }
     }

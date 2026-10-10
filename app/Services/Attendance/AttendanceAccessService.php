@@ -26,19 +26,19 @@ final class AttendanceAccessService
     public function assertCanAdminister(User $user): void
     {
         $this->assertCanViewModule($user);
-        if (! in_array($this->role($user), config('attendance.administrator_roles', []), true)) {
+        if (! $user->hasPermission('attendance.devices.manage')) {
             $this->deny('ATTENDANCE_ADMIN_FORBIDDEN', 'Нет права управлять терминалами посещаемости.');
         }
     }
 
     public function assertCanViewTable(User $user): void
     {
-        $this->assertRoleIn($user, config('attendance.table_roles', []), 'ATTENDANCE_TABLE_FORBIDDEN', 'Нет права просматривать общую таблицу посещаемости.');
+        $this->assertPermission($user, 'attendance.table.view', 'ATTENDANCE_TABLE_FORBIDDEN', 'Нет права просматривать общую таблицу посещаемости.');
     }
 
     public function assertCanManageMappings(User $user): void
     {
-        $this->assertRoleIn($user, config('attendance.mapping_roles', []), 'ATTENDANCE_MAPPING_FORBIDDEN', 'Нет права управлять сопоставлениями терминала.');
+        $this->assertPermission($user, 'attendance.mappings.manage', 'ATTENDANCE_MAPPING_FORBIDDEN', 'Нет права управлять сопоставлениями терминала.');
     }
 
     public function mappingUsersQuery(User $viewer): Builder
@@ -64,42 +64,42 @@ final class AttendanceAccessService
 
     public function assertCanViewPresence(User $user): void
     {
-        $this->assertRoleIn($user, ['rop', 'branch_director', 'admin', 'superadmin', 'owner'], 'ATTENDANCE_PRESENCE_FORBIDDEN', 'Нет права просматривать местонахождение сотрудников.');
+        $this->assertPermission($user, 'attendance.presence.view', 'ATTENDANCE_PRESENCE_FORBIDDEN', 'Нет права просматривать местонахождение сотрудников.');
     }
 
     public function assertCanViewHrReport(User $user): void
     {
-        $this->assertRoleIn($user, config('attendance.hr_report_roles', []), 'ATTENDANCE_HR_REPORT_FORBIDDEN', 'Нет права просматривать отчёт HR.');
+        $this->assertPermission($user, 'attendance.hr_report.view', 'ATTENDANCE_HR_REPORT_FORBIDDEN', 'Нет права просматривать отчёт HR.');
     }
 
     public function assertCanComment(User $user): void
     {
-        $this->assertRoleIn($user, config('attendance.comment_roles', []), 'ATTENDANCE_COMMENT_FORBIDDEN', 'Нет права изменять HR-комментарий.');
+        $this->assertPermission($user, 'attendance.comments.manage', 'ATTENDANCE_COMMENT_FORBIDDEN', 'Нет права изменять HR-комментарий.');
     }
 
     public function assertCanManageSchedules(User $user): void
     {
-        $this->assertRoleIn($user, config('attendance.schedule_roles', []), 'ATTENDANCE_SCHEDULE_FORBIDDEN', 'Нет права изменять рабочий график.');
+        $this->assertPermission($user, 'attendance.schedules.manage', 'ATTENDANCE_SCHEDULE_FORBIDDEN', 'Нет права изменять рабочий график.');
     }
 
     public function assertCanManageLeaves(User $user): void
     {
-        $this->assertRoleIn($user, config('attendance.leave_roles', []), 'ATTENDANCE_LEAVE_FORBIDDEN', 'Нет права назначать отпуска.');
+        $this->assertPermission($user, 'attendance.leaves.manage', 'ATTENDANCE_LEAVE_FORBIDDEN', 'Нет права назначать отпуска.');
     }
 
     public function assertCanManageDuties(User $user): void
     {
-        $this->assertRoleIn($user, config('attendance.duty_roles', []), 'ATTENDANCE_DUTY_FORBIDDEN', 'Нет права назначать дежурных.');
+        $this->assertPermission($user, 'attendance.duties.manage', 'ATTENDANCE_DUTY_FORBIDDEN', 'Нет права назначать дежурных.');
     }
 
     public function assertCanManageHolidays(User $user): void
     {
-        $this->assertRoleIn($user, config('attendance.holiday_roles', []), 'ATTENDANCE_HOLIDAY_FORBIDDEN', 'Нет права управлять праздничными днями.');
+        $this->assertPermission($user, 'attendance.holidays.manage', 'ATTENDANCE_HOLIDAY_FORBIDDEN', 'Нет права управлять праздничными днями.');
     }
 
     public function assertCanViewDevices(User $user): void
     {
-        $this->assertRoleIn($user, config('attendance.device_viewer_roles', []), 'ATTENDANCE_DEVICE_FORBIDDEN', 'Нет права просматривать терминалы посещаемости.');
+        $this->assertPermission($user, 'attendance.devices.view', 'ATTENDANCE_DEVICE_FORBIDDEN', 'Нет права просматривать терминалы посещаемости.');
     }
 
     public function permissions(User $user): array
@@ -107,18 +107,18 @@ final class AttendanceAccessService
         $role = $this->role($user);
 
         return [
-            'can_view_presence' => in_array($role, ['rop', 'branch_director', 'admin', 'superadmin', 'owner'], true),
-            'can_view_hr_report' => in_array($role, config('attendance.hr_report_roles', []), true),
-            'can_view_attendance_table' => in_array($role, config('attendance.table_roles', []), true),
-            'can_view_all_branches' => in_array($role, config('attendance.all_branch_viewer_roles', []), true),
-            'can_comment_late_day' => in_array($role, config('attendance.comment_roles', []), true),
-            'can_manage_mappings' => in_array($role, config('attendance.mapping_roles', []), true),
-            'can_manage_schedules' => in_array($role, config('attendance.schedule_roles', []), true),
-            'can_manage_leaves' => in_array($role, config('attendance.leave_roles', []), true),
-            'can_manage_duties' => in_array($role, config('attendance.duty_roles', []), true),
-            'can_manage_holidays' => in_array($role, config('attendance.holiday_roles', []), true),
-            'can_view_devices' => in_array($role, config('attendance.device_viewer_roles', []), true),
-            'can_manage_devices' => in_array($role, config('attendance.administrator_roles', []), true),
+            'can_view_presence' => $user->hasPermission('attendance.presence.view'),
+            'can_view_hr_report' => $user->hasPermission('attendance.hr_report.view'),
+            'can_view_attendance_table' => $user->hasPermission('attendance.table.view'),
+            'can_view_all_branches' => $user->hasPermission('attendance.all_branches.view'),
+            'can_comment_late_day' => $user->hasPermission('attendance.comments.manage'),
+            'can_manage_mappings' => $user->hasPermission('attendance.mappings.manage'),
+            'can_manage_schedules' => $user->hasPermission('attendance.schedules.manage'),
+            'can_manage_leaves' => $user->hasPermission('attendance.leaves.manage'),
+            'can_manage_duties' => $user->hasPermission('attendance.duties.manage'),
+            'can_manage_holidays' => $user->hasPermission('attendance.holidays.manage'),
+            'can_view_devices' => $user->hasPermission('attendance.devices.view'),
+            'can_manage_devices' => $user->hasPermission('attendance.devices.manage'),
         ];
     }
 
@@ -138,7 +138,7 @@ final class AttendanceAccessService
             ->whereHas('role', fn (Builder $roles) => $roles->whereNotIn('slug', $excludedRoles))
             ->with(['role', 'branch', 'branchGroup']);
 
-        if (in_array($this->role($viewer), config('attendance.all_branch_viewer_roles', []), true)) {
+        if ($viewer->hasPermission('attendance.all_branches.view')) {
             return $query;
         }
 
@@ -180,10 +180,10 @@ final class AttendanceAccessService
         ], $status));
     }
 
-    private function assertRoleIn(User $user, array $roles, string $code, string $message): void
+    private function assertPermission(User $user, string $permission, string $code, string $message): void
     {
         $this->assertCanViewModule($user);
-        if (! in_array($this->role($user), $roles, true)) {
+        if (! $user->hasPermission($permission)) {
             $this->deny($code, $message);
         }
     }

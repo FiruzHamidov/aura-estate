@@ -39,6 +39,16 @@ class User extends Authenticatable
         'deletion_requested_at' => 'datetime',
     ];
 
+    protected static function booted(): void
+    {
+        static::saving(function (User $target): void {
+            $actor = auth()->user();
+            if ($actor instanceof User) {
+                app(\App\Services\Rbac\RoleAssignmentGuard::class)->ensureCanSave($actor, $target);
+            }
+        });
+    }
+
     public function getStatusAttribute($value): string
     {
         return in_array($value, [self::STATUS_ACTIVE, self::STATUS_INACTIVE], true)
@@ -81,6 +91,11 @@ class User extends Authenticatable
     public function hasRole(string $slug): bool
     {
         return $this->role && $this->role->slug === $slug;
+    }
+
+    public function hasPermission(string $permission): bool
+    {
+        return $this->role?->hasPermission($permission) ?? false;
     }
 
     public function agentBookings()

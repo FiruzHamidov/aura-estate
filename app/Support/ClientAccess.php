@@ -409,20 +409,7 @@ class ClientAccess
 
     public function ensureCanMutateClients(User $authUser, string $ability = 'clients.create'): void
     {
-        $allowedRoles = [
-            'superadmin',
-            'admin',
-            'marketing',
-            'branch_director',
-            'rop',
-            'mop',
-            'agent',
-            'manager',
-            'operator',
-            'intern',
-        ];
-
-        if (!in_array($this->roleSlug($authUser), $allowedRoles, true)) {
+        if (! $authUser->hasPermission($ability)) {
             $this->denyWithCode('FORBIDDEN_ACTION', 'Role cannot mutate CRM contacts.', 403, $authUser, $ability);
         }
     }

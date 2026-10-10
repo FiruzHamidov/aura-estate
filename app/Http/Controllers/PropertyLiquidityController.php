@@ -77,7 +77,7 @@ class PropertyLiquidityController extends Controller
         }
 
         if ($purpose === 'social') {
-            abort_unless(in_array($user->role?->slug, ['marketing', 'reels_manager', 'rop', 'mop', 'branch_director', 'admin', 'superadmin'], true), 403);
+            abort_unless($user->hasPermission('liquidity.queue.view'), 403);
             $query->whereIn($this->liquidityColumn($user, 'promotion_eligibility'), ['eligible', 'content_needed'])
                 ->orderByDesc($this->liquidityColumn($user, 'promotion_priority_score'));
         } else {
@@ -167,7 +167,7 @@ class PropertyLiquidityController extends Controller
 
     public function recalculate(Request $request, Property $property)
     {
-        abort_unless(in_array($request->user()?->role?->slug, ['admin', 'superadmin'], true), 403, 'Доступ запрещён');
+        abort_unless($request->user()?->hasPermission('liquidity.settings.manage'), 403, 'Доступ запрещён');
         RecalculatePropertyLiquidity::dispatch($property->id);
 
         return response()->json(['message' => 'Пересчет поставлен в очередь.'], 202);

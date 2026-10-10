@@ -17,7 +17,7 @@ final class ClientCatalogController extends Controller
     private function lists(User $user): array
     {
         $role = $user->role?->slug;
-        abort_unless(in_array($role, ['intern', 'agent', 'rop', 'mop', 'admin', 'superadmin'], true), 403);
+        abort_unless($user->hasPermission('clients.catalog.view'), 403);
 
         return $role === 'intern' ? ['interns'] : ['agents', 'interns'];
     }
@@ -93,7 +93,7 @@ final class ClientCatalogController extends Controller
     private function claimant(Request $request): User
     {
         $user = $request->user();
-        abort_unless(in_array($user->role?->slug, ['agent', 'intern'], true), 403, 'Брать клиентов могут только агенты и стажёры.');
+        abort_unless($user->hasPermission('clients.catalog.claim'), 403, 'Брать клиентов могут только агенты и стажёры.');
 
         return $user;
     }
@@ -119,7 +119,7 @@ final class ClientCatalogController extends Controller
         $client = DB::transaction(function () use ($actor, $clientId) {
             // Serialize both requests by the same employee and requests for the same client.
             $user = User::query()->lockForUpdate()->findOrFail($actor->id);
-            abort_unless($user->status === 'active' && in_array($user->role?->slug, ['agent', 'intern'], true), 403);
+            abort_unless($user->status === 'active' && $user->hasPermission('clients.catalog.claim'), 403);
             $client = Client::query()->lockForUpdate()->findOrFail($clientId);
             $existing = DB::table('client_catalog_claims')->where('client_id', $clientId)->lockForUpdate()->first();
             if ($existing) {

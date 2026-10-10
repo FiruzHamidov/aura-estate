@@ -18,9 +18,10 @@ class ReferenceCatalogService
     {
         $user->loadMissing('role');
 
-        if (in_array($user->role?->slug, ['admin', 'superadmin'], true)
-            || (in_array($user->role?->slug, ['owner', 'agent', 'mop'], true)
-                && in_array($catalog, self::NEW_BUILDING_CATALOGS, true))) {
+        if ($catalog === 'roles') {
+            if ($user->hasPermission('roles.manage')) return;
+        } elseif ($user->hasPermission('catalogs.manage')
+            || ($user->hasPermission('catalogs.new_buildings.manage') && in_array($catalog, self::NEW_BUILDING_CATALOGS, true))) {
             return;
         }
 
