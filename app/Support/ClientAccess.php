@@ -115,7 +115,7 @@ class ClientAccess
     public function visibleQuery(User $authUser): Builder
     {
         $query = Client::query()->with(['branch', 'branchGroup', 'creator', 'responsibleAgent', 'type']);
-        if ($authUser->hasRole('rop')) {
+        if ($authUser->usesAssignedGroupScope()) {
             app(RopGroupAccess::class)->scope($query, $authUser, 'clients.branch_group_id', 'clients.branch_id');
         }
         $scope = $this->scopeType($authUser);
@@ -300,7 +300,7 @@ class ClientAccess
     {
         $data['client_id'] = $client->id;
         $data['created_by'] = $authUser->id;
-        $data['responsible_agent_id'] ??= $client->responsible_agent_id ?: ($authUser->hasRole('rop') ? null : $authUser->id);
+        $data['responsible_agent_id'] ??= $client->responsible_agent_id ?: ($authUser->usesAssignedGroupScope() ? null : $authUser->id);
 
         return $data;
     }

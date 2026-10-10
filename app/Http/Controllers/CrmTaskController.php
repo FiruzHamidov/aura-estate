@@ -32,7 +32,7 @@ class CrmTaskController extends Controller
             'per_page' => 'nullable|integer|min:1|max:100',
         ]);
 
-        if (! empty($validated['assignee_id']) && ($authUser->hasRole('rop') || $authUser->hasPermission('tasks.scope.branch'))
+        if (! empty($validated['assignee_id']) && ($authUser->usesAssignedGroupScope() || $authUser->hasPermission('tasks.scope.branch'))
             && ! app(\App\Support\RopGroupAccess::class)->hasVisibleTaskHistory($authUser, (int) $validated['assignee_id'])) {
             $this->branchScope->ensureUserInUserBranchOrDeny((int) $validated['assignee_id'], $authUser);
         }
@@ -102,7 +102,7 @@ class CrmTaskController extends Controller
             abort_unless($authUser->hasPermission('tasks.create'), 403, 'FORBIDDEN_ACTION');
             abort_unless($authUser->hasPermission('tasks.assign.all') || $authUser->hasPermission('tasks.assign.branch'), 403, 'FORBIDDEN_ACTION');
             $assignee = User::query()->findOrFail($validated['assignee_id']);
-            if ($authUser->hasRole('rop') || !$authUser->hasPermission('tasks.assign.all')) {
+            if ($authUser->usesAssignedGroupScope() || !$authUser->hasPermission('tasks.assign.all')) {
                 $this->branchScope->ensureUserInUserBranchOrDeny((int) $assignee->id, $authUser);
             }
 
@@ -151,10 +151,10 @@ class CrmTaskController extends Controller
     {
         $authUser->loadMissing('role');
 
-        if ($authUser->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'crm_tasks.branch_group_id');
+        if ($authUser->usesAssignedGroupScope()) app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'crm_tasks.branch_group_id');
         if ($authUser->hasPermission('tasks.scope.all')) return;
         if ($authUser->hasPermission('tasks.scope.branch')) {
-            if (!$authUser->hasRole('rop')) $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id));
+            if (!$authUser->usesAssignedGroupScope()) $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id));
         } elseif ($authUser->hasPermission('tasks.scope.group')) {
             $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_group_id', $authUser->branch_group_id));
         } elseif ($authUser->hasPermission('tasks.scope.own')) {

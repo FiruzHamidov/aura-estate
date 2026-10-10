@@ -653,7 +653,7 @@ class PropertyReportController extends Controller
             return;
         }
 
-        if (! $authUser->hasRole('rop') && ! $authUser->hasPermission('property_reports.scope.branch')) {
+        if (! $authUser->usesAssignedGroupScope() && ! $authUser->hasPermission('property_reports.scope.branch')) {
             return;
         }
 
@@ -994,7 +994,7 @@ class PropertyReportController extends Controller
         if ($request->filled('agent_id')) {
             $scopedUsersQuery->whereIn('id', array_map('intval', $this->toArray($request->input('agent_id'))));
         }
-        $historicalRop = auth()->user()?->hasRole('rop');
+        $historicalRop = auth()->user()?->usesAssignedGroupScope();
         $allowedUserIds = $historicalRop ? [] : $scopedUsersQuery
             ->pluck('id')
             ->map(fn ($id) => (int) $id)
@@ -1481,7 +1481,7 @@ class PropertyReportController extends Controller
 
     private function scopeVisiblePropertyClient(Request $request, \Illuminate\Database\Eloquent\Builder $query, string $foreignKey): void
     {
-        if (! $request->user()?->hasRole('rop')) {
+        if (! $request->user()?->usesAssignedGroupScope()) {
             return;
         }
         $visibleClients = app(\App\Support\RopGroupAccess::class)->scope(
@@ -1591,7 +1591,7 @@ class PropertyReportController extends Controller
 
         $userIds = $rows->pluck('created_by')->filter()->unique()->values();
         $users = User::whereIn('id', $userIds)->get(['id','name','email'])->keyBy('id');
-        $contactUserIds = $request->user()?->hasRole('rop')
+        $contactUserIds = $request->user()?->usesAssignedGroupScope()
             ? app(\App\Support\RopGroupAccess::class)->employees($request->user())
                 ->whereIn('users.id', $userIds)->pluck('users.id')->flip()
             : null;
@@ -1706,7 +1706,7 @@ class PropertyReportController extends Controller
                     ->whereIn('property_id', $propertyIds)
                     ->groupBy('property_id');
 
-                if ($request->user()?->hasRole('rop')) {
+                if ($request->user()?->usesAssignedGroupScope()) {
                     $this->applyBranchAccessByUserColumn($request, $bookingsQ, 'bookings.agent_id');
                 }
 
@@ -1809,7 +1809,7 @@ class PropertyReportController extends Controller
                 ->whereIn('property_id', $allPropertyIds)
                 ->groupBy('property_id');
 
-            if ($request->user()?->hasRole('rop')) {
+            if ($request->user()?->usesAssignedGroupScope()) {
                 $this->applyBranchAccessByUserColumn($request, $bookingsQ, 'bookings.agent_id');
             }
 
@@ -2014,7 +2014,7 @@ class PropertyReportController extends Controller
             'date_field' => 'bookings.created_at',
         ]);
 
-        $isRop = $request->user()?->hasRole('rop');
+        $isRop = $request->user()?->usesAssignedGroupScope();
         [$q] = $this->applyCommonFilters($requestWithDateField, $base, $isRop ? 'bookings.agent_id' : 'properties.created_by');
 
         if ($request->filled('agent_id')) {

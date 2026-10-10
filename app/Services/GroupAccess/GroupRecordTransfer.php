@@ -85,7 +85,7 @@ final class GroupRecordTransfer
                 && (int) $record->assignee_id === (int) $target->id;
             if (! $taskAlreadyMoved) $this->authorize($actor, $record, $employeeTransfer);
             abort_unless(hash_equals($this->revision($record), $data['revision']), 409, 'RECORD_VERSION_CONFLICT');
-            if ($actor->hasRole('rop')) {
+            if ($actor->usesAssignedGroupScope()) {
                 if ($employeeTransfer && (int) $record->getAttribute(GroupOwnedRecordObserver::RESPONSIBLES[$record->getTable()]) === (int) $target->id) {
                     abort_unless(app(EmployeeGroupTransfer::class)->destinationQuery($actor)->whereKey($group->id)->exists(), 403, 'RBAC_GROUP_SCOPE_VIOLATION');
                 } else $this->access->ensureGroup($actor, $group->id);

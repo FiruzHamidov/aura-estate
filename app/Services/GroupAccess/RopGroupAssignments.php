@@ -13,13 +13,13 @@ final class RopGroupAssignments
 
     public function authorize(User $actor, User $rop, bool $write): void
     {
-        if ($write) abort_unless(!$actor->hasRole('rop') && $actor->hasPermission('rop_groups.manage'), 403, 'FORBIDDEN_ACTION');
+        if ($write) abort_unless(!$actor->usesAssignedGroupScope() && $actor->hasPermission('rop_groups.manage'), 403, 'FORBIDDEN_ACTION');
         $global = $actor->hasPermission('rop_groups.scope.all');
         $director = $actor->hasPermission('rop_groups.scope.branch') && $actor->branch_id !== null
             && (int) $actor->branch_id === (int) $rop->branch_id;
-        $self = ! $write && $actor->id === $rop->id && $actor->hasRole('rop') && $actor->hasPermission('rop_groups.scope.self');
+        $self = ! $write && $actor->id === $rop->id && $actor->usesAssignedGroupScope() && $actor->hasPermission('rop_groups.scope.self');
         abort_unless($global || $director || $self, 403, 'FORBIDDEN_ACTION');
-        abort_unless($rop->hasRole('rop'), 422, 'ROP_ROLE_REQUIRED');
+        abort_unless($rop->usesAssignedGroupScope(), 422, 'ROP_ROLE_REQUIRED');
     }
 
     public function payload(User $rop): array

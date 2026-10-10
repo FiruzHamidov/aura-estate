@@ -33,7 +33,7 @@ class BranchGroupController extends Controller
         $query = BranchGroup::query()
             ->with(['branch', 'rops:id,name,branch_id']);
 
-        if ($authUser->hasRole('rop')) {
+        if ($authUser->usesAssignedGroupScope()) {
             if (!$authUser->hasPermission('branch_groups.scope.all') && !$authUser->hasPermission('branch_groups.scope.branch')) return $query->whereRaw('1 = 0');
             $query->withCount([
                 'users' => fn ($users) => $users->where('branch_id', $authUser->branch_id)
@@ -57,7 +57,7 @@ class BranchGroupController extends Controller
 
     private function ensureVisible(User $authUser, BranchGroup $branchGroup): void
     {
-        if ($authUser->hasRole('rop')) {
+        if ($authUser->usesAssignedGroupScope()) {
             abort_unless(app(\App\Support\RopGroupAccess::class)->allowsGroup($authUser, $branchGroup->id), 404, 'NOT_FOUND');
         }
 
@@ -68,7 +68,7 @@ class BranchGroupController extends Controller
             ->exists();
 
         if (! $allowed) {
-            if (($authUser->hasRole('rop') || $authUser->hasPermission('branch_groups.scope.branch'))) {
+            if (($authUser->usesAssignedGroupScope() || $authUser->hasPermission('branch_groups.scope.branch'))) {
                 $this->branchScope->denyBranchScopeViolation();
             }
 
@@ -78,7 +78,7 @@ class BranchGroupController extends Controller
 
     private function ensureManageable(User $authUser, ?int $branchId = null, ?BranchGroup $branchGroup = null): void
     {
-        abort_if($authUser->hasRole('rop'), 403, 'Forbidden');
+        abort_if($authUser->usesAssignedGroupScope(), 403, 'Forbidden');
         if ($authUser->hasPermission('branch_groups.manage.all')) {
             return;
         }
@@ -125,7 +125,7 @@ class BranchGroupController extends Controller
         ]);
 
         // Attendance and HR user creation only need group labels, not CRM counts/settings.
-        $query = ($authUser->hasPermission('branch_groups.labels.list') && !$authUser->hasPermission('branch_groups.scope.all') && !$authUser->hasPermission('branch_groups.scope.branch') && !$authUser->hasRole('rop'))
+        $query = ($authUser->hasPermission('branch_groups.labels.list') && !$authUser->hasPermission('branch_groups.scope.all') && !$authUser->hasPermission('branch_groups.scope.branch') && !$authUser->usesAssignedGroupScope())
             ? BranchGroup::query()->select(['id', 'name', 'branch_id'])
             : $this->visibleQuery($authUser);
 
@@ -138,7 +138,7 @@ class BranchGroupController extends Controller
         }
 
         if (!empty($validated['branch_id'])) {
-            if (($authUser->hasRole('rop') || $authUser->hasPermission('branch_groups.scope.branch'))) {
+            if (($authUser->usesAssignedGroupScope() || $authUser->hasPermission('branch_groups.scope.branch'))) {
                 $this->branchScope->ensureSameBranchOrDeny((int) $validated['branch_id'], $authUser);
             }
 
@@ -161,7 +161,7 @@ class BranchGroupController extends Controller
     {
         return DB::transaction(function () use ($request) {
             $authUser = User::query()->lockForUpdate()->findOrFail($this->authUser()->id);
-            abort_if($authUser->hasRole('rop'), 403, 'Forbidden');
+            abort_if($authUser->usesAssignedGroupScope(), 403, 'Forbidden');
             abort_unless(
                 $authUser->hasPermission('branch_groups.manage.all') || $authUser->hasPermission('branch_groups.manage.branch'),
                 403,
@@ -206,7 +206,7 @@ class BranchGroupController extends Controller
     public function show(BranchGroup $branchGroup)
     {
         $authUser = $this->authUser();
-        if ($authUser->hasPermission('branch_groups.labels.show') && !$authUser->hasPermission('branch_groups.scope.all') && !$authUser->hasPermission('branch_groups.scope.branch') && !$authUser->hasRole('rop')) {
+        if ($authUser->hasPermission('branch_groups.labels.show') && !$authUser->hasPermission('branch_groups.scope.all') && !$authUser->hasPermission('branch_groups.scope.branch') && !$authUser->usesAssignedGroupScope()) {
             return response()->json($branchGroup->only(['id', 'name', 'branch_id']));
         }
 

@@ -137,7 +137,7 @@ class KpiModuleController extends Controller
         }
 
         return \DB::transaction(function () use ($actor, $validated, $scope, $scopeRoles) {
-            if ($actor->hasRole('rop')) {
+            if ($actor->usesAssignedGroupScope()) {
                 User::query()->whereIn('id', [$actor->id, ...array_column($validated['rows'], 'user_id')])
                     ->orderBy('id')->lockForUpdate()->get();
             }
@@ -176,7 +176,7 @@ class KpiModuleController extends Controller
 
                     $results[] = ['user_id' => $userId, 'ok' => true];
                 } catch (ValidationException $e) {
-                    if ($actor->hasRole('rop')) throw $e;
+                    if ($actor->usesAssignedGroupScope()) throw $e;
                     $results[] = [
                         'user_id' => $userId,
                         'ok' => false,
@@ -185,7 +185,7 @@ class KpiModuleController extends Controller
                         'details' => ['row' => $index, 'role' => $rowRole, 'errors' => $e->errors()],
                     ];
                 } catch (\DomainException $e) {
-                    if ($actor->hasRole('rop')) throw new HttpResponseException($this->kpiError('KPI_PLAN_PERIOD_CONFLICT', $e->getMessage(), 409));
+                    if ($actor->usesAssignedGroupScope()) throw new HttpResponseException($this->kpiError('KPI_PLAN_PERIOD_CONFLICT', $e->getMessage(), 409));
                     $results[] = [
                         'user_id' => $userId,
                         'ok' => false,
@@ -194,7 +194,7 @@ class KpiModuleController extends Controller
                         'details' => ['row' => $index, 'role' => $rowRole, 'errors' => []],
                     ];
                 } catch (HttpResponseException $e) {
-                    if ($actor->hasRole('rop')) throw $e;
+                    if ($actor->usesAssignedGroupScope()) throw $e;
                     $response = $e->getResponse();
                     $payload = method_exists($response, 'getData')
                         ? (array) $response->getData(true)
@@ -208,7 +208,7 @@ class KpiModuleController extends Controller
                         'details' => array_merge(['row' => $index, 'role' => $rowRole, 'errors' => []], (array) ($payload['details'] ?? [])),
                     ];
                 } catch (\Throwable $e) {
-                    if ($actor->hasRole('rop')) throw $e;
+                    if ($actor->usesAssignedGroupScope()) throw $e;
                     $results[] = [
                         'user_id' => $userId,
                         'ok' => false,
@@ -341,7 +341,7 @@ class KpiModuleController extends Controller
         }
 
         // planById scopes persisted plan ownership for ROP, including transferred employees.
-        if ($this->authUser()->hasRole('rop')) {
+        if ($this->authUser()->usesAssignedGroupScope()) {
             $this->kpiPlanScopePolicy->ensureCanReadHistoricalUserPlan($this->authUser(), $plan);
         } else {
             $target = User::query()->findOrFail((int) $plan['user_id']);
@@ -710,7 +710,7 @@ class KpiModuleController extends Controller
         $this->ensureManageAccess($this->authUser(), 'kpi.alerts.view');
         $validated = $request->validate(['date' => 'nullable|date', 'branch_group_id' => 'nullable|integer|exists:branch_groups,id']);
         $query = KpiEarlyRiskAlert::query()->orderByDesc('id');
-        if ($this->authUser()->hasRole('rop')) {
+        if ($this->authUser()->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $this->authUser(), 'kpi_early_risk_alerts.branch_group_id');
             if (isset($validated['branch_group_id'])) $query->where('branch_group_id', $validated['branch_group_id']);
         }
@@ -769,7 +769,7 @@ class KpiModuleController extends Controller
         $this->ensureManageAccess($this->authUser(), 'kpi.acceptance.view');
         $validated = $request->validate(['branch_group_id' => 'nullable|integer|exists:branch_groups,id']);
         $query = KpiAcceptanceRun::query()->orderByDesc('id');
-        if ($this->authUser()->hasRole('rop')) {
+        if ($this->authUser()->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $this->authUser(), 'kpi_acceptance_runs.branch_group_id');
             if (isset($validated['branch_group_id'])) $query->where('branch_group_id', $validated['branch_group_id']);
         }
@@ -816,7 +816,7 @@ class KpiModuleController extends Controller
 
     public function adjustmentEntities(Request $request)
     {
-        if ($this->authUser()->hasRole('rop')) return app(KpiPeriodLockController::class)->historicalEntities($request);
+        if ($this->authUser()->usesAssignedGroupScope()) return app(KpiPeriodLockController::class)->historicalEntities($request);
         $this->ensureManageAccess($this->authUser(), 'kpi.operations.manage');
 
         $validated = $request->validate([

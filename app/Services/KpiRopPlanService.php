@@ -21,7 +21,7 @@ class KpiRopPlanService
     public function list(User $actor, array $filters): LengthAwarePaginator
     {
         abort_unless($actor->hasPermission('kpi.rop_plans.view'), 403, 'KPI_FORBIDDEN_SCOPE');
-        if (! $actor->hasRole('rop') || isset($filters['branch_group_id'])) {
+        if (! $actor->usesAssignedGroupScope() || isset($filters['branch_group_id'])) {
             $this->scopePolicy->ensureCanReadCommonPlan($actor, $filters);
         } else {
             abort_unless($actor->hasPermission('kpi.plans.common.view')
@@ -29,7 +29,7 @@ class KpiRopPlanService
         }
 
         $query = KpiRopPlan::query()->orderByDesc('id');
-        if ($actor->hasRole('rop')) {
+        if ($actor->usesAssignedGroupScope()) {
             app(RopGroupAccess::class)->scope($query, $actor, 'kpi_rop_plans.branch_group_id', 'kpi_rop_plans.branch_id');
             if ($actor->hasPermission('kpi.plans.scope.group') && ! $actor->hasPermission('kpi.plans.scope.all')) {
                 $query->where('branch_group_id', (int) $actor->branch_group_id)->where('role_slug', '!=', 'rop');
@@ -78,7 +78,7 @@ class KpiRopPlanService
     {
         return DB::transaction(function () use ($actor, $payload, $sourceId) {
             [$actor] = app(GroupRecordWriteLock::class)->acquire($actor, null, null, $payload['branch_group_id'] ?? null);
-            if ($actor->hasRole('rop')) {
+            if ($actor->usesAssignedGroupScope()) {
                 $payload['branch_group_id'] = app(RopGroupAccess::class)->creationGroup($actor, $payload['branch_group_id'] ?? null);
                 abort_if(isset($payload['branch_id']) && (int) $payload['branch_id'] !== (int) $actor->branch_id, 403, 'RBAC_GROUP_SCOPE_VIOLATION');
                 $payload['branch_id'] = $actor->branch_id;
@@ -117,7 +117,7 @@ class KpiRopPlanService
             [$actor, $plan] = app(GroupRecordWriteLock::class)->acquire($actor, $plan, null, $payload['branch_group_id'] ?? null);
             abort_unless($actor->hasPermission('kpi.rop_plans.update'), 403, 'KPI_FORBIDDEN_ROLE_ACTION');
             $this->scopePolicy->ensureCanManageCommonPlan($actor, ['role' => $plan->role_slug, 'branch_id' => $plan->branch_id, 'branch_group_id' => $plan->branch_group_id]);
-            if ($actor->hasRole('rop')) {
+            if ($actor->usesAssignedGroupScope()) {
                 foreach (['branch_id', 'branch_group_id'] as $field) {
                     abort_if(array_key_exists($field, $payload) && (string) $payload[$field] !== (string) $plan->{$field}, 422, 'GROUP_TRANSFER_REQUIRED');
                 }

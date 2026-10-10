@@ -97,7 +97,7 @@ class ClientPropertyMatcher
     private function matchingPropertiesForNeed(User $authUser, ClientNeed $need, int $limitPerNeed): array
     {
         $properties = Property::query()
-            ->when($authUser->hasRole('rop'), fn (Builder $q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id', 'properties.branch_id'))
+            ->when($authUser->usesAssignedGroupScope(), fn (Builder $q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id', 'properties.branch_id'))
             ->whereNotIn('moderation_status', ['deleted', 'sold', 'rented', 'sold_by_owner'])
             ->where(function (Builder $query) use ($need) {
                 if ($this->scoreCalculator->offerTypeMatches((string) ($need->type?->slug ?? ''), 'sale')) {

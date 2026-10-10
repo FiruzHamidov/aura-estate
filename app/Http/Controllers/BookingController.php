@@ -329,7 +329,7 @@ class BookingController extends Controller
 
     private function ensureBookingIsVisible(Request $request, Booking $booking): void
     {
-        if ($this->authUser($request)?->hasRole('rop')) {
+        if ($this->authUser($request)?->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->ensureVisible($this->authUser($request), $booking);
         }
         $visible = Booking::query()

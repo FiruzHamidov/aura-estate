@@ -22,7 +22,7 @@ final class AttendanceGroupScope
             }
             return $query;
         }
-        if (! $viewer->hasRole('rop')) return $query;
+        if (! $viewer->usesAssignedGroupScope()) return $query;
         $table = $query->getModel()->getTable();
         if (in_array($table, ['attendance_events', 'attendance_daily_summaries'], true)) {
             if (\Schema::hasColumn($table, 'role_slug')) {
@@ -47,7 +47,7 @@ final class AttendanceGroupScope
     public function users(User $viewer, ?string $from = null, ?string $to = null): Builder
     {
         $current = app(AttendanceAccessService::class)->visibleUsersQuery($viewer);
-        if (! $viewer->hasRole('rop')) return $current;
+        if (! $viewer->usesAssignedGroupScope()) return $current;
         $summaries = $this->apply(AttendanceDailySummary::query(), $viewer)
             ->when($from, fn ($q) => $q->whereDate('work_date', '>=', $from))
             ->when($to, fn ($q) => $q->whereDate('work_date', '<=', $to));
@@ -58,7 +58,7 @@ final class AttendanceGroupScope
 
     public function assertHistoryUser(User $viewer, User $target): void
     {
-        if (! $viewer->hasRole('rop')) {
+        if (! $viewer->usesAssignedGroupScope()) {
             app(AttendanceAccessService::class)->assertCanViewUser($viewer, $target);
             return;
         }
@@ -69,7 +69,7 @@ final class AttendanceGroupScope
 
     public function filterUsers(Builder $query, User $viewer, array $filters, ?string $from = null, ?string $to = null): void
     {
-        if (! $viewer->hasRole('rop') || (! isset($filters['branch_group_id']) && ! isset($filters['role']))) return;
+        if (! $viewer->usesAssignedGroupScope() || (! isset($filters['branch_group_id']) && ! isset($filters['role']))) return;
         $current = $this->groups->employees($viewer);
         if (isset($filters['branch_group_id'])) $current->where('users.branch_group_id', $filters['branch_group_id']);
         if (isset($filters['role'])) $current->whereHas('role', fn ($roles) => $roles->where('slug', $filters['role']));

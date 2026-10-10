@@ -67,7 +67,7 @@ class UserController extends Controller
     private function visibleUsersQuery(User $authUser, bool $includeUnassigned = false, bool $includeClients = true)
     {
         $query = User::query()->with(['role', 'branch', 'branchGroup']);
-        if ($authUser->hasRole('rop')) {
+        if ($authUser->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'users.branch_group_id', 'users.branch_id');
             $query->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop', 'intern']));
         }
@@ -205,7 +205,7 @@ class UserController extends Controller
             ->whereKey($targetUser->id)
             ->exists();
 
-        abort_unless($allowed, $authUser->hasRole('rop') ? 404 : 403, 'Forbidden');
+        abort_unless($allowed, $authUser->usesAssignedGroupScope() ? 404 : 403, 'Forbidden');
     }
 
     private function authorizeHrCreationRole(User $authUser, ?Role $targetRole): void
@@ -500,7 +500,7 @@ class UserController extends Controller
         return DB::transaction(function () use ($request) {
             $authUser = User::query()->lockForUpdate()->findOrFail($this->authUser()->id);
             abort_unless($authUser->hasPermission('users.create'), 403, 'FORBIDDEN_ACTION');
-            $isRop = $authUser->hasRole('rop');
+            $isRop = $authUser->usesAssignedGroupScope();
 
             $request->validate([
                 'name' => 'required|string',
@@ -603,9 +603,9 @@ class UserController extends Controller
         return response()->json(array_merge($user->toArray(), [
             'daily_report_status' => app(DailyReportService::class)->reportStatusPayload($user),
             'access_scope' => [
-                'scope_type' => $user->hasRole('rop') ? 'groups' : 'role',
+                'scope_type' => $user->usesAssignedGroupScope() ? 'groups' : 'role',
                 'branch_id' => $user->branch_id,
-                'branch_group_ids' => $user->hasRole('rop') ? app(\App\Support\RopGroupAccess::class)->groupIds($user) : [],
+                'branch_group_ids' => $user->usesAssignedGroupScope() ? app(\App\Support\RopGroupAccess::class)->groupIds($user) : [],
                 'version' => (int) $user->access_scope_version,
             ],
         ]));
@@ -669,7 +669,7 @@ class UserController extends Controller
                 'security_attendance_branch_ids.*' => 'required|integer|distinct|exists:branches,id',
             ]);
 
-            if ($authUser->hasRole('rop')) {
+            if ($authUser->usesAssignedGroupScope()) {
                 // Group transfers and dismissal use their dedicated, audited workflows.
                 $requestedRole = $this->resolveRequestedRole($request, $user);
                 abort_unless(in_array($requestedRole?->slug, ['intern', 'agent', 'mop'], true), 403, 'FORBIDDEN_ACTION');
@@ -762,7 +762,7 @@ class UserController extends Controller
 
         $actor = $request->user() ?? $request->user('sanctum');
         $agents = User::with(['role', 'branch', 'branchGroup'])
-            ->when($actor?->hasRole('rop'), fn ($query) => app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'users.branch_group_id', 'users.branch_id'))
+            ->when($actor?->usesAssignedGroupScope(), fn ($query) => app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'users.branch_group_id', 'users.branch_id'))
             ->whereHas('role', function ($q) {
                 $q->whereIn('slug', self::PUBLIC_AGENT_ROLE_SLUGS);
             })
@@ -812,7 +812,7 @@ class UserController extends Controller
         $plan = $request->input('transfer_plan');
         // ROP dismissal must always use the reviewed inventory; legacy automatic
         // redistribution can include unclassified or out-of-group records.
-        abort_if($authUser->hasRole('rop') && $plan === null, 422, 'COMPLETE_TRANSFER_PLAN_REQUIRED');
+        abort_if($authUser->usesAssignedGroupScope() && $plan === null, 422, 'COMPLETE_TRANSFER_PLAN_REQUIRED');
         $distribute = (bool) $request->boolean('distribute_to_agents');
         $agentId = $request->input('agent_id');
 

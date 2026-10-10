@@ -52,7 +52,7 @@ class ReelController extends Controller
             return false;
         }
 
-        if ($user->hasRole('rop')) {
+        if ($user->usesAssignedGroupScope()) {
             return app(\App\Support\RopGroupAccess::class)->allows($user, $property);
         }
 
@@ -79,7 +79,7 @@ class ReelController extends Controller
             return false;
         }
 
-        if ($user->hasRole('rop')) {
+        if ($user->usesAssignedGroupScope()) {
             $access = app(\App\Support\RopGroupAccess::class);
 
             return $reel ? $access->allows($user, $reel) : $access->groupIds($user) !== [];
@@ -111,7 +111,7 @@ class ReelController extends Controller
 
             return $property->branch_group_id;
         }
-        if ($user->hasRole('rop')) {
+        if ($user->usesAssignedGroupScope()) {
             return app(\App\Support\RopGroupAccess::class)->creationGroup($user, $requested);
         }
         $groupId = $requested ?? $user->branch_group_id;
@@ -586,7 +586,7 @@ class ReelController extends Controller
                 if ($validated['property_id']) {
                     $targetProperty = $lockedProperty;
                     $this->ensureCanManageProperty($targetProperty);
-                    abort_if($this->authUser()?->hasRole('rop') && (int) $sourceGroup !== (int) $targetProperty->branch_group_id,
+                    abort_if($this->authUser()?->usesAssignedGroupScope() && (int) $sourceGroup !== (int) $targetProperty->branch_group_id,
                         403, 'GROUP_TRANSFER_REQUIRED');
                     $validated['branch_group_id'] = $targetProperty->branch_group_id;
                 } else {
@@ -596,7 +596,7 @@ class ReelController extends Controller
                         'Forbidden'
                     );
                     $validated['branch_group_id'] = $sourceGroup;
-                    if ($this->authUser()?->hasRole('rop')) {
+                    if ($this->authUser()?->usesAssignedGroupScope()) {
                         app(\App\Support\RopGroupAccess::class)->ensureGroup($this->authUser(), $sourceGroup);
                     }
                 }

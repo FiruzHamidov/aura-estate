@@ -101,7 +101,7 @@ class ExternalAgentController extends Controller
 
     private function applyActorScope(Builder $query, User $actor): void
     {
-        if ($actor->hasRole('rop')) {
+        if ($actor->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'users.branch_group_id', 'users.branch_id');
         }
         if ($actor->hasPermission('external_agents.scope.all')) return;

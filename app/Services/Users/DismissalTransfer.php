@@ -67,7 +67,7 @@ final class DismissalTransfer
     {
         return User::query()->with(['role', 'branch', 'branchGroup'])->whereKeyNot($employee->id)->where('status', User::STATUS_ACTIVE)
             ->whereHas('role', fn ($q) => $q->whereIn('slug', ['agent', 'mop']))
-            ->when($actor->hasRole('rop'), fn ($q) => app(RopGroupAccess::class)->scope($q, $actor, 'users.branch_group_id', 'users.branch_id'))
+            ->when($actor->usesAssignedGroupScope(), fn ($q) => app(RopGroupAccess::class)->scope($q, $actor, 'users.branch_group_id', 'users.branch_id'))
             ->when(!$actor->hasPermission('users.dismissal.all_branches'), fn ($q) => $q->where('branch_id', $actor->branch_id))
             ->orderBy('id')->get()->reject(fn (User $user) => $user->isDeletedAccount());
     }
@@ -95,12 +95,12 @@ final class DismissalTransfer
 
     private function eligible(User $actor, User $target, array $record): bool
     {
-        if ($actor->hasRole('rop') && ! app(RopGroupAccess::class)->allows($actor, $target)) {
+        if ($actor->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->allows($actor, $target)) {
             return false;
         }
 
         if (empty($record['linked_task_fixed_group']) && $target->branch_group_id
-            && ($actor->hasPermission('users.dismissal.change_group') && ($record['type'] !== 'properties' || !$actor->hasRole('rop')))
+            && ($actor->hasPermission('users.dismissal.change_group') && ($record['type'] !== 'properties' || !$actor->usesAssignedGroupScope()))
             && ($actor->hasPermission('users.dismissal.all_branches') || (int) $actor->branch_id === (int) $target->branch_id)) {
             return $record['type'] !== 'deals' || $this->dealDestination($record, $target) !== null;
         }
@@ -127,7 +127,7 @@ final class DismissalTransfer
 
     private function ensureRecordScope(User $actor, array $records): void
     {
-        if ($actor->hasRole('rop')) {
+        if ($actor->usesAssignedGroupScope()) {
             $access = app(RopGroupAccess::class);
             foreach ($records as $record) {
                 abort_unless($actor->branch_id && (int) $record['branch_id'] === (int) $actor->branch_id

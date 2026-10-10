@@ -65,7 +65,7 @@ final class AttendanceTimesheetExporter
     {
         $dates = collect(CarbonPeriod::create($from->startOfDay(), $to->startOfDay()))
             ->map(fn ($date) => $date->toDateString());
-        if ($viewer?->hasRole('rop')) {
+        if ($viewer?->usesAssignedGroupScope()) {
             $groups = app(\App\Support\RopGroupAccess::class);
             $users = $users->map(function ($user) use ($viewer, $groups) {
                 $copy = clone $user;

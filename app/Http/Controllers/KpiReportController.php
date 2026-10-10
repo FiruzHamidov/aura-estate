@@ -73,7 +73,7 @@ class KpiReportController extends Controller
 
     private function validateScopeFilters(array $validated, User $authUser): void
     {
-        if (! $authUser->hasRole('rop') && ! $authUser->hasPermission('kpi.reports.scope.branch')) {
+        if (! $authUser->usesAssignedGroupScope() && ! $authUser->hasPermission('kpi.reports.scope.branch')) {
             return;
         }
 
@@ -86,7 +86,7 @@ class KpiReportController extends Controller
         }
 
         if (array_key_exists('user_id', $validated) && $validated['user_id'] !== null) {
-            if (! $authUser->hasRole('rop') || ! app(\App\Support\RopGroupAccess::class)->hasVisibleDailyReportHistory($authUser, (int) $validated['user_id'])) {
+            if (! $authUser->usesAssignedGroupScope() || ! app(\App\Support\RopGroupAccess::class)->hasVisibleDailyReportHistory($authUser, (int) $validated['user_id'])) {
                 $this->branchScope->ensureUserInUserBranchOrDeny((int) $validated['user_id'], $authUser);
             }
         }

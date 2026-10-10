@@ -32,7 +32,7 @@ class ExternalPropertyRequestService
     {
         $user->loadMissing('role');
         // External-agent management has no defined ROP employee scope in this release.
-        abort_if($user->hasRole('rop'), 403, 'FORBIDDEN_ACTION');
+        abort_if($user->usesAssignedGroupScope(), 403, 'FORBIDDEN_ACTION');
 
         $query = ExternalPropertyRequest::query()
             ->with([

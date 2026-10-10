@@ -63,7 +63,7 @@ final class EnforceRopGroupScope
             $fresh = User::query()->whereKey($actor->id)->lockForUpdate()->firstOrFail();
             abort_unless($fresh->status === User::STATUS_ACTIVE && ! $fresh->isDeletedAccount(), 403, 'FORBIDDEN_ACTION');
             $request->attributes->set(RopScopeResponse::VERSION_ATTRIBUTE, (int) $fresh->access_scope_version);
-            abort_unless($fresh->hasRole('rop') && (int) $fresh->access_scope_version === (int) $actor->access_scope_version, 409, 'ACCESS_SCOPE_VERSION_CONFLICT');
+            abort_unless($fresh->usesAssignedGroupScope() && (int) $fresh->access_scope_version === (int) $actor->access_scope_version, 409, 'ACCESS_SCOPE_VERSION_CONFLICT');
 
             $response = $run();
             if ($response->getStatusCode() >= 400) {

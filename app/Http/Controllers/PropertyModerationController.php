@@ -100,7 +100,7 @@ final class PropertyModerationController extends Controller
             ->with('user:id,name,phone,branch_id')
             ->groupBy('user_id')
             ->orderBy('points_delta');
-        if ($user->hasRole('rop')) {
+        if ($user->usesAssignedGroupScope()) {
             $query->whereIn('user_id', app(\App\Support\RopGroupAccess::class)->employees($user)->select('users.id'));
             $query->whereIn('property_id', $this->access->scopeModeratable(Property::query(), $user)->select('properties.id'));
         } elseif (! $user->hasPermission('properties.manage_all')) {

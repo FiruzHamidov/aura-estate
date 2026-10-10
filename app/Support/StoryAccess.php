@@ -10,13 +10,13 @@ final class StoryAccess
 {
     public function canEdit(User $actor, Story $story, string $action): bool
     {
-        return ! $actor->hasRole('rop') && $actor->hasPermission('stories.'.$action)
+        return ! $actor->usesAssignedGroupScope() && $actor->hasPermission('stories.'.$action)
             && ((int) $story->user_id === (int) $actor->id || $actor->hasPermission('stories.manage_all'));
     }
 
     public function canChangeStatus(User $actor, Story $story): bool
     {
-        if ($actor->hasRole('rop')) return false;
+        if ($actor->usesAssignedGroupScope()) return false;
         if ((int) $story->user_id === (int) $actor->id && $actor->hasPermission('stories.status')) return true;
 
         return $actor->hasPermission('stories.moderation.status') && $this->inModerationScope($actor, $story);
@@ -24,7 +24,7 @@ final class StoryAccess
 
     public function canViewModeration(User $actor): bool
     {
-        return ! $actor->hasRole('rop') && $actor->hasPermission('stories.moderation.view')
+        return ! $actor->usesAssignedGroupScope() && $actor->hasPermission('stories.moderation.view')
             && ($actor->hasPermission('stories.moderation.scope.all')
                 || ($actor->branch_id && $actor->hasPermission('stories.moderation.scope.branch'))
                 || ($actor->branch_group_id && $actor->hasPermission('stories.moderation.scope.group')));
@@ -32,7 +32,7 @@ final class StoryAccess
 
     public function scopeModeration(Builder $query, User $actor): void
     {
-        if ($actor->hasRole('rop')) {
+        if ($actor->usesAssignedGroupScope()) {
             $query->whereRaw('1 = 0');
         } elseif ($actor->hasPermission('stories.moderation.scope.all')) {
             return;

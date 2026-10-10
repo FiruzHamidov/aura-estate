@@ -87,7 +87,13 @@ class User extends Authenticatable
         return $this->belongsTo(BranchGroup::class);
     }
 
-    // Быстрая проверка роли в коде:
+    /** Shared entry point for the assigned-group data policy, separate from job identity. */
+    public function usesAssignedGroupScope(): bool
+    {
+        return $this->hasRole('rop');
+    }
+
+    // Быстрая проверка должности, независимо от политики доступа.
     public function hasRole(string $slug): bool
     {
         return $this->role && $this->role->slug === $slug;

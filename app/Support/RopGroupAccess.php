@@ -13,7 +13,7 @@ final class RopGroupAccess
 {
     public function applies(?User $actor): bool
     {
-        return $actor?->hasRole('rop') ?? false;
+        return $actor?->usesAssignedGroupScope() ?? false;
     }
 
     public function groupsQuery(User $actor): QueryBuilder

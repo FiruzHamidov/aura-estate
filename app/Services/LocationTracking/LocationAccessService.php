@@ -49,7 +49,7 @@ class LocationAccessService
                 'branch',
                 'branchGroup',
                 'currentLocation' => function ($current) use ($viewer): void {
-                    if ($viewer->hasRole('rop')) {
+                    if ($viewer->usesAssignedGroupScope()) {
                         $points = app(\App\Support\RopGroupAccess::class)->scope(\App\Models\UserLocationPoint::query(), $viewer, 'branch_group_id', 'branch_id');
                         $current->whereIn('location_point_id', $points->select('id'));
                     }
@@ -58,7 +58,7 @@ class LocationAccessService
                 'latestActiveLocationDevice',
             ]);
 
-        if ($viewer->hasRole('rop')) {
+        if ($viewer->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id');
             $query->whereIn('users.role_id', $subjects['branch']);
         }
@@ -106,7 +106,7 @@ class LocationAccessService
         if (! $actor->hasPermission($write ? 'locations.settings.update' : 'locations.settings.view')) {
             $this->deny(self::FORBIDDEN_SCOPE, 'Нет доступа к настройкам отслеживания пользователя.');
         }
-        if ($actor->hasRole('rop')) {
+        if ($actor->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->ensureEmployee($actor, $target->id);
         }
         if ($actor->hasPermission('locations.settings.scope.all')) return;
@@ -128,7 +128,7 @@ class LocationAccessService
 
     public function applyHistoryScope(Builder $query, User $viewer, User $target): Builder
     {
-        if ($viewer->hasRole('rop')) {
+        if ($viewer->usesAssignedGroupScope()) {
             $this->assertCanViewModule($viewer);
             $groups = app(\App\Support\RopGroupAccess::class);
             $historical = $groups->scope(\App\Models\UserLocationPoint::query()->where('user_id', $target->id), $viewer, 'branch_group_id', 'branch_id');

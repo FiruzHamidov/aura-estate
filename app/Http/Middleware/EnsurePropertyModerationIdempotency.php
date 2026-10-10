@@ -64,7 +64,7 @@ final class EnsurePropertyModerationIdempotency
             }
 
             if ($record->status === 'completed') {
-                if ($request->user()?->hasRole('rop')) {
+                if ($request->user()?->usesAssignedGroupScope()) {
                     // The saved body may contain a related card transferred since execution.
                     // Never replay that private snapshot; the action must not execute twice.
                     return response()->json([

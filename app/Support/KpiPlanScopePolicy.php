@@ -50,7 +50,7 @@ class KpiPlanScopePolicy
 
     private function ensureScope(User $actor, array $scope): void
     {
-        if ($actor->hasRole('rop')) {
+        if ($actor->usesAssignedGroupScope()) {
             app(RopGroupAccess::class)->ensureGroup($actor, isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null);
         }
         if ($actor->hasPermission('kpi.plans.scope.all')) return;
@@ -100,7 +100,7 @@ class KpiPlanScopePolicy
     public function ensureCanManageUserPlan(User $actor, User $target, bool $allowSelf = false): void
     {
         if (! $actor->hasPermission($allowSelf ? 'kpi.plans.user.view' : 'kpi.plans.user.manage')) $this->denyScope();
-        if ($actor->hasRole('rop') && ! app(RopGroupAccess::class)->employees($actor)->whereKey($target->id)->exists()) $this->denyScope();
+        if ($actor->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->employees($actor)->whereKey($target->id)->exists()) $this->denyScope();
         $allowed = $actor->hasPermission('kpi.plans.scope.all')
             || ($actor->hasPermission('kpi.plans.scope.branch') && $actor->branch_id && (int) $actor->branch_id === (int) $target->branch_id)
             || ($actor->hasPermission('kpi.plans.scope.group') && $actor->branch_group_id && (int) $actor->branch_group_id === (int) $target->branch_group_id)

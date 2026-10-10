@@ -29,21 +29,21 @@ class SelectionController extends Controller
             'deal_id' => 'nullable|integer|min:1',
             'branch_group_id' => 'nullable|integer|min:1',
         ]);
-        abort_if(Auth::user()?->hasRole('rop') && ! empty($validated['deal_id']), 422, 'LEGACY_SELECTION_LINK_NOT_SUPPORTED');
+        abort_if(Auth::user()?->usesAssignedGroupScope() && ! empty($validated['deal_id']), 422, 'LEGACY_SELECTION_LINK_NOT_SUPPORTED');
         $q = Selection::query()
             ->when(! empty($validated['branch_group_id']), fn ($query) => $query->where('branch_group_id', $validated['branch_group_id']))
             ->when($request->filled('deal_id'), fn ($qq) => $qq->where('deal_id', $request->integer('deal_id')))
             ->when($request->filled('status'), fn ($qq) => $qq->where('status', $request->string('status')));
 
         // Если используете Sanctum и роли — можно ограничить по created_by
-        if (Auth::user()?->hasRole('rop')) {
+        if (Auth::user()?->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($q, Auth::user(), 'selections.branch_group_id');
         } elseif (Auth::check()) {
             $q->where('created_by', Auth::id());
         }
 
         $page = $q->orderByDesc('id')->paginate((int) ($validated['per_page'] ?? 20))->withQueryString();
-        if (Auth::user()?->hasRole('rop')) {
+        if (Auth::user()?->usesAssignedGroupScope()) {
             app(\App\Services\GroupAccess\GroupDataProjection::class)->prepareSelections($page->getCollection(), Auth::user());
         }
 
@@ -107,7 +107,7 @@ class SelectionController extends Controller
     public function show($id)
     {
         $sel = Selection::findOrFail($id);
-        if (Auth::user()?->hasRole('rop')) {
+        if (Auth::user()?->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->ensureVisible(Auth::user(), $sel);
         } elseif (Auth::check() && $sel->created_by && $sel->created_by !== Auth::id()) {
             abort(403);

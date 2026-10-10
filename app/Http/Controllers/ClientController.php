@@ -62,7 +62,7 @@ class ClientController extends Controller
 
         $query = $modelClass::query();
         $actor = $this->authUser();
-        if ($modelClass === BranchGroup::class && $actor->hasRole('rop')) {
+        if ($modelClass === BranchGroup::class && $actor->usesAssignedGroupScope()) {
             $query->whereIn('id', app(\App\Support\RopGroupAccess::class)->groupsQuery($actor));
         }
 
@@ -278,7 +278,7 @@ class ClientController extends Controller
         }
 
         $actor = $this->authUser();
-        if ($actor->hasRole('rop')) {
+        if ($actor->usesAssignedGroupScope()) {
             $visibleIds = app(\App\Support\RopGroupAccess::class)->employees($actor)
                 ->whereIn('users.id', array_column($payload, 'user_id'))->pluck('users.id')->all();
             $payload = array_map(fn ($row) => in_array($row['user_id'], $visibleIds, true)
@@ -640,7 +640,7 @@ class ClientController extends Controller
                 $agentsQuery->where('branch_id', $authUser->branch_id);
             }
 
-            if ($authUser->hasRole('rop')) {
+            if ($authUser->usesAssignedGroupScope()) {
                 $agentsQuery->whereIn('users.id', app(\App\Support\RopGroupAccess::class)->employees($authUser)->select('users.id'));
             }
 
@@ -1015,7 +1015,7 @@ class ClientController extends Controller
             $this->clientAccess->ensureCanManageCollaborators($authUser, $client);
 
             $collaborator = User::query()->lockForUpdate()->findOrFail($validated['user_id']);
-            if ($authUser->hasRole('rop')) {
+            if ($authUser->usesAssignedGroupScope()) {
                 app(\App\Support\RopGroupAccess::class)->ensureEmployee($authUser, $collaborator->id, $client->branch_group_id, true);
             }
 

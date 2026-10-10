@@ -850,7 +850,7 @@ final class PropertyModerationService
             [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $candidate->moderationCase()->value('property_id'), [], [$candidate->candidate_property_id]);
             $case = PropertyModerationCase::query()->lockForUpdate()->findOrFail($candidate->moderation_case_id);
             $candidate = PropertyDuplicateCandidate::query()->lockForUpdate()->findOrFail($candidate->id);
-            if ($actor->hasRole('rop')) {
+            if ($actor->usesAssignedGroupScope()) {
                 $target = Property::query()->lockForUpdate()->findOrFail($candidate->candidate_property_id);
                 app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $target);
                 app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $property);
@@ -938,7 +938,7 @@ final class PropertyModerationService
             [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $candidate->moderationCase()->value('property_id'), [], [$candidate->candidate_property_id]);
             $case = PropertyModerationCase::query()->lockForUpdate()->findOrFail($candidate->moderation_case_id);
             $candidate = PropertyDuplicateCandidate::query()->lockForUpdate()->findOrFail($candidate->id);
-            if ($actor->hasRole('rop')) {
+            if ($actor->usesAssignedGroupScope()) {
                 $target = Property::query()->lockForUpdate()->findOrFail($candidate->candidate_property_id);
                 app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $target);
                 app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $property);
@@ -996,7 +996,7 @@ final class PropertyModerationService
             [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $candidate->moderationCase()->value('property_id'), [], [$candidate->candidate_property_id]);
             $case = PropertyModerationCase::query()->lockForUpdate()->findOrFail($candidate->moderation_case_id);
             $candidate = PropertyDuplicateCandidate::query()->lockForUpdate()->findOrFail($candidate->id);
-            if ($actor->hasRole('rop')) {
+            if ($actor->usesAssignedGroupScope()) {
                 $target = Property::query()->lockForUpdate()->findOrFail($candidate->candidate_property_id);
                 app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $target);
                 app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $property);

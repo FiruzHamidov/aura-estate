@@ -27,7 +27,7 @@ final class UserRecordCounts
             if ($type === 'properties') {
                 $query->where(fn ($q) => $q->whereNull('moderation_status')->orWhere('moderation_status', '!=', 'deleted'));
             }
-            if ($actor->hasRole('rop')) {
+            if ($actor->usesAssignedGroupScope()) {
                 app(RopGroupAccess::class)->scope($query, $actor, 'branch_group_id', $hasBranch ? 'branch_id' : null);
             } elseif (!$actor->hasPermission('users.record_counts.all_branches')) {
                 if ($hasBranch) {

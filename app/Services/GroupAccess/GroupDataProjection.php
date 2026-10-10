@@ -36,13 +36,13 @@ final class GroupDataProjection
     /** A stored diagnostic may outlive access to its referenced property. */
     public function qualityIssues(Collection $issues, User $actor): Collection
     {
-        if (! $actor->hasRole('rop')) return $issues;
+        if (! $actor->usesAssignedGroupScope()) return $issues;
         return $this->diagnostics($issues, $actor, 'details', 'title');
     }
 
     public function diagnostics(Collection $records, User $actor, string $payloadField, ?string $textField = null): Collection
     {
-        if (! $actor->hasRole('rop')) return $records;
+        if (! $actor->usesAssignedGroupScope()) return $records;
         $projection = app(AuditSnapshotProjection::class);
         $projection->preparePayloads($records->map(fn ($record) => (array) $record->$payloadField), $actor);
         return $records->map(function ($record) use ($projection, $actor, $payloadField, $textField) {
@@ -130,7 +130,7 @@ final class GroupDataProjection
     /** Cross-group matches remain visible without exposing private owner data. */
     public function duplicateResults(Collection $results, User $actor): Collection
     {
-        if (! $actor->hasRole('rop') || $results->isEmpty()) {
+        if (! $actor->usesAssignedGroupScope() || $results->isEmpty()) {
             return $results;
         }
         $ids = app(RopGroupAccess::class)->scope(Property::query(), $actor, 'properties.branch_group_id', 'properties.branch_id')

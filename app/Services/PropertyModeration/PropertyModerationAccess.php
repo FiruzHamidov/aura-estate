@@ -22,7 +22,7 @@ final class PropertyModerationAccess
     /** Read-only access to the closed stages exposed by the property control report. */
     public function canViewClosedProperty(User $user, Property $property): bool
     {
-        if ($user->hasRole('rop') && ! app(RopGroupAccess::class)->allows($user, $property)) return false;
+        if ($user->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->allows($user, $property)) return false;
 
         return $user->hasPermission('properties.closed.view')
             && in_array($property->moderation_status, config('security-property-control.trigger_statuses', []), true);
@@ -30,7 +30,7 @@ final class PropertyModerationAccess
 
     public function canEdit(User $user, Property $property): bool
     {
-        if ($user->hasRole('rop') && ! app(RopGroupAccess::class)->allows($user, $property)) {
+        if ($user->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->allows($user, $property)) {
             return false;
         }
         if (! $user->hasPermission('properties.edit')) {
@@ -64,7 +64,7 @@ final class PropertyModerationAccess
 
     public function canViewHistory(User $user, Property $property): bool
     {
-        if ($user->hasRole('rop') && ! app(RopGroupAccess::class)->allows($user, $property)) return false;
+        if ($user->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->allows($user, $property)) return false;
 
         return $user->hasPermission('properties.history.view')
             && ($this->canEdit($user, $property) || $this->canViewClosedProperty($user, $property));
@@ -97,7 +97,7 @@ final class PropertyModerationAccess
 
     public function canManageDeal(User $user, Property $property): bool
     {
-        if ($user->hasRole('rop') && ! app(RopGroupAccess::class)->allows($user, $property)) return false;
+        if ($user->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->allows($user, $property)) return false;
 
         return $user->hasPermission('properties.deal.manage')
             && ($this->canEdit($user, $property) || $user->hasPermission('properties.deal.colleague'));
@@ -105,7 +105,7 @@ final class PropertyModerationAccess
 
     public function canModerate(User $user, Property $property): bool
     {
-        if ($user->hasRole('rop') && ! app(RopGroupAccess::class)->allows($user, $property)) {
+        if ($user->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->allows($user, $property)) {
             return false;
         }
         if (! $user->hasPermission('properties.moderate')) {
@@ -125,7 +125,7 @@ final class PropertyModerationAccess
         if (! $user->hasPermission('properties.moderate')) {
             return $query->whereRaw('1 = 0');
         }
-        if ($user->hasRole('rop')) {
+        if ($user->usesAssignedGroupScope()) {
             return app(RopGroupAccess::class)->scope($query, $user, 'properties.branch_group_id', 'properties.branch_id');
         }
         if ($user->hasPermission('properties.manage_all')) {

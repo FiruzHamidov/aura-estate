@@ -110,7 +110,7 @@ class DailyReportController extends Controller
                 ? (int) $authUser->branch_id
                 : (int) $validated['branch_id'];
 
-            if ($authUser->hasRole('rop')) {
+            if ($authUser->usesAssignedGroupScope()) {
                 $query->whereIn('daily_reports.branch_group_id', \App\Models\BranchGroup::query()
                     ->where('branch_id', $effectiveBranchId)->select('id'));
             } else {
@@ -119,7 +119,7 @@ class DailyReportController extends Controller
         }
 
         if (! empty($validated['branch_group_id'])) {
-            if ($authUser->hasRole('rop')) {
+            if ($authUser->usesAssignedGroupScope()) {
                 $query->where('daily_reports.branch_group_id', $validated['branch_group_id']);
             } else {
                 $query->whereHas('user', fn (Builder $userQuery) => $userQuery->where('branch_group_id', $validated['branch_group_id']));
@@ -170,7 +170,7 @@ class DailyReportController extends Controller
             ->where('user_id', $actor->id)
             ->orderByDesc('report_date');
 
-        if ($actor->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'daily_reports.branch_group_id');
+        if ($actor->usesAssignedGroupScope()) app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'daily_reports.branch_group_id');
 
         if (! empty($validated['date_from'])) {
             $query->whereDate('report_date', '>=', $validated['date_from']);
@@ -611,7 +611,7 @@ class DailyReportController extends Controller
         $branch = $authUser->hasPermission('daily_reports.list.scope.branch');
         $own = $authUser->hasPermission('daily_reports.list.scope.own') || $authUser->hasPermission('daily_reports.list.scope.own_group');
         abort_unless($all || $branch || $own, 403, 'Forbidden');
-        if ($authUser->hasRole('rop')) {
+        if ($authUser->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'daily_reports.branch_group_id');
             if ($all || $branch) return;
         }
@@ -626,7 +626,7 @@ class DailyReportController extends Controller
 
     private function validateScopeFilters(array $validated, User $authUser): void
     {
-        if ($authUser->hasRole('rop') || $authUser->hasPermission('daily_reports.list.scope.branch')) {
+        if ($authUser->usesAssignedGroupScope() || $authUser->hasPermission('daily_reports.list.scope.branch')) {
             if (array_key_exists('branch_id', $validated) && $validated['branch_id'] !== null) {
                 $this->branchScope->ensureSameBranchOrDeny((int) $validated['branch_id'], $authUser);
             }
@@ -636,7 +636,7 @@ class DailyReportController extends Controller
             }
 
             if (array_key_exists('user_id', $validated) && $validated['user_id'] !== null) {
-                if (! $authUser->hasRole('rop') || ! app(\App\Support\RopGroupAccess::class)
+                if (! $authUser->usesAssignedGroupScope() || ! app(\App\Support\RopGroupAccess::class)
                     ->hasVisibleDailyReportHistory($authUser, (int) $validated['user_id'])) {
                     $this->branchScope->ensureUserInUserBranchOrDeny((int) $validated['user_id'], $authUser);
                 }
@@ -764,7 +764,7 @@ class DailyReportController extends Controller
 
     private function ensureScopedReportAccess(User $actor, User $employee, ?DailyReport $report, string $date): void
     {
-        if (! $actor->hasRole('rop')) {
+        if (! $actor->usesAssignedGroupScope()) {
             $this->ensureCanReadScopedReport($actor, $employee);
             return;
         }
@@ -920,7 +920,7 @@ class DailyReportController extends Controller
                 $query->orWhere(function (Builder $context) use ($user, $date, $actor): void {
                     $context->where(fn (Builder $q) => $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $date))
                         ->where(fn (Builder $q) => $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $date));
-                    if ($actor->hasRole('rop')) {
+                    if ($actor->usesAssignedGroupScope()) {
                         $context->where('branch_group_id', $user->branch_group_id)->where('role_slug', $user->role?->slug);
                     }
                     $context->where(function (Builder $q) use ($user): void {
@@ -945,7 +945,7 @@ class DailyReportController extends Controller
 
     private function resolvePlanMap(User $user, string $reportDate): array
     {
-        $rop = $this->authUser()->hasRole('rop');
+        $rop = $this->authUser()->usesAssignedGroupScope();
         $plans = [
             'objects' => ['target_value' => null, 'plan_source' => null, 'source_record_id' => null],
             'shows' => ['target_value' => null, 'plan_source' => null, 'source_record_id' => null],
@@ -1013,7 +1013,7 @@ class DailyReportController extends Controller
         $report->loadMissing(['user.role', 'user.branch', 'user.branchGroup']);
         $user = $report->user;
         $actor = $this->authUser();
-        $userPayload = $actor->hasRole('rop')
+        $userPayload = $actor->usesAssignedGroupScope()
             ? (app(\App\Services\GroupAccess\GroupDataProjection::class)->relations($report, $actor)['user'] ?? null)
             : $user;
         $reportDate = $report->report_date->toDateString();

@@ -41,7 +41,7 @@ class NotificationService
             return $notification;
         }
 
-        if ($user->hasRole('rop')) {
+        if ($user->usesAssignedGroupScope()) {
             abort_unless(app(NotificationGroupAccess::class)->allows($notification, $user), 404, 'NOT_FOUND');
         } else {
             abort_unless((int) $notification->user_id === (int) $user->id, 403, 'Forbidden');
@@ -853,7 +853,7 @@ class NotificationService
             $latestReport = $workingReports->first();
             $previousReport = $workingReports->get(1);
             $receivers = $receivers->filter(function (User $receiver) use ($latestReport, $previousReport): bool {
-                if (! $receiver->hasRole('rop')) return true;
+                if (! $receiver->usesAssignedGroupScope()) return true;
                 $access = app(NotificationGroupAccess::class);
                 return $previousReport && $access->subjectAllowed($receiver, $latestReport)
                     && $access->subjectAllowed($receiver, $previousReport)
@@ -1130,7 +1130,7 @@ class NotificationService
             'data' => $options['data'] ?? [],
         ];
 
-        if ($recipient->hasRole('rop') && $subject instanceof Selection) {
+        if ($recipient->usesAssignedGroupScope() && $subject instanceof Selection) {
             // Public tracking accepts only property_id; never copy arbitrary event data or public access hashes.
             $eventPropertyId = $options['data']['payload']['property_id'] ?? null;
             $payload['data'] = ['selection_id' => $subject->id, 'payload' => $eventPropertyId !== null ? ['property_id' => (int) $eventPropertyId] : null];

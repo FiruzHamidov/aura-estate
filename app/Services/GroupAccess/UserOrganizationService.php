@@ -32,7 +32,7 @@ final class UserOrganizationService
             }
             $changed = $subject->isDirty(['role_id', 'branch_id', 'branch_group_id']);
             if ($changed) {
-                if ($actor->hasRole('rop')) {
+                if ($actor->usesAssignedGroupScope()) {
                     app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $subject->fresh());
                     abort_unless($actor->id !== $subject->id
                         && in_array($previousRole, ['intern', 'agent', 'mop'], true)

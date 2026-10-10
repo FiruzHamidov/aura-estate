@@ -14,7 +14,7 @@ class KpiReportService
 {
     public function build(User $authUser, array $filters): array
     {
-        $historical = $authUser->hasRole('rop');
+        $historical = $authUser->usesAssignedGroupScope();
         $periodType = $filters['period_type'];
         $dateFrom = Carbon::parse($filters['date_from'])->startOfDay();
         $dateTo = Carbon::parse($filters['date_to'])->endOfDay();
@@ -136,7 +136,7 @@ class KpiReportService
         $authUser->loadMissing('role');
 
         abort_unless($authUser->hasPermission('kpi.reports.view'), 403, 'KPI_FORBIDDEN_SCOPE');
-        $historical = $authUser->hasRole('rop');
+        $historical = $authUser->usesAssignedGroupScope();
         if ($historical) app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'daily_reports.branch_group_id');
         if ($authUser->hasPermission('kpi.reports.scope.all')) return;
         if ($authUser->hasPermission('kpi.reports.scope.branch')) {

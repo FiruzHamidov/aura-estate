@@ -657,7 +657,7 @@ class ExternalPropertyRequestController extends Controller
         $user = $request->user();
         abort_unless($user, 401, 'Unauthenticated.');
         $user->loadMissing('role');
-        abort_if($user->hasRole('rop'), 403, 'FORBIDDEN_ACTION');
+        abort_if($user->usesAssignedGroupScope(), 403, 'FORBIDDEN_ACTION');
         abort_unless($user->hasPermission($permission), 403, 'Доступ запрещён');
 
         return $user;

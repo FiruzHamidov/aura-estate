@@ -316,7 +316,7 @@ class PropertyController extends Controller
             );
 
             $this->ensureDealAssigneeExists((int) $data[$field]);
-            if ($actor->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->ensureEmployee($actor, (int) $data[$field], $property?->branch_group_id, true);
+            if ($actor->usesAssignedGroupScope()) app(\App\Support\RopGroupAccess::class)->ensureEmployee($actor, (int) $data[$field], $property?->branch_group_id, true);
         }
 
         foreach (($data['agents'] ?? []) as $index => $agent) {
@@ -331,7 +331,7 @@ class PropertyController extends Controller
             );
 
             $this->ensureDealAssigneeExists((int) $agent['agent_id']);
-            if ($actor->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->ensureEmployee($actor, (int) $agent['agent_id'], $property?->branch_group_id, true);
+            if ($actor->usesAssignedGroupScope()) app(\App\Support\RopGroupAccess::class)->ensureEmployee($actor, (int) $agent['agent_id'], $property?->branch_group_id, true);
         }
     }
 
@@ -774,7 +774,7 @@ class PropertyController extends Controller
             'buyerClient.type',
         ];
 
-        if (auth()->user()?->hasRole('rop')) {
+        if (auth()->user()?->usesAssignedGroupScope()) {
             $relations[] = 'creator.role';
         }
 
@@ -875,7 +875,7 @@ class PropertyController extends Controller
     private function scopePropertyList(Builder $query, ?User $user, Request $request): Builder
     {
         if (! $user) return $query->publicSearchable();
-        if ($user->hasRole('rop')) {
+        if ($user->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $user, 'properties.branch_group_id', 'properties.branch_id');
         }
         if ($user->hasPermission('properties.list.scope.all')) return $query;
@@ -2132,7 +2132,7 @@ class PropertyController extends Controller
         $user = $this->crmAuthUser();
         $this->moderation->assertCanCreate($user);
         $this->moderation->assertNoProtectedFields($request,
-            $user->hasRole('rop') ? ['branch_id', 'branch_group_id', 'agent_id'] : ['branch_id', 'branch_group_id'], $user);
+            $user->usesAssignedGroupScope() ? ['branch_id', 'branch_group_id', 'agent_id'] : ['branch_id', 'branch_group_id'], $user);
 
         $promotionInput = $request->validate(['requested_listing_type' => 'nullable|in:regular,vip,urgent']);
         $requestedType = $promotionInput['requested_listing_type'] ?? 'regular';
@@ -2140,7 +2140,7 @@ class PropertyController extends Controller
         $validated = $this->validateProperty($request);
         // The creation wizard has no title field; the database column is non-nullable.
         $validated['title'] ??= '';
-        if ($user->hasRole('rop')) {
+        if ($user->usesAssignedGroupScope()) {
             $validated = array_merge($validated, $request->validate(['agent_id' => 'required|integer|exists:users,id']));
         }
         $featureIds = $validated['features'] ?? [];
@@ -2440,7 +2440,7 @@ class PropertyController extends Controller
     public function show(Request $request, Property $property)
     {
         $authUser = $this->propertyShowAuthUser($request);
-        if ($authUser?->hasRole('rop') && ! app(\App\Support\RopGroupAccess::class)->allows($authUser, $property)) {
+        if ($authUser?->usesAssignedGroupScope() && ! app(\App\Support\RopGroupAccess::class)->allows($authUser, $property)) {
             // The storefront is public. Group permissions still guard every internal endpoint.
             $this->moderation->publicOrFail($property, null);
 

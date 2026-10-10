@@ -15,7 +15,7 @@ final class ExternalRequestMediaController extends Controller
         $actor = $http->user();
         $request = $photo->request;
         abort_unless($request, 404, 'NOT_FOUND');
-        abort_if($actor->hasRole('rop'), 403, 'FORBIDDEN_ACTION');
+        abort_if($actor->usesAssignedGroupScope(), 403, 'FORBIDDEN_ACTION');
         if (! ($actor->hasPermission('external_requests.own.view') && (int) $request->external_agent_id === (int) $actor->id)) {
             abort_unless($actor->hasPermission('external_requests.view') && $requests->scopedInternalQuery($actor)->whereKey($request->id)->exists(), 404, 'NOT_FOUND');
         }

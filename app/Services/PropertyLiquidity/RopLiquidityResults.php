@@ -16,7 +16,7 @@ final class RopLiquidityResults
     {
         DB::transaction(function () use ($actor) {
             $actor = User::whereKey($actor->id)->lockForUpdate()->firstOrFail();
-            abort_unless($actor->hasRole('rop'), 403, 'FORBIDDEN_ACTION');
+            abort_unless($actor->usesAssignedGroupScope(), 403, 'FORBIDDEN_ACTION');
             DB::table('rop_liquidity_results')->where('rop_id', $actor->id)->delete();
             $this->groups->scope(Property::query(), $actor, 'properties.branch_group_id', 'properties.branch_id')
                 ->publicSearchable()->whereNull('sold_at')->where('offer_type', 'sale')
@@ -85,7 +85,7 @@ final class RopLiquidityResults
 
     private function scopedQuery(User $actor, string $table, bool $active): Builder
     {
-        abort_unless($actor->hasRole('rop'), 403, 'FORBIDDEN_ACTION');
+        abort_unless($actor->usesAssignedGroupScope(), 403, 'FORBIDDEN_ACTION');
         $properties = $this->groups->scope(Property::query(), $actor, 'properties.branch_group_id', 'properties.branch_id')
             ->whereColumn('properties.branch_group_id', $table.'.branch_group_id');
         if ($active) $properties->publicSearchable()->whereNull('sold_at')->where('offer_type', 'sale');

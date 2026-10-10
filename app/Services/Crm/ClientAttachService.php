@@ -83,7 +83,7 @@ class ClientAttachService
             $query->where('clients.branch_id', $authUser->branch_id);
         }
 
-        if ($authUser->hasRole('rop')) {
+        if ($authUser->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'clients.branch_group_id', 'clients.branch_id');
         }
 
@@ -93,7 +93,7 @@ class ClientAttachService
     public function canAttachClient(User $authUser, Client $client, array $context): bool
     {
         if (!$authUser->hasPermission('clients.attach')) return false;
-        if ($authUser->hasRole('rop') && ! app(\App\Support\RopGroupAccess::class)->allows($authUser, $client)) {
+        if ($authUser->usesAssignedGroupScope() && ! app(\App\Support\RopGroupAccess::class)->allows($authUser, $client)) {
             return false;
         }
         try {
@@ -327,7 +327,7 @@ class ClientAttachService
 
     private function canAccessProperty(User $authUser, Property $property): bool
     {
-        if ($authUser->hasRole('rop') && !app(\App\Support\RopGroupAccess::class)->allows($authUser, $property)) return false;
+        if ($authUser->usesAssignedGroupScope() && !app(\App\Support\RopGroupAccess::class)->allows($authUser, $property)) return false;
 
         if ($authUser->hasPermission('clients.properties.all')) {
             return true;

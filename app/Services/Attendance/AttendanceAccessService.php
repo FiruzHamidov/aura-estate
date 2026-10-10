@@ -44,7 +44,7 @@ final class AttendanceAccessService
     public function mappingUsersQuery(User $viewer): Builder
     {
         $query = $this->participants->query();
-        if ($viewer->hasRole('rop')) {
+        if ($viewer->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id');
             $query->whereHas('role', fn ($roles) => $roles->whereIn('slug', ['intern', 'agent', 'mop']));
         }
@@ -54,7 +54,7 @@ final class AttendanceAccessService
     public function mappingDevicesQuery(User $viewer): Builder
     {
         $query = \App\Models\AttendanceDevice::query();
-        if ($viewer->hasRole('rop')) {
+        if ($viewer->usesAssignedGroupScope()) {
             $query->where('branch_id', $viewer->branch_id ?? 0)->where(function ($devices) use ($viewer) {
                 $devices->whereNull('branch_group_id')->orWhereIn('branch_group_id', app(\App\Support\RopGroupAccess::class)->groupsQuery($viewer));
             });
@@ -145,7 +145,7 @@ final class AttendanceAccessService
         if ($viewer->hasPermission('attendance.scope.assigned_branches')) {
             return $query->whereIn('users.branch_id', $this->securityBranchIds($viewer));
         }
-        if ($viewer->hasRole('rop')) {
+        if ($viewer->usesAssignedGroupScope()) {
             return app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id')
                 ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop']));
         }
