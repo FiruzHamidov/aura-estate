@@ -250,13 +250,12 @@ class DealController extends Controller
 
     private function ensurePropertyUsable(User $authUser, Property $property): void
     {
-        $roleSlug = $this->dealAccess->roleSlug($authUser);
 
-        if ($this->dealAccess->isPrivilegedRole($roleSlug)) {
+        if ($authUser->hasPermission('deals.properties.all')) {
             return;
         }
 
-        if (in_array($roleSlug, ['agent', 'intern'], true)) {
+        if ($authUser->hasPermission('deals.properties.own')) {
             abort_unless(
                 (int) $property->created_by === (int) $authUser->id
                     || (int) $property->agent_id === (int) $authUser->id,
@@ -267,7 +266,7 @@ class DealController extends Controller
             return;
         }
 
-        if ($roleSlug === 'mop') {
+        if ($authUser->hasPermission('deals.properties.group')) {
             abort_unless(
                 ! empty($authUser->branch_group_id)
                     && $this->resolvePropertyBranchGroupId($property) === (int) $authUser->branch_group_id,
@@ -278,7 +277,7 @@ class DealController extends Controller
             return;
         }
 
-        if (in_array($roleSlug, ['branch_director', 'rop', 'manager', 'operator'], true)) {
+        if ($authUser->hasPermission('deals.properties.branch')) {
             abort_unless(
                 ! empty($authUser->branch_id)
                     && $this->resolvePropertyBranchId($property) === (int) $authUser->branch_id,
@@ -738,7 +737,7 @@ class DealController extends Controller
             $data = $this->dealAccess->normalizeMutationData($data, $authUser);
             if ($deal->isPropertyControl() && array_key_exists('responsible_agent_id', $data) && $data['responsible_agent_id']) {
                 $responsible = User::query()->with('role')->findOrFail($data['responsible_agent_id']);
-                if ($responsible->role?->slug !== 'security') {
+                if (! $responsible->hasPermission('deals.control.claim')) {
                     throw ValidationException::withMessages([
                         'responsible_agent_id' => ['Ответственным за контроль может быть только сотрудник СБ.'],
                     ]);
@@ -756,6 +755,9 @@ class DealController extends Controller
 
             $stageId = $data['stage_id'] ?? $deal->stage_id;
             $stage = $this->resolveStage($pipeline, $stageId);
+            if ((int) $deal->pipeline_id !== (int) $pipeline->id || (int) $deal->stage_id !== (int) $stage->id) {
+                $this->dealAccess->ensureAction($authUser, 'move');
+            }
             $data['pipeline_id'] = $pipeline->id;
             $data['stage_id'] = $stage->id;
             $data = $this->applyStageState($data, $stage, $deal);
@@ -827,6 +829,7 @@ class DealController extends Controller
             [$authUser, $deal] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
                 $this->authUser(), $deal, $request->integer('responsible_agent_id') ?: null, $request->integer('branch_group_id') ?: null
             );
+            $this->dealAccess->ensureAction($authUser, 'move');
             $this->dealAccess->ensureVisible($authUser, $deal);
 
             $validated = $request->validate([
@@ -916,7 +919,7 @@ class DealController extends Controller
         $authUser = $this->authUser();
         $this->dealAccess->ensureVisible($authUser, $deal);
 
-        if (! $this->dealAccess->isSecurityRole($this->dealAccess->roleSlug($authUser))
+        if (! $authUser->hasPermission('deals.control.claim')
             || ! $this->propertyControlWorkflow->isControlDeal($deal)) {
             return response()->json([
                 'message' => 'Действие недоступно.',
@@ -929,7 +932,7 @@ class DealController extends Controller
                 $authUser, $deal, $authUser->id, null
             );
             $this->dealAccess->ensureVisible($authUser, $locked);
-            abort_unless($this->dealAccess->isSecurityRole($this->dealAccess->roleSlug($authUser))
+            abort_unless($authUser->hasPermission('deals.control.claim')
                 && $this->propertyControlWorkflow->isControlDeal($locked), 403, 'CRM_DEAL_FORBIDDEN');
             $locked->load(['pipeline.stages', 'stage']);
 

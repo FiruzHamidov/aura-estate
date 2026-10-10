@@ -29,6 +29,17 @@ class RolePermissionController extends Controller
             'permissions.*' => ['required', 'string', 'distinct', Rule::in(array_keys($catalog->definitions()))],
         ]);
 
+        $exclusive = [];
+        foreach ($data['permissions'] as $permission) {
+            $group = $catalog->definitions()[$permission]['exclusive_group'] ?? null;
+            if ($group !== null && isset($exclusive[$group])) {
+                throw \Illuminate\Validation\ValidationException::withMessages([
+                    'permissions' => ['Для одного раздела можно выбрать только одну область данных.'],
+                ]);
+            }
+            if ($group !== null) $exclusive[$group] = true;
+        }
+
         $result = DB::transaction(function () use ($request, $role, $data) {
             // A single lock order serializes permission editors, including edits to their own role.
             $roles = Role::orderBy('id')->lockForUpdate()->get();

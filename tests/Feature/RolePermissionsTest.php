@@ -167,4 +167,97 @@ class RolePermissionsTest extends TestCase
         $this->postJson('/api/roles', ['name' => 'Assistant', 'slug' => 'assistant'])->assertCreated();
     }
 
+    public function test_lead_scope_changes_are_effective_and_never_grant_mutation_implicitly(): void
+    {
+        Schema::create('leads', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('created_by')->nullable();
+            $table->unsignedBigInteger('responsible_agent_id')->nullable(); $table->softDeletes();
+        });
+        $actor = $this->actor('agent');
+        $actor->branch_id = 10;
+        DB::table('leads')->insert([
+            ['id' => 1, 'branch_id' => 10, 'created_by' => $actor->id, 'responsible_agent_id' => null],
+            ['id' => 2, 'branch_id' => 10, 'created_by' => 999, 'responsible_agent_id' => null],
+            ['id' => 3, 'branch_id' => 20, 'created_by' => $actor->id, 'responsible_agent_id' => null],
+        ]);
+        $access = app(\App\Support\LeadAccess::class);
+        $this->assertSame([1], $access->visibleQuery($actor)->pluck('id')->all());
+        $role = $actor->role;
+        $role->permissions = ['leads.scope.branch'];
+        $role->save();
+        $this->assertSame([1, 2], $access->visibleQuery($actor)->pluck('id')->all());
+        $role->permissions = ['leads.scope.all'];
+        $role->save();
+        $this->assertSame([1, 2, 3], $access->visibleQuery($actor)->pluck('id')->all());
+        $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);
+        $access->ensureAction($actor, 'update');
+    }
+
+    public function test_conflicting_data_scopes_are_rejected(): void
+    {
+        $this->actor('admin');
+        $role = Role::where('slug', 'agent')->firstOrFail();
+        $this->putJson('/api/rbac/roles/'.$role->id, [
+            'version' => 1, 'permissions' => ['leads.scope.all', 'leads.scope.own'],
+        ])->assertUnprocessable();
+    }
+
+    public function test_deal_and_pipeline_scopes_are_independent_of_mutations(): void
+    {
+        Schema::create('crm_deal_pipelines', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('branch_id')->nullable();
+            $table->string('code')->nullable(); $table->boolean('is_active')->default(true);
+        });
+        Schema::create('crm_deals', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('created_by')->nullable();
+            $table->unsignedBigInteger('responsible_agent_id')->nullable();
+            $table->unsignedBigInteger('pipeline_id'); $table->softDeletes();
+        });
+        DB::table('crm_deal_pipelines')->insert([
+            ['id' => 1, 'branch_id' => 10, 'code' => null, 'is_active' => true],
+            ['id' => 2, 'branch_id' => 20, 'code' => null, 'is_active' => true],
+            ['id' => 3, 'branch_id' => null, 'code' => 'hr_recruitment', 'is_active' => true],
+            ['id' => 4, 'branch_id' => null, 'code' => 'property_control', 'is_active' => true],
+            ['id' => 5, 'branch_id' => null, 'code' => 'property_control', 'is_active' => false],
+        ]);
+        $actor = $this->actor('operator');
+        $actor->branch_id = 10;
+        DB::table('crm_deals')->insert([
+            ['id' => 1, 'branch_id' => 10, 'created_by' => $actor->id, 'pipeline_id' => 1],
+            ['id' => 2, 'branch_id' => 10, 'created_by' => 999, 'pipeline_id' => 1],
+            ['id' => 3, 'branch_id' => 20, 'created_by' => $actor->id, 'pipeline_id' => 2],
+            ['id' => 4, 'branch_id' => null, 'created_by' => 999, 'pipeline_id' => 3],
+            ['id' => 5, 'branch_id' => 20, 'created_by' => 999, 'pipeline_id' => 4],
+            ['id' => 6, 'branch_id' => 20, 'created_by' => 999, 'pipeline_id' => 5],
+        ]);
+        $deals = app(\App\Support\DealAccess::class);
+        $pipelines = app(\App\Support\DealPipelineAccess::class);
+        foreach (['own' => [1], 'branch' => [1, 2], 'all' => [1, 2, 3, 4, 5, 6], 'hr' => [4], 'control' => [5], 'none' => []] as $scope => $ids) {
+            $actor->role->permissions = $scope === 'none' ? [] : ['deals.scope.'.$scope];
+            $this->assertSame($ids, $deals->visibleQuery($actor)->orderBy('id')->pluck('id')->all(), $scope);
+        }
+        foreach (['branch' => [1, 3, 4, 5], 'all' => [1, 2, 3, 4, 5], 'hr' => [3], 'control' => [4], 'none' => []] as $scope => $ids) {
+            $actor->role->permissions = $scope === 'none' ? [] : ['pipelines.scope.'.$scope];
+            $this->assertSame($ids, $pipelines->visibleQuery($actor)->orderBy('id')->pluck('id')->all(), $scope);
+            $this->assertFalse($pipelines->canManage($actor));
+        }
+        $actor->role->permissions = ['deals.scope.all'];
+        $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);
+        $deals->ensureCanCreate($actor);
+    }
+
+    public function test_crm_grant_works_for_formerly_excluded_roles_without_opening_other_modules(): void
+    {
+        $actor = $this->actor('client');
+        $actor->role->permissions = ['leads.scope.own'];
+        $middleware = app(\App\Http\Middleware\EnsureUserIsNotClient::class);
+        foreach (['/api/leads' => 200, '/api/leads/1/convert' => 200, '/api/deals' => 403, '/api/user' => 403] as $path => $status) {
+            $request = \Illuminate\Http\Request::create($path);
+            $request->setUserResolver(fn () => $actor);
+            $this->assertSame($status, $middleware->handle($request, fn () => response('ok'))->getStatusCode(), $path);
+        }
+    }
+
 }

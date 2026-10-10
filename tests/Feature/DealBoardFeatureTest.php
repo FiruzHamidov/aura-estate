@@ -394,6 +394,35 @@ class DealBoardFeatureTest extends TestCase
         );
     }
 
+    public function test_revoked_move_permission_blocks_all_stage_change_endpoints(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $agent = $this->createUser($role, $branch, 'Agent');
+        $client = $this->createClient($branch, $agent, 'Buyer', '992960000010');
+        [$pipeline, $first, $second] = $this->createPipelineWithStages($branch);
+        Sanctum::actingAs($agent);
+        $deal = $this->postJson('/api/deals', [
+            'pipeline_id' => $pipeline->id, 'stage_id' => $first->id,
+            'client_id' => $client->id, 'title' => 'Test move permission',
+        ])->assertCreated()->json();
+        $role->refresh();
+        $role->permissions = array_values(array_diff($role->permissionKeys(), ['deals.move']));
+        $role->save();
+        Sanctum::actingAs($agent->fresh());
+        $this->patchJson('/api/deals/'.$deal['id'].'/move', ['stage_id' => $second->id])->assertForbidden();
+        $this->putJson('/api/deals/'.$deal['id'], ['stage_id' => $second->id])->assertForbidden();
+        $this->postJson('/api/crm/deals/'.$deal['id'].'/activities', [
+            'type' => 'status_change', 'stage_id' => $second->id,
+        ])->assertForbidden();
+        $this->assertSame($first->id, Deal::findOrFail($deal['id'])->stage_id);
+        $this->putJson('/api/deals/'.$deal['id'], ['title' => 'Still editable'])->assertOk();
+        $this->postJson('/api/crm/deals/'.$deal['id'].'/activities', [
+            'type' => 'comment', 'comment' => 'Still allowed',
+        ])->assertOk();
+    }
+
     public function test_agent_cannot_move_foreign_branch_deal_but_rop_sees_branch_board_only(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);

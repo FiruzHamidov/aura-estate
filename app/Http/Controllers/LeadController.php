@@ -415,7 +415,7 @@ class LeadController extends Controller
             $query->where('client_id', $validated['client_id']);
         }
 
-        if ($this->leadAccess->isPrivilegedRole($this->leadAccess->roleSlug($authUser)) && ! empty($validated['branch_id'])) {
+        if ($this->leadAccess->canReadAll($authUser) && ! empty($validated['branch_id'])) {
             $query->where('branch_id', $validated['branch_id']);
         }
 
@@ -483,6 +483,7 @@ class LeadController extends Controller
                 $this->authUser(), null, $request->integer('responsible_agent_id') ?: null, $request->integer('branch_group_id') ?: null
             );
 
+            $this->leadAccess->ensureAction($authUser, 'create');
             $data = $this->validatePayload($request);
             $data = $this->normalizeInput($data);
             $data = $this->applyState($data);
@@ -547,6 +548,7 @@ class LeadController extends Controller
             [$authUser, $lead] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
                 $this->authUser(), $lead, $request->integer('responsible_agent_id') ?: null, $request->integer('branch_group_id') ?: null
             );
+            $this->leadAccess->ensureAction($authUser, 'update');
             $this->leadAccess->ensureVisible($authUser, $lead);
 
             $data = $this->validatePayload($request, $lead);
@@ -578,6 +580,7 @@ class LeadController extends Controller
             [$authUser, $lead] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
                 $this->authUser(), $lead, null, null
             );
+            $this->leadAccess->ensureAction($authUser, 'delete');
             $this->leadAccess->ensureVisible($authUser, $lead);
 
             $this->auditLogger->log(

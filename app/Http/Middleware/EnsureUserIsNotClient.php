@@ -17,6 +17,23 @@ class EnsureUserIsNotClient
             return $next($request);
         }
 
+        // Migrated CRM endpoints enforce action permissions and record scope themselves.
+        // A grant must work for any role, including a former client/accountant role.
+        $crmScopes = [
+            'leads' => ['api/leads', 'api/leads/*', 'api/crm/leads/*'],
+            'deals' => ['api/deals', 'api/deals/*', 'api/crm/deals/*'],
+            'pipelines' => ['api/deal-pipelines', 'api/deal-pipelines/*', 'api/deal-stages', 'api/deal-stages/*'],
+        ];
+        foreach ($crmScopes as $module => $paths) {
+            if ($request->is(...$paths)) {
+                foreach (['all', 'branch', 'own', 'hr', 'control'] as $scope) {
+                    if ($user?->hasPermission($module.'.scope.'.$scope)) {
+                        return $next($request);
+                    }
+                }
+            }
+        }
+
         // HR can select existing roles/groups, but cannot change these dictionaries.
         if ($user?->role?->slug === 'hr'
             && $request->is('api/roles', 'api/roles/*', 'api/branch-groups', 'api/branch-groups/*')

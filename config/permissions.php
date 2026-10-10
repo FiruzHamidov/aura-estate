@@ -254,4 +254,106 @@ return [
     'liquidity.settings.manage' => [
         'group' => 'Ликвидность', 'name' => 'Настройки расчёта', 'description' => 'Изменение настроек расчёта ликвидности и параметров рынка.', 'roles' => ['admin', 'superadmin'], 'sensitive' => true,
     ],
+    'leads.scope.all' => [
+        'exclusive_group' => 'leads.scope',
+        'group' => 'CRM · Лиды', 'name' => 'Лиды всех филиалов', 'description' => 'Просмотр лидов всех филиалов. Для РОП сохраняется обязательная граница закреплённых групп. Действия с лидами выдаются отдельно.', 'roles' => ['superadmin', 'admin', 'owner', 'marketing'], 'sensitive' => true,
+    ],
+    'leads.scope.branch' => [
+        'exclusive_group' => 'leads.scope',
+        'group' => 'CRM · Лиды', 'name' => 'Лиды своего филиала', 'description' => 'Просмотр всех лидов своего филиала. РОП видит только лиды закреплённых за ним групп.', 'roles' => ['branch_director', 'rop', 'operator', 'manager'],
+    ],
+    'leads.scope.own' => [
+        'exclusive_group' => 'leads.scope',
+        'group' => 'CRM · Лиды', 'name' => 'Свои лиды', 'description' => 'Просмотр созданных вами или назначенных вам лидов внутри вашего филиала. Доступ ко всему филиалу имеет приоритет над этим разрешением.', 'roles' => ['agent', 'mop'],
+    ],
+    'leads.create' => [
+        'group' => 'CRM · Лиды', 'name' => 'Создание лидов', 'description' => 'Создание лида внутри разрешённой области данных.', 'roles' => ['superadmin', 'admin', 'owner', 'marketing', 'branch_director', 'rop', 'operator', 'manager', 'agent', 'mop'],
+    ],
+    'leads.update' => [
+        'group' => 'CRM · Лиды', 'name' => 'Изменение лидов', 'description' => 'Редактирование контактов, статуса и ответственного доступного лида.', 'roles' => ['superadmin', 'admin', 'owner', 'marketing', 'branch_director', 'rop', 'operator', 'manager', 'agent', 'mop'],
+    ],
+    'leads.delete' => [
+        'group' => 'CRM · Лиды', 'name' => 'Удаление лидов', 'description' => 'Удаление доступных лидов с записью действия в журнале.', 'roles' => ['superadmin', 'admin', 'owner', 'marketing', 'branch_director', 'rop', 'operator', 'manager', 'agent', 'mop'], 'sensitive' => true,
+    ],
+    'leads.convert' => [
+        'group' => 'CRM · Лиды', 'name' => 'Преобразование лида', 'description' => 'Преобразование доступного лида в контакт и сделку. Это разрешение включает создание связанных записей в рамках преобразования.', 'roles' => ['superadmin', 'admin', 'owner', 'marketing', 'branch_director', 'rop', 'operator', 'manager', 'agent', 'mop'],
+    ],
+    'deals.scope.all' => [
+        'group' => 'CRM · Сделки', 'name' => 'Все сделки', 'description' => 'Сделки всех филиалов. Действия с данными разрешаются отдельно; обязательные ограничения закреплённых групп сохраняются.', 'roles' => ['admin', 'superadmin', 'marketing'], 'exclusive_group' => 'deals.scope', 'sensitive' => true,
+    ],
+    'deals.scope.branch' => [
+        'group' => 'CRM · Сделки', 'name' => 'Сделки своего филиала', 'description' => 'Все сделки своего филиала; РОП ограничен закреплёнными группами. Действия с данными разрешаются отдельно; обязательные ограничения закреплённых групп сохраняются.', 'roles' => ['branch_director', 'rop', 'manager'], 'exclusive_group' => 'deals.scope',
+    ],
+    'deals.scope.own' => [
+        'group' => 'CRM · Сделки', 'name' => 'Свои сделки', 'description' => 'Созданные вами и назначенные вам сделки своего филиала. Действия с данными разрешаются отдельно; обязательные ограничения закреплённых групп сохраняются.', 'roles' => ['agent', 'operator'], 'exclusive_group' => 'deals.scope',
+    ],
+    'deals.scope.hr' => [
+        'group' => 'CRM · Сделки', 'name' => 'Только найм', 'description' => 'Сделки только в HR-воронке найма. Действия с данными разрешаются отдельно; обязательные ограничения закреплённых групп сохраняются.', 'roles' => ['hr'], 'exclusive_group' => 'deals.scope',
+    ],
+    'deals.scope.control' => [
+        'group' => 'CRM · Сделки', 'name' => 'Только контроль объектов', 'description' => 'Карточки только в активной воронке контроля объектов. Действия с данными разрешаются отдельно; обязательные ограничения закреплённых групп сохраняются.', 'roles' => ['security'], 'exclusive_group' => 'deals.scope',
+    ],
+    'pipelines.scope.all' => [
+        'group' => 'CRM · Воронки', 'name' => 'Все воронки', 'description' => 'Доступ к воронкам всех филиалов. Действия с данными разрешаются отдельно; обязательные ограничения закреплённых групп сохраняются.', 'roles' => ['admin', 'superadmin', 'marketing'], 'exclusive_group' => 'pipelines.scope', 'sensitive' => true,
+    ],
+    'pipelines.scope.branch' => [
+        'group' => 'CRM · Воронки', 'name' => 'Воронки своего филиала', 'description' => 'Воронки своего филиала и общие воронки без филиала. Действия с данными разрешаются отдельно; обязательные ограничения закреплённых групп сохраняются.', 'roles' => ['branch_director', 'rop', 'manager', 'agent', 'operator'], 'exclusive_group' => 'pipelines.scope',
+    ],
+    'pipelines.scope.hr' => [
+        'group' => 'CRM · Воронки', 'name' => 'Воронка найма', 'description' => 'Доступ только к HR-воронке найма. Действия с данными разрешаются отдельно; обязательные ограничения закреплённых групп сохраняются.', 'roles' => ['hr'], 'exclusive_group' => 'pipelines.scope',
+    ],
+    'pipelines.scope.control' => [
+        'group' => 'CRM · Воронки', 'name' => 'Воронка контроля', 'description' => 'Доступ только к активной воронке контроля объектов. Действия с данными разрешаются отдельно; обязательные ограничения закреплённых групп сохраняются.', 'roles' => ['security'], 'exclusive_group' => 'pipelines.scope',
+    ],
+    'deals.create' => [
+        'group' => 'CRM · Сделки', 'name' => 'Создание сделок', 'description' => 'Создание сделки в доступной воронке и области данных.', 'roles' => ['admin', 'superadmin', 'marketing', 'branch_director', 'rop', 'manager', 'agent', 'operator', 'hr'],
+    ],
+    'deals.update' => [
+        'group' => 'CRM · Сделки', 'name' => 'Редактирование сделок', 'description' => 'Изменение доступных сделок. Системные карточки контроля требуют отдельного права редактирования.', 'roles' => ['admin', 'superadmin', 'marketing', 'branch_director', 'rop', 'manager', 'agent', 'operator', 'hr'],
+    ],
+    'deals.delete' => [
+        'group' => 'CRM · Сделки', 'name' => 'Удаление сделок', 'description' => 'Удаление доступных сделок. Системные карточки контроля объектов удалять нельзя.', 'roles' => ['admin', 'superadmin', 'marketing', 'branch_director', 'rop', 'manager', 'agent', 'operator', 'hr'], 'sensitive' => true,
+    ],
+    'deals.move' => [
+        'group' => 'CRM · Сделки', 'name' => 'Перемещение сделок', 'description' => 'Перемещение доступных сделок между этапами. Переходы карточек контроля дополнительно ограничены правилами процесса.', 'roles' => ['admin', 'superadmin', 'marketing', 'branch_director', 'rop', 'manager', 'agent', 'operator', 'hr', 'security'],
+    ],
+    'deals.activities.create' => [
+        'group' => 'CRM · Сделки', 'name' => 'Действия и комментарии по сделке', 'description' => 'Запись звонков, комментариев, меток и дат контакта по доступной сделке. Смена этапа требует права перемещения, а назначение ответственного — редактирования сделки.', 'roles' => ['admin', 'superadmin', 'marketing', 'branch_director', 'rop', 'manager', 'agent', 'operator', 'hr', 'security'],
+    ],
+    'deals.related_control.view' => [
+        'group' => 'CRM · Сделки', 'name' => 'Контроль своих объектов', 'description' => 'Включает в выборку своих сделок карточки контроля по вашим объявлениям.', 'roles' => ['agent', 'intern'],
+    ],
+    'deals.control.edit' => [
+        'group' => 'CRM · Сделки', 'name' => 'Редактирование данных карточки контроля', 'description' => 'Изменение основных данных системной карточки контроля. Требуется общее право редактирования сделок.', 'roles' => ['admin', 'superadmin'], 'sensitive' => true,
+    ],
+    'deals.control.claim' => [
+        'group' => 'CRM · Сделки', 'name' => 'Взять карточку контроля', 'description' => 'Назначить себя ответственным за свободную новую карточку контроля.', 'roles' => ['security'],
+    ],
+    'deals.control.deadline' => [
+        'group' => 'CRM · Сделки', 'name' => 'Срок проверки карточки', 'description' => 'Изменение срока следующего действия по карточке контроля.', 'roles' => ['admin', 'superadmin', 'security'],
+    ],
+    'deals.control.review' => [
+        'group' => 'CRM · Сделки', 'name' => 'Проверка службой безопасности', 'description' => 'Переходы проверки СБ по доступным карточкам контроля с соблюдением обязательных комментариев.', 'roles' => ['admin', 'superadmin', 'security'],
+    ],
+    'deals.control.correct' => [
+        'group' => 'CRM · Сделки', 'name' => 'Исправления филиала', 'description' => 'Переходы уточнения и исправления по карточкам своего филиала.', 'roles' => ['admin', 'superadmin', 'branch_director', 'rop', 'manager', 'agent', 'operator'],
+    ],
+    'deals.control.manage_all' => [
+        'group' => 'CRM · Сделки', 'name' => 'Все переходы контроля', 'description' => 'Позволяет выполнять переходы СБ и филиала для любой доступной карточки контроля.', 'roles' => ['admin', 'superadmin'], 'sensitive' => true,
+    ],
+    'pipelines.manage' => [
+        'group' => 'CRM · Воронки', 'name' => 'Настройка воронок', 'description' => 'Создание и изменение воронок и этапов внутри выбранной области. Для области найма доступно изменение существующей HR-воронки.', 'roles' => ['admin', 'superadmin', 'marketing', 'branch_director', 'hr'],
+    ],
+    'deals.properties.all' => [
+        'group' => 'CRM · Сделки', 'name' => 'Привязка: Объекты всех филиалов', 'description' => 'Определяет, какие объявления можно прикреплять к доступным сделкам. Само изменение сделки требует отдельного разрешения.', 'exclusive_group' => 'deals.properties', 'roles' => ['admin', 'superadmin', 'marketing'],
+    ],
+    'deals.properties.branch' => [
+        'group' => 'CRM · Сделки', 'name' => 'Привязка: Объекты своего филиала', 'description' => 'Определяет, какие объявления можно прикреплять к доступным сделкам. Само изменение сделки требует отдельного разрешения.', 'exclusive_group' => 'deals.properties', 'roles' => ['branch_director', 'rop', 'manager', 'operator'],
+    ],
+    'deals.properties.group' => [
+        'group' => 'CRM · Сделки', 'name' => 'Привязка: Объекты своей группы', 'description' => 'Определяет, какие объявления можно прикреплять к доступным сделкам. Само изменение сделки требует отдельного разрешения.', 'exclusive_group' => 'deals.properties', 'roles' => ['mop'],
+    ],
+    'deals.properties.own' => [
+        'group' => 'CRM · Сделки', 'name' => 'Привязка: Свои объекты', 'description' => 'Определяет, какие объявления можно прикреплять к доступным сделкам. Само изменение сделки требует отдельного разрешения.', 'exclusive_group' => 'deals.properties', 'roles' => ['agent', 'intern'],
+    ],
 ];
