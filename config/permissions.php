@@ -500,6 +500,11 @@ $permissions['tasks.assign.all'] = ['group' => 'CRM · Задачи', 'name' => 
 $permissions['tasks.assign.branch'] = ['group' => 'CRM · Задачи', 'name' => 'Исполнители задач своего филиала', 'description' => 'Разрешает назначать создаваемые задачи исполнителям своего филиала. Для РОП сохраняются закреплённые группы.', 'roles' => ['branch_director', 'rop'], 'exclusive_group' => 'tasks.assign'];
 $permissions['tasks.module.view'] = ['group' => 'CRM · Задачи', 'name' => 'Раздел задач на сайте', 'description' => 'Открывает раздел задач CRM на сайте. Нужна также область видимости задач; действия разрешаются отдельно.', 'roles' => ['admin', 'superadmin', 'marketing', 'agent', 'mop', 'manager', 'operator', 'rop', 'branch_director']];
 
+$permissions['crm_reports.scope.all'] = ['group' => 'CRM · Отчёты', 'name' => 'Отчёты всех филиалов', 'description' => 'Показатели операторов и менеджеров всех филиалов с выбором сотрудника и периода. Недоступно РОП: отчёт не ограничивается закреплёнными группами.', 'roles' => ['admin', 'superadmin'], 'exclusive_group' => 'crm_reports.scope'];
+$permissions['crm_reports.scope.branch'] = ['group' => 'CRM · Отчёты', 'name' => 'Отчёты своего филиала', 'description' => 'Показатели операторов и менеджеров своего филиала. Требуется назначенный филиал; ограничение РОП сохраняется.', 'roles' => ['branch_director'], 'exclusive_group' => 'crm_reports.scope'];
+$permissions['crm_reports.scope.own_operator'] = ['group' => 'CRM · Отчёты', 'name' => 'Личные показатели оператора', 'description' => 'Только собственные показатели обработки заявок. Строка отчёта формируется для сотрудника с ролью оператора.', 'roles' => ['operator'], 'exclusive_group' => 'crm_reports.scope'];
+$permissions['crm_reports.scope.own_manager'] = ['group' => 'CRM · Отчёты', 'name' => 'Личные показатели менеджера', 'description' => 'Только собственные показатели контроля объектов. Строка отчёта формируется для сотрудника с ролью менеджера.', 'roles' => ['manager'], 'exclusive_group' => 'crm_reports.scope'];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],

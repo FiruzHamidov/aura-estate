@@ -34,6 +34,12 @@ class EnsureUserIsNotClient
             }
         }
 
+        if ($request->is('api/crm/reports/performance')) {
+            foreach (['all', 'branch', 'own_operator', 'own_manager'] as $scope) {
+                if ($user?->hasPermission('crm_reports.scope.'.$scope)) return $next($request);
+            }
+        }
+
         if (($request->is('api/clients/duplicate-check') && $user?->hasPermission('clients.duplicates.search'))
             || ($request->is('api/clients/attach-existing') && $user?->hasPermission('clients.attach'))) {
             return $next($request);

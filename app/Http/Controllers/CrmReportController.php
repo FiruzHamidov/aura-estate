@@ -30,7 +30,7 @@ class CrmReportController extends Controller
     {
         // This report measures operator/manager roles, outside a ROP's agent/MOP scope.
         abort_if($authUser->hasRole('rop'), 403, 'FORBIDDEN_ACTION');
-        abort_if($authUser->role?->slug === 'marketing', 403, 'Forbidden');
+        abort_unless(collect(['all', 'branch', 'own_operator', 'own_manager'])->contains(fn ($scope) => $authUser->hasPermission('crm_reports.scope.'.$scope)), 403, 'Forbidden');
     }
 
     public function performance(Request $request)
@@ -123,16 +123,15 @@ class CrmReportController extends Controller
 
     private function resolveScope(User $authUser, array $validated): array
     {
-        $roleSlug = $authUser->role?->slug;
-
-        if (in_array($roleSlug, ['admin', 'superadmin'], true)) {
+        if ($authUser->hasPermission('crm_reports.scope.all')) {
             return [
                 'branch_id' => $validated['branch_id'] ?? null,
                 'responsible_user_id' => $validated['responsible_user_id'] ?? null,
             ];
         }
 
-        if (in_array($roleSlug, ['rop', 'branch_director'], true)) {
+        if ($authUser->hasPermission('crm_reports.scope.branch')) {
+            abort_unless($authUser->branch_id, 403, 'BRANCH_REQUIRED');
             abort_if(
                 ! empty($validated['branch_id']) && (int) $validated['branch_id'] !== (int) $authUser->branch_id,
                 403,
@@ -145,8 +144,8 @@ class CrmReportController extends Controller
             ];
         }
 
-        if (in_array($roleSlug, ['operator', 'manager'], true)) {
-            abort_if($roleSlug !== $validated['role_type'], 403, 'Forbidden');
+        if ($authUser->hasPermission('crm_reports.scope.own_operator') || $authUser->hasPermission('crm_reports.scope.own_manager')) {
+            abort_unless($authUser->hasPermission('crm_reports.scope.own_'.$validated['role_type']), 403, 'Forbidden');
             abort_if(
                 ! empty($validated['responsible_user_id']) && (int) $validated['responsible_user_id'] !== (int) $authUser->id,
                 403,
