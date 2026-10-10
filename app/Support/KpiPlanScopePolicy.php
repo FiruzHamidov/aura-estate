@@ -100,7 +100,7 @@ class KpiPlanScopePolicy
     public function ensureCanManageUserPlan(User $actor, User $target, bool $allowSelf = false): void
     {
         if (! $actor->hasPermission($allowSelf ? 'kpi.plans.user.view' : 'kpi.plans.user.manage')) $this->denyScope();
-        if ($actor->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->employees($actor)->whereKey($target->id)->exists()) $this->denyScope();
+        if ($actor->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->employees($actor, 'kpi.subject.assigned_groups')->whereKey($target->id)->exists()) $this->denyScope();
         $allowed = $actor->hasPermission('kpi.plans.scope.all')
             || ($actor->hasPermission('kpi.plans.scope.branch') && $actor->branch_id && (int) $actor->branch_id === (int) $target->branch_id)
             || ($actor->hasPermission('kpi.plans.scope.group') && $actor->branch_group_id && (int) $actor->branch_group_id === (int) $target->branch_group_id)

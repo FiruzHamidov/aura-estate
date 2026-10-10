@@ -25,7 +25,7 @@ class KpiReportService
             ->whereDate('report_date', '<=', $dateTo->toDateString());
 
         $this->applyVisibilityScope($query, $authUser);
-        if ($historical) $query->with('branchGroup')->whereIn('role_slug', ['agent', 'mop']);
+        if ($historical) $query->with('branchGroup')->whereHas('historicalRole', fn (Builder $roles) => $roles->withPermission('kpi.subject.assigned_groups'));
 
         if (! empty($filters['user_id'])) {
             $query->where('user_id', (int) $filters['user_id']);

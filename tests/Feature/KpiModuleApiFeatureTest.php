@@ -1563,6 +1563,39 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->patchJson('/api/kpi/plans/'.$otherMop->id, $payload)->assertOk();
     }
 
+    public function test_custom_kpi_subject_policy_controls_plans_and_eligible_list_independently_of_record_transfer(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $role = Role::create(['name' => 'Custom KPI employee', 'slug' => 'custom_kpi_employee']);
+        $role->forceFill(['permissions' => ['kpi.subject.assigned_groups']])->save();
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $other = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G2']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '900094001', 'role_id' => $ropRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $employee = User::create(['name' => 'Employee', 'phone' => '900094002', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $foreign = User::create(['name' => 'Foreign', 'phone' => '900094003', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $other->id]);
+        $rop->supervisedGroups()->sync([$group->id]);
+        Sanctum::actingAs($rop);
+        $payload = ['effective_from' => '2026-05-01', 'items' => [['metric_key' => 'calls', 'daily_plan' => 10, 'weight' => 1]]];
+        $url = '/api/kpi/plans/eligible-users?branch_group_id='.$group->id;
+        $this->getJson($url)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $employee->id);
+        $this->patchJson('/api/kpi/plans/'.$employee->id, $payload)->assertOk();
+        $this->patchJson('/api/kpi/plans/'.$foreign->id, $payload)->assertForbidden();
+        $this->getJson('/api/kpi/daily?v=2&date=2026-05-01&user_id='.$employee->id)->assertOk();
+        $report = DailyReport::create(['user_id' => $employee->id, 'branch_group_id' => $group->id, 'role_slug' => $role->slug, 'report_date' => '2026-05-01', 'calls_count' => 5]);
+        $read = '/api/kpi/daily?date=2026-05-01&user_id='.$employee->id;
+        $legacyRead = '/api/kpi-reports?period_type=day&date_from=2026-05-01&date_to=2026-05-01&user_id='.$employee->id;
+        $this->getJson($legacyRead)->assertOk()->assertJsonCount(1, 'data');
+        $this->getJson($read)->assertOk()->assertJsonCount(1, 'data');
+        $role->forceFill(['permissions' => ['users.subject.record_recipient']])->save();
+        $this->getJson($read)->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson($legacyRead)->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson($url)->assertOk()->assertJsonCount(0, 'data');
+        $this->patchJson('/api/kpi/plans/'.$employee->id, $payload)->assertForbidden();
+        $this->assertDatabaseHas('kpi_plans', ['user_id' => $employee->id, 'role_slug' => $role->slug, 'daily_plan' => 10]);
+    }
+
     public function test_rop_can_save_agent_and_mop_in_assigned_group_but_not_intern(): void
     {
         $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);

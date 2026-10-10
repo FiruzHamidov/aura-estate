@@ -914,7 +914,7 @@ class KpiModuleService
 
         if ($actor->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'users.branch_group_id', 'users.branch_id')
-                ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop']));
+                ->whereHas('role', fn (Builder $roles) => $roles->withPermission('kpi.subject.assigned_groups'));
         }
         if ($actor->hasPermission('kpi.plans.scope.all')) {
             // Every branch is available, subject to the ROP boundary above.
@@ -922,7 +922,7 @@ class KpiModuleService
             $query->where('users.branch_id', (int) $actor->branch_id);
         } elseif ($actor->hasPermission('kpi.plans.scope.group')) {
             $query->where('users.branch_group_id', (int) $actor->branch_group_id)
-                ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'intern']));
+                ->whereHas('role', fn (Builder $roles) => $roles->withPermission('kpi.subject.group_selection'));
         } else {
             $query->whereRaw('1 = 0');
         }
@@ -1031,7 +1031,7 @@ class KpiModuleService
                 $report = DailyReport::query()->where('user_id', $employeeId)->whereDate('report_date', $date)->lockForUpdate()->first();
                 if ($authUser->usesAssignedGroupScope() && $report) {
                     app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $report);
-                    abort_unless(in_array($report->role_slug, ['agent', 'mop'], true), 404, 'NOT_FOUND');
+                    abort_unless($report->historicalRole?->hasPermission('kpi.subject.assigned_groups'), 404, 'NOT_FOUND');
                 }
                 $this->ensureCanUpsertDailyForUser($authUser, $targetUser, $report);
                 if ($authUser->usesAssignedGroupScope()) {
@@ -1905,13 +1905,12 @@ class KpiModuleService
     private function weeklyUsersScopeQuery(User $authUser, array $filters): Builder
     {
         $authUser->loadMissing('role');
-        $includedTargetRoles = ['agent', 'intern', 'mop'];
         $includeInactive = (bool) ($filters['include_inactive'] ?? false);
 
         $query = User::query()
             ->select('users.*')
             ->with(['role:id,slug', 'branch:id,name', 'branchGroup:id,branch_id,name'])
-            ->whereHas('role', fn (Builder $q) => $q->whereIn('slug', $includedTargetRoles));
+            ->whereHas('role', fn (Builder $q) => $q->withPermission('kpi.subject.period_reports'));
 
         if (! $includeInactive) {
             $query->where('users.status', '!=', 'inactive');
@@ -2213,7 +2212,7 @@ class KpiModuleService
     {
         $authUser->loadMissing('role');
         $historical = $authUser->usesAssignedGroupScope();
-        if ($historical) $query->whereIn('daily_reports.role_slug', ['agent', 'mop']);
+        if ($historical) $query->whereHas('historicalRole', fn (Builder $roles) => $roles->withPermission('kpi.subject.assigned_groups'));
         $includeInactive = (bool) ($filters['include_inactive'] ?? false);
 
         if (! $includeInactive) {
@@ -2262,7 +2261,7 @@ class KpiModuleService
         $groupColumn = match ($kind) { 'users' => 'users.branch_group_id', 'reports' => 'daily_reports.branch_group_id', default => 'crm_tasks.branch_group_id' };
         if ($historical) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $actor, $groupColumn);
-            if ($kind === 'users') $query->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop']));
+            if ($kind === 'users') $query->whereHas('role', fn (Builder $roles) => $roles->withPermission('kpi.subject.assigned_groups'));
         }
         if ($actor->hasPermission('kpi.reports.scope.all')) return;
         if ($actor->hasPermission('kpi.reports.scope.branch')) {
@@ -2385,7 +2384,7 @@ class KpiModuleService
                 $groupId = $report->branch_group_id;
                 $branchId = \App\Models\BranchGroup::query()->whereKey($groupId)->value('branch_id');
             } else {
-                abort_unless(app(\App\Support\RopGroupAccess::class)->employees($authUser)->whereKey($targetUser->id)->exists(), 403, 'KPI_FORBIDDEN_SCOPE');
+                abort_unless(app(\App\Support\RopGroupAccess::class)->employees($authUser, 'kpi.subject.assigned_groups')->whereKey($targetUser->id)->exists(), 403, 'KPI_FORBIDDEN_SCOPE');
             }
         }
         $allowed = $authUser->hasPermission('kpi.daily.input.scope.all')

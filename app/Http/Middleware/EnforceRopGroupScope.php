@@ -110,7 +110,10 @@ final class EnforceRopGroupScope
                         && $this->access->hasVisibleDailyReportHistory($actor, (int) $id)) {
                         continue;
                     }
-                    $this->access->ensureEmployee($actor, (int) $id, assignable: ! $read);
+                    $permission = request()->is('api/kpi/*', 'api/kpi-reports*')
+                        ? 'kpi.subject.assigned_groups'
+                        : (request()->is('api/daily-reports*') ? 'daily_reports.subject.employee' : 'users.subject.record_recipient');
+                    $this->access->ensureEmployee($actor, (int) $id, assignable: ! $read, permission: $permission);
                 }
             }
         }
