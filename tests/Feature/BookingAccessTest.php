@@ -555,4 +555,31 @@ class BookingAccessTest extends TestCase
         $response->assertJsonPath('data.0.id', $matchingBooking->id);
         $response->assertJsonPath('total', 1);
     }
+    public function test_saved_booking_scope_changes_existing_accounts_and_can_revoke_listing(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $branch = Branch::create(['name' => 'A']);
+        $otherBranch = Branch::create(['name' => 'B']);
+        $users = [];
+        foreach ([$branch->id, $branch->id, $otherBranch->id] as $index => $branchId) {
+            $users[] = User::create(['name' => 'Agent '.$index, 'phone' => '91000000'.$index,
+                'role_id' => $role->id, 'branch_id' => $branchId, 'status' => 'active']);
+            $property = Property::create(['title' => 'Object '.$index, 'created_by' => $users[$index]->id, 'agent_id' => $users[$index]->id]);
+            Booking::create(['property_id' => $property->id, 'agent_id' => $users[$index]->id,
+                'start_time' => now()->toDateTimeString(), 'end_time' => now()->addHour()->toDateTimeString()]);
+        }
+        foreach (['agent' => [1], 'branch' => [1, 2], 'all' => [1, 2, 3], 'none' => []] as $scope => $ids) {
+            $role->permissions = $scope === 'none' ? [] : ['bookings.scope.'.$scope];
+            $role->save();
+            Sanctum::actingAs($users[0]->fresh());
+            $response = $this->getJson('/api/bookings')->assertOk();
+            $actual = collect($response->json('data'))->pluck('id')->sort()->values()->all();
+            $this->assertSame($ids, $actual, $scope);
+        }
+        $this->getJson('/api/bookings/1')->assertForbidden();
+        $this->getJson('/api/bookings/agents-report')->assertForbidden();
+        $this->patchJson('/api/bookings/1', ['note' => 'Denied'])->assertForbidden();
+    }
+
 }

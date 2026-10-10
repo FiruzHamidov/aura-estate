@@ -399,4 +399,34 @@ return [
         'description' => 'Проверка совпадений по телефону, имени и почте. Недоступные контакты показываются с маскировкой личных данных.',
         'roles' => ['admin', 'superadmin', 'marketing', 'hr', 'security', 'branch_director', 'rop', 'mop', 'agent', 'intern', 'manager', 'operator', 'reels_manager', 'owner'],
     ],
+    'bookings.scope.all' => [
+        'group' => 'Показы и бронирования', 'name' => 'Все показы', 'description' => 'Просмотр показов всех филиалов. Для РОП сохраняется ограничение закреплённых групп.', 'roles' => ['admin', 'superadmin', 'marketing', 'hr', 'accountant', 'security', 'manager', 'operator', 'reels_manager', 'intern', 'external_agent', 'owner'], 'exclusive_group' => 'bookings.scope',
+    ],
+    'bookings.scope.agent' => [
+        'group' => 'Показы и бронирования', 'name' => 'Назначенные показы', 'description' => 'Просмотр показов, в которых сотрудник указан агентом.', 'roles' => ['agent'], 'exclusive_group' => 'bookings.scope',
+    ],
+    'bookings.scope.client' => [
+        'group' => 'Показы и бронирования', 'name' => 'Показы клиента', 'description' => 'Просмотр показов, привязанных к аккаунту клиента.', 'roles' => ['client'], 'exclusive_group' => 'bookings.scope',
+    ],
+    'bookings.scope.branch' => [
+        'group' => 'Показы и бронирования', 'name' => 'Показы своего филиала', 'description' => 'Просмотр показов агентов своего филиала. Для РОП выборка строится по закреплённым группам записей.', 'roles' => ['rop', 'branch_director'], 'exclusive_group' => 'bookings.scope',
+    ],
+    'bookings.scope.group' => [
+        'group' => 'Показы и бронирования', 'name' => 'Показы своей группы', 'description' => 'Просмотр показов агентов своей группы. Без назначенной группы доступ закрыт.', 'roles' => ['mop'], 'exclusive_group' => 'bookings.scope',
+    ],
+    'bookings.create' => [
+        'group' => 'Показы и бронирования', 'name' => 'Создание показов', 'description' => 'Создание показа с действующим агентом, объектом и клиентом. Сохраняются проверки времени, связанных записей и групп.', 'roles' => ['admin', 'superadmin', 'marketing', 'hr', 'security', 'manager', 'operator', 'reels_manager', 'intern', 'rop', 'branch_director', 'mop', 'agent', 'owner'],
+    ],
+    'bookings.update.own' => [
+        'group' => 'Показы и бронирования', 'name' => 'Изменение назначенных показов', 'description' => 'Изменение времени, заметки и клиента показа, в котором сотрудник указан агентом.', 'roles' => ['admin', 'superadmin', 'marketing', 'hr', 'security', 'manager', 'operator', 'reels_manager', 'intern', 'rop', 'branch_director', 'mop', 'agent', 'owner'],
+    ],
+    'bookings.update.all' => [
+        'group' => 'Показы и бронирования', 'name' => 'Изменение любых показов', 'description' => 'Изменение времени, заметки и клиента любого показа. Для РОП сохраняются закреплённые группы.', 'roles' => ['admin', 'superadmin', 'marketing'],
+    ],
+    'bookings.agent.assign' => [
+        'group' => 'Показы и бронирования', 'name' => 'Смена агента показа', 'description' => 'Назначение другого действующего агента при редактировании показа. Требуется право изменения самого показа.', 'roles' => ['admin', 'superadmin', 'marketing'],
+    ],
+    'bookings.reports.view' => [
+        'group' => 'Показы и бронирования', 'name' => 'Отчёт по показам', 'description' => 'Просмотр отчёта по агентам в пределах области видимости показов.', 'roles' => ['admin', 'superadmin', 'hr', 'security', 'manager', 'operator', 'reels_manager', 'intern', 'rop', 'branch_director', 'mop', 'agent', 'owner'],
+    ],
 ];

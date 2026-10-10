@@ -266,7 +266,8 @@ class RolePermissionsTest extends TestCase
         $migration->down();
         $legacy = Role::create(['name' => 'Legacy colleague', 'slug' => 'legacy_colleague']);
         $migration->up();
-        $this->assertSame(['clients.shared.view', 'clients.attach', 'clients.duplicates.search'], $legacy->fresh()->permissionKeys());
+        $this->assertSame(app(PermissionCatalog::class)->migrationDefaults('legacy_colleague'), $legacy->fresh()->permissionKeys());
+        $this->assertTrue($legacy->fresh()->hasPermission('clients.shared.view'));
         $new = Role::create(['name' => 'New colleague', 'slug' => 'new_colleague']);
         $this->assertSame([], $new->permissionKeys());
     }

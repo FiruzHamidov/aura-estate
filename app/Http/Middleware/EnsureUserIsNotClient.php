@@ -52,6 +52,13 @@ class EnsureUserIsNotClient
             }
         }
 
+        if (($request->is('api/bookings') && $request->isMethod('POST') && $user?->hasPermission('bookings.create'))
+            || ($request->is('api/bookings/agents-report') && $user?->hasPermission('bookings.reports.view'))
+            || ($request->is('api/bookings/*') && in_array($request->method(), ['PUT', 'PATCH'], true)
+                && ($user?->hasPermission('bookings.update.own') || $user?->hasPermission('bookings.update.all')))) {
+            return $next($request);
+        }
+
         // HR can select existing roles/groups, but cannot change these dictionaries.
         if ($user?->role?->slug === 'hr'
             && $request->is('api/roles', 'api/roles/*', 'api/branch-groups', 'api/branch-groups/*')
