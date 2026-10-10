@@ -27,9 +27,9 @@ final class GroupRecordTransfer
     public function authorize(User $actor, Model $record, bool $employeeTransfer = false): void
     {
         $role = $actor->role?->slug;
-        abort_unless(in_array($role, ['admin', 'superadmin', 'branch_director', 'rop'], true), 403, 'FORBIDDEN_ACTION');
+        abort_unless($actor->hasPermission('records.transfer'), 403, 'FORBIDDEN_ACTION');
         $this->access->ensureVisible($actor, $record);
-        if ($role === 'branch_director') {
+        if (!$actor->hasPermission('records.transfer.all_branches')) {
             $branchId = $record->getAttributes()['branch_id'] ?? DB::table('branch_groups')->where('id', $record->getAttributes()['branch_group_id'] ?? 0)->value('branch_id');
             abort_unless($actor->branch_id && (int) $branchId === (int) $actor->branch_id, 404, 'NOT_FOUND');
         }
@@ -90,7 +90,7 @@ final class GroupRecordTransfer
                     abort_unless(app(EmployeeGroupTransfer::class)->destinationQuery($actor)->whereKey($group->id)->exists(), 403, 'RBAC_GROUP_SCOPE_VIOLATION');
                 } else $this->access->ensureGroup($actor, $group->id);
             }
-            if ($actor->hasRole('branch_director')) abort_unless((int) $actor->branch_id === (int) $group->branch_id, 403, 'RBAC_GROUP_SCOPE_VIOLATION');
+            if (!$actor->hasPermission('records.transfer.all_branches')) abort_unless((int) $actor->branch_id === (int) $group->branch_id, 403, 'RBAC_GROUP_SCOPE_VIOLATION');
             abort_unless($target->status === User::STATUS_ACTIVE && ! $target->isDeletedAccount()
                 && in_array($target->role?->slug, $employeeTransfer ? ['agent', 'mop', 'intern'] : ['agent', 'mop'], true)
                 && (int) $target->branch_group_id === (int) $group->id

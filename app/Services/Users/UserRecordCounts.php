@@ -12,8 +12,7 @@ final class UserRecordCounts
     /** Count current responsibility, never historical authorship, in four queries per page. */
     public function attach(Collection $users, User $actor): void
     {
-        if ($users->isEmpty() || ! in_array($actor->role?->slug,
-            ['admin', 'superadmin', 'hr', 'marketing', 'branch_director', 'rop'], true)) {
+        if ($users->isEmpty() || !$actor->hasPermission('users.record_counts.view')) {
             return;
         }
 
@@ -30,7 +29,7 @@ final class UserRecordCounts
             }
             if ($actor->hasRole('rop')) {
                 app(RopGroupAccess::class)->scope($query, $actor, 'branch_group_id', $hasBranch ? 'branch_id' : null);
-            } elseif ($actor->hasRole('branch_director')) {
+            } elseif (!$actor->hasPermission('users.record_counts.all_branches')) {
                 if ($hasBranch) {
                     $query->where('branch_id', $actor->branch_id);
                 } else {

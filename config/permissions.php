@@ -477,6 +477,16 @@ $permissions['users.directory.view'] = [
     'roles' => ['admin', 'superadmin', 'marketing', 'hr', 'branch_director', 'rop'],
 ];
 
+$permissions['users.record_counts.view'] = ['group' => 'Перенос записей', 'name' => 'Счётчики записей сотрудников', 'description' => 'Показывает количество объектов, клиентов, сделок и показов на сотруднике.', 'roles' => ['admin', 'superadmin', 'hr', 'marketing', 'branch_director', 'rop']];
+$permissions['users.record_counts.all_branches'] = ['group' => 'Перенос записей', 'name' => 'Счётчики записей всех филиалов', 'description' => 'Считает записи сотрудников по всем филиалам. Без права — только свой филиал; закреплённые группы РОП остаются обязательными.', 'roles' => ['admin', 'superadmin', 'hr', 'marketing']];
+$permissions['users.dismissal.all_branches'] = ['group' => 'Перенос записей', 'name' => 'Перераспределение при увольнении между филиалами', 'description' => 'Разрешает обрабатывать записи и получателей разных филиалов при увольнении. Для смены группы требуются дополнительные права переноса записей.', 'roles' => ['admin', 'superadmin', 'hr', 'marketing', 'mop', 'agent']];
+$permissions['records.transfer'] = ['group' => 'Перенос записей', 'name' => 'Перенос записей между группами', 'description' => 'Перенос доступной записи к активному ответственному в другую группу с проверкой версии и обязательной причиной. Действуют дополнительные права соответствующего раздела и ограничения связанных записей.', 'roles' => ['admin', 'superadmin', 'branch_director', 'rop']];
+$permissions['records.transfer.all_branches'] = ['group' => 'Перенос записей', 'name' => 'Перенос записей между филиалами', 'description' => 'Расширяет разрешённые исходные и целевые группы переноса на все филиалы. Для РОП закреплённые группы остаются обязательными.', 'roles' => ['admin', 'superadmin']];
+$permissions['users.dismissal.change_group'] = ['group' => 'Перенос записей', 'name' => 'Смена группы записей при увольнении', 'description' => 'Разрешает включать смену группы в план увольнения. Для РОП перенос объектов сохраняет отдельные ограничения; связанные задачи следуют за родительской записью.', 'roles' => ['admin', 'superadmin', 'branch_director', 'rop']];
+
+$permissions['users.group_transfer'] = ['group' => 'Перенос записей', 'name' => 'Перевод сотрудника в другую группу', 'description' => 'Перевод агента, стажёра или МОП с явным планом обработки каждой активной записи. Перенос записей требует соответствующих разрешений. Групповые ограничения РОП сохраняются.', 'roles' => ['admin', 'superadmin', 'branch_director', 'rop']];
+$permissions['users.group_transfer.all_branches'] = ['group' => 'Перенос записей', 'name' => 'Перевод сотрудника между филиалами', 'description' => 'Разрешает выбирать исходного сотрудника и целевую группу в других филиалах. Для переноса записей между филиалами требуется отдельное право.', 'roles' => ['admin', 'superadmin'], 'sensitive' => true];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],

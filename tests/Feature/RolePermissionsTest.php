@@ -354,4 +354,30 @@ class RolePermissionsTest extends TestCase
         $authorize->invoke($controller, $actor, $actor, 'update');
     }
 
+    public function test_employee_transfer_permissions_work_for_custom_roles_and_keep_branch_scope(): void
+    {
+        Role::create(['name' => 'Transfer operator', 'slug' => 'transfer_operator']);
+        $actor = $this->actor('transfer_operator');
+        $actor->branch_id = 10;
+        $target = new User(['name' => 'Agent', 'role_id' => Role::where('slug', 'agent')->value('id')]);
+        $target->branch_id = 20;
+        $service = app(\App\Services\GroupAccess\EmployeeGroupTransfer::class);
+        $authorize = new \ReflectionMethod($service, 'authorize');
+        foreach ([[[], 403], [['users.group_transfer'], 404]] as [$permissions, $status]) {
+            $actor->role->permissions = $permissions;
+            try {
+                $authorize->invoke($service, $actor, $target);
+                $this->fail('Transfer must be denied');
+            } catch (\Symfony\Component\HttpKernel\Exception\HttpException $error) {
+                $this->assertSame($status, $error->getStatusCode());
+            }
+        }
+        $actor->role->permissions = ['users.group_transfer', 'users.group_transfer.all_branches'];
+        $authorize->invoke($service, $actor, $target);
+        $this->assertTrue(true);
+        // Employee transfer does not implicitly grant independent record transfer.
+        $this->expectException(\Symfony\Component\HttpKernel\Exception\HttpException::class);
+        app(\App\Services\GroupAccess\GroupRecordTransfer::class)->authorize($actor, new \App\Models\Property);
+    }
+
 }
