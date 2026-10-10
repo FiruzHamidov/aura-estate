@@ -11,28 +11,9 @@ use Illuminate\Database\Eloquent\Builder;
 
 class MessageAccessService
 {
-    private const SUPPORT_ROLE_SLUGS = [
-        'admin',
-        'superadmin',
-        'manager',
-        'operator',
-    ];
-
-    public function roleSlug(?User $user): ?string
-    {
-        $user?->loadMissing('role');
-
-        return $user?->role?->slug;
-    }
-
     public function canJoinGroup(?User $user): bool
     {
         return $user?->hasPermission('messaging.groups.join') ?? false;
-    }
-
-    public function isSupportStaff(?User $user): bool
-    {
-        return in_array($this->roleSlug($user), self::SUPPORT_ROLE_SLUGS, true);
     }
 
     public function canCreateDirectConversation(User $actor, User $target): bool
@@ -190,7 +171,7 @@ class MessageAccessService
     public function supportAssignableUsers()
     {
         return User::query()
-            ->whereHas('role', fn ($query) => $query->whereIn('slug', self::SUPPORT_ROLE_SLUGS))
+            ->whereIn('role_id', $this->roleIdsWithPermission('messaging.support.receive'))
             ->where(function ($query) {
                 $query->where('status', User::STATUS_ACTIVE)
                     ->orWhereNull('status');

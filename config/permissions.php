@@ -580,6 +580,8 @@ $permissions['messaging.personal.to_agents'] = ['group' => 'Личные чат�
 $permissions['messaging.personal.to_clients'] = ['group' => 'Личные чаты', 'name' => 'Обслуживание клиентов в личных чатах', 'description' => 'Переписка с пользователями, имеющими право «Клиентская сторона диалога», без ограничения филиала. Такой сотрудник появляется в их списке собеседников. По умолчанию назначено агентам.', 'roles' => ['agent']];
 $permissions['messaging.personal.site'] = ['group' => 'Личные чаты', 'name' => 'Выбор собеседников на сайте', 'description' => 'Открывает выбор собеседников на сайте и позволяет другим пользователям сайта выбирать этот аккаунт. Сам диалог дополнительно проверяется по правам переписки и области филиалов.', 'roles' => [...$groupChatRoles, 'client']];
 
+$permissions['messaging.support.receive'] = ['group' => 'Поддержка', 'name' => 'Получение новых обращений', 'description' => 'Автоматически подключает сотрудника к новым обращениям пользователей и гостей как участника поддержки. Даёт доступ к этим диалогам и уведомлениям. Отзыв прекращает новые подключения; участие в уже назначенных диалогах сохраняется, как при прежней смене роли.', 'roles' => ['admin', 'superadmin', 'manager', 'operator'], 'sensitive' => true];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],

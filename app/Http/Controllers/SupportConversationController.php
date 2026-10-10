@@ -58,11 +58,7 @@ class SupportConversationController extends Controller
         $latestAuthorId = $thread->conversation->latestMessage?->author_id;
         $latestGuestSessionId = $thread->conversation->latestMessage?->guest_session_id;
         $eligibleResponderIds = $thread->conversation->participants
-            ->filter(fn ($participant) => in_array(
-                $participant->user?->role?->slug,
-                ['manager', 'operator', 'admin', 'superadmin'],
-                true
-            ))
+            ->filter(fn ($participant) => $participant->role === \App\Models\ConversationParticipant::ROLE_ADMIN)
             ->pluck('user_id')
             ->values()
             ->all();

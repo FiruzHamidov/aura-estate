@@ -996,6 +996,36 @@ class MessagingFeatureTest extends TestCase
         ];
     }
 
+    public function test_support_receive_grant_controls_new_assignments_and_preserves_existing_participation(): void
+    {
+        $first = $this->createUser('client', 'First', '991009301');
+        $second = $this->createUser('client', 'Second', '991009302');
+        $custom = $this->createUser('custom_support', 'Custom Support', '991009303');
+        $manager = $this->createUser('manager', 'Manager', '991009304');
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $custom->role->forceFill(['permissions' => ['messaging.support.receive']])->save();
+        $manager->role->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($first->fresh());
+        $response = $this->postJson('/api/support/conversations', ['title' => 'First request', 'initial_message' => 'Help'])->assertCreated();
+        $id = $response->json('conversation.id');
+        $response->assertJsonPath('responsibility.eligible_responder_user_ids', [$custom->id]);
+        $this->assertDatabaseMissing('conversation_participants', ['conversation_id' => $id, 'user_id' => $manager->id]);
+        Sanctum::actingAs($custom->fresh());
+        $this->getJson('/api/conversations/'.$id)->assertOk()->assertJsonPath('responsibility.eligible_responder_user_ids', [$custom->id]);
+        $this->postJson('/api/conversations/'.$id.'/messages', ['body' => 'Support reply'])->assertCreated();
+
+        $custom->role->forceFill(['permissions' => []])->save();
+        $manager->role->forceFill(['permissions' => ['messaging.support.receive']])->save();
+        Sanctum::actingAs($second->fresh());
+        $response = $this->postJson('/api/support/conversations', ['title' => 'Second request', 'initial_message' => 'Help'])->assertCreated();
+        $secondId = $response->json('conversation.id');
+        $response->assertJsonPath('responsibility.eligible_responder_user_ids', [$manager->id]);
+        Sanctum::actingAs($custom->fresh());
+        $this->getJson('/api/conversations/'.$secondId)->assertForbidden();
+        $this->getJson('/api/conversations/'.$id)->assertOk()->assertJsonPath('responsibility.eligible_responder_user_ids', [$custom->id]);
+        $this->postJson('/api/conversations/'.$id.'/messages', ['body' => 'Existing assignment'])->assertCreated();
+    }
+
     public function test_persisted_personal_chat_defaults_preserve_every_role_pair_and_branch_scope(): void
     {
         foreach (Role::systemRoles() as $role) Role::firstOrCreate(['slug' => $role['slug']], $role);
