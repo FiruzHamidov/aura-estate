@@ -24,7 +24,7 @@ final class GroupRecordTransfer
         return self::MODELS[$type]::query()->when($lock, fn ($query) => $query->lockForUpdate())->findOrFail($id);
     }
 
-    public function authorize(User $actor, Model $record): void
+    public function authorize(User $actor, Model $record, bool $employeeTransfer = false): void
     {
         $role = $actor->role?->slug;
         abort_unless(in_array($role, ['admin', 'superadmin', 'branch_director', 'rop'], true), 403, 'FORBIDDEN_ACTION');
@@ -45,7 +45,7 @@ final class GroupRecordTransfer
             app(ClientAccess::class)->ensureCanMutateClients($actor);
         } elseif ($record instanceof Lead) {
             app(LeadAccess::class)->ensureVisible($actor, $record);
-        } elseif ($record instanceof Booking && $role === 'rop') {
+        } elseif ($record instanceof Booking && $role === 'rop' && ! $employeeTransfer) {
             abort(403, 'FORBIDDEN_ACTION');
         }
     }
@@ -70,21 +70,29 @@ final class GroupRecordTransfer
                 'stage_is_closed' => (bool) $record->stage?->is_closed] : [])];
     }
 
-    public function transfer(User $actor, string $type, int $id, array $data): Model
+    public function transfer(User $actor, string $type, int $id, array $data, bool $employeeTransfer = false): Model
     {
-        return DB::transaction(function () use ($actor, $type, $id, $data) {
+        return DB::transaction(function () use ($actor, $type, $id, $data, $employeeTransfer) {
             $users = User::query()->whereIn('id', [$actor->id, $data['responsible_user_id']])->orderBy('id')->lockForUpdate()->get()->keyBy('id');
             $actor = $users->get($actor->id);
             $target = $users->get((int) $data['responsible_user_id']);
             abort_unless($actor && $target, 422, 'INVALID_TRANSFER_TARGET');
             $group = BranchGroup::query()->lockForUpdate()->findOrFail($data['branch_group_id']);
             $record = $this->model($type, $id, true);
-            $this->authorize($actor, $record);
+            // Related tasks may already have followed their parent in this same employee transaction.
+            $taskAlreadyMoved = $employeeTransfer && $record instanceof CrmTask
+                && (int) $record->branch_group_id === (int) $group->id
+                && (int) $record->assignee_id === (int) $target->id;
+            if (! $taskAlreadyMoved) $this->authorize($actor, $record, $employeeTransfer);
             abort_unless(hash_equals($this->revision($record), $data['revision']), 409, 'RECORD_VERSION_CONFLICT');
-            if ($actor->hasRole('rop')) $this->access->ensureGroup($actor, $group->id);
+            if ($actor->hasRole('rop')) {
+                if ($employeeTransfer && (int) $record->getAttribute(GroupOwnedRecordObserver::RESPONSIBLES[$record->getTable()]) === (int) $target->id) {
+                    abort_unless(app(EmployeeGroupTransfer::class)->destinationQuery($actor)->whereKey($group->id)->exists(), 403, 'RBAC_GROUP_SCOPE_VIOLATION');
+                } else $this->access->ensureGroup($actor, $group->id);
+            }
             if ($actor->hasRole('branch_director')) abort_unless((int) $actor->branch_id === (int) $group->branch_id, 403, 'RBAC_GROUP_SCOPE_VIOLATION');
             abort_unless($target->status === User::STATUS_ACTIVE && ! $target->isDeletedAccount()
-                && in_array($target->role?->slug, ['agent', 'mop'], true)
+                && in_array($target->role?->slug, $employeeTransfer ? ['agent', 'mop', 'intern'] : ['agent', 'mop'], true)
                 && (int) $target->branch_group_id === (int) $group->id
                 && (int) $target->branch_id === (int) $group->branch_id, 422, 'INVALID_TRANSFER_TARGET');
 
@@ -113,7 +121,13 @@ final class GroupRecordTransfer
                 DB::table('properties')->where('id', $record->id)->update(['branch_group_id' => $group->id, 'branch_id' => $group->branch_id]);
                 $ownership = ['agent_id' => $target->id];
                 if ((int) $record->co_owner_user_id === (int) $target->id) $ownership['co_owner_user_id'] = null;
-                $record = app(PropertyModerationService::class)->transfer($record->fresh(), $actor, $ownership, $data['reason'], (int) $record->moderation_version);
+                if ($employeeTransfer && (int) $record->agent_id === (int) $target->id) {
+                    // Ownership is unchanged; only the employee's organization moves.
+                    DB::table('properties')->where('id', $record->id)->update(['updated_at' => now(), 'moderation_version' => (int) $record->moderation_version + 1]);
+                    $record = $record->fresh();
+                } else {
+                    $record = app(PropertyModerationService::class)->transfer($record->fresh(), $actor, $ownership, $data['reason'], (int) $record->moderation_version);
+                }
                 // System control cards inherit their property's group, while keeping the SB assignee.
                 $controls = Deal::query()->where('primary_property_id', $record->id)->where('control_kind', 'security_property_closure')
                     ->whereNull('closed_at')->with('stage')->lockForUpdate()->get();

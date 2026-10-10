@@ -24,7 +24,7 @@ final class AttendanceDeviceController extends Controller
             'is_active' => ['nullable', 'boolean'],
             'per_page' => ['nullable', 'integer', 'between:1,100'],
         ]);
-        $query = AttendanceDevice::query()->with(['branch', 'branchGroup'])->withCount('userMappings');
+        $query = $this->access->mappingDevicesQuery($request->user())->with(['branch', 'branchGroup'])->withCount('userMappings');
         if (isset($validated['branch_id'])) {
             $query->where('branch_id', $validated['branch_id']);
         }

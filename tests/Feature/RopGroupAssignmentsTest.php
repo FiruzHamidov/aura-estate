@@ -86,7 +86,7 @@ class RopGroupAssignmentsTest extends TestCase
         $this->rop->supervisedGroups()->attach([$this->a->id, $this->b->id]);
         $employee = $this->user('agent', $this->a);
         Sanctum::actingAs($this->rop);
-        foreach ([['role_id' => $this->admin->role_id], ['role_id' => Role::where('slug', 'mop')->value('id')],
+        foreach ([['role_id' => $this->admin->role_id],
             ['branch_group_id' => $this->b->id], ['branch_group_id' => null], ['status' => 'inactive']] as $changes) {
             $this->patchJson('/api/user/'.$employee->id, ['name' => 'Forbidden'] + $changes)->assertForbidden();
             $this->assertSame('agent', $employee->fresh()->name);
@@ -95,6 +95,62 @@ class RopGroupAssignmentsTest extends TestCase
         $this->patchJson('/api/user/'.$employee->id, ['name' => 'Inactive employee'])->assertOk();
         $this->rop->supervisedGroups()->detach();
         $this->patchJson('/api/user/'.$employee->id, ['name' => 'Revoked'])->assertNotFound();
+    }
+
+    public function test_rop_changes_team_roles_and_transfers_employee_with_reviewed_records(): void
+    {
+        Role::create(['name' => 'Intern', 'slug' => 'intern']);
+        $this->rop->supervisedGroups()->attach($this->a->id);
+        $receiver = $this->user('rop', $this->b);
+        $receiver->supervisedGroups()->attach($this->b->id);
+        $employee = $this->user('intern', $this->a);
+        $replacement = $this->user('agent', $this->a);
+        Sanctum::actingAs($this->rop);
+        foreach (['agent', 'mop', 'intern', 'agent'] as $role) {
+            $this->patchJson('/api/user/'.$employee->id, ['role_id' => Role::where('slug', $role)->value('id')])->assertOk();
+            $this->assertSame($role, $employee->fresh()->role->slug);
+        }
+        $make = fn ($name, $status = 'active') => Client::create(['full_name' => $name, 'status' => $status,
+            'branch_id' => $this->branch->id, 'branch_group_id' => $this->a->id, 'responsible_agent_id' => $employee->id]);
+        $move = $make('Move'); $retain = $make('Retain'); $history = $make('History', 'inactive');
+        $url = '/api/users/'.$employee->id.'/group-transfer';
+        $preview = $this->getJson($url)->assertOk()->json();
+        $this->getJson('/api/employee-transfer-destinations')->assertOk()->assertJsonCount(2, 'data');
+        $payload = ['branch_group_id' => $this->b->id, 'revision' => $preview['revision'], 'reason' => 'Transfer to another ROP',
+            'records' => [['type' => 'clients', 'id' => $move->id, 'action' => 'move'],
+                ['type' => 'clients', 'id' => $retain->id, 'action' => 'retain', 'responsible_user_id' => $replacement->id]]];
+        $this->postJson($url, [...$payload, 'branch_group_id' => $this->c->id])->assertForbidden();
+        $this->postJson($url, [...$payload, 'records' => []])->assertUnprocessable();
+        $this->assertSame($this->a->id, (int) $employee->fresh()->branch_group_id);
+        $this->postJson($url, $payload)->assertOk();
+        $this->assertSame($this->b->id, (int) $move->fresh()->branch_group_id);
+        $this->assertSame($replacement->id, (int) $retain->fresh()->responsible_agent_id);
+        $this->assertSame($this->a->id, (int) $history->fresh()->branch_group_id);
+        $this->patchJson('/api/user/'.$employee->id, ['name' => 'Forbidden'])->assertNotFound();
+        $this->getJson($url)->assertNotFound();
+        Sanctum::actingAs($receiver);
+        $this->patchJson('/api/user/'.$employee->id, ['name' => 'New team'])->assertOk();
+    }
+
+    public function test_rop_can_transfer_intern_but_not_mop_or_foreign_employee(): void
+    {
+        Role::create(['name' => 'Intern', 'slug' => 'intern']);
+        $this->rop->supervisedGroups()->attach($this->a->id);
+        $receiver = $this->user('rop', $this->b);
+        $receiver->supervisedGroups()->attach($this->b->id);
+        Sanctum::actingAs($this->rop);
+        foreach (['intern', 'mop'] as $role) {
+            $employee = $this->user($role, $this->a);
+            $url = '/api/users/'.$employee->id.'/group-transfer';
+            $preview = $this->getJson($url)->assertOk()->json();
+            $result = $this->postJson($url, ['branch_group_id' => $this->b->id, 'revision' => $preview['revision'], 'reason' => 'Transfer employee', 'records' => []]);
+            $role === 'intern' ? $result->assertOk() : $result->assertForbidden();
+        }
+        $foreign = $this->user('agent', $this->b);
+        $this->getJson('/api/users/'.$foreign->id.'/group-transfer')->assertNotFound();
+        $this->rop->supervisedGroups()->detach();
+        $own = $this->user('agent', $this->a);
+        $this->getJson('/api/users/'.$own->id.'/group-transfer')->assertNotFound();
     }
 
     private function url(): string
@@ -1209,7 +1265,7 @@ class RopGroupAssignmentsTest extends TestCase
         $clients[0]->update(['full_name' => 'Changed after preview']);
         $this->postJson($url, $payload)->assertConflict();
         Sanctum::actingAs($this->rop);
-        $this->getJson($url)->assertForbidden();
+        $this->getJson($url)->assertNotFound();
     }
 
 }

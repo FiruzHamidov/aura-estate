@@ -32,7 +32,13 @@ final class UserOrganizationService
             }
             $changed = $subject->isDirty(['role_id', 'branch_id', 'branch_group_id']);
             if ($changed) {
-                abort_if($actor->hasRole('rop'), 403, 'FORBIDDEN_ACTION');
+                if ($actor->hasRole('rop')) {
+                    app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $subject->fresh());
+                    abort_unless($actor->id !== $subject->id
+                        && in_array($previousRole, ['intern', 'agent', 'mop'], true)
+                        && in_array($nextRole, ['intern', 'agent', 'mop'], true)
+                        && ! $subject->isDirty(['branch_id', 'branch_group_id', 'status']), 403, 'FORBIDDEN_ACTION');
+                }
                 if ($subject->branch_group_id) {
                     $group = \App\Models\BranchGroup::query()->lockForUpdate()->find($subject->branch_group_id);
                     abort_unless($group, 422, 'INVALID_GROUP');

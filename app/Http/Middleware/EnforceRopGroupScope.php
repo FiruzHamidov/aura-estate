@@ -44,7 +44,13 @@ final class EnforceRopGroupScope
                 && $controller !== 'App\\Http\\Controllers\\MotivationController@rules'), 403, 'FORBIDDEN_ACTION');
 
         $run = function () use ($request, $next, $actor) {
-            $this->validateFilters($request->all(), $actor, $request->isMethodSafe());
+            // These endpoints validate their subjects and destinations under transaction locks.
+            // A transfer destination is intentionally outside the actor's current groups.
+            $controller = $request->route()?->getActionName();
+            $filters = $request->all();
+            if ($controller === 'App\\Http\\Controllers\\EmployeeGroupTransferController@store') unset($filters['branch_group_id']);
+            if (in_array($controller, ['App\\Http\\Controllers\\AttendanceMappingController@upsert', 'App\\Http\\Controllers\\AttendanceMappingController@index'], true)) unset($filters['user_id']);
+            $this->validateFilters($filters, $actor, $request->isMethodSafe());
             return RopScopeResponse::headers($next($request), $request);
         };
 

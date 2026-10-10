@@ -16,11 +16,24 @@ final class EmployeeGroupTransfer
 
     private function authorize(User $actor, User $employee): void
     {
-        abort_unless(in_array($actor->role?->slug, ['admin', 'superadmin', 'branch_director'], true), 403, 'FORBIDDEN_ACTION');
-        abort_unless(in_array($employee->role?->slug, ['agent', 'mop'], true), 422, 'EMPLOYEE_ROLE_REQUIRED');
+        abort_unless(in_array($actor->role?->slug, ['admin', 'superadmin', 'branch_director', 'rop'], true), 403, 'FORBIDDEN_ACTION');
+        abort_unless(in_array($employee->role?->slug, ['agent', 'mop', 'intern'], true), 422, 'EMPLOYEE_ROLE_REQUIRED');
+        if ($actor->hasRole('rop')) {
+            abort_unless($actor->id !== $employee->id && $employee->status === User::STATUS_ACTIVE && ! $employee->isDeletedAccount(), 403, 'FORBIDDEN_ACTION');
+            app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $employee);
+        }
         if ($actor->hasRole('branch_director')) {
             abort_unless($actor->branch_id && (int) $employee->branch_id === (int) $actor->branch_id, 404, 'NOT_FOUND');
         }
+    }
+
+    public function destinationQuery(User $actor): \Illuminate\Database\Eloquent\Builder
+    {
+        abort_unless($actor->hasRole('rop'), 403, 'FORBIDDEN_ACTION');
+        return BranchGroup::query()->where('branch_id', $actor->branch_id ?? 0)
+            ->whereHas('rops', fn ($rops) => $rops->where('users.status', User::STATUS_ACTIVE)
+                ->whereNull('users.deleted_at')->whereColumn('users.branch_id', 'branch_groups.branch_id')
+                ->whereHas('role', fn ($roles) => $roles->where('slug', 'rop')));
     }
 
     private function inventory(User $employee, bool $lock = false): array
@@ -50,7 +63,7 @@ final class EmployeeGroupTransfer
     {
         $this->authorize($actor, $employee);
         $records = $this->inventory($employee);
-        foreach ($records as $item) $this->records->authorize($actor, $this->records->model($item['type'], $item['id']));
+        foreach ($records as $item) $this->records->authorize($actor, $this->records->model($item['type'], $item['id']), employeeTransfer: true);
         return ['user_id' => $employee->id, 'branch_id' => $employee->branch_id,
             'branch_group_id' => $employee->branch_group_id, 'records' => $records,
             'revision' => $this->revision($employee, $records)];
@@ -74,6 +87,10 @@ final class EmployeeGroupTransfer
             if ($actor->hasRole('branch_director')) {
                 abort_unless((int) $destination->branch_id === (int) $actor->branch_id, 403, 'RBAC_GROUP_SCOPE_VIOLATION');
             }
+            if ($actor->hasRole('rop')) {
+                abort_unless($this->destinationQuery($actor)->whereKey($destination->id)->exists(), 403, 'RBAC_GROUP_SCOPE_VIOLATION');
+                abort_if($employee->hasRole('mop') && (int) $destination->id !== (int) $employee->branch_group_id, 403, 'Передавать в другую группу можно только агента или стажёра.');
+            }
             $sameGroup = (int) $destination->id === (int) $employee->branch_group_id;
             $inventory = $this->inventory($employee, true);
             abort_unless(hash_equals($this->revision($employee, $inventory), $data['revision']), 409, 'EMPLOYEE_TRANSFER_VERSION_CONFLICT');
@@ -90,7 +107,7 @@ final class EmployeeGroupTransfer
                 abort_if($inventory === [] || collect($plans)->contains(fn ($plan) => $plan['action'] !== 'retain'),
                     422, 'REPLACEMENT_EMPLOYEE_REQUIRED');
             }
-            foreach ($inventory as $item) $this->records->authorize($actor, $this->records->model($item['type'], $item['id']));
+            foreach ($inventory as $item) $this->records->authorize($actor, $this->records->model($item['type'], $item['id']), employeeTransfer: true);
             $before = $employee->only(['role_id', 'branch_id', 'branch_group_id']);
             $employee->forceFill(['branch_id' => $destination->branch_id, 'branch_group_id' => $destination->id,
                 'access_scope_version' => (int) $employee->access_scope_version + 1])->save();
@@ -105,7 +122,7 @@ final class EmployeeGroupTransfer
                     'responsible_user_id' => $responsible, 'reason' => $data['reason'],
                     'revision' => $this->records->revision($record),
                     ...array_intersect_key($plan, array_flip(['pipeline_id', 'stage_id'])),
-                ]);
+                ], employeeTransfer: true);
             }
             // Includes records newly assigned by a concurrent writer before our final consistency check.
             foreach ($this->organization->activeQueries($employee->id) as $table => $query) {
