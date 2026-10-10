@@ -347,7 +347,9 @@
         }
       ],
       "remaining_checks": [
-        "Продолжить полный аудит остальных прямых ссылок frontend; временный результат поиска /tmp/aura-rbac-front-roles.txt не подтверждает завершение аудита."
+        "Продолжить полный аудит остальных прямых ссылок frontend; временный результат поиска /tmp/aura-rbac-front-roles.txt не подтверждает завершение аудита.",
+        "MobileBottomNavigation: direct role switch still defines bottom navigation links; audit migration to configurable settings while preserving initial layouts.",
+        "ClientForm and ClientNeedForm: role-specific insertion of current user into responsible selection remains; audit independent selection policy. ClientPicker intern comparison only changes quick-create label."
       ]
     },
     {
@@ -546,7 +548,36 @@
       {
         "file": "app/profile/_components/profile-menu.tsx::getSectionOrder",
         "classification": "presentation order only: operator/manager place CRM first; permission-based menu items unchanged"
+      },
+      {
+        "file": "ui-components/clients/ClientPicker.tsx::quickCreateLabel",
+        "classification": "presentation wording only: intern uses possessive label; no authorization in this branch"
       }
     ]
+  },
+  "latest_full_verification": {
+    "backend": {
+      "tests": 1288,
+      "assertions": 18992,
+      "baseline_errors": 2,
+      "baseline_failures": 5,
+      "new_failure_names": 0,
+      "baseline_reason_check": "Same absent fixture column crm_deals.branch_group_id, absent table client_need_repair_type, same validation-label and public-intake language differences. Compared test names and causes with verified baseline.",
+      "log": "/tmp/aura-rbac-full-current.log"
+    },
+    "browser": {
+      "passed": 282,
+      "failed": 0,
+      "log": "/tmp/aura-rbac-full-current-browser.log"
+    },
+    "frontend_node": {
+      "tests": 637,
+      "passed": 626,
+      "baseline_failures": 11,
+      "new_failure_names": 0,
+      "log": "/tmp/aura-rbac-full-current-node.log",
+      "repair": "Updated expected HR hint text in UserForm test after intentional rights-based wording; six UserForm tests rechecked and full Node suite rerun."
+    },
+    "completion_claim": false
   }
 }
