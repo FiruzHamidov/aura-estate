@@ -952,6 +952,48 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertTrue($capabilities['can_withdraw_listing']);
     }
 
+    public function test_custom_role_edit_expansions_are_independent_and_require_edit_permission(): void
+    {
+        [$agent, , $actor] = $this->users();
+        $actor->forceFill(['branch_group_id' => 1])->save();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role = Role::create(['name' => 'Custom editor', 'slug' => 'custom_editor', 'permissions' => []]);
+        $actor->forceFill(['role_id' => $role->id])->save();
+        $own = Property::create($this->propertyPayload($actor));
+        $group = Property::create($this->propertyPayload($agent));
+        $branch = Property::create($this->propertyPayload($agent, ['branch_group_id' => 2]));
+        $foreign = Property::create($this->propertyPayload($agent, ['branch_id' => 2, 'branch_group_id' => 3]));
+        $access = app(PropertyModerationAccess::class);
+        foreach ([
+            [[], [false, false, false, false]],
+            [['properties.edit.group', 'properties.edit.branch'], [false, false, false, false]],
+            [['properties.edit'], [true, false, false, false]],
+            [['properties.edit', 'properties.edit.group'], [true, true, false, false]],
+            [['properties.edit', 'properties.edit.branch'], [true, true, true, false]],
+            [['properties.edit', 'properties.edit.group', 'properties.edit.branch'], [true, true, true, false]],
+            [['properties.edit', 'properties.manage_all'], [true, true, true, true]],
+            [['properties.edit'], [true, false, false, false]],
+        ] as [$permissions, $expected]) {
+            $role->forceFill(['permissions' => $permissions])->save();
+            $fresh = $actor->fresh();
+            $this->assertSame($expected, array_map(fn ($property) => $access->canEdit($fresh, $property), [$own, $group, $branch, $foreign]), implode(',', $permissions));
+        }
+    }
+
+    public function test_moderation_queue_requires_action_and_preserves_rop_groups_with_global_grant(): void
+    {
+        [$agent, $rop, $director] = $this->users();
+        $ownGroup = Property::create($this->propertyPayload($agent));
+        $otherGroup = Property::create($this->propertyPayload($agent, ['branch_group_id' => 2]));
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $access = app(PropertyModerationAccess::class);
+        $rop->role->forceFill(['permissions' => ['properties.moderate', 'properties.manage_all']])->save();
+        $this->assertSame([$ownGroup->id], $access->scopeModeratable(Property::query(), $rop->fresh())->pluck('id')->all());
+        $this->assertFalse($access->canModerate($rop->fresh(), $otherGroup));
+        $director->role->forceFill(['permissions' => ['properties.manage_all']])->save();
+        $this->assertFalse($access->scopeModeratable(Property::query(), $director->fresh())->exists());
+    }
+
     public function test_queue_scope_does_not_follow_creator_into_another_branch(): void
     {
         [$agent, $rop] = $this->users();

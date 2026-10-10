@@ -31,7 +31,6 @@ final class PropertyModerationAccess
         if ($user->hasRole('rop') && ! app(RopGroupAccess::class)->allows($user, $property)) {
             return false;
         }
-        $role = $this->role($user);
         if (! $user->hasPermission('properties.edit')) {
             return false;
         }
@@ -48,12 +47,12 @@ final class PropertyModerationAccess
             return true;
         }
 
-        if ($role === 'mop') {
-            return $user->branch_group_id !== null
-                && $this->propertyBranchGroupId($property) === (int) $user->branch_group_id;
+        if ($user->hasPermission('properties.edit.group')) {
+            if ($user->branch_group_id !== null
+                && $this->propertyBranchGroupId($property) === (int) $user->branch_group_id) return true;
         }
 
-        if (in_array($role, ['rop', 'branch_director'], true)) {
+        if ($user->hasPermission('properties.edit.branch')) {
             return $user->branch_id !== null
                 && $this->propertyBranchId($property) === (int) $user->branch_id;
         }
@@ -74,7 +73,6 @@ final class PropertyModerationAccess
         if ($user->hasRole('rop') && ! app(RopGroupAccess::class)->allows($user, $property)) {
             return false;
         }
-        $role = $this->role($user);
         if (! $user->hasPermission('properties.moderate')) {
             return false;
         }
@@ -89,15 +87,17 @@ final class PropertyModerationAccess
 
     public function scopeModeratable(Builder $query, User $user): Builder
     {
+        if (! $user->hasPermission('properties.moderate')) {
+            return $query->whereRaw('1 = 0');
+        }
+        if ($user->hasRole('rop')) {
+            return app(RopGroupAccess::class)->scope($query, $user, 'properties.branch_group_id', 'properties.branch_id');
+        }
         if ($user->hasPermission('properties.manage_all')) {
             return $query;
         }
-        if (! $user->branch_id || ! $user->hasPermission('properties.moderate')) {
+        if (! $user->branch_id) {
             return $query->whereRaw('1 = 0');
-        }
-
-        if ($user->hasRole('rop')) {
-            return app(RopGroupAccess::class)->scope($query, $user, 'properties.branch_group_id', 'properties.branch_id');
         }
 
         return $query->where(function (Builder $properties) use ($user): void {
