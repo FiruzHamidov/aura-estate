@@ -36,6 +36,20 @@ class RolePermissionsTest extends TestCase
         return $user;
     }
 
+    public function test_responsible_picker_defaults_preserve_existing_role_behavior(): void
+    {
+        foreach (Role::all() as $role) {
+            $this->assertSame(in_array($role->slug, ['agent', 'intern'], true), $role->hasPermission('clients.responsible_picker.exclude_self'), $role->slug);
+            $this->assertSame($role->slug === 'agent', $role->hasPermission('client_needs.responsible_picker.exclude_self'), $role->slug);
+        }
+        $this->actor('superadmin');
+        $target = Role::create(['name' => 'Custom picker', 'slug' => 'custom_picker', 'permissions' => []]);
+        $this->putJson('/api/rbac/roles/'.$target->id, ['version' => $target->fresh()->permissions_version,
+            'permissions' => ['clients.responsible_picker.exclude_self']])->assertOk();
+        $this->assertTrue($target->fresh()->hasPermission('clients.responsible_picker.exclude_self'));
+        $this->assertFalse($target->fresh()->hasPermission('client_needs.responsible_picker.exclude_self'));
+    }
+
     public function test_mobile_navigation_preserves_default_layouts_and_rejects_multiple_choices(): void
     {
         foreach (['agent' => 'sales', 'intern' => 'personal', 'manager' => 'deals', 'operator' => 'leads',

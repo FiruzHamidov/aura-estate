@@ -354,6 +354,10 @@
             "/tmp/aura-rbac-mobile-menu-browser.log",
             "/tmp/aura-rbac-mobile-menu-tsc.log"
           ]
+        },
+        {
+          "change": "Формы клиента и потребности: добавление текущего пользователя сверх серверного списка ответственных управляется clients.responsible_picker.exclude_self и client_needs.responsible_picker.exclude_self. Defaults сохраняют agent/intern и agent соответственно; серверные кандидаты, филиалы, группы и права назначения не меняются. Русские описания уточняют область настройки.",
+          "verification": "38 серверных тестов / 2279 проверок, 2 Node-теста, TypeScript и 2 браузерных сценария реальных форм прошли. Проверены независимые настройки, legacy role strings, пользовательская роль и переключение с сохранением другого кандидата."
         }
       ],
       "remaining_checks": [

@@ -1077,4 +1077,13 @@ foreach ([
 $permissions['users.subject.public_agent']['sensitive'] = true;
 $permissions['users.subject.group_profile']['sensitive'] = true;
 
+foreach (['clients' => ['клиента', ['agent', 'intern']], 'client_needs' => ['потребности', ['agent']]] as $prefix => [$label, $defaults]) {
+    $permissions[$prefix.'.responsible_picker.exclude_self'] = [
+        'group' => 'Клиенты',
+        'name' => 'Не добавлять себя в список ответственных '.$label,
+        'description' => 'В форме '.$label.' на сайте не добавляет текущего пользователя как дополнительного ответственного, если его нет в серверном списке. Уже присутствующий в списке пользователь остаётся доступен. Выбор ответственного, филиал и закреплённые группы проверяются отдельно. По умолчанию включено для '.($prefix === 'clients' ? 'агента и стажёра.' : 'агента.'),
+        'roles' => $defaults,
+    ];
+}
+
 return $permissions;
