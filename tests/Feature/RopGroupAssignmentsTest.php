@@ -61,6 +61,48 @@ class RopGroupAssignmentsTest extends TestCase
             'branch_group_id' => $group?->id, 'status' => 'active']);
     }
 
+    public function test_configured_assignment_reader_cannot_write_until_granted_and_revocation_takes_effect(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $actor = $this->user('marketing');
+        $role = $actor->role;
+        $role->forceFill(['permissions' => ['rop_groups.scope.branch']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson($this->url())->assertOk();
+        $payload = ['branch_group_ids' => [$this->a->id], 'version' => 0];
+        $this->putJson($this->url(), $payload)->assertForbidden();
+        $role->forceFill(['permissions' => ['rop_groups.scope.branch', 'rop_groups.manage']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->putJson($this->url(), $payload)->assertOk()->assertJsonPath('version', 1);
+        $this->assertDatabaseCount('group_access_audit_logs', 1);
+        $role->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson($this->url())->assertForbidden();
+        $this->putJson($this->url(), ['branch_group_ids' => [], 'version' => 1])->assertForbidden();
+        $this->assertDatabaseCount('rop_branch_groups', 1);
+    }
+
+    public function test_review_queue_grants_are_branch_scoped_and_revocable(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        (require database_path('migrations/2026_09_09_030000_create_group_access_review_items.php'))->up();
+        $other = Branch::create(['name' => 'Other']);
+        foreach ([$this->branch->id, $other->id] as $id) DB::table('group_access_review_items')->insert([
+            'source_table' => 'clients', 'source_id' => $id, 'branch_id' => $id, 'reason' => 'unclassified', 'detected_at' => now(),
+        ]);
+        $actor = $this->user('marketing');
+        $role = $actor->role;
+        $role->forceFill(['permissions' => ['group_access_review.scope.branch']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/group-access/review')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.branch_id', $this->branch->id);
+        $role->forceFill(['permissions' => ['group_access_review.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/group-access/review')->assertOk()->assertJsonCount(2, 'data');
+        $role->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/group-access/review')->assertForbidden();
+    }
+
     public function test_rop_can_edit_employee_details_only_in_assigned_groups(): void
     {
         Role::create(['name' => 'intern', 'slug' => 'intern']);
