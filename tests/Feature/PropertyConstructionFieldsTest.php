@@ -212,6 +212,32 @@ class PropertyConstructionFieldsTest extends TestCase
         parent::tearDown();
     }
 
+    public function test_custom_creator_needs_promotion_permission_only_for_promoted_listing(): void
+    {
+        (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
+        $role = Role::create(['name' => 'Custom creator', 'slug' => 'custom_creator']);
+        $user = User::create(['name' => 'Creator', 'phone' => '930000098', 'role_id' => $role->id, 'status' => 'active']);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $base = ['properties.create', 'properties.edit'];
+        $role->forceFill(['permissions' => $base])->save();
+        Sanctum::actingAs($user->fresh());
+        $payload = ['type_id' => $type->id, 'price' => 990000, 'currency' => 'TJS', 'offer_type' => 'sale'];
+        $this->postJson('/api/properties', [...$payload, 'requested_listing_type' => 'vip'])->assertForbidden();
+        $this->assertDatabaseCount('properties', 0);
+        $this->assertDatabaseCount('property_promotions', 0);
+        $this->postJson('/api/properties', [...$payload, 'requested_listing_type' => 'regular'])->assertOk();
+        $role->forceFill(['permissions' => [...$base, 'properties.promotions.request']])->save();
+        Sanctum::actingAs($user->fresh());
+        $this->postJson('/api/properties', [...$payload, 'requested_listing_type' => 'urgent'])->assertOk();
+        $this->assertDatabaseCount('property_promotions', 1);
+        $role->forceFill(['permissions' => $base])->save();
+        Sanctum::actingAs($user->fresh());
+        $this->postJson('/api/properties', [...$payload, 'requested_listing_type' => 'vip'])->assertForbidden();
+        $this->assertDatabaseCount('properties', 2);
+        $this->assertDatabaseCount('property_promotions', 1);
+    }
+
     public function test_agent_can_select_vip_or_urgent_when_creating_a_listing(): void
     {
         (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();

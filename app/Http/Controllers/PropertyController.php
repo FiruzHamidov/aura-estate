@@ -2185,6 +2185,9 @@ class PropertyController extends Controller
         [$property, $dups, $qualityWarnings, $user] = DB::transaction(function () use ($request, $validated, $featureIds, $tagIds, $user, $requiresReview, $requestedType) {
             [$user] = $this->lockPropertyWrite($user, null, $validated);
             $this->moderation->assertCanCreate($user);
+            if ($requestedType !== 'regular') {
+                abort_unless($user->hasPermission('properties.promotions.request') && $user->hasPermission('properties.edit'), 403, 'PROMOTION_PERMISSION_DENIED');
+            }
             $validated = $this->normalizeMopBranchGroupPayload($user, $validated);
             $this->ensureVisibleClientsForProperty($validated);
             $validated = $this->syncPropertyClientSnapshots($validated);
