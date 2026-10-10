@@ -1033,7 +1033,7 @@ final class PropertyModerationService
         }
 
         if ($viewer && ($this->access->canEdit($viewer, $property)
-            || $this->access->canViewSecurityReportProperty($viewer, $property))) {
+            || $this->access->canViewClosedProperty($viewer, $property))) {
             return;
         }
 

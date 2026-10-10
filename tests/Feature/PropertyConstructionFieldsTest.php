@@ -1836,6 +1836,43 @@ class PropertyConstructionFieldsTest extends TestCase
         $this->assertNull($property->status_comment);
     }
 
+    public function test_custom_role_closed_card_and_history_permissions_are_independent(): void
+    {
+        [$owner, $property] = $this->createListingDateRefreshFixture('sold', '930000412');
+        $role = Role::create(['name' => 'Closed card reader', 'slug' => 'closed_card_reader']);
+        $reader = User::create(['name' => 'Reader', 'phone' => '930000413', 'role_id' => $role->id, 'status' => 'active']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $grant = function (array $permissions) use ($role, $reader): void {
+            $role->forceFill(['permissions' => $permissions])->save();
+            Sanctum::actingAs($reader->fresh());
+        };
+        $grant(['properties.history.view']);
+        $this->getJson('/api/properties/'.$property->id)->assertNotFound();
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        $grant(['properties.closed.view']);
+        $this->getJson('/api/properties/'.$property->id)->assertOk()
+            ->assertJsonPath('capabilities.can_edit', false)
+            ->assertJsonPath('capabilities.can_view_history', false);
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        $grant(['properties.closed.view', 'properties.history.view']);
+        foreach (['deposit', 'sold', 'sold_by_owner', 'rented', 'deleted'] as $status) {
+            $property->forceFill(['moderation_status' => $status])->save();
+            $this->getJson('/api/properties/'.$property->id)->assertOk();
+            $this->getJson('/api/properties/'.$property->id.'/logs')->assertOk();
+        }
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertOk();
+        $this->postJson('/api/properties/'.$property->id.'/refresh-listing-date')->assertForbidden();
+        foreach (['draft', 'pending'] as $status) {
+            $property->forceFill(['moderation_status' => $status])->save();
+            $this->getJson('/api/properties/'.$property->id)->assertNotFound();
+            $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        }
+        $property->forceFill(['moderation_status' => 'sold'])->save();
+        $grant([]);
+        $this->getJson('/api/properties/'.$property->id)->assertNotFound();
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+    }
+
     public function test_security_history_default_preserves_closed_stage_boundary_and_can_be_revoked(): void
     {
         [$owner, $property] = $this->createListingDateRefreshFixture('sold', '930000410');

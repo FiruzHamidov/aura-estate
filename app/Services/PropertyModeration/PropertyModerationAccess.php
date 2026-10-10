@@ -19,10 +19,12 @@ final class PropertyModerationAccess
         return $user->hasPermission('properties.create');
     }
 
-    /** Read-only access to the same closed stages exposed by the SB report. */
-    public function canViewSecurityReportProperty(User $user, Property $property): bool
+    /** Read-only access to the closed stages exposed by the property control report. */
+    public function canViewClosedProperty(User $user, Property $property): bool
     {
-        return $this->role($user) === 'security'
+        if ($user->hasRole('rop') && ! app(RopGroupAccess::class)->allows($user, $property)) return false;
+
+        return $user->hasPermission('properties.closed.view')
             && in_array($property->moderation_status, config('security-property-control.trigger_statuses', []), true);
     }
 
@@ -65,7 +67,7 @@ final class PropertyModerationAccess
         if ($user->hasRole('rop') && ! app(RopGroupAccess::class)->allows($user, $property)) return false;
 
         return $user->hasPermission('properties.history.view')
-            && ($this->canEdit($user, $property) || $this->canViewSecurityReportProperty($user, $property));
+            && ($this->canEdit($user, $property) || $this->canViewClosedProperty($user, $property));
     }
 
     public function canRefreshListingDate(User $user, Property $property): bool
@@ -255,13 +257,6 @@ final class PropertyModerationAccess
             'can_withdraw_listing' => $canEdit,
             'submit_requires_review' => $canEdit && (array) $property->approved_content_snapshot !== [],
         ];
-    }
-
-    private function role(User $user): string
-    {
-        $user->loadMissing('role');
-
-        return (string) ($user->role?->slug ?? '');
     }
 
     private function propertyBranchId(Property $property): int

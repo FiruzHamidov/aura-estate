@@ -1065,6 +1065,22 @@ class PropertyModerationWorkflowTest extends TestCase
         }
     }
 
+    public function test_closed_card_grant_keeps_rop_group_boundary(): void
+    {
+        [$agent, $rop] = $this->users();
+        $ownGroup = Property::create($this->propertyPayload($agent, ['moderation_status' => 'sold']));
+        $otherGroup = Property::create($this->propertyPayload($agent, ['moderation_status' => 'sold', 'branch_group_id' => 2]));
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $rop->role->forceFill(['permissions' => ['properties.closed.view', 'properties.history.view', 'properties.manage_all']])->save();
+        $access = app(PropertyModerationAccess::class);
+        $actor = $rop->fresh();
+        $this->assertTrue($access->canViewClosedProperty($actor, $ownGroup));
+        $this->assertTrue($access->canViewHistory($actor, $ownGroup));
+        $this->assertFalse($access->canViewClosedProperty($actor, $otherGroup));
+        $this->assertFalse($access->canViewHistory($actor, $otherGroup));
+        $this->assertFalse($access->canEdit($actor, $ownGroup));
+    }
+
     public function test_moderation_queue_requires_action_and_preserves_rop_groups_with_global_grant(): void
     {
         [$agent, $rop, $director] = $this->users();
