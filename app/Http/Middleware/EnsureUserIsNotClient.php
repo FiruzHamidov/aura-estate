@@ -14,6 +14,11 @@ class EnsureUserIsNotClient
         $user?->loadMissing('role');
 
         $action = $request->route()?->getActionName();
+        if ($action && str_starts_with($action, 'App\\Http\\Controllers\\PropertyReportController@')) {
+            abort_unless($user?->hasPermission('property_reports.view'), 403, 'FORBIDDEN_ACTION');
+            return $next($request);
+        }
+
         // Only audited property actions may replace the legacy role gate.
         // Controllers/services still enforce the operation, record scope and fresh write checks.
         foreach ($this->propertyActionGrants($action) as $permission) {

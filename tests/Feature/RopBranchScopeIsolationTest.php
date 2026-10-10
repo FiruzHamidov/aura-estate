@@ -195,6 +195,41 @@ class RopBranchScopeIsolationTest extends TestCase
             ->assertJsonPath('data.0.user_id', $users['agentA']->id);
     }
 
+    public function test_general_report_permissions_and_scopes_work_for_any_configured_role(): void
+    {
+        [$branchA, $branchB, $users] = $this->seedContext();
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $group = BranchGroup::findOrFail($users['agentA']->branch_group_id);
+        $actors = [];
+        foreach (['custom_report', 'client', 'external_agent', 'accountant', 'marketing'] as $slug) {
+            $role = Role::create(['name' => $slug, 'slug' => $slug]);
+            $actors[] = [$role, $this->createUser($role, $branchA, $slug, $group)];
+        }
+        foreach ($actors as [$role, $actor]) {
+            $grant = function (array $permissions) use ($role, $actor) {
+                $role->forceFill(['permissions' => $permissions])->save();
+                Sanctum::actingAs($actor->fresh());
+            };
+            $url = '/api/reports/properties/summary';
+            $grant([]);
+            $this->getJson($url)->assertForbidden();
+            foreach (['group' => 1, 'branch' => 2, 'all' => 3] as $scope => $total) {
+                $grant(['property_reports.view', 'property_reports.scope.'.$scope]);
+                $this->getJson($url)->assertOk()->assertJsonPath('total', $total);
+                if ($scope === 'branch') {
+                    $this->getJson($url.'?branch_id='.$branchB->id)->assertForbidden();
+                    $this->getJson($url.'?agent_id='.$users['agentB']->id)->assertForbidden();
+                }
+            }
+            $grant(['property_reports.view']);
+            $this->getJson($url)->assertOk()->assertJsonPath('total', 0);
+            $grant(['property_reports.scope.all']);
+            $this->getJson($url)->assertForbidden();
+            $this->getJson('/api/reports/missing-phone/list')->assertForbidden();
+            $this->getJson('/api/reports/agent/earnings')->assertForbidden();
+        }
+    }
+
     private function seedContext(): array
     {
         $roles = [

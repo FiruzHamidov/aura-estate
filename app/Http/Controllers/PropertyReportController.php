@@ -24,19 +24,9 @@ class PropertyReportController extends Controller
 
     private function ensureReportsAllowed(Request $request): void
     {
-        $request->user()?->loadMissing('role');
-
-        abort_if($request->user()?->role?->slug === 'marketing', 403, 'Forbidden');
-    }
-
-    private function isBranchScopedRole(?string $roleSlug): bool
-    {
-        return in_array($roleSlug, ['rop', 'branch_director'], true);
-    }
-
-    private function isBranchGroupScopedRole(?string $roleSlug): bool
-    {
-        return in_array($roleSlug, ['mop'], true);
+        $actor = $request->user() ?? auth()->user();
+        $actor?->loadMissing('role');
+        abort_unless($actor?->hasPermission('property_reports.view'), 403, 'Forbidden');
     }
 
     // --- Helper: нормализация входа (array или "1,2,3")
@@ -54,6 +44,10 @@ class PropertyReportController extends Controller
         $authUser = auth()->user();
         $authUser?->loadMissing('role');
         $roleSlug = $authUser->role->slug ?? null;
+        if (! collect(['all', 'branch', 'group'])->contains(fn ($scope) => $authUser?->hasPermission('property_reports.scope.'.$scope))) {
+            $query->whereRaw('1 = 0');
+            return;
+        }
         if ($roleSlug === 'rop') {
             $access = app(\App\Support\RopGroupAccess::class);
             $isBooking = $query->getModel() instanceof Booking;
@@ -97,7 +91,7 @@ class PropertyReportController extends Controller
         }
 
         // Принудительное ограничение для branch-scoped ролей: только свой филиал
-        if ($this->isBranchScopedRole($roleSlug)) {
+        if ($authUser?->hasPermission('property_reports.scope.branch')) {
             if (empty($authUser->branch_id)) {
                 $query->whereRaw('1 = 0');
                 return;
@@ -106,7 +100,7 @@ class PropertyReportController extends Controller
             $query->whereIn($creatorColumn, User::query()->where('branch_id', $authUser->branch_id)->select('id'));
         }
 
-        if ($this->isBranchGroupScopedRole($roleSlug)) {
+        if ($authUser?->hasPermission('property_reports.scope.group')) {
             if (empty($authUser->branch_group_id)) {
                 $query->whereRaw('1 = 0');
                 return;
@@ -123,6 +117,10 @@ class PropertyReportController extends Controller
         $authUser = auth()->user();
         $authUser?->loadMissing('role');
         $roleSlug = $authUser->role->slug ?? null;
+        if (! collect(['all', 'branch', 'group'])->contains(fn ($scope) => $authUser?->hasPermission('property_reports.scope.'.$scope))) {
+            $query->whereRaw('1 = 0');
+            return;
+        }
         if ($roleSlug === 'rop') {
             $table = $query instanceof \Illuminate\Database\Eloquent\Builder ? $query->getModel()->getTable() : $query->from;
             abort_unless(in_array($table, ['users', 'clients', 'bookings'], true), 403, 'GROUP_SCOPE_UNAVAILABLE');
@@ -156,7 +154,7 @@ class PropertyReportController extends Controller
             }
         }
 
-        if ($this->isBranchScopedRole($roleSlug)) {
+        if ($authUser?->hasPermission('property_reports.scope.branch')) {
             if (empty($authUser->branch_id)) {
                 $query->whereRaw('1 = 0');
                 return;
@@ -165,7 +163,7 @@ class PropertyReportController extends Controller
             $query->whereIn($userColumn, User::query()->where('branch_id', $authUser->branch_id)->select('id'));
         }
 
-        if ($this->isBranchGroupScopedRole($roleSlug)) {
+        if ($authUser?->hasPermission('property_reports.scope.group')) {
             if (empty($authUser->branch_group_id)) {
                 $query->whereRaw('1 = 0');
                 return;
@@ -655,7 +653,7 @@ class PropertyReportController extends Controller
             return;
         }
 
-        if (! $this->branchScope->isBranchScopedManager($authUser)) {
+        if (! $authUser->hasRole('rop') && ! $authUser->hasPermission('property_reports.scope.branch')) {
             return;
         }
 
