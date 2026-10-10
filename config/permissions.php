@@ -666,6 +666,9 @@ foreach (['integrations.view' => ['Состояние интеграций KPI',
 
 $permissions['kpi.operations.site.view'] = ['group' => 'KPI', 'name' => 'Операционный контроль KPI на сайте', 'description' => 'Открывает страницу операционного контроля и пункт меню. Каждый блок диагностики, показатели, планы, расписание и действия требуют отдельных прав. Глобальные блоки расписания и интеграций остаются недоступными РОП.', 'roles' => ['admin', 'superadmin', 'rop', 'branch_director']];
 
+$permissions['kpi.plans.legacy.view'] = ['group' => 'KPI', 'name' => 'Просмотр сводного плана должности', 'description' => 'Чтение прежнего сводного плана по должности без выбора сотрудника; используется в операционном экспорте KPI. Не требует доступа к персональным планам. У РОП сохраняется выбор закреплённой группы; у остальных ролей выборка, как прежде, общая по должности.', 'roles' => $kpiPlanAllRoles];
+$permissions['kpi.plans.legacy.manage'] = ['group' => 'KPI', 'name' => 'Изменение сводного плана должности', 'description' => 'Изменение плана через прежний маршрут планирования по должности. Требуется также управление планами KPI. У РОП изменяется план закреплённой группы; у остальных ролей сохраняется общая выборка по должности. Персональные и месячные планы имеют отдельные права.', 'roles' => ['admin', 'superadmin', 'rop', 'branch_director', 'mop'], 'sensitive' => true];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],

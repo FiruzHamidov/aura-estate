@@ -351,6 +351,30 @@ class KpiModuleApiFeatureTest extends TestCase
 
     }
 
+    public function test_legacy_role_plan_access_can_be_granted_and_revoked(): void
+    {
+        $role = Role::create(['name' => 'Planner', 'slug' => 'custom_legacy_planner']);
+        $actor = User::create(['name' => 'Planner', 'phone' => '919904001', 'role_id' => $role->id]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $payload = ['role' => 'agent', 'items' => [['metric_key' => 'calls', 'daily_plan' => 10, 'weight' => 1]]];
+        foreach ([[], ['kpi.plans.manage'], ['kpi.plans.legacy.manage']] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->patchJson('/api/kpi-plans', $payload)->assertForbidden();
+            $this->getJson('/api/kpi/plans?role=agent')->assertForbidden();
+        }
+        $role->forceFill(['permissions' => ['kpi.plans.manage', 'kpi.plans.legacy.manage']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson('/api/kpi-plans', $payload)->assertOk();
+        $this->getJson('/api/kpi/plans?role=agent')->assertForbidden();
+        $role->forceFill(['permissions' => ['kpi.plans.legacy.view']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/plans?role=agent')->assertOk();
+        $this->patchJson('/api/kpi-plans', $payload)->assertForbidden();
+        $this->getJson('/api/kpi/plans?user_id='.$actor->id.'&date=2026-05-05')->assertForbidden();
+        $this->assertEquals(10, KpiPlan::where('role_slug', 'agent')->where('metric_key', 'calls')->firstOrFail()->daily_plan);
+    }
+
     public function test_operational_kpi_permissions_separate_read_status_and_schedule_changes(): void
     {
         $role = Role::create(['name' => 'Observer', 'slug' => 'custom_kpi_observer']);

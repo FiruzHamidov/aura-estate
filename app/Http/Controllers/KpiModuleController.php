@@ -57,6 +57,7 @@ class KpiModuleController extends Controller
             ]);
         }
 
+        $this->ensureManageAccess($this->authUser(), 'kpi.plans.legacy.view');
         $role = (string) ($validated['role'] ?? 'mop');
 
         return response()->json(['data' => $this->service->plans($role, isset($validated['branch_group_id']) ? (int) $validated['branch_group_id'] : null)]);
