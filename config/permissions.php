@@ -641,6 +641,8 @@ foreach (['all' => ['Показатели всех филиалов', 'Прос�
     $permissions['kpi.reports.scope.'.$scope] = ['group' => 'KPI', 'name' => $name, 'description' => $description.' Требуется просмотр показателей. РОП ограничен закреплёнными группами; для истории сохраняется принадлежность отчётов на дату записи.', 'roles' => $roles, 'exclusive_group' => 'kpi.reports.scope'];
 }
 
+$permissions['kpi.reports.site.view'] = ['group' => 'KPI', 'name' => 'Страницы показателей KPI на сайте', 'description' => 'Открывает дашборд, дневные, недельные и месячные страницы KPI и их пункты меню. Серверный просмотр показателей, область доступа и ввод собственного отчёта разрешаются отдельно.', 'roles' => ['admin', 'superadmin', 'rop', 'branch_director', 'mop']];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],
