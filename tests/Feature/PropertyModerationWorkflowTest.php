@@ -1277,6 +1277,44 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertSame('pending', $candidate->fresh()->decision);
     }
 
+    public function test_duplicate_search_scans_all_groups_and_branches_beyond_recent_candidates(): void
+    {
+        [$source, $original, $rop, $agent] = $this->detectedDuplicateFixture();
+        DB::table('branch_groups')->insert(['id' => 2, 'branch_id' => 2, 'name' => 'Other branch']);
+        $original->forceFill(['branch_id' => 2, 'branch_group_id' => 2, 'created_at' => now()->subYear()])->saveQuietly();
+        for ($i = 0; $i < 260; $i++) {
+            $copy = $source->replicate();
+            $copy->floor = 9;
+            $copy->saveQuietly();
+        }
+        $matches = app(PropertyDuplicateService::class)->find($source->getAttributes(), $source->id);
+        $this->assertSame([$original->id], $matches->pluck('id')->all());
+        $state = $this->moderation()->creationState($this->propertyPayload($agent), $matches);
+        $this->assertSame('pending', $state['publication_status']);
+        $response = $this->getJson("/api/properties/{$source->id}/duplicate-candidates")->assertOk();
+        $match = collect($response->json('duplicates'))->sole();
+        $this->assertSame($original->id, $match['id']);
+        $this->assertTrue($match['details_restricted']);
+        $this->assertNotEmpty($match['scope_notice']);
+        foreach (['owner_phone', 'owner_name', 'address', 'description', 'photos', 'links', 'signals'] as $key) {
+            $this->assertArrayNotHasKey($key, $match);
+        }
+    }
+
+    public function test_duplicate_search_excludes_inactive_listings_across_branches(): void
+    {
+        [$source, $original] = $this->detectedDuplicateFixture();
+        foreach (['deleted', 'rejected', 'denied', 'draft', 'archived', 'sold', 'rented', 'sold_by_owner'] as $status) {
+            $copy = $original->replicate();
+            $copy->moderation_status = $status;
+            $copy->saveQuietly();
+        }
+        $matches = app(PropertyDuplicateService::class)->find($source->getAttributes(), $source->id);
+        $this->assertSame([$original->id], $matches->pluck('id')->all());
+        $projected = app(\App\Services\GroupAccess\GroupDataProjection::class)->duplicateResults($matches, auth()->user());
+        $this->assertSame($matches->all(), $projected->all());
+    }
+
     private function detectedDuplicateFixture(): array
     {
         Schema::table('properties', fn (Blueprint $table) => $table->string('landmark')->nullable());

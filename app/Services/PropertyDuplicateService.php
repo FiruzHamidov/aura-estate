@@ -9,7 +9,7 @@ use Illuminate\Support\Collection;
 final class PropertyDuplicateService
 {
     private const ACTIVE_STATUSES_EXCLUDED = [
-        'deleted', 'rejected', 'denied', 'draft', 'sold', 'rented', 'sold_by_owner',
+        'deleted', 'rejected', 'denied', 'draft', 'archived', 'sold', 'rented', 'sold_by_owner',
     ];
 
     private const DUPLICATE_SCORE_THRESHOLD = 90.0;
@@ -28,15 +28,16 @@ final class PropertyDuplicateService
 
         $this->applyCandidateFilter($query, $data);
 
-        return $query
-            ->orderByDesc('created_at')
-            ->limit(200)
-            ->get()
-            ->map(fn (Property $candidate) => $this->score($data, $candidate))
-            ->filter()
-            ->sortByDesc('score')
-            ->take(10)
-            ->values();
+        // Search every matching active record across branches and groups. Keep only
+        // the strongest results in memory; a recent weak candidate must not hide an old match.
+        $best = collect();
+        $query->chunkById(250, function (Collection $candidates) use ($data, &$best) {
+            $best = $best->concat($candidates->map(fn (Property $candidate) => $this->score($data, $candidate))->filter())
+                ->sort(fn ($a, $b) => ($b['score'] <=> $a['score']) ?: ($b['id'] <=> $a['id']))
+                ->take(10)->values();
+        });
+
+        return $best;
     }
 
     private function applyCandidateFilter(Builder $query, array $data): void
