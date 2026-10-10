@@ -516,12 +516,25 @@ class ExternalPropertyRequestFeatureTest extends TestCase
             ->assertJsonPath('status', ExternalPropertyRequest::STATUS_SUBMITTED);
     }
 
-    public function test_internal_agent_converts_external_request_to_property_with_source(): void
+    public static function conversionRoles(): array
+    {
+        return [['agent'], ['custom_converter'], ['client'], ['external_agent'], ['intern']];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('conversionRoles')]
+    public function test_internal_agent_converts_external_request_to_property_with_source(string $actorSlug): void
     {
         \Illuminate\Support\Facades\Storage::fake('public');
         \Illuminate\Support\Facades\Storage::fake(\App\Services\ExternalRequestMedia::DISK);
         $externalAgent = $this->user($this->externalRole, '930000011', branchId: 1, branchGroupId: 1);
         $internalAgent = $this->user($this->agentRole, '930000012', branchId: 1, branchGroupId: 1);
+        if ($actorSlug !== 'agent') {
+            Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+            $role = Role::firstOrCreate(['slug' => $actorSlug], ['name' => $actorSlug]);
+            $role->forceFill(['permissions' => ['properties.create', 'external_requests.convert', 'external_requests.scope.all']])->save();
+            $internalAgent->forceFill(['role_id' => $role->id])->saveQuietly();
+        }
+
         $type = PropertyType::create(['name' => 'Квартира', 'slug' => 'apartment']);
         $status = PropertyStatus::create(['name' => 'Вторичка', 'slug' => 'secondary']);
 

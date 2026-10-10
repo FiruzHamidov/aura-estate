@@ -272,7 +272,7 @@ class ExternalPropertyRequestService
     ): Property {
         abort_if($request->property_id || $request->status === ExternalPropertyRequest::STATUS_CONVERTED, 422, 'Заявка уже сконвертирована.');
         abort_if(in_array($request->status, [ExternalPropertyRequest::STATUS_REJECTED, ExternalPropertyRequest::STATUS_ARCHIVED], true), 422, 'Закрытую заявку нельзя конвертировать.');
-        abort_if($actor->hasRole('intern') || $actor->hasRole('external_agent') || $actor->hasRole('client'), 403, 'Доступ запрещён');
+        abort_unless($actor->hasPermission('external_requests.convert'), 403, 'Доступ запрещён');
         $this->moderation->assertCanCreate($actor);
 
         return DB::transaction(function () use ($request, $actor, $payload, $copyPhotos) {
