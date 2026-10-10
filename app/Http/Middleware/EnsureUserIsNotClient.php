@@ -89,6 +89,9 @@ class EnsureUserIsNotClient
             }
         }
 
+        if ($request->is('api/reels', 'api/reels/*') && $user?->hasPermission('reels.view')
+            && ($user->hasPermission('reels.scope.all') || $user->hasPermission('reels.scope.branch'))) return $next($request);
+
         // HR can select existing roles/groups, but cannot change these dictionaries.
         if ($user?->role?->slug === 'hr'
             && $request->is('api/roles', 'api/roles/*', 'api/branch-groups', 'api/branch-groups/*')

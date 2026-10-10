@@ -547,6 +547,13 @@ $permissions['new_buildings.scope.branch'] = ['group' => 'Новостройки
 $permissions['new_buildings.scope.own'] = ['group' => 'Новостройки', 'name' => 'Свои и назначенные ЖК', 'description' => 'Область управления ЖК, где сотрудник является автором или ответственным. При создании и смене филиала сохраняется ограничение своим филиалом.', 'roles' => ['agent', 'mop'], 'exclusive_group' => 'new_buildings.scope'];
 $permissions['new_buildings.assign'] = ['group' => 'Новостройки', 'name' => 'Назначение консультанта ЖК', 'description' => 'Выбор другого активного сотрудника с правом работы с ЖК в филиале комплекса. Для изменения самого ЖК нужны права управления; публикация разрешается отдельно.', 'roles' => ['admin', 'superadmin', 'owner', 'branch_director']];
 
+$reelRoles = ['admin', 'superadmin', 'marketing', 'reels_manager', 'rop', 'branch_director'];
+$permissions['reels.scope.all'] = ['group' => 'Ролики', 'name' => 'Ролики всех филиалов', 'description' => 'Область управления роликами всех филиалов. Для РОП сохраняются закреплённые группы.', 'roles' => ['admin', 'superadmin', 'marketing', 'reels_manager'], 'exclusive_group' => 'reels.scope'];
+$permissions['reels.scope.branch'] = ['group' => 'Ролики', 'name' => 'Ролики своего филиала', 'description' => 'Ролики объектов сотрудников своего филиала и отдельные ролики авторов своего филиала. Для РОП — только закреплённые группы.', 'roles' => ['rop', 'branch_director'], 'exclusive_group' => 'reels.scope'];
+foreach (['view' => ['Просмотр и раздел управления', 'Просмотр неопубликованных роликов и доступ к управлению в выбранной области. Публичная лента доступна отдельно.'], 'create' => ['Загрузка роликов', 'Создание роликов и завершение прямой загрузки. Нужны просмотр и область управления.'], 'update' => ['Редактирование роликов', 'Изменение видео, обложки, текста и привязки к объекту в доступной области. Замена видео запускает обработку заново.'], 'publish' => ['Публикация и архивирование', 'Публикация готового ролика, возврат в черновик и архивирование в доступной области.'], 'delete' => ['Удаление роликов', 'Удаление доступного ролика и его медиафайлов.']] as $action => [$name, $description]) {
+    $permissions['reels.'.$action] = ['group' => 'Ролики', 'name' => $name, 'description' => $description, 'roles' => $reelRoles];
+}
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],
