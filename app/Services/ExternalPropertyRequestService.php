@@ -94,7 +94,8 @@ class ExternalPropertyRequestService
     {
         $externalAgent->loadMissing('role');
 
-        abort_unless($externalAgent->hasRole('external_agent'), 403, 'Доступ запрещён');
+        abort_unless($externalAgent->hasPermission('external_requests.own.create'), 403, 'Доступ запрещён');
+        abort_unless($draft || $externalAgent->hasPermission('external_requests.own.submit'), 403, 'Нет права отправить заявку.');
 
         $data['external_agent_id'] = $externalAgent->id;
         $data['status'] = $draft ? ExternalPropertyRequest::STATUS_DRAFT : ExternalPropertyRequest::STATUS_SUBMITTED;

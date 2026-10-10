@@ -426,6 +426,73 @@ class ExternalPropertyRequestFeatureTest extends TestCase
         $assertRecipients($expected);
     }
 
+    public function test_own_request_permissions_are_independent_and_keep_ownership_boundaries(): void
+    {
+        \Illuminate\Support\Facades\Storage::fake(\App\Services\ExternalRequestMedia::DISK);
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Partner', 'slug' => 'custom_partner']);
+        $actor = $this->user($role, '939444441', branchId: 1, branchGroupId: 1);
+        $other = $this->user($this->externalRole, '939444442');
+        $foreign = ExternalPropertyRequest::create(['external_agent_id' => $other->id, 'status' => 'draft']);
+        $type = PropertyType::create(['name' => 'Квартира', 'slug' => 'apartment']);
+        $payload = ['offer_type' => 'sale', 'type_id' => $type->id, 'price' => 85000, 'currency' => 'USD', 'owner_phone' => '900444441'];
+        $grant = function (array $permissions) use ($role, $actor) {
+            $role->forceFill(['permissions' => array_map(fn ($key) => 'external_requests.own.'.$key, $permissions)])->save();
+            Sanctum::actingAs($actor->fresh());
+        };
+        $base = '/api/external/property-requests';
+        $grant([]);
+        $this->postJson($base, ['draft' => true])->assertForbidden();
+        $grant(['create']);
+        $created = $this->postJson($base, ['draft' => true, 'external_agent_id' => $other->id, 'branch_id' => 2, 'branch_group_id' => 2])->assertCreated()->json('id');
+        $record = ExternalPropertyRequest::findOrFail($created);
+        $this->assertSame($actor->id, $record->external_agent_id);
+        $this->assertSame(1, $record->branch_id);
+        $this->assertSame(1, $record->branch_group_id);
+        $url = $base.'/'.$created;
+        $this->postJson($base, $payload)->assertForbidden();
+        $this->getJson($url)->assertForbidden();
+        $this->patchJson($url, $payload)->assertForbidden();
+        $grant(['view']);
+        $this->getJson($base)->assertOk()->assertJsonPath('total', 1);
+        $this->getJson($base.'/stats')->assertOk();
+        $this->getJson($url)->assertOk();
+        $this->getJson($base.'/'.$foreign->id)->assertForbidden();
+        $this->patchJson($url, $payload)->assertForbidden();
+        $grant(['edit']);
+        $this->patchJson($url, $payload)->assertOk();
+        $this->patchJson($base.'/'.$foreign->id, ['price' => 2])->assertForbidden();
+        $this->postJson($url.'/submit')->assertForbidden();
+        $record->update(['status' => 'needs_info']);
+        $this->patchJson($url, ['price' => 87000])->assertForbidden();
+        $this->assertSame('needs_info', $record->fresh()->status);
+        $grant(['edit', 'submit']);
+        $this->patchJson($url, ['price' => 85000])->assertOk()->assertJsonPath('status', 'submitted');
+        $record->update(['status' => 'converted']);
+        $this->patchJson($url, ['price' => 99999])->assertUnprocessable();
+        $grant(['photos']);
+        $this->postJson($url.'/photos', ['photos' => [\Illuminate\Http\UploadedFile::fake()->image('closed.jpg')]])->assertUnprocessable();
+        $record->update(['status' => 'draft']);
+        $grant(['submit']);
+        $this->postJson($url.'/submit')->assertOk();
+        $this->postJson($base.'/'.$foreign->id.'/submit')->assertForbidden();
+        $record->update(['status' => 'draft']);
+        $grant(['photos']);
+        $photo = $this->postJson($url.'/photos', ['photos' => [\Illuminate\Http\UploadedFile::fake()->image('photo.jpg')]])->assertCreated()->json('data.0.id');
+        $this->getJson('/api/external-request-photos/'.$photo)->assertNotFound();
+        $this->deleteJson($base.'/'.$foreign->id.'/photos/'.$photo)->assertForbidden();
+        $grant(['view']);
+        $this->get('/api/external-request-photos/'.$photo)->assertOk();
+        $this->deleteJson($url.'/photos/'.$photo)->assertForbidden();
+        $grant(['photos']);
+        $this->deleteJson($url.'/photos/'.$photo)->assertOk();
+        $grant(['edit']);
+        auth()->user()->load('role');
+        $role->forceFill(['permissions' => []])->save();
+        $this->patchJson($url, ['price' => 99999])->assertForbidden();
+        $this->assertSame(85000.0, (float) $record->fresh()->price);
+    }
+
     public function test_request_photos_are_private_and_require_current_parent_access(): void
     {
         \Illuminate\Support\Facades\Storage::fake('public');
