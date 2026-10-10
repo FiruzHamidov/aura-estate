@@ -388,6 +388,31 @@ class UserAccessTest extends TestCase
         $response->assertJsonPath('inactive_count', 0);
     }
 
+    public function test_legacy_dismissal_uses_configured_recipients_for_manual_and_automatic_transfer(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900092001', 'role_id' => $adminRole->id, 'status' => 'active']);
+        $recipientRole = Role::create(['name' => 'Recipient', 'slug' => 'custom_legacy_receiver']);
+        $recipientRole->forceFill(['permissions' => []])->save();
+        $recipient = User::create(['name' => 'Recipient', 'phone' => '900092002', 'role_id' => $recipientRole->id, 'status' => 'active']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agentRole->forceFill(['permissions' => []])->save();
+        $revoked = User::create(['name' => 'Revoked agent', 'phone' => '900092003', 'role_id' => $agentRole->id, 'status' => 'active']);
+        Sanctum::actingAs($admin);
+        foreach ([false, true] as $index => $automatic) {
+            $employee = User::create(['name' => 'Dismissed', 'phone' => '90009201'.$index, 'role_id' => $agentRole->id, 'status' => 'active']);
+            $property = DB::table('properties')->insertGetId(['title' => 'Work', 'agent_id' => $employee->id, 'created_by' => $employee->id, 'moderation_status' => 'approved']);
+            $this->deleteJson('/api/user/'.$employee->id, ['agent_id' => $revoked->id])->assertUnprocessable();
+            $recipientRole->forceFill(['permissions' => []])->save();
+            $this->deleteJson('/api/user/'.$employee->id, ['agent_id' => $recipient->id])->assertUnprocessable();
+            $this->assertDatabaseHas('properties', ['id' => $property, 'agent_id' => $employee->id]);
+            $recipientRole->forceFill(['permissions' => ['users.subject.legacy_property_recipient']])->save();
+            $this->deleteJson('/api/user/'.$employee->id, $automatic ? ['distribute_to_agents' => true] : ['agent_id' => $recipient->id])->assertOk();
+            $this->assertDatabaseHas('properties', ['id' => $property, 'agent_id' => $recipient->id]);
+        }
+    }
+
     public function test_dismissal_transfers_properties_to_co_owner_before_redistribution(): void
     {
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);

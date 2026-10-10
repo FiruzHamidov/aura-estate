@@ -831,12 +831,12 @@ class UserController extends Controller
             ], 422);
         }
 
-        // Проверка, что целевой получатель — агент (если указан)
+        // Проверка допуска получателя в прежнем сценарии передачи объектов.
         if ($agentId) {
             $target = User::with('role')->find($agentId);
-            if (! $target || ! $target->role || $target->role->slug !== 'agent' || $target->status !== 'active') {
+            if (! $target || ! $target->hasPermission('users.subject.legacy_property_recipient') || $target->status !== 'active') {
                 return response()->json([
-                    'message' => 'agent_id должен указывать на активного пользователя с ролью агент.',
+                    'message' => 'Получатель должен быть активным и иметь допуск к передаче объектов при увольнении.',
                 ], 422);
             }
 
@@ -850,13 +850,19 @@ class UserController extends Controller
         ];
 
         DB::transaction(function () use ($user, $authUser, $distribute, $agentId, $plan, &$transferStats) {
-            $participantIds = [$user->id, $authUser->id, ...array_column($plan['records'] ?? [], 'responsible_user_id')];
+            $participantIds = array_filter([$user->id, $authUser->id, $agentId, ...array_column($plan['records'] ?? [], 'responsible_user_id')]);
             $lockedUsers = User::query()->whereIn('id', $participantIds)->orderBy('id')->lockForUpdate()->get()->keyBy('id');
             $user = $lockedUsers->get($user->id);
             $authUser = $lockedUsers->get($authUser->id);
             abort_unless($user && $authUser, 404, 'NOT_FOUND');
             $this->ensureUserIsVisible($authUser, $user, false);
             $this->authorizeUserMutation($authUser, $user, 'dismiss');
+            if ($agentId) {
+                $target = $lockedUsers->get($agentId);
+                abort_unless($target && $target->status === User::STATUS_ACTIVE
+                    && $target->hasPermission('users.subject.legacy_property_recipient'), 422, 'INVALID_TRANSFER_TARGET');
+                $this->ensureUserIsVisible($authUser, $target);
+            }
             if ($plan !== null) {
                 $counts = app(\App\Services\Users\DismissalTransfer::class)->apply($authUser, $user, $plan, $lockedUsers);
                 $transferStats['transferred_counts'] = $counts;
@@ -911,7 +917,7 @@ class UserController extends Controller
                 if ($props->isNotEmpty()) {
                     if ($distribute) {
                         // Соберём список доступных агентов (кроме удаляемого)
-                        $agentIds = User::whereHas('role', fn ($q) => $q->where('slug', 'agent'))
+                        $agentIds = User::whereHas('role', fn ($q) => $q->withPermission('users.subject.legacy_property_recipient'))
                             ->where(function (Builder $query) {
                                 $query->where('status', 'active')
                                     ->orWhereNull('status');
