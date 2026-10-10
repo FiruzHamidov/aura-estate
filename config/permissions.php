@@ -159,7 +159,7 @@ $permissions = [
     'new_buildings.manage' => [
         'group' => 'Новостройки',
         'name' => 'Работа с жилыми комплексами',
-        'description' => 'Создание и редактирование своих или назначенных ЖК; для директора — в своём филиале. Учётная запись должна быть активна.',
+        'description' => 'Создание и редактирование ЖК в выбранной области доступа. Дополнительно выберите свои ЖК, свой филиал или все филиалы. Учётная запись должна быть активна.',
         'roles' => ['superadmin', 'admin', 'owner', 'branch_director', 'agent', 'mop'],
     ],
     'new_buildings.manage_all' => [
@@ -541,6 +541,11 @@ $permissions['group_access_review.scope.branch'] = ['group' => 'Группы с�
 $permissions['payment_programs.global.manage'] = ['group' => 'Условия покупки', 'name' => 'Общие ипотечные программы', 'description' => 'Просмотр и изменение общих ипотечных программ, не привязанных к конкретному ЖК. Требуется активная учётная запись; публикация разрешается отдельно.', 'roles' => ['admin', 'superadmin', 'owner']];
 $permissions['payment_programs.building.manage'] = ['group' => 'Условия покупки', 'name' => 'Программы покупки доступных ЖК', 'description' => 'Просмотр и изменение условий покупки в доступном жилом комплексе. Дополнительно требуется право управления этим ЖК; доступ к чужим ЖК не расширяется.', 'roles' => ['admin', 'superadmin', 'owner', 'branch_director', 'agent', 'mop']];
 $permissions['payment_programs.publish'] = ['group' => 'Условия покупки', 'name' => 'Подтверждение и публикация программ', 'description' => 'Публикация, отклонение и архивирование доступных программ покупки. Подтверждающие данные, срок действия и проверка версии обязательны. Без этого права изменения опубликованных условий отправляются на модерацию.', 'roles' => ['admin', 'superadmin', 'owner', 'branch_director'], 'sensitive' => true];
+
+$permissions['new_buildings.manage_all']['exclusive_group'] = 'new_buildings.scope';
+$permissions['new_buildings.scope.branch'] = ['group' => 'Новостройки', 'name' => 'ЖК своего филиала', 'description' => 'Область управления ЖК своего филиала. Требуется право работы с ЖК и назначенный филиал.', 'roles' => ['branch_director'], 'exclusive_group' => 'new_buildings.scope'];
+$permissions['new_buildings.scope.own'] = ['group' => 'Новостройки', 'name' => 'Свои и назначенные ЖК', 'description' => 'Область управления ЖК, где сотрудник является автором или ответственным. При создании и смене филиала сохраняется ограничение своим филиалом.', 'roles' => ['agent', 'mop'], 'exclusive_group' => 'new_buildings.scope'];
+$permissions['new_buildings.assign'] = ['group' => 'Новостройки', 'name' => 'Назначение консультанта ЖК', 'description' => 'Выбор другого активного сотрудника с правом работы с ЖК в филиале комплекса. Для изменения самого ЖК нужны права управления; публикация разрешается отдельно.', 'roles' => ['admin', 'superadmin', 'owner', 'branch_director']];
 
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
