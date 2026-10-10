@@ -723,6 +723,23 @@ class DealBoardFeatureTest extends TestCase
         $this->deleteJson('/api/deals/'.$deal->id)->assertForbidden();
     }
 
+    public function test_property_control_staff_filter_uses_configured_target_policy(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $securityRole = Role::create(['name' => 'Security', 'slug' => 'security']);
+        $security = $this->createUser($securityRole, $branch, 'Security Officer');
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role = Role::forceCreate(['name' => 'Custom filter', 'slug' => 'custom_control_filter', 'permissions' => ['property_control.subject.report_filter']]);
+        $target = $this->createUser($role, $branch, 'Custom Officer');
+        Sanctum::actingAs($security);
+        $ids = $this->getJson('/api/crm/property-control/meta')->assertOk()->json('security_officers.*.id');
+        $this->assertContains($target->id, $ids);
+        $role->forceFill(['permissions' => []])->save();
+        $ids = $this->getJson('/api/crm/property-control/meta')->assertOk()->json('security_officers.*.id');
+        $this->assertNotContains($target->id, $ids);
+        $this->assertContains($security->id, $ids);
+    }
+
     public function test_property_control_report_filters_export_and_meta_are_scoped_to_crm_control(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);

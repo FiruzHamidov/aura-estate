@@ -76,7 +76,7 @@ class PropertyControlReportController extends Controller
             'security_officers' => User::query()
                 ->select(['id', 'name', 'branch_id'])
                 ->where('status', User::STATUS_ACTIVE)
-                ->whereHas('role', fn ($role) => $role->where('slug', 'security'))
+                ->whereHas('role', fn ($role) => $role->withPermission('property_control.subject.report_filter'))
                 ->orderBy('name')
                 ->get(),
         ]);

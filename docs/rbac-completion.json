@@ -209,6 +209,10 @@
           "logs": [
             "/tmp/aura-rbac-crm-final-policies.log"
           ]
+        },
+        {
+          "change": "Три дополнительные серверные проверки перенесены: KpiEarlyRiskAlert сохраняет текущую группу по kpi.subject.assigned_groups; плановая очистка координат без индивидуальных настроек использует locations.subject.default_retention с прежним tracked_roles default; фильтр сотрудников контроля объектов использует property_control.subject.report_filter с default security. Все настройки описаны по-русски.",
+          "verification": "179 серверных тестов / 3949 проверок прошли. Custom roles: сохранение текущего снимка группы и неизменность истории после отзыва; удаление только старых координат, отзыв общей политики и независимость индивидуального срока; появление/исчезновение сотрудника в фильтре контроля. Прежние сценарии группы, карты и отчёта также прошли."
         }
       ],
       "remaining_checks": [
@@ -490,20 +494,7 @@
       "app/Http/Controllers/DailyReportController.php",
       "app/Http/Controllers/AttendanceWebController.php"
     ],
-    "pending_followups": [
-      {
-        "file": "app/Models/KpiEarlyRiskAlert.php",
-        "finding": "creating observer infers current group only for hardcoded agent/mop; align with configurable subject policy after checking caller/history semantics."
-      },
-      {
-        "file": "app/Console/Commands/PruneUserLocationHistoryCommand.php",
-        "finding": "default-retention query still uses tracked_roles; align with transmission eligibility without losing retention semantics for existing settings."
-      },
-      {
-        "file": "app/Http/Controllers/PropertyControlReportController.php::meta",
-        "finding": "security_officers filter list still hardcoded security; determine intended target policy for custom control staff."
-      }
-    ],
+    "pending_followups": [],
     "classified_business_references": [
       {
         "file": "app/Services/PropertyReportStaff.php",

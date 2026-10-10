@@ -652,6 +652,31 @@ class LocationTrackingFeatureTest extends TestCase
         return $context;
     }
 
+    public function test_history_pruning_uses_role_policy_and_preserves_individual_retention(): void
+    {
+        $context = $this->context();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role = Role::forceCreate(['name' => 'Custom retention', 'slug' => 'custom_retention', 'permissions' => ['locations.subject.default_retention']]);
+        $user = $this->user($role, $context['branchA'], $context['groupA1'], 'Retention');
+        $device = \App\Models\UserLocationDevice::forceCreate(['user_id' => $user->id, 'device_uuid' => (string) Str::uuid(), 'platform' => 'android']);
+        $point = fn ($days) => UserLocationPoint::create(['event_id' => (string) Str::uuid(), 'user_id' => $user->id, 'device_id' => $device->id,
+            'latitude' => 38.5, 'longitude' => 68.7, 'accuracy_m' => 10, 'quality' => 'good', 'captured_at' => now()->subDays($days), 'received_at' => now()]);
+        config(['location_tracking.history_retention_days' => 90]);
+        $old = $point(100);
+        $recent = $point(5);
+        $this->artisan('locations:prune-history')->assertSuccessful();
+        $this->assertNull($old->fresh());
+        $this->assertNotNull($recent->fresh());
+        $role->forceFill(['permissions' => []])->save();
+        $retained = $point(100);
+        $this->artisan('locations:prune-history')->assertSuccessful();
+        $this->assertNotNull($retained->fresh());
+        \App\Models\UserLocationTrackingSetting::forceCreate(['user_id' => $user->id, 'history_retention_days' => 10]);
+        $this->artisan('locations:prune-history')->assertSuccessful();
+        $this->assertNull($retained->fresh());
+        $this->assertNotNull($recent->fresh());
+    }
+
     private function user(Role $role, ?Branch $branch, ?BranchGroup $group, string $name): User
     {
         return User::query()->create([

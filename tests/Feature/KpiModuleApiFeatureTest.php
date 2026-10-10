@@ -744,6 +744,22 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertEquals($group->id, $report['rop_assignments'][0]['branch_group_id']);
     }
 
+    public function test_custom_kpi_subject_snapshots_only_current_valid_group_without_rewriting_history(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $group = BranchGroup::create(['name' => 'Group', 'branch_id' => $branch->id]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role = Role::forceCreate(['name' => 'Custom KPI', 'slug' => 'custom_kpi_snapshot', 'permissions' => ['kpi.subject.assigned_groups']]);
+        $user = User::create(['name' => 'Employee', 'phone' => '912000088', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $create = fn ($date) => KpiEarlyRiskAlert::create(['user_id' => $user->id, 'alert_date' => $date, 'status' => 'open', 'message' => 'Risk']);
+        $snapshot = $create(now('Asia/Dushanbe')->toDateString());
+        $this->assertSame($group->id, $snapshot->branch_group_id);
+        $this->assertNull($create('2000-01-01')->branch_group_id);
+        $role->forceFill(['permissions' => []])->save();
+        $this->assertNull($create(now('Asia/Dushanbe')->toDateString())->branch_group_id);
+        $this->assertSame($group->id, $snapshot->fresh()->branch_group_id);
+    }
+
     public function test_early_risk_alerts_use_snapshot_group_for_reads_and_status_changes(): void
     {
         $branch = Branch::create(['name' => 'Main']);
