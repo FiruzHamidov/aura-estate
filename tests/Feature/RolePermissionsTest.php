@@ -66,6 +66,15 @@ class RolePermissionsTest extends TestCase
         $this->assertNotContains('properties.search.owner', $catalog->defaults('new_custom'));
     }
 
+    public function test_control_mode_is_enabled_only_for_existing_security_role(): void
+    {
+        foreach (Role::all() as $role) {
+            $this->assertSame($role->slug === 'security', $role->hasPermission('deals.site.control'), $role->slug);
+        }
+        $catalog = app(PermissionCatalog::class);
+        $this->assertNotContains('deals.site.control', $catalog->migrationDefaults('legacy_custom'));
+    }
+
     public function test_client_matching_defaults_preserve_existing_access(): void
     {
         $catalog = app(PermissionCatalog::class);

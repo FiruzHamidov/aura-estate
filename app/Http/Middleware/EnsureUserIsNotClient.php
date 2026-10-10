@@ -146,6 +146,9 @@ class EnsureUserIsNotClient
                 default => [],
             };
         }
+        if ($controller === \App\Http\Controllers\PropertyControlReportController::class && in_array($method, ['summary', 'meta', 'export'], true)) {
+            return ['properties.control_report.view'];
+        }
         if ($controller === \App\Http\Controllers\PropertyContactAnalyticsController::class && $method === 'index') {
             return ['properties.analytics.view'];
         }

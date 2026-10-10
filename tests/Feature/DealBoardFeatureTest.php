@@ -756,6 +756,20 @@ class DealBoardFeatureTest extends TestCase
             ->assertOk()
             ->assertHeader('content-type', 'text/csv; charset=UTF-8');
 
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        foreach (['client', 'external_agent', 'accountant', 'custom_control'] as $slug) {
+            $securityRole->forceFill(['slug' => $slug, 'permissions' => ['deals.scope.control', 'properties.control_report.view']])->save();
+            Sanctum::actingAs($security->fresh('role'));
+            $this->getJson('/api/crm/property-control/report')->assertOk()->assertJsonPath('total', 2);
+            $this->getJson('/api/crm/property-control/meta')->assertOk();
+            $this->get('/api/crm/property-control/export')->assertOk();
+            $securityRole->forceFill(['permissions' => ['deals.scope.control']])->save();
+            Sanctum::actingAs($security->fresh('role'));
+            $this->getJson('/api/crm/property-control/report')->assertForbidden();
+            $this->getJson('/api/crm/property-control/meta')->assertForbidden();
+            $this->get('/api/crm/property-control/export')->assertForbidden();
+        }
+
         $this->assertDatabaseHas('crm_audit_logs', [
             'auditable_type' => $security->getMorphClass(),
             'auditable_id' => $security->id,
