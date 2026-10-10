@@ -56,6 +56,28 @@ class RolePermissionsTest extends TestCase
         }
     }
 
+    public function test_owner_search_defaults_preserve_all_existing_non_client_roles(): void
+    {
+        foreach (Role::all() as $role) {
+            $this->assertSame($role->slug !== 'client', $role->hasPermission('properties.search.owner'), $role->slug);
+        }
+        $catalog = app(PermissionCatalog::class);
+        $this->assertContains('properties.search.owner', $catalog->migrationDefaults('legacy_custom'));
+        $this->assertNotContains('properties.search.owner', $catalog->defaults('new_custom'));
+    }
+
+    public function test_property_contact_defaults_preserve_separate_payload_and_website_access(): void
+    {
+        foreach (Role::all() as $role) {
+            $this->assertTrue($role->hasPermission('properties.contacts.view'), $role->slug);
+            $this->assertSame(in_array($role->slug, ['manager', 'admin', 'superadmin', 'marketing', 'rop', 'branch_director', 'security'], true), $role->hasPermission('properties.contacts.site.all'), $role->slug);
+            $this->assertSame(in_array($role->slug, ['agent', 'mop'], true), $role->hasPermission('properties.contacts.site.own'), $role->slug);
+        }
+        $catalog = app(PermissionCatalog::class);
+        $this->assertContains('properties.contacts.view', $catalog->migrationDefaults('legacy_custom'));
+        $this->assertNotContains('properties.contacts.view', $catalog->defaults('new_custom'));
+    }
+
     public function test_object_report_filter_defaults_preserve_existing_role_scopes(): void
     {
         foreach (Role::all() as $role) {

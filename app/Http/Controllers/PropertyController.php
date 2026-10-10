@@ -224,6 +224,7 @@ class PropertyController extends Controller
         return array_merge($workflow, [
             'can_manage_listing_date' => $user && $this->moderationAccess->canRefreshListingDate($user, $property),
             'can_refresh_listing_date' => $user && $this->moderationAccess->canRefreshListingDate($user, $property) && $refreshState['available'],
+            'can_view_contacts' => $user?->hasPermission('properties.contacts.view') ?? false,
             'can_view_history' => $user && $this->moderationAccess->canViewHistory($user, $property),
             'can_moderate' => $workflow['can_moderate'],
             'can_manage_co_owner' => $workflow['can_manage_co_owner'],
@@ -336,10 +337,13 @@ class PropertyController extends Controller
 
     private function serializePropertyShow(Property $property, ?User $authUser): array
     {
-        $includeAuthContacts = $authUser !== null;
+        $includeAuthContacts = $authUser?->hasPermission('properties.contacts.view') ?? false;
+
+        if ($authUser) {
+            $property->loadMissing(['externalAgent', 'externalPropertyRequest']);
+        }
 
         if ($includeAuthContacts) {
-            $property->loadMissing(['externalAgent', 'externalPropertyRequest']);
             $property->makeVisible([
                 'owner_client_id',
                 'owner_name',
@@ -368,6 +372,13 @@ class PropertyController extends Controller
         if ($includeAuthContacts) {
             $payload['ownerClient'] = $payload['owner_client'] ?? null;
             $payload['buyerClient'] = $payload['buyer_client'] ?? null;
+        } else {
+            foreach (['owner_client_id', 'owner_name', 'owner_phone', 'buyer_client_id', 'buyer_full_name', 'buyer_phone', 'owner_client', 'buyer_client', 'ownerClient', 'buyerClient', 'external_property_request'] as $field) {
+                unset($payload[$field]);
+            }
+        }
+
+        if ($authUser) {
             $payload['external_source'] = $property->external_agent_id ? [
                 'source_type' => $property->source_type,
                 'external_agent_id' => $property->external_agent_id,
@@ -975,7 +986,7 @@ class PropertyController extends Controller
 
     private function canSearchPropertyCrmFields(?User $user): bool
     {
-        return $user !== null && ! $user->hasRole('client');
+        return $user?->hasPermission('properties.search.owner') ?? false;
     }
 
     private function applyPropertySearchFilters(Builder $query, array $filters): void

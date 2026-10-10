@@ -372,6 +372,31 @@ class PropertyShowAuthContactsTest extends TestCase
         $response->assertJsonPath('buyer_client.id', $buyerClient->id);
         $response->assertJsonPath('buyer_client.full_name', 'Buyer Client');
         $response->assertJsonPath('buyerClient.id', $buyerClient->id);
+
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedBigInteger('external_property_request_id')->nullable());
+        Schema::create('external_property_requests', function (Blueprint $table) {
+            $table->id();
+            $table->softDeletes();
+            $table->string('status')->default('draft');
+            $table->string('owner_name');
+            $table->string('owner_phone');
+        });
+        \Illuminate\Support\Facades\DB::table('external_property_requests')->insert(['id' => 71, 'owner_name' => 'External owner', 'owner_phone' => '930000201']);
+        $property->forceFill(['external_property_request_id' => 71])->saveQuietly();
+        foreach ([[], ['properties.contacts.view'], []] as $permissions) {
+            $agentRole->forceFill(['slug' => 'custom_contacts', 'permissions' => $permissions])->save();
+            \Laravel\Sanctum\Sanctum::actingAs($user->fresh());
+            $response = $this->getJson('/api/properties/'.$property->id)->assertOk();
+            $response->assertJsonPath('capabilities.can_view_contacts', $permissions !== []);
+            if ($permissions !== []) {
+                $response->assertJsonPath('owner_phone', '930000201')->assertJsonPath('buyerClient.id', $buyerClient->id)->assertJsonPath('external_property_request.owner_phone', '930000201');
+            } else {
+                foreach (['owner_client_id', 'owner_name', 'owner_phone', 'buyer_client_id', 'buyer_full_name', 'buyer_phone', 'owner_client', 'buyer_client', 'ownerClient', 'buyerClient', 'external_property_request'] as $field) {
+                    $response->assertJsonMissingPath($field);
+                }
+            }
+        }
     }
 
     public function test_property_show_returns_stable_branch_ids_for_property_and_creator(): void
