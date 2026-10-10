@@ -389,6 +389,38 @@ class DailyReportFrontendScenariosTest extends TestCase
 
     }
 
+    public function test_period_and_finalization_exceptions_can_be_granted_and_revoked_independently(): void
+    {
+        [$users, $reports] = $this->seedContext();
+        Schema::table('daily_reports', fn (Blueprint $t) => $t->boolean('is_finalized')->default(false));
+        Schema::create('kpi_period_locks', function (Blueprint $t) {
+            $t->id(); $t->string('period_type'); $t->string('period_key');
+            $t->unsignedBigInteger('branch_id')->nullable(); $t->unsignedBigInteger('branch_group_id')->nullable();
+        });
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $report = DailyReport::findOrFail($reports['agentA']);
+        $report->update(['submitted_at' => null]);
+        \DB::table('kpi_period_locks')->insert(['period_type' => 'day', 'period_key' => '2026-05-01']);
+        $actor = $users['agentA'];
+        $role = $actor->role;
+        $defaults = $role->permissionKeys();
+        $payload = ['report_date' => '2026-05-01', 'ads' => 2, 'calls' => 9];
+        Sanctum::actingAs($actor->fresh());
+        $this->putJson('/api/kpi/daily/my-report/draft', $payload)->assertForbidden()->assertJsonPath('code', 'KPI_FORBIDDEN_LOCKED_PERIOD');
+        $role->forceFill(['permissions' => [...$defaults, 'daily_reports.locked_period.override']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->putJson('/api/kpi/daily/my-report/draft', $payload)->assertOk();
+        \DB::table('daily_reports')->where('id', $report->id)->update(['is_finalized' => true]);
+        $this->putJson('/api/kpi/daily/my-report/draft', $payload)->assertForbidden()->assertJsonPath('code', 'KPI_FINALIZED_EDIT_FORBIDDEN');
+        $role->forceFill(['permissions' => [...$defaults, 'daily_reports.locked_period.override', 'daily_reports.finalized.edit']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->putJson('/api/kpi/daily/my-report/draft', $payload)->assertOk();
+        $this->patchJson('/api/daily-reports/'.$reports['agentB'], ['comment' => 'Not authorized'])->assertForbidden();
+        $role->forceFill(['permissions' => [...$defaults, 'daily_reports.finalized.edit']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->putJson('/api/kpi/daily/my-report/draft', $payload)->assertForbidden()->assertJsonPath('code', 'KPI_FORBIDDEN_LOCKED_PERIOD');
+    }
+
     private function seedContext(): array
     {
         $roles = [

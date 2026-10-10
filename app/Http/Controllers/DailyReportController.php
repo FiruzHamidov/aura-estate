@@ -722,9 +722,8 @@ class DailyReportController extends Controller
         ?DailyReport $report,
         bool $enforceDeadline = false
     ): void {
-        $role = $actor->role?->slug;
-        $isPrivileged = in_array($role, ['admin', 'superadmin', 'owner', 'rop', 'branch_director'], true);
-        $isRestricted = in_array($role, ['agent', 'intern', 'mop'], true);
+        $isPrivileged = $actor->hasPermission('daily_reports.finalized.edit');
+        $isRestricted = ! $actor->hasPermission('daily_reports.locked_period.override');
 
         if ($report && (bool) ($report->is_finalized ?? false) && !$isPrivileged) {
             $this->denyKpi('KPI_FINALIZED_EDIT_FORBIDDEN', 'Finalized KPI report cannot be edited.');

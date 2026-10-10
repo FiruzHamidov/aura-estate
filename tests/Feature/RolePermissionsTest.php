@@ -87,6 +87,16 @@ class RolePermissionsTest extends TestCase
         $this->assertFalse($director->hasPermission('users.site.dismiss_clients'));
     }
 
+    public function test_daily_report_period_exceptions_preserve_historical_role_defaults(): void
+    {
+        foreach (Role::all() as $role) {
+            $this->assertSame(in_array($role->slug, ['admin', 'superadmin', 'owner', 'rop', 'branch_director'], true),
+                $role->hasPermission('daily_reports.finalized.edit'), $role->slug);
+            $this->assertSame(! in_array($role->slug, ['agent', 'intern', 'mop'], true),
+                $role->hasPermission('daily_reports.locked_period.override'), $role->slug);
+        }
+    }
+
     public function test_edit_is_audited_and_takes_effect_for_existing_user(): void
     {
         $agent = $this->actor('agent');
