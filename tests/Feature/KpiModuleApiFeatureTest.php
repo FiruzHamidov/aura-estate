@@ -1676,6 +1676,51 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->getJson('/api/kpi/reports/users')->assertForbidden();
     }
 
+    public function test_adjustment_user_picker_scopes_and_legacy_default_filter_are_configurable(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $branch = Branch::create(['name' => 'Main']);
+        $foreignBranch = Branch::create(['name' => 'Other']);
+        $group = BranchGroup::create(['name' => 'One', 'branch_id' => $branch->id]);
+        $secondGroup = BranchGroup::create(['name' => 'Two', 'branch_id' => $branch->id]);
+        $otherGroup = BranchGroup::create(['name' => 'Other', 'branch_id' => $foreignBranch->id]);
+        $managerRole = Role::create(['name' => 'Reader', 'slug' => 'custom_adjustment_picker']);
+        $role = Role::create(['name' => 'Custom employee', 'slug' => 'custom_plan_employee']);
+        $rights = ['kpi.subject.adjustment_selection'];
+        $role->forceFill(['permissions' => $rights])->save();
+        $actor = User::create(['name' => 'Reader', 'phone' => '900096001', 'role_id' => $managerRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $ids = [];
+        foreach ([$group, $secondGroup, $otherGroup] as $index => $team) {
+            $ids[] = User::create(['name' => 'Employee '.$index, 'phone' => '90009601'.$index, 'role_id' => $role->id, 'branch_id' => $team->branch_id, 'branch_group_id' => $team->id])->id;
+        }
+        User::create(['name' => 'Inactive', 'phone' => '900096020', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'inactive']);
+        foreach (['all' => $ids, 'branch' => array_slice($ids, 0, 2), 'group' => [$ids[0]], 'own' => []] as $scope => $expected) {
+            $managerRole->forceFill(['permissions' => ['kpi.adjustments.users.view', 'kpi.adjustments.users.scope.'.$scope]])->save();
+            Sanctum::actingAs($actor->fresh());
+            $response = $this->getJson('/api/kpi/adjustments/users')->assertOk();
+            $this->assertEqualsCanonicalizing($expected, array_column($response->json('data'), 'id'));
+            $response->assertJsonMissingPath('data.0.phone')->assertJsonMissingPath('data.0.email');
+        }
+        $managerRole->forceFill(['permissions' => ['kpi.adjustments.users.view', 'kpi.adjustments.users.scope.all', 'data.scope.assigned_groups']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/adjustments/users')->assertForbidden();
+        $managerRole->forceFill(['permissions' => ['kpi.adjustments.users.view', 'kpi.adjustments.users.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $role->forceFill(['permissions' => []])->save();
+        $this->getJson('/api/kpi/adjustments/users')->assertOk()->assertJsonCount(0, 'data');
+        $managerRole->forceFill(['permissions' => ['kpi.adjustments.users.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/adjustments/users')->assertForbidden();
+        $managerRole->forceFill(['permissions' => ['kpi.operations.manage']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/adjustments/entities?active=1')->assertOk()->assertJsonCount(0, 'data');
+        $role->forceFill(['permissions' => ['kpi.subject.adjustment_default_filter']])->save();
+        $this->getJson('/api/kpi/adjustments/entities?active=1')->assertOk()->assertJsonCount(3, 'data');
+        $role->forceFill(['permissions' => []])->save();
+        $this->getJson('/api/kpi/adjustments/entities?active=1')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/kpi/adjustments/entities?active=1&role=custom_plan_employee')->assertOk()->assertJsonCount(3, 'data');
+    }
+
     public function test_custom_template_role_catalog_and_group_permission_can_be_revoked(): void
     {
         Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());

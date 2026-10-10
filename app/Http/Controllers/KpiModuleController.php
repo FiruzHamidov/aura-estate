@@ -857,6 +857,29 @@ class KpiModuleController extends Controller
         ]);
     }
 
+    public function adjustmentUsers(Request $request)
+    {
+        $actor = $this->authUser();
+        $this->ensureManageAccess($actor, 'kpi.adjustments.users.view');
+        abort_if($actor->usesAssignedGroupScope(), 403, 'KPI_HISTORICAL_SELECTION_REQUIRED');
+        $data = $request->validate(['page' => 'nullable|integer|min:1', 'per_page' => 'nullable|integer|min:1|max:200']);
+        $query = User::query()->select(['id', 'name'])
+            ->where(fn ($q) => $q->where('status', User::STATUS_ACTIVE)->orWhereNull('status'))
+            ->whereHas('role', fn ($roles) => $roles->withPermission('kpi.subject.adjustment_selection'));
+        if ($actor->hasPermission('kpi.adjustments.users.scope.all')) {
+            // All branches are explicitly allowed for this picker.
+        } elseif ($actor->hasPermission('kpi.adjustments.users.scope.branch') && $actor->branch_id) {
+            $query->where('branch_id', $actor->branch_id);
+        } elseif ($actor->hasPermission('kpi.adjustments.users.scope.group') && $actor->branch_group_id) {
+            $query->where('branch_group_id', $actor->branch_group_id)->where('branch_id', $actor->branch_id);
+        } elseif ($actor->hasPermission('kpi.adjustments.users.scope.own')) {
+            $query->whereKey($actor->id);
+        } else {
+            $query->whereRaw('1 = 0');
+        }
+        return response()->json($query->orderBy('name')->orderBy('id')->paginate($data['per_page'] ?? 100));
+    }
+
     public function adjustmentEntities(Request $request)
     {
         if ($this->authUser()->usesAssignedGroupScope()) return app(KpiPeriodLockController::class)->historicalEntities($request);
@@ -867,7 +890,7 @@ class KpiModuleController extends Controller
             'active' => 'nullable|boolean',
         ]);
 
-        $roles = collect(explode(',', (string) ($validated['role'] ?? 'agent,mop,rop')))
+        $roles = collect(explode(',', (string) ($validated['role'] ?? '')))
             ->map(fn (string $role) => trim($role))
             ->filter()
             ->values()
@@ -876,7 +899,9 @@ class KpiModuleController extends Controller
         $query = User::query()
             ->select(['users.id', 'users.name', 'users.branch_id', 'users.role_id'])
             ->with('role:id,slug')
-            ->whereHas('role', fn ($q) => $q->whereIn('slug', $roles));
+            ->whereHas('role', fn ($q) => isset($validated['role'])
+                ? $q->whereIn('slug', $roles)
+                : $q->withPermission('kpi.subject.adjustment_default_filter'));
 
         if (array_key_exists('active', $validated) && (bool) $validated['active']) {
             $query->where(function ($q) {

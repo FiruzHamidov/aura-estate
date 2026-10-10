@@ -401,6 +401,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::get('/kpi/adjustments', [KpiModuleController::class, 'adjustments'])->middleware('rop.branch.scope');
     Route::post('/kpi/adjustments', [KpiModuleController::class, 'createAdjustment'])->middleware('rop.branch.scope');
     Route::get('/kpi/adjustments/meta', [KpiModuleController::class, 'adjustmentMeta'])->middleware('rop.branch.scope');
+    Route::get('/kpi/adjustments/users', [KpiModuleController::class, 'adjustmentUsers']);
     Route::get('/kpi/adjustments/entities', [KpiModuleController::class, 'adjustmentEntities'])->middleware('rop.branch.scope');
     Route::get('/kpi/integrations/status', [KpiModuleController::class, 'integrationsStatus'])->middleware('rop.branch.scope');
     Route::get('/kpi/ops/integrations/status', [KpiModuleController::class, 'integrationsStatus'])->middleware('rop.branch.scope');
