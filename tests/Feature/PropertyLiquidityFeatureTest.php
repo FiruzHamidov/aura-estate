@@ -132,7 +132,7 @@ class PropertyLiquidityFeatureTest extends TestCase
         $foreign = $this->createTarget(88_000, 2);
         DB::table('properties')->where('id', $own->id)->update(['branch_id' => 1, 'branch_group_id' => 1]);
         DB::table('properties')->where('id', $foreign->id)->update(['branch_id' => 1, 'branch_group_id' => 3]);
-        DB::table('roles')->where('id', 4)->update(['permissions' => json_encode(['liquidity.scope.all', 'liquidity.promotion.manage', 'liquidity.settings.manage'])]);
+        DB::table('roles')->where('id', 4)->update(['permissions' => json_encode(['data.scope.assigned_groups', 'liquidity.scope.all', 'liquidity.promotion.manage', 'liquidity.settings.manage'])]);
         Sanctum::actingAs(User::findOrFail(5));
         $this->patchJson("/api/marketing/property-promotions/{$own->id}", ['status' => 'planned'])->assertCreated();
         $this->postJson("/api/admin/properties/{$own->id}/liquidity/recalculate")->assertAccepted();

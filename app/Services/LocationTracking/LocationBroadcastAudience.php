@@ -51,14 +51,14 @@ final class LocationBroadcastAudience
                         ->whereIn('role_id', $roleIds['branch']));
                 }
             })
-            // Assigned groups remain a hard boundary for actual ROP accounts, regardless of grants.
+            // Apply the same assigned-group policy as synchronous reads.
             ->where(function (Builder $boundary) use ($target, $point, $tracked) {
-                $boundary->whereHas('role', fn (Builder $role) => $role->where('slug', '!=', 'rop'));
+                $boundary->whereHas('role', fn (Builder $role) => $role->usingAssignedGroups(false));
                 if (! $tracked || ! $target->branch_id || ! $target->branch_group_id || ! $point->branch_group_id
                     || (int) $point->branch_id !== (int) $target->branch_id) return;
                 $boundary->orWhere(function (Builder $rops) use ($target, $point) {
                     $rops->where('users.branch_id', $target->branch_id)
-                        ->whereHas('role', fn (Builder $role) => $role->where('slug', 'rop'));
+                        ->whereHas('role', fn (Builder $role) => $role->usingAssignedGroups());
                     foreach (array_unique([$target->branch_group_id, $point->branch_group_id]) as $groupId) {
                         $rops->whereHas('supervisedGroups', fn (Builder $groups) => $groups->where('branch_groups.id', $groupId)
                             ->where('branch_groups.branch_id', $target->branch_id));

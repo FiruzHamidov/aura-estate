@@ -26,7 +26,7 @@
     {
       "id": "organization_boundaries",
       "title": "Границы групп РОП и филиалов охраны",
-      "status": "open",
+      "status": "complete_with_shared_dependencies",
       "source_files": [
         "app/Support/RopGroupAccess.php",
         "app/Services/GroupAccess/RopGroupAssignments.php",
@@ -43,13 +43,16 @@
         {
           "change": "251 проверки hasRole(rop) в 61 серверном файле переведены на общий User::usesAssignedGroupScope. Метод пока сохраняет старый выбор по должности; это подготовка атомарного включения права после согласования SQL и frontend.",
           "verification": "Полный PHPUnit: 1253 теста, 18176 проверок; те же 2 ошибки и 5 падений, что в baseline (сверены имена и причины), новых падений нет."
+        },
+        {
+          "change": "Включено data.scope.assigned_groups с default rop. User/Role, SQL-предикаты, выборка групп, перевод сотрудников, карта и очереди используют одну политику. Frontend: RopAccessBoundary, формы назначения/создания/перевода, CRM, KPI и отчёты используют разрешение; проверка области имеет ключ кэша по роли и филиалу. Имена и описания назначения групп теперь подходят пользовательским ролям. Должностные поля KPI и отчётов остаются бизнес-данными.",
+          "verification": "Полный PHPUnit: 1254 теста, 18200 проверок; те же 2 ошибки и 5 падений baseline, имена и причины совпали. 251 браузерный тест, 68 тестов RBAC/форм и TypeScript прошли. Custom role: пустые группы закрывают доступ, назначение через API открывает свою группу, самоназначение запрещено, снятие/возврат политики меняет выборку без потери назначений. Очередь карты повторно проверяет группы и права. MySQL: 5 случаев null/[]/явное право, положительный и отрицательный SQL совпадают с моделью; транзакция отменена. Локальный /api/rbac возвращает настройку с русским описанием."
         }
       ],
-      "remaining_checks": [
-        "Перевести свежие SQL-проверки роли в RopGroupAccess, LocationBroadcastAudience, EmployeeGroupTransfer на общий режим.",
-        "Классифицировать оставшиеся прямые сравнения slug/role === rop: ограничения доступа vs должность в KPI и формах.",
-        "Согласовать frontend: RopAccessBoundary, назначение групп и ограничения форм с режимом, возвращаемым сервером.",
-        "После согласования включить разрешение assigned groups с default rop; проверить пользовательскую роль, отзыв, текущую/историческую область и очереди."
+      "remaining_checks": [],
+      "shared_dependencies": [
+        "target_eligibility: списки допустимых должностей сотрудников внутри назначенных групп проверяются в отдельном направлении.",
+        "migration_editor_release: итоговый выпуск и проверка переноса прав всех модулей."
       ]
     },
     {
@@ -275,5 +278,18 @@
       "Не выполнять общий migrate:rollback --step=1 как откат RBAC: в репозитории после этой миграции есть другие миграции.",
       "Полное восстановление предрелизной БД может удалить последующие бизнес-изменения; план восстановления должен учитывать записи, созданные после backup."
     ]
+  },
+  "verification_after_group_policy": {
+    "backend_tests": 1254,
+    "backend_assertions": 18200,
+    "baseline_errors": 2,
+    "baseline_failures": 5,
+    "new_failures": 0,
+    "browser_passed": 251,
+    "targeted_node_passed": 68,
+    "typescript": "passed",
+    "frontend_head": "13c37eb",
+    "backend_log": "/tmp/aura-rbac-group-policy-final.log",
+    "browser_log": "/tmp/aura-rbac-group-ui-all-browser.log"
   }
 }

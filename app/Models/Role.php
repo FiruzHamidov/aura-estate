@@ -14,6 +14,30 @@ class Role extends Model
 
     protected $casts = ['permissions' => 'array', 'permissions_version' => 'integer'];
 
+    /** Central policy predicate; used by both loaded users and fresh SQL selections. */
+    public function usesAssignedGroupScope(): bool
+    {
+        return $this->hasPermission('data.scope.assigned_groups');
+    }
+
+    public function scopeUsingAssignedGroups(\Illuminate\Database\Eloquent\Builder $query, bool $enabled = true): void
+    {
+        $permission = 'data.scope.assigned_groups';
+        $defaults = (config('permissions', [])[$permission]['roles'] ?? []);
+        // Keep the predicate in SQL, so repeated group subqueries do not fetch all roles.
+        // The legacy branch also supports deployments before the RBAC migration.
+        if (! \Illuminate\Support\Facades\Schema::hasColumn($query->getModel()->getTable(), 'permissions')) {
+            $query->whereIn($query->qualifyColumn('slug'), $defaults, 'and', ! $enabled);
+            return;
+        }
+        $column = $query->qualifyColumn('permissions');
+        $slug = $query->qualifyColumn('slug');
+        $condition = fn ($roles) => $roles
+            ->where(fn ($legacy) => $legacy->whereNull($column)->whereIn($slug, $defaults))
+            ->orWhere(fn ($configured) => $configured->whereNotNull($column)->whereJsonContains($column, $permission));
+        $enabled ? $query->where($condition) : $query->whereNot($condition);
+    }
+
     public function permissionKeys(): array
     {
         // An explicit empty array revokes every grant. Null preserves pre-migration behavior.

@@ -48,7 +48,7 @@ class PropertyReportController extends Controller
             $query->whereRaw('1 = 0');
             return;
         }
-        if ($roleSlug === 'rop') {
+        if ($authUser?->usesAssignedGroupScope()) {
             $access = app(\App\Support\RopGroupAccess::class);
             $isBooking = $query->getModel() instanceof Booking;
             $groupColumn = $isBooking ? 'bookings.branch_group_id' : 'properties.branch_group_id';
@@ -121,7 +121,7 @@ class PropertyReportController extends Controller
             $query->whereRaw('1 = 0');
             return;
         }
-        if ($roleSlug === 'rop') {
+        if ($authUser?->usesAssignedGroupScope()) {
             $table = $query instanceof \Illuminate\Database\Eloquent\Builder ? $query->getModel()->getTable() : $query->from;
             abort_unless(in_array($table, ['users', 'clients', 'bookings'], true), 403, 'GROUP_SCOPE_UNAVAILABLE');
             app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, $table.'.branch_group_id', $table === 'bookings' ? null : $table.'.branch_id');

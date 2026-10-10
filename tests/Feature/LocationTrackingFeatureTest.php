@@ -558,7 +558,21 @@ class LocationTrackingFeatureTest extends TestCase
             $this->postJson('/api/broadcasting/auth', ['socket_id' => '1234.5678', 'channel_name' => $channel])->assertForbidden();
             $this->assertNotContains($channel, array_map(fn ($entry) => $entry->name, $event->broadcastOn()));
         }
-        $context['roles']['rop']->forceFill(['permissions' => ['locations.view', 'locations.scope.all']])->save();
+        // A custom role uses the same group boundary for reads and queued delivery.
+        $role->forceFill(['permissions' => ['data.scope.assigned_groups', 'locations.view', 'locations.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/location-tracking/available-users')->assertOk()->assertJsonCount(0, 'data');
+        $this->assertNotContains($channel, array_map(fn ($entry) => $entry->name, $event->broadcastOn()));
+        $actor->supervisedGroups()->attach($context['groupA1']->id);
+        $this->getJson('/api/location-tracking/available-users')->assertOk()->assertJsonCount(2, 'data');
+        $this->assertContains($channel, array_map(fn ($entry) => $entry->name, $event->broadcastOn()));
+        $actor->supervisedGroups()->detach();
+        $this->assertNotContains($channel, array_map(fn ($entry) => $entry->name, $event->broadcastOn()));
+        $role->forceFill(['permissions' => ['locations.view', 'locations.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/location-tracking/available-users')->assertOk()->assertJsonCount(4, 'data');
+        $this->assertContains($channel, array_map(fn ($entry) => $entry->name, $event->broadcastOn()));
+        $context['roles']['rop']->forceFill(['permissions' => ['data.scope.assigned_groups', 'locations.view', 'locations.scope.all']])->save();
         Sanctum::actingAs($context['ropA']->fresh());
         $this->getJson('/api/location-tracking/available-users')->assertOk()->assertJsonCount(2, 'data');
         $this->assertFalse(app(LocationAccessService::class)->canView($context['ropA']->fresh(), $context['agentOtherGroup']));

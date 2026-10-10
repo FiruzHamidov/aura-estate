@@ -1316,7 +1316,7 @@ class KpiModuleApiFeatureTest extends TestCase
         $foreign = User::create(['name' => 'Other', 'phone' => '919941003', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $b->id]);
         $actor->supervisedGroups()->attach($a->id);
         (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
-        $role->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.all']])->save();
+        $role->forceFill(['permissions' => ['data.scope.assigned_groups', 'kpi.reports.view', 'kpi.reports.scope.all']])->save();
         Sanctum::actingAs($actor->fresh());
         $url = '/api/kpi/daily/my-progress?date=2026-05-16';
         $this->getJson($url.'&user_id='.$own->id)->assertOk();

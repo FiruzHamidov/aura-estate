@@ -221,7 +221,7 @@ class UserController extends Controller
     {
         abort_unless($authUser->hasPermission('users.'.$operation), 403, 'FORBIDDEN_ACTION');
         $actorRole = $this->roleSlug($authUser);
-        if ($actorRole === 'rop') {
+        if ($authUser->usesAssignedGroupScope()) {
             abort_unless(in_array($operation, ['update', 'dismiss'], true) && $authUser->id !== $targetUser->id
                 && ($operation === 'update' || $targetUser->status === User::STATUS_ACTIVE)
                 && ! $targetUser->isDeletedAccount()
@@ -1019,7 +1019,7 @@ class UserController extends Controller
             $user = $users->get($user->id);
             abort_unless($authUser && $user, 404, 'NOT_FOUND');
             $authRole = $this->roleSlug($authUser);
-            abort_if($authRole === 'rop', 403, 'FORBIDDEN_ACTION');
+            abort_if($authUser->usesAssignedGroupScope(), 403, 'FORBIDDEN_ACTION');
 
             $canRestore = $authUser->hasPermission('users.restore');
             abort_unless($canRestore, 403, 'Forbidden');

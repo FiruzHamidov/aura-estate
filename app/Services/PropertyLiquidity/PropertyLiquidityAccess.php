@@ -34,7 +34,7 @@ class PropertyLiquidityAccess
     {
         $role = $this->role($user);
 
-        if ($role === 'rop') {
+        if ($user->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $user, 'properties.branch_group_id', 'properties.branch_id');
         }
 

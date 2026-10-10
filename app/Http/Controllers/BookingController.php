@@ -246,7 +246,7 @@ class BookingController extends Controller
             return;
         }
 
-        if ($roleSlug === 'rop') {
+        if ($authUser?->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'bookings.branch_group_id');
             if ($request->filled('branch_group_id')) {
                 $query->whereIn('bookings.branch_group_id', $this->toArray($request->input('branch_group_id')));

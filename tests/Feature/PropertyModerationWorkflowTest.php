@@ -1071,7 +1071,7 @@ class PropertyModerationWorkflowTest extends TestCase
         $ownGroup = Property::create($this->propertyPayload($agent, ['moderation_status' => 'sold']));
         $otherGroup = Property::create($this->propertyPayload($agent, ['moderation_status' => 'sold', 'branch_group_id' => 2]));
         (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
-        $rop->role->forceFill(['permissions' => ['properties.closed.view', 'properties.history.view', 'properties.manage_all']])->save();
+        $rop->role->forceFill(['permissions' => ['data.scope.assigned_groups', 'properties.closed.view', 'properties.history.view', 'properties.manage_all']])->save();
         $access = app(PropertyModerationAccess::class);
         $actor = $rop->fresh();
         $this->assertTrue($access->canViewClosedProperty($actor, $ownGroup));
@@ -1088,7 +1088,7 @@ class PropertyModerationWorkflowTest extends TestCase
         $otherGroup = Property::create($this->propertyPayload($agent, ['branch_group_id' => 2]));
         (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
         $access = app(PropertyModerationAccess::class);
-        $rop->role->forceFill(['permissions' => ['properties.moderate', 'properties.manage_all']])->save();
+        $rop->role->forceFill(['permissions' => ['data.scope.assigned_groups', 'properties.moderate', 'properties.manage_all']])->save();
         $this->assertSame([$ownGroup->id], $access->scopeModeratable(Property::query(), $rop->fresh())->pluck('id')->all());
         $this->assertFalse($access->canModerate($rop->fresh(), $otherGroup));
         $director->role->forceFill(['permissions' => ['properties.manage_all']])->save();
@@ -1498,7 +1498,7 @@ class PropertyModerationWorkflowTest extends TestCase
             DB::table('roles')->where('id', $agent->role_id)->update(['permissions' => json_encode([])]);
             $this->actingAs($agent->fresh())->getJson($url)->assertForbidden();
         }
-        DB::table('roles')->where('id', $rop->role_id)->update(['permissions' => json_encode(['properties.analytics.view'])]);
+        DB::table('roles')->where('id', $rop->role_id)->update(['permissions' => json_encode(['data.scope.assigned_groups', 'properties.analytics.view'])]);
         $this->actingAs($rop->fresh())->getJson($url)->assertOk()
             ->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $own->id)
             ->assertJsonCount(1, 'branches')->assertJsonPath('branches.0.id', 1)

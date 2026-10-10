@@ -90,7 +90,7 @@ class User extends Authenticatable
     /** Shared entry point for the assigned-group data policy, separate from job identity. */
     public function usesAssignedGroupScope(): bool
     {
-        return $this->hasRole('rop');
+        return $this->role?->usesAssignedGroupScope() ?? false;
     }
 
     // Быстрая проверка должности, независимо от политики доступа.

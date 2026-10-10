@@ -65,7 +65,7 @@ class DealAccess
             'primaryProperty',
         ]);
 
-        if ($roleSlug === 'rop') {
+        if ($authUser?->usesAssignedGroupScope()) {
             app(RopGroupAccess::class)->scope($query, $authUser, 'crm_deals.branch_group_id', 'crm_deals.branch_id');
         }
 

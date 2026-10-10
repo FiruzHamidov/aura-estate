@@ -195,6 +195,33 @@ class RopGroupAssignmentsTest extends TestCase
         $this->getJson('/api/users/'.$own->id.'/group-transfer')->assertNotFound();
     }
 
+    public function test_custom_role_can_use_assigned_groups_and_removing_policy_restores_module_scope(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Team reviewer', 'slug' => 'team_reviewer']);
+        $rights = ['data.scope.assigned_groups', 'clients.scope.all', 'users.group_transfer'];
+        $role->forceFill(['permissions' => $rights])->save();
+        $actor = $this->user('team_reviewer');
+        $own = Client::create(['full_name' => 'Own', 'branch_id' => $this->branch->id, 'branch_group_id' => $this->a->id]);
+        $foreign = Client::create(['full_name' => 'Foreign', 'branch_id' => $this->branch->id, 'branch_group_id' => $this->b->id]);
+        $access = app(ClientAccess::class);
+        $this->assertSame(0, $access->visibleQuery($actor->fresh())->count());
+        Sanctum::actingAs($this->admin);
+        $url = '/api/users/'.$actor->id.'/supervised-groups';
+        $this->putJson($url, ['branch_group_ids' => [$this->a->id], 'version' => 0])->assertOk();
+        $this->assertSame([$own->id], $access->visibleQuery($actor->fresh())->pluck('clients.id')->all());
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/employee-transfer-destinations')->assertOk()->assertJsonCount(1, 'data');
+        $this->putJson($url, ['branch_group_ids' => [$this->a->id, $this->b->id], 'version' => 1])->assertForbidden();
+        $role->forceFill(['permissions' => ['clients.scope.all', 'users.group_transfer']])->save();
+        $this->assertEqualsCanonicalizing([$own->id, $foreign->id], $access->visibleQuery($actor->fresh())->pluck('clients.id')->all());
+        $this->assertFalse(Role::query()->usingAssignedGroups()->whereKey($role->id)->exists());
+        $role->forceFill(['permissions' => $rights])->save();
+        $this->assertTrue(Role::query()->usingAssignedGroups()->whereKey($role->id)->exists());
+        $this->assertSame([$own->id], $access->visibleQuery($actor->fresh())->pluck('clients.id')->all());
+        $this->assertDatabaseHas('rop_branch_groups', ['rop_id' => $actor->id, 'branch_group_id' => $this->a->id]);
+    }
+
     private function url(): string
     {
         return '/api/users/'.$this->rop->id.'/supervised-groups';

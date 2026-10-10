@@ -47,7 +47,7 @@ class LeadAccess
 
         $query = Lead::query()->with(['branch', 'creator', 'responsibleAgent', 'client']);
 
-        if ($roleSlug === 'rop') {
+        if ($authUser?->usesAssignedGroupScope()) {
             if (! $this->canReadAll($authUser) && ! $this->isBranchScoped($authUser)) {
                 return $query->whereRaw('1 = 0');
             }

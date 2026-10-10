@@ -189,7 +189,7 @@ class ClientAccess
 
         $authUser->loadMissing('branchGroup');
 
-        if ($roleSlug === 'rop') {
+        if ($authUser?->usesAssignedGroupScope()) {
             $data['branch_group_id'] = app(RopGroupAccess::class)->creationGroup($authUser, $data['branch_group_id'] ?? null);
         }
 
@@ -315,7 +315,7 @@ class ClientAccess
 
         $roleSlug = $this->roleSlug($authUser);
 
-        if ($roleSlug === 'rop') {
+        if ($authUser?->usesAssignedGroupScope()) {
             if (! empty($data['responsible_agent_id'])) {
                 app(RopGroupAccess::class)->ensureEmployee($authUser, (int) $data['responsible_agent_id'], (int) $client->branch_group_id, true);
             }

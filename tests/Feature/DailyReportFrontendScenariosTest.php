@@ -337,7 +337,8 @@ class DailyReportFrontendScenariosTest extends TestCase
         \DB::disableQueryLog();
         $this->assertCount(1, $queries->filter(fn ($entry) => str_contains($entry['query'], 'from "kpi_plans"')));
         $this->assertLessThanOrEqual(2, $queries->filter(fn ($entry) => str_contains($entry['query'], 'from "branch_groups"'))->count());
-        $this->assertLessThanOrEqual(3, $queries->filter(fn ($entry) => str_contains($entry['query'], 'from "roles"'))->count());
+        // Embedded role-policy subqueries are part of the data query, not extra role loads.
+        $this->assertLessThanOrEqual(3, $queries->filter(fn ($entry) => preg_match('/^select\s+[^()]*\s+from\s+"roles"/i', $entry['query']))->count());
 
         $rows = collect($response->json('data'))->keyBy('id');
         foreach ([$reports['agentA'] => 5, $reports['agentA2'] => 9, $reports['mopA1'] => 13, $nextDay->id => 7] as $id => $expected) {

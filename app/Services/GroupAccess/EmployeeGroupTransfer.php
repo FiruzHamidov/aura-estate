@@ -33,7 +33,7 @@ final class EmployeeGroupTransfer
         return BranchGroup::query()->where('branch_id', $actor->branch_id ?? 0)
             ->whereHas('rops', fn ($rops) => $rops->where('users.status', User::STATUS_ACTIVE)
                 ->whereNull('users.deleted_at')->whereColumn('users.branch_id', 'branch_groups.branch_id')
-                ->whereHas('role', fn ($roles) => $roles->where('slug', 'rop')));
+                ->whereHas('role', fn ($roles) => $roles->usingAssignedGroups()));
     }
 
     private function inventory(User $employee, bool $lock = false): array

@@ -21,10 +21,9 @@ final class RopGroupAccess
         return DB::table('rop_branch_groups as rbg')
             ->join('branch_groups as rg', 'rg.id', '=', 'rbg.branch_group_id')
             ->join('users as ru', 'ru.id', '=', 'rbg.rop_id')
-            ->join('roles as rr', 'rr.id', '=', 'ru.role_id')
             ->where('ru.id', $actor->id)
             ->where('ru.status', User::STATUS_ACTIVE)
-            ->where('rr.slug', 'rop')
+            ->whereIn('ru.role_id', \App\Models\Role::query()->usingAssignedGroups()->select('id'))
             ->whereColumn('rg.branch_id', 'ru.branch_id')
             ->select('rg.id');
     }

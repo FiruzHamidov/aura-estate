@@ -26,7 +26,6 @@ final class GroupRecordTransfer
 
     public function authorize(User $actor, Model $record, bool $employeeTransfer = false): void
     {
-        $role = $actor->role?->slug;
         abort_unless($actor->hasPermission('records.transfer'), 403, 'FORBIDDEN_ACTION');
         $this->access->ensureVisible($actor, $record);
         if (!$actor->hasPermission('records.transfer.all_branches')) {
@@ -45,7 +44,7 @@ final class GroupRecordTransfer
             app(ClientAccess::class)->ensureCanMutateClients($actor);
         } elseif ($record instanceof Lead) {
             app(LeadAccess::class)->ensureVisible($actor, $record);
-        } elseif ($record instanceof Booking && $role === 'rop' && ! $employeeTransfer) {
+        } elseif ($record instanceof Booking && $actor->usesAssignedGroupScope() && ! $employeeTransfer) {
             abort(403, 'FORBIDDEN_ACTION');
         }
     }
