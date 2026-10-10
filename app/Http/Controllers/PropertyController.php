@@ -740,7 +740,7 @@ class PropertyController extends Controller
 
         // A deterministic tie-breaker keeps page-by-page report exports stable.
         $result = $query->latest()->orderByDesc('properties.id')->paginate($perPage);
-        if (in_array($request->user()?->role?->slug, ['superadmin', 'accountant'], true)) {
+        if ($request->user()?->hasPermission('properties.reports.economics')) {
             app(\App\Services\PropertyReportStaff::class)->attach($result->getCollection());
         }
 
