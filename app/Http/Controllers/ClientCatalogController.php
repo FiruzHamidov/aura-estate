@@ -16,10 +16,11 @@ final class ClientCatalogController extends Controller
 {
     private function lists(User $user): array
     {
-        $role = $user->role?->slug;
         abort_unless($user->hasPermission('clients.catalog.view'), 403);
 
-        return $role === 'intern' ? ['interns'] : ['agents', 'interns'];
+        $lists = array_values(array_filter(['agents', 'interns'], fn (string $list) => $user->hasPermission('clients.catalog.list.'.$list)));
+        abort_unless($lists !== [], 403, 'Нет доступных подборок каталога.');
+        return $lists;
     }
 
     private function needs(Builder $query, array $lists): void
@@ -93,7 +94,7 @@ final class ClientCatalogController extends Controller
     private function claimant(Request $request): User
     {
         $user = $request->user();
-        abort_unless($user->hasPermission('clients.catalog.claim'), 403, 'Брать клиентов могут только агенты и стажёры.');
+        abort_unless($user->hasPermission('clients.catalog.claim'), 403, 'Нет права брать клиентов из каталога.');
 
         return $user;
     }
