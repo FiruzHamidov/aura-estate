@@ -771,13 +771,14 @@ class DailyReportController extends Controller
         $access = app(\App\Support\RopGroupAccess::class);
         if ($report) {
             $access->ensureVisible($actor, $report);
-            abort_unless(in_array($report->role_slug, ['agent', 'mop'], true), 403, 'KPI_FORBIDDEN_ROLE_ACTION');
-            $this->ensureCanReadScopedReport($actor, $this->reportContextUser($employee, $report));
+            $context = $this->reportContextUser($employee, $report);
+            abort_unless($context->hasPermission('daily_reports.subject.employee'), 403, 'KPI_FORBIDDEN_ROLE_ACTION');
+            $this->ensureCanReadScopedReport($actor, $context);
             return;
         }
         // A missing historical snapshot cannot be assigned to today's team.
         abort_unless($date === Carbon::now($this->timezone())->toDateString(), 404, 'NOT_FOUND');
-        $access->ensureEmployee($actor, (int) $employee->id);
+        $access->ensureEmployee($actor, (int) $employee->id, permission: 'daily_reports.subject.employee');
         $this->ensureCanReadScopedReport($actor, $employee);
     }
 
@@ -811,7 +812,7 @@ class DailyReportController extends Controller
             return;
         }
         if ($actor->hasPermission('daily_reports.employee.scope.all') || $actor->hasPermission('daily_reports.employee.scope.branch')) {
-            if (! in_array($targetUser->role?->slug, ['agent', 'mop'], true)) {
+            if (! $targetUser->hasPermission('daily_reports.subject.employee')) {
                 $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Target role is not supported for this action.');
             }
             if (! $actor->hasPermission('daily_reports.employee.scope.all')
@@ -835,7 +836,7 @@ class DailyReportController extends Controller
     {
         if (! $actor->hasPermission('daily_reports.employee.edit')) return false;
         if ($actor->hasPermission('daily_reports.employee.scope.own')) return (int) $actor->id === (int) $targetUser->id;
-        if (! in_array($targetUser->role?->slug, ['agent', 'mop'], true)) return false;
+        if (! $targetUser->hasPermission('daily_reports.subject.employee')) return false;
         return $actor->hasPermission('daily_reports.employee.scope.all')
             || ($actor->hasPermission('daily_reports.employee.scope.branch') && $actor->branch_id
                 && (int) $actor->branch_id === (int) $targetUser->branch_id);
@@ -1029,6 +1030,7 @@ class DailyReportController extends Controller
             'id' => $report->id,
             'user_id' => $report->user_id,
             'role_slug' => $report->role_slug,
+            'employee_report_eligible' => $user?->hasPermission('daily_reports.subject.employee') ?? false,
             'report_date' => $reportDate,
             'metrics' => $user ? $this->buildMetricsPayload($user, $reportDate, $report, $autoMetrics) : [
                 'objects' => $this->metricPayload((int) ($autoMetrics['new_properties_count'] ?? 0), null, 'system', null),

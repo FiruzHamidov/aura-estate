@@ -59,10 +59,10 @@ final class RopGroupAccess
         return $query;
     }
 
-    public function employees(User $actor): Builder
+    public function employees(User $actor, string $permission = 'users.subject.record_recipient'): Builder
     {
         return $this->scope(User::query(), $actor, 'users.branch_group_id', 'users.branch_id')
-            ->whereHas('role', fn (Builder $roles) => $roles->withPermission('users.subject.record_recipient'));
+            ->whereHas('role', fn (Builder $roles) => $roles->withPermission($permission));
     }
 
     public function allowsGroup(User $actor, ?int $groupId): bool
@@ -104,9 +104,9 @@ final class RopGroupAccess
             ->where('user_id', $employeeId)->exists();
     }
 
-    public function ensureEmployee(User $actor, int $id, ?int $groupId = null, bool $assignable = false): void
+    public function ensureEmployee(User $actor, int $id, ?int $groupId = null, bool $assignable = false, string $permission = 'users.subject.record_recipient'): void
     {
-        $query = $this->employees($actor)->whereKey($id);
+        $query = $this->employees($actor, $permission)->whereKey($id);
         if ($groupId !== null) {
             $query->where('branch_group_id', $groupId);
         }

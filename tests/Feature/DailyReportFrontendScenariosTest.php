@@ -480,6 +480,33 @@ class DailyReportFrontendScenariosTest extends TestCase
         $this->postJson('/api/daily-reports', $payload)->assertForbidden();
     }
 
+    public function test_custom_report_subject_policy_respects_history_and_does_not_require_transfer_eligibility(): void
+    {
+        [$users, $reports, $groups] = $this->seedContext();
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Custom reporter', 'slug' => 'custom_employee_report']);
+        $role->forceFill(['permissions' => ['daily_reports.subject.employee']])->save();
+        $employee = $users['agentA'];
+        $employee->forceFill(['role_id' => $role->id])->save();
+        DailyReport::whereKey($reports['agentA'])->update(['role_slug' => $role->slug]);
+        Sanctum::actingAs($users['ropA']);
+        $url = '/api/kpi/daily/report?employee_id='.$employee->id.'&date=2026-05-01';
+        $this->getJson($url)->assertOk();
+        $this->getJson('/api/daily-reports?report_date=2026-05-01&user_id='.$employee->id)->assertOk()->assertJsonPath('data.0.employee_report_eligible', true);
+        // Today's empty report uses the reporting policy, not transfer-recipient eligibility.
+        $this->travelTo(\Carbon\Carbon::parse('2026-05-02 12:00:00', 'Asia/Dushanbe'));
+        $this->getJson('/api/kpi/daily/report?employee_id='.$employee->id.'&date=2026-05-02')->assertOk();
+        $employee->forceFill(['branch_group_id' => $groups['groupA2']->id])->save();
+        $this->getJson($url)->assertOk();
+        $this->getJson('/api/kpi/daily/report?employee_id='.$employee->id.'&date=2026-05-02')->assertForbidden();
+        $role->forceFill(['permissions' => []])->save();
+        $this->getJson($url)->assertForbidden();
+        $this->getJson('/api/daily-reports?report_date=2026-05-01&user_id='.$employee->id)->assertOk()->assertJsonPath('data.0.employee_report_eligible', false);
+        $role->forceFill(['permissions' => ['daily_reports.subject.employee']])->save();
+        $this->getJson($url)->assertOk();
+        $this->travelBack();
+    }
+
     private function seedContext(): array
     {
         $roles = [
