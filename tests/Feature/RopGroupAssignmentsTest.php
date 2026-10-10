@@ -1226,6 +1226,56 @@ class RopGroupAssignmentsTest extends TestCase
         $this->assertDatabaseHas('group_access_audit_logs', ['subject_id' => $employee->id, 'event' => 'employee_group_transferred']);
     }
 
+    public function test_custom_assignment_group_policy_is_checked_for_properties_and_new_tasks(): void
+    {
+        $role = Role::create(['name' => 'Custom assignee', 'slug' => 'custom_group_assignee']);
+        $employee = $this->user($role->slug, $this->a);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $controller = app(\App\Http\Controllers\PropertyController::class);
+        $lock = new \ReflectionMethod($controller, 'lockPropertyWrite');
+        foreach ([[], ['users.subject.assignment_group_required'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            foreach ([$this->a, $this->b] as $group) {
+                $checks = [
+                    fn () => $lock->invoke($controller, $this->admin, null, ['agent_id' => $employee->id, 'branch_group_id' => $group->id]),
+                    fn () => app(\App\Services\GroupAccess\TaskGroupOwnership::class)->validate(
+                        new \App\Models\CrmTask(['assignee_id' => $employee->id, 'branch_group_id' => $group->id, 'status' => 'pending']), $this->admin),
+                ];
+                foreach ($checks as $check) {
+                    $expected = $rights !== [] && $group->id !== $this->a->id;
+                    try {
+                        \DB::transaction($check);
+                        $this->assertFalse($expected, 'Cross-group assignment must be rejected.');
+                    } catch (\Symfony\Component\HttpKernel\Exception\HttpException $error) {
+                        $this->assertTrue($expected);
+                        $this->assertSame(422, $error->getStatusCode());
+                        $this->assertSame('RESPONSIBLE_GROUP_MISMATCH', $error->getMessage());
+                    }
+                }
+            }
+        }
+    }
+
+    public function test_reopening_task_still_requires_group_transfer_without_role_policy(): void
+    {
+        $role = Role::create(['name' => 'Custom assignee', 'slug' => 'custom_reopening_assignee']);
+        $employee = $this->user($role->slug, $this->a);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role->forceFill(['permissions' => []])->save();
+        $task = new \App\Models\CrmTask(['assignee_id' => $employee->id,
+            'branch_group_id' => $this->b->id, 'status' => 'done', 'completed_at' => '2026-10-01 10:00:00']);
+        $task->exists = true;
+        $task->syncOriginal();
+        $task->forceFill(['status' => 'pending', 'completed_at' => null]);
+        try {
+            \DB::transaction(fn () => app(\App\Services\GroupAccess\TaskGroupOwnership::class)->validate($task, $this->admin));
+            $this->fail('Reopening must retain the mandatory group check.');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $error) {
+            $this->assertSame(422, $error->getStatusCode());
+            $this->assertSame('TASK_REOPEN_REQUIRES_GROUP_TRANSFER', $error->getMessage());
+        }
+    }
+
     public function test_task_creation_requires_visible_parent_in_the_selected_group(): void
     {
         Schema::create('crm_task_types', function (Blueprint $table) {

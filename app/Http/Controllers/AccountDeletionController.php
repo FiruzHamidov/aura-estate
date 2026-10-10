@@ -31,7 +31,7 @@ class AccountDeletionController extends Controller
                 return;
             }
 
-            if (in_array($user->role?->slug, ['agent', 'mop'], true)) {
+            if ($user->hasPermission('users.subject.deletion_requires_transfer')) {
                 abort_if(app(\App\Services\GroupAccess\UserOrganizationService::class)
                     ->hasActiveRecords($user->id, lock: true, classifiedOnly: true), 409, 'EMPLOYEE_TRANSFER_REQUIRED');
             }

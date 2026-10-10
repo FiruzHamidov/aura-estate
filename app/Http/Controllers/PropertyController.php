@@ -2119,7 +2119,7 @@ class PropertyController extends Controller
         if (! empty($data['agent_id'])) {
             $responsible = User::query()->lockForUpdate()->findOrFail($data['agent_id']);
             $groupId = $data['branch_group_id'] ?? ($records['property'] ?? null)?->getRawOriginal('branch_group_id') ?? $responsible->branch_group_id;
-            if ($groupId && in_array($responsible->role?->slug, ['agent', 'mop'], true)) {
+            if ($groupId && $responsible->hasPermission('users.subject.assignment_group_required')) {
                 abort_unless((int) $responsible->branch_group_id === (int) $groupId, 422, 'RESPONSIBLE_GROUP_MISMATCH');
                 abort_unless($responsible->status === User::STATUS_ACTIVE && ! $responsible->isDeletedAccount(), 422, 'INVALID_TRANSFER_TARGET');
             }

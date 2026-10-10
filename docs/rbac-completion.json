@@ -195,6 +195,13 @@
           "logs": [
             "/tmp/aura-rbac-group-subjects.log"
           ]
+        },
+        {
+          "change": "users.subject.assignment_group_required переносит зависимость проверки группы и активности ответственного объекта/новой задачи от agent/mop; users.subject.deletion_requires_transfer переносит требование передачи активных классифицированных записей перед самостоятельным удалением аккаунта. Повторное открытие задачи по-прежнему требует совпадающую группу независимо от настроек роли.",
+          "verification": "99 тестов / 2849 проверок прошли. Пользовательская роль: включение и отзыв проверки, разрешение своей группы и запрет чужой в обоих путях, обязательная проверка повторного открытия, отказ удаления без потери аккаунта/токена, удаление после снятия требования без удаления рабочих записей.",
+          "logs": [
+            "/tmp/aura-rbac-assignment-policies.log"
+          ]
         }
       ],
       "remaining_checks": [
@@ -402,18 +409,6 @@
       "app/Http/Controllers/AttendanceWebController.php"
     ],
     "pending_followups": [
-      {
-        "file": "app/Services/GroupAccess/TaskGroupOwnership.php",
-        "reason": "Проверка группы ответственного при новой задаче зависит от agent/mop; согласовать с целостностью и настройками."
-      },
-      {
-        "file": "app/Http/Controllers/AccountDeletionController.php",
-        "reason": "Прямая проверка agent/mop требует классификации."
-      },
-      {
-        "file": "app/Http/Controllers/PropertyController.php",
-        "reason": "Проверка группы ответственного зависит от agent/mop."
-      },
       {
         "file": "app/Services/PropertyReportStaff.php",
         "reason": "Колонки РОП/МОП отражают должности и комиссии; классифицировать как бизнес-данные после проверки потребителей."
