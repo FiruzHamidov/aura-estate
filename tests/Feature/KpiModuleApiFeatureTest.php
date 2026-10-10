@@ -1599,6 +1599,49 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->getJson('/api/kpi/plans/users')->assertForbidden();
     }
 
+    public function test_report_user_picker_uses_report_permissions_scopes_and_target_eligibility(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $branch = Branch::create(['name' => 'Main']);
+        $foreignBranch = Branch::create(['name' => 'Other']);
+        $group = BranchGroup::create(['name' => 'One', 'branch_id' => $branch->id]);
+        $secondGroup = BranchGroup::create(['name' => 'Two', 'branch_id' => $branch->id]);
+        $otherGroup = BranchGroup::create(['name' => 'Other', 'branch_id' => $foreignBranch->id]);
+        $managerRole = Role::create(['name' => 'Reader', 'slug' => 'custom_report_picker']);
+        $role = Role::create(['name' => 'Custom employee', 'slug' => 'custom_plan_employee']);
+        $rights = ['kpi.subject.report_selection', 'kpi.subject.assigned_groups', 'kpi.subject.period_reports'];
+        $role->forceFill(['permissions' => $rights])->save();
+        $actor = User::create(['name' => 'Reader', 'phone' => '900096001', 'role_id' => $managerRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $ids = [];
+        foreach ([$group, $secondGroup, $otherGroup] as $index => $team) {
+            $ids[] = User::create(['name' => 'Employee '.$index, 'phone' => '90009601'.$index, 'role_id' => $role->id, 'branch_id' => $team->branch_id, 'branch_group_id' => $team->id])->id;
+        }
+        User::create(['name' => 'Inactive', 'phone' => '900096020', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'inactive']);
+        foreach (['all' => $ids, 'branch' => array_slice($ids, 0, 2), 'group' => [$ids[0]], 'own' => []] as $scope => $expected) {
+            $managerRole->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.'.$scope]])->save();
+            Sanctum::actingAs($actor->fresh());
+            $response = $this->getJson('/api/kpi/reports/users')->assertOk();
+            $this->assertEqualsCanonicalizing($expected, array_column($response->json('data'), 'id'));
+            $response->assertJsonMissingPath('data.0.phone')->assertJsonMissingPath('data.0.email');
+        }
+        $managerRole->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.own', 'kpi.subject.report_selection']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/reports/users')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $actor->id);
+        $managerRole->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/weekly?year=2026&week=19&v=2&role=custom_plan_employee')
+            ->assertOk()->assertJsonPath('meta.pagination.total', 3)->assertJsonPath('data.0.role', 'custom_plan_employee');
+        $managerRole->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.all', 'data.scope.assigned_groups']])->save();
+        $actor->supervisedGroups()->attach($group->id);
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/reports/users')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $ids[0]);
+        $role->forceFill(['permissions' => ['kpi.subject.report_selection']])->save();
+        $this->getJson('/api/kpi/reports/users')->assertOk()->assertJsonCount(0, 'data');
+        $managerRole->forceFill(['permissions' => ['kpi.reports.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/reports/users')->assertForbidden();
+    }
+
     public function test_custom_template_role_catalog_and_group_permission_can_be_revoked(): void
     {
         Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());

@@ -450,6 +450,13 @@ class KpiModuleController extends Controller
         return response()->json($result);
     }
 
+    public function reportUsers(Request $request)
+    {
+        $data = $request->validate(['page' => 'nullable|integer|min:1', 'per_page' => 'nullable|integer|min:1|max:200']);
+        return response()->json($this->service->reportUsersQuery($this->authUser())
+            ->orderBy('users.name')->orderBy('users.id')->paginate($data['per_page'] ?? 100));
+    }
+
     public function planUsers(Request $request)
     {
         $actor = $this->authUser();
@@ -936,7 +943,7 @@ class KpiModuleController extends Controller
             'include_breakdown' => 'nullable|boolean',
             'include_inactive' => 'nullable|boolean',
             'period_type' => ['nullable', Rule::in(['day', 'week', 'month'])],
-            'role' => ['nullable', Rule::in(['admin', 'superadmin', 'owner', 'branch_director', 'rop', 'mop', 'agent', 'intern'])],
+            'role' => ['nullable', 'string', 'max:64'],
             'assignee_id' => 'nullable|integer|exists:users,id',
             'user_id' => 'nullable|integer|exists:users,id',
             'mop_id' => 'nullable|integer|exists:users,id',
@@ -951,9 +958,6 @@ class KpiModuleController extends Controller
         ]));
 
         if ((bool) ($validated['include_inactive'] ?? false)) {
-            $role = (string) ($this->authUser()->role?->slug ?? '');
-            $allowed = ['admin', 'superadmin', 'owner', 'rop', 'branch_director'];
-
             if (! $this->authUser()->hasPermission('kpi.inactive.view')) {
                 abort(response()->json([
                     'code' => 'KPI_FORBIDDEN_INCLUDE_INACTIVE',

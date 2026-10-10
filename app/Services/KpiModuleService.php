@@ -1902,6 +1902,16 @@ class KpiModuleService
             ->with(['role:id,slug', 'branch:id,name', 'branchGroup:id,branch_id,name']);
     }
 
+    public function reportUsersQuery(User $actor): Builder
+    {
+        $query = User::query()->select(['users.id', 'users.name', 'users.role_id', 'users.branch_id', 'users.branch_group_id', 'users.status'])
+            ->with(['role:id,name,slug', 'branch:id,name', 'branchGroup:id,branch_id,name'])
+            ->where('users.status', User::STATUS_ACTIVE)
+            ->whereHas('role', fn (Builder $roles) => $roles->withPermission('kpi.subject.report_selection'));
+        $this->applyReadScope($query, $actor, 'users');
+        return $query;
+    }
+
     private function weeklyUsersScopeQuery(User $authUser, array $filters): Builder
     {
         $authUser->loadMissing('role');
