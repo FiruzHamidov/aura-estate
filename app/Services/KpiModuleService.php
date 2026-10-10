@@ -669,10 +669,14 @@ class KpiModuleService
 
     public function updateTelegramConfig(array $payload): KpiTelegramReportConfig
     {
-        $config = $this->telegramConfig();
-        $config->fill($payload)->save();
+        return DB::transaction(function () use ($payload) {
+            [$actor] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(auth()->user(), null, null, null);
+            abort_unless($actor->hasPermission('kpi.operations.manage'), 403, 'KPI_FORBIDDEN_ROLE_ACTION');
+            $config = $this->telegramConfig();
+            $config->fill($payload)->save();
 
-        return $config->fresh();
+            return $config->fresh();
+        });
     }
 
     public function periodContract(User $authUser, Carbon $from, Carbon $to, array $filters): Collection

@@ -351,6 +351,34 @@ class KpiModuleApiFeatureTest extends TestCase
 
     }
 
+    public function test_operational_kpi_permissions_separate_read_status_and_schedule_changes(): void
+    {
+        $role = Role::create(['name' => 'Observer', 'slug' => 'custom_kpi_observer']);
+        $actor = User::create(['name' => 'Observer', 'phone' => '919903001', 'role_id' => $role->id]);
+        $alert = KpiEarlyRiskAlert::create(['user_id' => $actor->id, 'alert_date' => '2026-05-04', 'status' => 'open', 'message' => 'Risk']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $paths = ['kpi.integrations.view' => '/api/kpi/integrations/status', 'kpi.telegram.view' => '/api/kpi/telegram-reports/config',
+            'kpi.quality.view' => '/api/kpi/quality/issues', 'kpi.alerts.view' => '/api/kpi/early-risk-alerts', 'kpi.acceptance.view' => '/api/kpi/acceptance-runs'];
+        foreach ($paths as $permission => $path) {
+            $role->forceFill(['permissions' => [$permission]])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->getJson($path)->assertOk();
+            foreach ($paths as $other => $deniedPath) if ($other !== $permission) $this->getJson($deniedPath)->assertForbidden();
+            $this->patchJson('/api/kpi/early-risk-alerts/status', ['alert_id' => $alert->id, 'status' => 'closed'])->assertForbidden();
+            $this->patchJson('/api/kpi/telegram-reports/config', ['daily_enabled' => true])->assertForbidden();
+        }
+        $role->forceFill(['permissions' => ['kpi.alerts.update']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson('/api/kpi/ops/early-risk-alerts/status', ['alert_id' => $alert->id, 'status' => 'acknowledged'])->assertOk();
+        $this->getJson('/api/kpi/ops/early-risk-alerts')->assertForbidden();
+        $role->forceFill(['permissions' => ['kpi.operations.manage']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson('/api/kpi/ops/telegram/config', ['daily_enabled' => true])->assertOk();
+        $this->getJson('/api/kpi/ops/telegram/config')->assertForbidden();
+        $this->patchJson('/api/kpi/early-risk-alerts/status', ['alert_id' => $alert->id, 'status' => 'closed'])->assertForbidden();
+        $this->assertSame('acknowledged', $alert->fresh()->status);
+    }
+
     public function test_custom_role_can_grant_rop_plan_actions_independently(): void
     {
         $role = Role::create(['name' => 'Planner', 'slug' => 'custom_rop_planner']);

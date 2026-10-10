@@ -651,11 +651,13 @@ class KpiModuleController extends Controller
 
     public function integrationsStatus()
     {
+        $this->ensureManageAccess($this->authUser(), 'kpi.integrations.view');
         return response()->json(['data' => KpiIntegrationStatus::query()->orderBy('id')->get()]);
     }
 
     public function telegramConfig()
     {
+        $this->ensureManageAccess($this->authUser(), 'kpi.telegram.view');
         return response()->json(['data' => $this->service->telegramConfig()]);
     }
 
@@ -677,6 +679,7 @@ class KpiModuleController extends Controller
 
     public function qualityIssues(Request $request)
     {
+        $this->ensureManageAccess($this->authUser(), 'kpi.quality.view');
         $validated = $request->validate(['date_from' => 'nullable|date', 'date_to' => 'nullable|date']);
         $query = KpiQualityIssue::query()->orderByDesc('detected_at');
         $query->forRop($this->authUser(), $request->filled('branch_group_id') ? $request->integer('branch_group_id') : null);
@@ -703,6 +706,7 @@ class KpiModuleController extends Controller
 
     public function earlyRiskAlerts(Request $request)
     {
+        $this->ensureManageAccess($this->authUser(), 'kpi.alerts.view');
         $validated = $request->validate(['date' => 'nullable|date', 'branch_group_id' => 'nullable|integer|exists:branch_groups,id']);
         $query = KpiEarlyRiskAlert::query()->orderByDesc('id');
         if ($this->authUser()->hasRole('rop')) {
@@ -737,6 +741,7 @@ class KpiModuleController extends Controller
             [$actor, $alert] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
                 $this->authUser(), $alert, null, null
             );
+            $this->ensureManageAccess($actor, 'kpi.alerts.update');
             app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $alert);
             $alert->update(['status' => $validated['status']]);
         });
@@ -760,6 +765,7 @@ class KpiModuleController extends Controller
 
     public function acceptanceRuns(Request $request)
     {
+        $this->ensureManageAccess($this->authUser(), 'kpi.acceptance.view');
         $validated = $request->validate(['branch_group_id' => 'nullable|integer|exists:branch_groups,id']);
         $query = KpiAcceptanceRun::query()->orderByDesc('id');
         if ($this->authUser()->hasRole('rop')) {
