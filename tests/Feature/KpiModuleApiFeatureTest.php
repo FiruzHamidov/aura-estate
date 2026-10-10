@@ -240,6 +240,17 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->getJson('/api/kpi/plans/'.$plans['a']->id)->assertOk()->assertJsonPath('data.0.id', $plans['a']->id);
         foreach (['c', 'null'] as $key) $this->getJson('/api/kpi/plans/'.$plans[$key]->id)->assertNotFound();
         $this->getJson('/api/kpi/plans/common/'.$branchPlan->id)->assertNotFound();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $defaults = $ropRole->fresh()->permissions;
+        foreach (['kpi.plans.user.view', 'kpi.plans.scope.branch'] as $revoked) {
+            $ropRole->forceFill(['permissions' => array_values(array_diff($defaults, [$revoked]))])->save();
+            Sanctum::actingAs($rop->fresh());
+            $this->getJson('/api/kpi/plans/'.$plans['a']->id)->assertForbidden();
+        }
+        $ropRole->forceFill(['permissions' => $defaults])->save();
+        Sanctum::actingAs($rop->fresh());
+        $this->getJson('/api/kpi/plans/'.$plans['a']->id)->assertOk();
+
         \DB::table('users')->where('id', $agent->id)->update(['branch_group_id' => $a->id]);
         $this->getJson('/api/kpi/plans?user_id='.$agent->id.'&date=2026-05-02')->assertOk()
             ->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $plans['a']->id);

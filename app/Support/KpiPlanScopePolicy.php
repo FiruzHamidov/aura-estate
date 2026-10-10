@@ -86,6 +86,17 @@ class KpiPlanScopePolicy
         $this->ensureCanManageUserPlan($actor, $target, true);
     }
 
+    public function ensureCanReadHistoricalUserPlan(User $actor, array $plan): void
+    {
+        if (! $actor->hasPermission('kpi.plans.user.view')) $this->denyScope();
+        app(RopGroupAccess::class)->ensureGroup($actor, $plan['branch_group_id'] ?? null);
+        $allowed = $actor->hasPermission('kpi.plans.scope.all')
+            || ($actor->hasPermission('kpi.plans.scope.branch') && $actor->branch_id && (int) $actor->branch_id === (int) ($plan['branch_id'] ?? 0))
+            || ($actor->hasPermission('kpi.plans.scope.group') && $actor->branch_group_id && (int) $actor->branch_group_id === (int) ($plan['branch_group_id'] ?? 0))
+            || ($actor->hasPermission('kpi.plans.scope.own') && (int) $actor->id === (int) ($plan['user_id'] ?? 0));
+        if (! $allowed) $this->denyScope();
+    }
+
     public function ensureCanManageUserPlan(User $actor, User $target, bool $allowSelf = false): void
     {
         if (! $actor->hasPermission($allowSelf ? 'kpi.plans.user.view' : 'kpi.plans.user.manage')) $this->denyScope();

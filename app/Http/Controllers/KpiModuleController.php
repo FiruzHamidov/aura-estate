@@ -340,7 +340,9 @@ class KpiModuleController extends Controller
         }
 
         // planById scopes persisted plan ownership for ROP, including transferred employees.
-        if (! $this->authUser()->hasRole('rop')) {
+        if ($this->authUser()->hasRole('rop')) {
+            $this->kpiPlanScopePolicy->ensureCanReadHistoricalUserPlan($this->authUser(), $plan);
+        } else {
             $target = User::query()->findOrFail((int) $plan['user_id']);
             $this->kpiPlanScopePolicy->ensureCanReadUserPlan($this->authUser(), $target);
         }
