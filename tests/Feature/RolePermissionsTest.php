@@ -48,7 +48,7 @@ class RolePermissionsTest extends TestCase
     public function test_creator_form_policy_defaults_preserve_agent_and_mop_behavior(): void
     {
         foreach (Role::all() as $role) {
-            foreach (['leads.site.prefill_creator', 'deals.site.prefill_creator', 'bookings.site.lock_creator'] as $key) {
+            foreach (['leads.site.prefill_creator', 'deals.site.prefill_creator', 'bookings.site.lock_creator', 'properties.site.client_prefill_self'] as $key) {
                 $this->assertSame(in_array($role->slug, ['agent', 'mop'], true), $role->hasPermission($key), $role->slug.' '.$key);
             }
         }

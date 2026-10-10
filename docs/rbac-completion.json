@@ -390,6 +390,10 @@
         {
           "change": "Общий ProfileAccessGuard пропускает новые роли в создание/редактирование объекта и redirect-адреса KPI/карты по соответствующим правам; конкретные страницы сохраняют проверки объекта. Сообщение отказа для настроенных ролей больше не называет сотрудника клиентом.",
           "verification": "65 Node RBAC тестов, 4 браузерных grant/revoke сценария настоящего ProfileAccessGuard, TypeScript. /tmp/aura-rbac-route-{node,browser,tsc}.log."
+        },
+        {
+          "change": "Закрыты три записанных followup: точный фильтр роли массовых планов, настройка ответственного клиента из объекта, история объекта без должностного fallback для настроенных ролей.",
+          "verification": "42 серверных теста / 2474 assertions; 67 Node RBAC тестов; 6 браузерных тестов KPI и карточки СБ на desktop/mobile; TypeScript. /tmp/aura-rbac-last-three-{backend,node,browser,tsc}.log."
         }
       ],
       "remaining_checks": [
@@ -564,7 +568,7 @@
         "decision": "INTERNAL_ROLES and MARKETING_WRITE_ROLES no longer authorize actions; isInternal/canManagePromotion/canSetBusinessPriority use permissions. MARKETING_WRITE_ROLES has no application callsites."
       }
     ],
-    "audit_note": "Backend literal inventory reviewed; CRM report subject whitelist found and migrated. Frontend current inventory /tmp/aura-rbac-final-front-role-inventory.txt contains 62 files; three concrete followups recorded. Account identities, relationship names and metric schemas must be consolidated before completion."
+    "audit_note": "Current search /tmp/aura-rbac-final-server-checks.txt contains 72 role-query/comparison references: permission predicates, request-selected exact filters, identity checks, report participant columns and legacy unused helper. No active hasRole calls remain (User method definition and commented old code only). Remaining profile common-page admission identified separately; final broad checks still required."
   },
   "execution_rules": [
     "Работать по одному открытому пункту, указывать конкретные завершённые подпункты и доказательства.",
@@ -689,20 +693,24 @@
       {
         "file": "ui-components/crm/leads/LeadForm.tsx, ui-components/crm/deals/DealForm.tsx and app/profile/my-booking/page.tsx",
         "classification": "Migrated agent/mop creator prefill and calendar picker lock to three independent site policies preserving prior defaults; server creator defaults and assignment authorization remain independent. Calendar responds to newly applied lock; CRM forms reset when prefill changes."
+      },
+      {
+        "file": "app/profile/kpi/plans/page.tsx",
+        "classification": "Bulk rows now match exact selected role, same as backend scopeRoles validation. Browser verifies separate ROP/director rows."
+      },
+      {
+        "file": "app/profile/edit-post/[id]/page.tsx",
+        "classification": "Client default responsible uses properties.site.client_prefill_self; defaults agent/mop preserved, otherwise property creator fallback."
+      },
+      {
+        "file": "app/apartment/[slug]/_components/GalleryWrapper.tsx",
+        "classification": "History uses own permission and authoritative server capability; explicit-role fallback only canEditProperty, never manager/operator job. Public-only page cannot show history. Legacy fallback preserved only without explicit permission array."
       }
     ],
     "pending_followups": [
       {
-        "file": "app/profile/kpi/plans/page.tsx:219",
-        "issue": "bulkRoles still aliases rop to branch_director although backend bulk validation requires exact selected role. Resolve and test with distinct configured roles."
-      },
-      {
-        "file": "app/profile/edit-post/[id]/page.tsx:298",
-        "issue": "Default client responsible still uses isAgentLikeRole to select actor vs property creator; migrate preserving old defaults."
-      },
-      {
-        "file": "app/apartment/[slug]/_components/GalleryWrapper.tsx:366",
-        "issue": "History legacy fallback still checks manager/operator. Verify every modern payload supplies capabilities; avoid hardcoded-role fallback for explicit permissions."
+        "file": "utils/rbac.ts::canAccessClientProfilePath and app/profile/_components/profile-menu.tsx",
+        "issue": "All existing profile page paths compared. Common chats/favorites/wallet still reach legacy accountant/security/external_agent role whitelist; add explicit configurable site admission preserving existing defaults and matching menu visibility."
       }
     ]
   },
