@@ -46,7 +46,7 @@ final class AttendanceAccessService
         $query = $this->participants->query();
         if ($viewer->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id');
-            $query->whereHas('role', fn ($roles) => $roles->whereIn('slug', ['intern', 'agent', 'mop']));
+            $query->whereHas('role', fn ($roles) => $roles->withPermission('attendance.subject.mapping_assigned_groups'));
         }
         return $query;
     }
@@ -133,9 +133,8 @@ final class AttendanceAccessService
     {
         $this->assertCanViewModule($viewer);
         // Apply the same employee scope to the table, totals, reports and day details.
-        $excludedRoles = array_unique(['client', 'external_agent', ...(array) config('attendance.excluded_table_user_roles', [])]);
         $query = $this->participants->query()
-            ->whereHas('role', fn (Builder $roles) => $roles->whereNotIn('slug', $excludedRoles))
+            ->whereHas('role', fn (Builder $roles) => $roles->withPermission('attendance.subject.exclude_table', false))
             ->with(['role', 'branch', 'branchGroup']);
 
         if ($viewer->hasPermission('attendance.all_branches.view')) {
@@ -147,7 +146,7 @@ final class AttendanceAccessService
         }
         if ($viewer->usesAssignedGroupScope()) {
             return app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id')
-                ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop']));
+                ->whereHas('role', fn (Builder $roles) => $roles->withPermission('attendance.subject.assigned_groups'));
         }
         if ($viewer->hasPermission('attendance.scope.branch')) {
             return $viewer->branch_id === null

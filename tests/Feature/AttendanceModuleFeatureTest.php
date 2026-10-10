@@ -1962,6 +1962,64 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->getJson($url)->assertOk()->assertJsonCount(1, 'data');
     }
 
+    public function test_assigned_group_attendance_subject_policies_are_independent_and_revocable(): void
+    {
+        $c = $this->context();
+        $role = Role::create(['name' => 'Custom attendance employee', 'slug' => 'custom_attendance_employee']);
+        $c['agent']->forceFill(['role_id' => $role->id])->save();
+        $c['otherAgent']->forceFill(['role_id' => $role->id])->save();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $access = app(\App\Services\Attendance\AttendanceAccessService::class);
+        $viewer = $c['rop']->fresh();
+        $url = '/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&view=users';
+        foreach ([[], ['attendance.subject.mapping_assigned_groups'], ['attendance.subject.assigned_groups'],
+            ['attendance.subject.mapping_assigned_groups', 'attendance.subject.assigned_groups'],
+            ['attendance.subject.assigned_groups', 'attendance.subject.exclude_table'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            $mapping = $access->mappingUsersQuery($viewer)->pluck('users.id')->all();
+            $visible = $access->visibleUsersQuery($viewer)->pluck('users.id')->all();
+            $this->assertSame(in_array('attendance.subject.mapping_assigned_groups', $rights), in_array($c['agent']->id, $mapping));
+            $expected = in_array('attendance.subject.assigned_groups', $rights) && ! in_array('attendance.subject.exclude_table', $rights);
+            $this->assertSame($expected, in_array($c['agent']->id, $visible));
+            $this->assertNotContains($c['otherAgent']->id, $mapping);
+            $this->assertNotContains($c['otherAgent']->id, $visible);
+            Sanctum::actingAs($viewer);
+            $response = $this->getJson($url)->assertOk();
+            $this->assertSame($expected, in_array($c['agent']->id, collect($response->json('data'))->pluck('user.id')->all()));
+        }
+        // An exclusion also applies to an observer with access to every branch.
+        $c['hr']->role->forceFill(['permissions' => ['attendance.all_branches.view']])->save();
+        foreach ([['attendance.subject.exclude_table'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            $this->assertSame($rights === [], $access->visibleUsersQuery($c['hr']->fresh())->whereKey($c['agent']->id)->exists());
+        }
+        $this->assertNotNull($c['agent']->fresh());
+    }
+
+    public function test_custom_attendance_history_uses_saved_role_and_preserves_group_boundaries(): void
+    {
+        $c = $this->context();
+        (require database_path('migrations/2026_09_09_010000_add_attendance_historical_context.php'))->up();
+        $role = Role::create(['name' => 'Historical employee', 'slug' => 'historical_attendance_employee']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $summary = AttendanceDailySummary::create(['user_id' => $c['otherAgent']->id,
+            'branch_group_id' => $c['group']->id, 'role_slug' => $role->slug,
+            'work_date' => '2026-08-17', 'status' => 'present']);
+        $foreign = AttendanceDailySummary::create(['user_id' => $c['agent']->id,
+            'branch_group_id' => $c['otherAgent']->branch_group_id, 'role_slug' => $role->slug,
+            'work_date' => '2026-08-17', 'status' => 'present']);
+        $scope = app(\App\Services\Attendance\AttendanceGroupScope::class);
+        foreach ([[], ['attendance.subject.assigned_groups'],
+            ['attendance.subject.assigned_groups', 'attendance.subject.exclude_table'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            $ids = $scope->apply(AttendanceDailySummary::query(), $c['rop']->fresh())->pluck('id')->all();
+            $this->assertSame($rights === ['attendance.subject.assigned_groups'], in_array($summary->id, $ids));
+            $this->assertNotContains($foreign->id, $ids);
+        }
+        $this->assertSame($role->slug, $summary->fresh()->role_slug);
+        $this->assertSame(2, AttendanceDailySummary::count());
+    }
+
     private function context(): array
     {
         $branchA = Branch::firstOrCreate(['name' => 'Branch A']);
