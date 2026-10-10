@@ -141,6 +141,13 @@ class EnsureUserIsNotClient
                 default => [],
             };
         }
+        if ($controller === \App\Http\Controllers\PropertyLiquidityController::class) {
+            return match ($method) {
+                'feed', 'report', 'history' => ['liquidity.view'],
+                'updateBusinessPriority' => ['liquidity.priority.manage'],
+                default => [],
+            };
+        }
         if ($controller === \App\Http\Controllers\PropertyPhotoController::class) {
             return in_array($method, ['store', 'destroy', 'reorder'], true) ? ['properties.edit'] : [];
         }

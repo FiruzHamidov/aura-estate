@@ -28,7 +28,7 @@ class PropertyLiquidityController extends Controller
         /** @var User|null $user */
         $user = auth('sanctum')->user();
 
-        if (! $user || $user->hasRole('client') || ! $this->access->isInternal($user)) {
+        if (! $user || ! $this->access->isInternal($user)) {
             $this->moderation->publicOrFail($property, null);
             return response()->json(['data' => [
                 'public_price_badge' => $property->publicPriceBadge(),

@@ -27,6 +27,68 @@ class PropertyLiquidityFeatureTest extends TestCase
         User::findOrFail(5)->supervisedGroups()->attach(1);
     }
 
+    public function test_liquidity_grants_and_scope_work_for_previously_blocked_roles_and_can_be_revoked(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $own = $this->createTarget(90_000, 3);
+        $other = $this->createTarget(88_000, 2);
+        app(PropertyLiquidityCalculator::class)->calculate($own);
+        app(PropertyLiquidityCalculator::class)->calculate($other);
+        foreach (['client', 'external_agent', 'accountant', 'custom_liquidity'] as $slug) {
+            DB::table('roles')->where('id', 2)->update(['slug' => $slug, 'permissions' => json_encode([])]);
+            Sanctum::actingAs(User::query()->findOrFail(3));
+            $this->getJson('/api/properties/liquidity-feed')->assertForbidden();
+            DB::table('roles')->where('id', 2)->update(['permissions' => json_encode(['liquidity.view', 'liquidity.scope.own'])]);
+            Sanctum::actingAs(User::query()->findOrFail(3));
+            $this->getJson('/api/properties/liquidity-feed')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $own->id);
+            $this->getJson("/api/properties/{$own->id}/liquidity")->assertOk()->assertJsonMissingPath('data.public_price_badge');
+            $this->getJson("/api/properties/{$other->id}/liquidity")->assertForbidden();
+            $this->getJson("/api/properties/{$own->id}/liquidity/history")->assertOk();
+            $this->getJson('/api/reports/properties/liquidity')->assertOk()->assertJsonPath('data.summary.total', 1);
+            $priority = ['enabled' => true, 'comment' => 'Проверка права приоритета'];
+            $this->patchJson("/api/properties/{$own->id}/liquidity/business-priority", $priority)->assertForbidden();
+            DB::table('roles')->where('id', 2)->update(['permissions' => json_encode(['liquidity.priority.manage', 'liquidity.scope.own'])]);
+            Sanctum::actingAs(User::query()->findOrFail(3));
+            $this->patchJson("/api/properties/{$own->id}/liquidity/business-priority", $priority)->assertOk();
+            $this->patchJson("/api/properties/{$other->id}/liquidity/business-priority", $priority)->assertForbidden();
+            DB::table('roles')->where('id', 2)->update(['permissions' => json_encode(['liquidity.view'])]);
+            Sanctum::actingAs(User::query()->findOrFail(3));
+            $this->getJson('/api/properties/liquidity-feed')->assertOk()->assertJsonCount(0, 'data');
+            $this->getJson("/api/properties/{$own->id}/liquidity/history")->assertForbidden();
+            DB::table('roles')->where('id', 2)->update(['permissions' => json_encode([])]);
+            Sanctum::actingAs(User::query()->findOrFail(3));
+            $this->getJson('/api/reports/properties/liquidity')->assertForbidden();
+            $this->getJson("/api/properties/{$own->id}/liquidity")->assertOk()->assertJsonMissingPath('data.price_position');
+        }
+    }
+
+    public function test_liquidity_scopes_are_configurable_without_role_names(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $own = $this->createTarget(90_000, 1);
+        $foreign = $this->createTarget(88_000, 2);
+        DB::table('properties')->where('id', $own->id)->update(['branch_id' => 1, 'branch_group_id' => 1]);
+        DB::table('properties')->where('id', $foreign->id)->update(['branch_id' => 2, 'branch_group_id' => 2]);
+        DB::table('roles')->where('id', 1)->update(['slug' => 'custom_scopes']);
+        $scopeIds = function (string $scope) use ($own, $foreign) {
+            DB::table('roles')->where('id', 1)->update(['permissions' => json_encode([$scope])]);
+            return app(\App\Services\PropertyLiquidity\PropertyLiquidityAccess::class)
+                ->scope(Property::query()->whereIn('id', [$own->id, $foreign->id]), User::findOrFail(1))->pluck('id')->all();
+        };
+        $this->assertEqualsCanonicalizing([$own->id, $foreign->id], $scopeIds('liquidity.scope.all'));
+        foreach (['own', 'group', 'branch'] as $scope) $this->assertSame([$own->id], $scopeIds('liquidity.scope.'.$scope));
+        DB::table('users')->where('id', 1)->update(['branch_id' => null, 'branch_group_id' => null]);
+        foreach (['group', 'branch'] as $scope) $this->assertSame([], $scopeIds('liquidity.scope.'.$scope));
+        $this->assertSame([$own->id], $scopeIds('liquidity.scope.own'));
+        $catalog = app(\App\Services\Rbac\PermissionCatalog::class);
+        foreach (['admin' => 'all', 'superadmin' => 'all', 'marketing' => 'all', 'reels_manager' => 'all', 'rop' => 'all', 'agent' => 'own', 'intern' => 'own', 'mop' => 'group', 'branch_director' => 'branch'] as $role => $scope) {
+            $this->assertSame(['liquidity.scope.'.$scope], array_values(array_filter($catalog->defaults($role), fn ($key) => str_starts_with($key, 'liquidity.scope.'))));
+        }
+        foreach (['client', 'external_agent', 'accountant', 'custom_scopes'] as $role) {
+            $this->assertSame([], array_values(array_filter($catalog->defaults($role), fn ($key) => str_starts_with($key, 'liquidity.scope.'))));
+        }
+    }
+
     public function test_calculator_marks_competitive_apartment_below_market_and_exposes_only_public_badge_to_guest(): void
     {
         $property = $this->createTarget(90_000, 1);
