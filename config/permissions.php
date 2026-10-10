@@ -1086,4 +1086,7 @@ foreach (['clients' => ['клиента', ['agent', 'intern']], 'client_needs' =
     ];
 }
 
+$permissions['messaging.support.site.create'] = ['group' => 'Поддержка', 'name' => 'Кнопка обращения в поддержку в чатах', 'description' => 'Показывает кнопку «Написать в поддержку» на странице чатов. По умолчанию у клиентов. Это настройка интерфейса: другие точки обращения в поддержку и участие в существующей переписке не меняются.', 'roles' => ['client']];
+$permissions['messaging.support.site.assignment_labels'] = ['group' => 'Поддержка', 'name' => 'Подписи ответственных в списке обращений', 'description' => 'Показывает заявителя, ответственного сотрудника и ожидание ответа в списке доступных обращений. По умолчанию у всех стандартных ролей, кроме клиента. Не открывает чужие диалоги и не разрешает переназначение.', 'roles' => array_values(array_diff([...array_column((require __DIR__.'/roles.php')['system'], 'slug'), 'owner'], ['client']))];
+
 return $permissions;

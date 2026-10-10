@@ -358,6 +358,10 @@
         {
           "change": "Формы клиента и потребности: добавление текущего пользователя сверх серверного списка ответственных управляется clients.responsible_picker.exclude_self и client_needs.responsible_picker.exclude_self. Defaults сохраняют agent/intern и agent соответственно; серверные кандидаты, филиалы, группы и права назначения не меняются. Русские описания уточняют область настройки.",
           "verification": "38 серверных тестов / 2279 проверок, 2 Node-теста, TypeScript и 2 браузерных сценария реальных форм прошли. Проверены независимые настройки, legacy role strings, пользовательская роль и переключение с сохранением другого кандидата."
+        },
+        {
+          "change": "Страница чатов: кнопка обращения и подписи заявителя/ответственного управляются двумя независимыми messaging.support.site.* настройками. Миграция сохраняет клиентское оформление прежних пользовательских ролей; новые роли не получают его автоматически. Доступ к переписке не расширяется.",
+          "verification": "39 серверных тестов / 2320 проверок, TypeScript и браузерный сценарий страницы чатов прошли: custom role получает элементы, отзыв скрывает их, доступный диалог остаётся."
         }
       ],
       "remaining_checks": [
@@ -565,6 +569,36 @@
       {
         "file": "ui-components/clients/ClientPicker.tsx::quickCreateLabel",
         "classification": "presentation wording only: intern uses possessive label; no authorization in this branch"
+      },
+      {
+        "file": "app/profile/chats/page.tsx",
+        "classification": "migrated support button and assignment labels; participant access unchanged"
+      },
+      {
+        "file": "services/messaging/presentation.ts::getSupportRequester",
+        "classification": "requester display fallback only when explicit requester/creator unavailable; does not select accessible conversations"
+      },
+      {
+        "file": "services/login/post-auth.ts",
+        "classification": "external-agent default landing preference; path restriction executes only without explicit permissions"
+      },
+      {
+        "file": "services/crm/helpers.ts",
+        "classification": "manager/operator metric schemas are report content, not actor authorization"
+      },
+      {
+        "file": "app/profile/_components/ProfileAccessGuard.tsx",
+        "classification": "role-specific denial explanation only; actual access is canAccessClientProfilePath"
+      },
+      {
+        "file": "app/_components/kpi/MonthlyKpiStickyBanner.tsx",
+        "classification": "explicit roles omit job-based report parameter; legacy resolver only fallback; permission and access-context gated query"
+      }
+    ],
+    "pending_followups": [
+      {
+        "file": "app/profile/kpi/operations/page.tsx",
+        "finding": "Still passes resolveKpiRole(profile) as report role even with explicit permissions; unlike MonthlyKpiStickyBanner. Inspect server interpretation and query cache context before classifying or fixing."
       }
     ]
   },

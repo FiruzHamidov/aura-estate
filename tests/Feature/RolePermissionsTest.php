@@ -36,6 +36,18 @@ class RolePermissionsTest extends TestCase
         return $user;
     }
 
+    public function test_chat_presentation_defaults_and_custom_role_migration(): void
+    {
+        foreach (Role::all() as $role) {
+            $this->assertSame($role->slug === 'client', $role->hasPermission('messaging.support.site.create'), $role->slug);
+            $this->assertSame($role->slug !== 'client', $role->hasPermission('messaging.support.site.assignment_labels'), $role->slug);
+        }
+        $catalog = app(PermissionCatalog::class);
+        $this->assertContains('messaging.support.site.create', $catalog->migrationDefaults('custom_chat'));
+        $this->assertNotContains('messaging.support.site.assignment_labels', $catalog->migrationDefaults('custom_chat'));
+        $this->assertNotContains('messaging.support.site.create', $catalog->defaults('custom_chat'));
+    }
+
     public function test_responsible_picker_defaults_preserve_existing_role_behavior(): void
     {
         foreach (Role::all() as $role) {
