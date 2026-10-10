@@ -97,7 +97,7 @@ class LocationTrackingPolicyService
             'min_distance_m' => (int) $settings->min_distance_m,
             'require_background_permission' => $enabled && (bool) $settings->require_background_permission,
             'policy_version' => (int) $settings->policy_version,
-            'tracked_roles' => config('location_tracking.tracked_roles', ['agent', 'mop']),
+            'tracked_roles' => \App\Models\Role::query()->withPermission('locations.transmit')->orderBy('slug')->pluck('slug')->all(),
         ];
     }
 }

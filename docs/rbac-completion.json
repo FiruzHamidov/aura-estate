@@ -374,6 +374,10 @@
         {
           "change": "Операции KPI используют существующую настраиваемую роль дашборда для дневной/недельной/сводной выгрузки, ждут загрузки настройки и показывают её ошибку. Семь служебных запросов разделяют кэш по контексту доступа; смена пользователя/прав/организации сбрасывает черновики страницы. Описания фильтра дополнены областью операций.",
           "verification": "TypeScript и браузерная проверка реальной страницы прошли: actor slug agent отправляет настроенный mop, после смены филиала custom_target; старое качество данных скрыто до ответа нового филиала, отзыв прав скрывает данные."
+        },
+        {
+          "change": "Карта сотрудников: добавлено locations.site.view с прежними defaults и связью с меню/общим guard. Фильтры API принимают существующие пользовательские роли; интерфейс формирует варианты и быстрый выбор из доступных сотрудников с role_name. tracked_roles в политике устройства определяется locations.transmit. Кэш карты, списка, watchlist, маршрутов и realtime updates разделён по контексту доступа; черновики страницы сбрасываются при его смене.",
+          "verification": "59 серверных тестов / 2639 проверок, 63 RBAC Node-теста, 7 тестов realtime/tracking, TypeScript и браузерный сценарий полной страницы с ProfileAccessGuard прошли. Custom actor/target, запрос фильтра, смена филиала с удержанным ответом, отзыв, неизвестная роль 422. Логи /tmp/aura-rbac-location-role-filter-{backend,node,browser,tsc}.log и /tmp/aura-rbac-location-realtime-node.log."
         }
       ],
       "remaining_checks": [
@@ -533,7 +537,7 @@
         "decision": "No application callsites in current app search; active recipients use usersByPermission."
       }
     ],
-    "audit_note": "Дополнительный поиск по всему app выявил observer и DealAccess вне первоначального списка; оба перенесены. Pending followups очищен только для разобранного списка, полный аудит сервера и frontend остаётся открытым."
+    "audit_note": "Current literal scan /tmp/aura-rbac-server-role-literals-current.txt: 151 references across app; actual location role-filter validation and tracked_roles payload found and migrated. Relationship names, report metric types and account categories still require final consolidated classification; no completion claim."
   },
   "execution_rules": [
     "Работать по одному открытому пункту, указывать конкретные завершённые подпункты и доказательства.",
@@ -646,6 +650,10 @@
       {
         "file": "app/profile/kpi/operations/page.tsx",
         "classification": "Configured roles use server dashboard_role policy for all three export queries, preserving existing defaults; legacy resolver only without permissions. Page drafts reset and seven operations query caches separate on access context changes."
+      },
+      {
+        "file": "app/profile/location-map/page.tsx and services/location-tracking",
+        "classification": "migrated site admission, menu, filter roles and access cache; actor scope remains backend authoritative"
       }
     ],
     "pending_followups": []

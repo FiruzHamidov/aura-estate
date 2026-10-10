@@ -590,6 +590,11 @@ class LocationTrackingFeatureTest extends TestCase
         $this->putJson('/api/location-tracking/me/device', $device)->assertOk();
         $this->postJson('/api/location-tracking/me/points', ['device_uuid' => $device['device_uuid'],
             'points' => [$this->pointPayload(now()->subMinute()->toISOString(), 38.56, 68.788)]])->assertOk();
+        $this->assertContains($role->slug, app(\App\Services\LocationTracking\LocationTrackingPolicyService::class)->payload($target->fresh())['tracked_roles']);
+        Sanctum::actingAs($context['admin']->fresh());
+        $this->getJson('/api/location-tracking/available-users?role='.$role->slug)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $target->id)->assertJsonPath('data.0.role_name', 'Custom tracked employee');
+        $this->getJson('/api/location-tracking/map?role='.$role->slug)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.user.id', $target->id);
+        $this->getJson('/api/location-tracking/map?role=missing_role')->assertUnprocessable();
         $event = null;
         Event::assertDispatched(UserLocationUpdated::class, function ($captured) use (&$event) { $event = $captured; return true; });
         $access = app(LocationAccessService::class);

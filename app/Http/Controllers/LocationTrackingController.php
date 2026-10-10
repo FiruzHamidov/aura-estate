@@ -163,7 +163,7 @@ class LocationTrackingController extends Controller
     {
         $validated = $request->validate([
             'search' => ['nullable', 'string', 'max:100'],
-            'role' => ['nullable', Rule::in(['agent', 'mop'])],
+            'role' => ['nullable', 'string', Rule::exists('roles', 'slug')],
             'branch_id' => ['nullable', 'integer'],
             'branch_group_id' => ['nullable', 'integer'],
             'tracking_enabled' => ['nullable', 'boolean'],
@@ -215,6 +215,7 @@ class LocationTrackingController extends Controller
                 'phone' => $user->phone,
                 'photo' => $user->photo,
                 'role' => $user->role?->slug,
+                'role_name' => $user->role?->name,
                 'branch_id' => $user->branch_id,
                 'branch' => $this->branchPayload($user),
                 'branch_group_id' => $user->branch_group_id,
@@ -287,7 +288,7 @@ class LocationTrackingController extends Controller
     public function map(Request $request)
     {
         $filters = $request->validate([
-            'role' => ['nullable', Rule::in(['agent', 'mop'])],
+            'role' => ['nullable', 'string', Rule::exists('roles', 'slug')],
             'branch_id' => ['nullable', 'integer'],
             'branch_group_id' => ['nullable', 'integer'],
             'status' => ['nullable', Rule::in([
@@ -444,6 +445,7 @@ class LocationTrackingController extends Controller
                 'name' => $user->name,
                 'photo' => $user->photo,
                 'role' => $user->role?->slug,
+                'role_name' => $user->role?->name,
                 'branch_id' => $user->branch_id,
                 'branch' => $this->branchPayload($user),
                 'branch_group_id' => $user->branch_group_id,
