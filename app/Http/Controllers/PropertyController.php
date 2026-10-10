@@ -548,9 +548,9 @@ class PropertyController extends Controller
         return (int) $branchId;
     }
 
-    private function normalizeMopBranchGroupPayload(User $user, array $data): array
+    private function normalizePropertyWriteGroup(User $user, array $data): array
     {
-        if (! $user->hasRole('mop')) {
+        if (! $user->hasPermission('properties.write.own_group')) {
             return $data;
         }
 
@@ -2152,7 +2152,7 @@ class PropertyController extends Controller
             if ($requestedType !== 'regular') {
                 abort_unless($user->hasPermission('properties.promotions.request') && $user->hasPermission('properties.edit'), 403, 'PROMOTION_PERMISSION_DENIED');
             }
-            $validated = $this->normalizeMopBranchGroupPayload($user, $validated);
+            $validated = $this->normalizePropertyWriteGroup($user, $validated);
             $this->ensureVisibleClientsForProperty($validated);
             $validated = $this->syncPropertyClientSnapshots($validated);
             $dups = $this->propertyDuplicateService->find($validated);
@@ -2234,7 +2234,7 @@ class PropertyController extends Controller
             $user
         ): void {
             [$user, $property] = $this->lockPropertyWrite($user, $property, $validated);
-            $validated = $this->normalizeMopBranchGroupPayload($user, $validated);
+            $validated = $this->normalizePropertyWriteGroup($user, $validated);
             $this->ensureVisibleClientsForProperty($validated, $property);
             $validated = $this->syncPropertyClientSnapshots($validated);
             $this->moderation->assertMutationVersion($request, $property);

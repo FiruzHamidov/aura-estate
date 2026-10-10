@@ -92,6 +92,13 @@ class RolePermissionsTest extends TestCase
         $this->assertContains('properties.matching.view', app(PermissionCatalog::class)->migrationDefaults('legacy_custom'));
     }
 
+    public function test_property_write_group_restriction_defaults_only_to_mop(): void
+    {
+        foreach (Role::all() as $role) {
+            $this->assertSame($role->slug === 'mop', $role->hasPermission('properties.write.own_group'), $role->slug);
+        }
+    }
+
     public function test_object_report_filter_defaults_preserve_existing_role_scopes(): void
     {
         foreach (Role::all() as $role) {

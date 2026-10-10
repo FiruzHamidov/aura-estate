@@ -212,6 +212,45 @@ class PropertyConstructionFieldsTest extends TestCase
         parent::tearDown();
     }
 
+    public function test_custom_writer_can_be_restricted_to_its_assigned_group(): void
+    {
+        Schema::table('users', fn (Blueprint $table) => $table->unsignedBigInteger('branch_group_id')->nullable());
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedBigInteger('branch_group_id')->nullable());
+        Schema::create('branch_groups', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+        });
+        \Illuminate\Support\Facades\DB::table('branch_groups')->insert([['id' => 1, 'name' => 'Own group'], ['id' => 2, 'name' => 'Other group']]);
+        (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
+        $role = Role::create(['name' => 'Group writer', 'slug' => 'custom_group_writer']);
+        $user = User::create(['name' => 'Writer', 'phone' => '930000097', 'role_id' => $role->id, 'status' => 'active']);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $base = ['properties.create', 'properties.edit'];
+        $role->forceFill(['permissions' => [...$base, 'properties.write.own_group']])->save();
+        Sanctum::actingAs($user->fresh());
+        $payload = ['type_id' => $type->id, 'price' => 991000, 'currency' => 'TJS', 'offer_type' => 'sale'];
+        $this->postJson('/api/properties', $payload)->assertForbidden();
+        $user->forceFill(['branch_group_id' => 1])->saveQuietly();
+        Sanctum::actingAs($user->fresh());
+        $this->postJson('/api/properties', [...$payload, 'branch_group_id' => 2])->assertForbidden();
+        $this->assertDatabaseCount('properties', 0);
+        $this->postJson('/api/properties', $payload)->assertOk();
+        $property = \App\Models\Property::query()->sole();
+        $this->assertSame(1, (int) $property->getRawOriginal('branch_group_id'));
+
+        $property->forceFill(['branch_group_id' => 2])->saveQuietly();
+        $this->putJson('/api/properties/'.$property->id, ['title' => 'Own group edit', 'version' => $property->moderation_version])->assertOk();
+        $this->assertSame(1, (int) $property->fresh()->getRawOriginal('branch_group_id'));
+
+        $role->forceFill(['permissions' => $base])->save();
+        Sanctum::actingAs($user->fresh());
+        $property = $property->fresh();
+        $property->forceFill(['branch_group_id' => 2])->saveQuietly();
+        $this->putJson('/api/properties/'.$property->id, ['title' => 'Unrestricted group edit', 'version' => $property->moderation_version])->assertOk();
+        $this->assertSame(2, (int) $property->fresh()->getRawOriginal('branch_group_id'));
+    }
+
     public function test_custom_creator_needs_promotion_permission_only_for_promoted_listing(): void
     {
         (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
