@@ -378,6 +378,10 @@
         {
           "change": "Карта сотрудников: добавлено locations.site.view с прежними defaults и связью с меню/общим guard. Фильтры API принимают существующие пользовательские роли; интерфейс формирует варианты и быстрый выбор из доступных сотрудников с role_name. tracked_roles в политике устройства определяется locations.transmit. Кэш карты, списка, watchlist, маршрутов и realtime updates разделён по контексту доступа; черновики страницы сбрасываются при его смене.",
           "verification": "59 серверных тестов / 2639 проверок, 63 RBAC Node-теста, 7 тестов realtime/tracking, TypeScript и браузерный сценарий полной страницы с ProfileAccessGuard прошли. Custom actor/target, запрос фильтра, смена филиала с удержанным ответом, отзыв, неизвестная роль 422. Логи /tmp/aura-rbac-location-role-filter-{backend,node,browser,tsc}.log и /tmp/aura-rbac-location-realtime-node.log."
+        },
+        {
+          "change": "Создание тегов и подстановка/фиксация автора в формах лида, сделки и календаря перенесены в каталог прав с русскими описаниями и прежними defaults.",
+          "verification": "41 серверный тест / 2417 assertions; 64 Node RBAC теста; 3 браузерных сценария (теги, реальная форма лида и сделки с grant/revoke); TypeScript. Логи /tmp/aura-rbac-tag-{backend,node,tsc}.log и /tmp/aura-rbac-form-policies-browser.log. Календарная настройка проверена helper/default тестами и типизацией; отдельный браузерный сценарий календаря ещё не выполнен."
         }
       ],
       "remaining_checks": [
@@ -654,6 +658,14 @@
       {
         "file": "app/profile/location-map/page.tsx and services/location-tracking",
         "classification": "migrated site admission, menu, filter roles and access cache; actor scope remains backend authoritative"
+      },
+      {
+        "file": "ui-components/properties/PropertyTagsField.tsx and utils/rbac.ts::canCreatePropertyTags",
+        "classification": "Explicit roles require properties.tags.create.site plus catalogs.entries.tags.manage; old top-level grants cannot bypass role revocation. Modal drafts close on access change, submit rechecks UI policy. Legacy role defaults retained."
+      },
+      {
+        "file": "ui-components/crm/leads/LeadForm.tsx, ui-components/crm/deals/DealForm.tsx and app/profile/my-booking/page.tsx",
+        "classification": "Migrated agent/mop creator prefill and calendar picker lock to three independent site policies preserving prior defaults; server creator defaults and assignment authorization remain independent. Calendar responds to newly applied lock; CRM forms reset when prefill changes."
       }
     ],
     "pending_followups": []

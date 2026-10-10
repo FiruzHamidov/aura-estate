@@ -36,6 +36,29 @@ class RolePermissionsTest extends TestCase
         return $user;
     }
 
+    public function test_creator_form_policy_defaults_preserve_agent_and_mop_behavior(): void
+    {
+        foreach (Role::all() as $role) {
+            foreach (['leads.site.prefill_creator', 'deals.site.prefill_creator', 'bookings.site.lock_creator'] as $key) {
+                $this->assertSame(in_array($role->slug, ['agent', 'mop'], true), $role->hasPermission($key), $role->slug.' '.$key);
+            }
+        }
+    }
+
+    public function test_property_tag_creation_preserves_defaults_and_supports_custom_roles(): void
+    {
+        foreach (Role::all() as $role) {
+            $this->assertSame(in_array($role->slug, ['admin', 'superadmin', 'marketing'], true), $role->hasPermission('properties.tags.create.site'), $role->slug);
+        }
+        $this->actor('superadmin');
+        $role = Role::forceCreate(['name' => 'Custom tags', 'slug' => 'custom_tags', 'permissions' => []]);
+        $grants = ['properties.tags.create.site', 'catalogs.entries.tags.manage'];
+        $this->putJson('/api/rbac/roles/'.$role->id, ['version' => $role->fresh()->permissions_version, 'permissions' => $grants])->assertOk();
+        foreach ($grants as $grant) $this->assertTrue($role->fresh()->hasPermission($grant));
+        $this->putJson('/api/rbac/roles/'.$role->id, ['version' => $role->fresh()->permissions_version, 'permissions' => []])->assertOk();
+        foreach ($grants as $grant) $this->assertFalse($role->fresh()->hasPermission($grant));
+    }
+
     public function test_chat_presentation_defaults_and_custom_role_migration(): void
     {
         foreach (Role::all() as $role) {
