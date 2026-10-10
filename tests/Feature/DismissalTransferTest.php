@@ -119,6 +119,41 @@ class DismissalTransferTest extends TestCase
         Sanctum::actingAs($this->actor);
     }
 
+    public function test_rop_employee_transfer_moves_properties_bookings_and_tasks_with_their_owner(): void
+    {
+        Schema::create('crm_deals', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('primary_property_id')->nullable(); $t->string('control_kind')->nullable(); $t->timestamp('closed_at')->nullable(); $t->softDeletes();
+        });
+        Schema::create('bookings', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('agent_id'); $t->unsignedBigInteger('branch_group_id'); $t->timestamp('end_time'); $t->timestamps();
+        });
+        Schema::create('crm_tasks', function (Blueprint $t) {
+            $t->id(); $t->string('title'); $t->unsignedBigInteger('assignee_id'); $t->unsignedBigInteger('branch_group_id');
+            $t->string('related_entity_type')->nullable(); $t->unsignedBigInteger('related_entity_id')->nullable();
+            $t->timestamp('completed_at')->nullable(); $t->string('status')->nullable(); $t->timestamps();
+        });
+        $rop = $this->person('rop');
+        $rop->supervisedGroups()->attach($this->group->id);
+        $destination = BranchGroup::create(['name' => 'New team', 'branch_id' => $this->group->branch_id]);
+        $receiver = $this->person('rop');
+        $receiver->supervisedGroups()->attach($destination->id);
+        DB::table('bookings')->insert(['agent_id' => $this->employee->id, 'branch_group_id' => $this->group->id, 'end_time' => now()->addDay()]);
+        DB::table('crm_tasks')->insert(['title' => 'Property follow-up', 'assignee_id' => $this->employee->id,
+            'branch_group_id' => $this->group->id, 'related_entity_type' => 'property', 'related_entity_id' => 1]);
+        Sanctum::actingAs($rop);
+        $url = '/api/users/'.$this->employee->id.'/group-transfer';
+        $preview = $this->getJson($url)->assertOk()->json();
+        $plans = array_map(fn ($row) => ['type' => $row['type'], 'id' => $row['id'], 'action' => 'move'], $preview['records']);
+        $this->postJson($url, ['branch_group_id' => $destination->id, 'revision' => $preview['revision'],
+            'reason' => 'Transfer employee workload', 'records' => $plans])->assertOk();
+        foreach ([1, 2] as $id) {
+            $this->assertDatabaseHas('properties', ['id' => $id, 'branch_group_id' => $destination->id, 'agent_id' => $this->employee->id, 'co_owner_user_id' => $this->first->id]);
+        }
+        $this->assertDatabaseHas('properties', ['id' => 3, 'branch_group_id' => $this->group->id]);
+        $this->assertDatabaseHas('bookings', ['agent_id' => $this->employee->id, 'branch_group_id' => $destination->id]);
+        $this->assertDatabaseHas('crm_tasks', ['assignee_id' => $this->employee->id, 'branch_group_id' => $destination->id]);
+    }
+
     private function person(string $role): User
     {
         return User::create(['name' => $role, 'phone' => (string) random_int(900000000, 999999999),
@@ -291,7 +326,7 @@ class DismissalTransferTest extends TestCase
             $this->assertSame('active', $this->employee->fresh()->status);
             $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $this->employee->id]);
         }
-        $this->putJson('/api/user/'.$this->employee->id, ['name' => 'Changed'])->assertForbidden();
+        $this->putJson('/api/user/'.$this->employee->id, ['name' => 'Changed'])->assertOk();
         $this->postJson('/api/user/'.$this->employee->id.'/restore')->assertForbidden();
     }
 

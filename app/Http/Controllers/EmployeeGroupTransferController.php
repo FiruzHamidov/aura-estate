@@ -10,6 +10,17 @@ use Illuminate\Validation\Rule;
 
 final class EmployeeGroupTransferController extends Controller
 {
+    public function destinations(Request $request, EmployeeGroupTransfer $transfers)
+    {
+        $groups = $transfers->destinationQuery($request->user())->with(['rops' => fn ($rops) => $rops
+            ->where('users.status', User::STATUS_ACTIVE)->whereNull('users.deleted_at')
+            ->whereHas('role', fn ($roles) => $roles->where('slug', 'rop'))])->orderBy('name')->get();
+        return response()->json(['data' => $groups->map(fn ($group) => [
+            'id' => $group->id, 'name' => $group->name, 'branch_id' => $group->branch_id,
+            'rops' => $group->rops->map(fn ($rop) => ['id' => $rop->id, 'name' => $rop->name]),
+        ])]);
+    }
+
     public function preview(Request $request, User $user, EmployeeGroupTransfer $transfers)
     {
         return response()->json($transfers->preview($request->user(), $user));

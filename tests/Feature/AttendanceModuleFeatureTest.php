@@ -1898,6 +1898,30 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->travelBack();
     }
 
+    public function test_rop_links_only_team_users_and_cannot_take_another_users_terminal_id(): void
+    {
+        $c = $this->context();
+        $device = $this->device('ROP-MAPPING', $c['branch'], $c['group']);
+        $foreignDevice = $this->device('FOREIGN-MAPPING', $c['otherAgent']->branch, $c['otherAgent']->branchGroup);
+        $existing = $this->map($device, $c['otherAgent']);
+        Sanctum::actingAs($c['rop']);
+        $data = ['device_id' => $device->id, 'device_user_id' => '00123', 'user_id' => $c['agent']->id];
+        $this->putJson('/api/attendance/device-users', $data)->assertOk()->assertJsonPath('data.device_user_id', '00123');
+        $this->getJson('/api/attendance/device-users')->assertOk()->assertJsonCount(1, 'data');
+        $this->getJson('/api/attendance/devices')->assertOk()->assertJsonCount(1, 'data');
+        $this->putJson('/api/attendance/device-users', [...$data, 'user_id' => $c['otherAgent']->id])->assertNotFound();
+        $this->putJson('/api/attendance/device-users', [...$data, 'device_id' => $foreignDevice->id])->assertNotFound();
+        $this->putJson('/api/attendance/device-users', [...$data, 'device_user_id' => $existing->device_user_id])->assertForbidden();
+        $this->deleteJson('/api/attendance/device-users/'.$existing->id)->assertForbidden();
+        $intern = $c['agent']->replicate();
+        $intern->phone = '900000999'; $intern->role_id = Role::firstOrCreate(['slug' => 'intern'], ['name' => 'Intern'])->id; $intern->save();
+        $this->putJson('/api/attendance/device-users', [...$data, 'device_user_id' => '00999', 'user_id' => $intern->id])->assertOk();
+        $c['rop']->supervisedGroups()->detach();
+        $this->putJson('/api/attendance/device-users', $data)->assertNotFound();
+        $this->getJson('/api/attendance/device-users')->assertOk()->assertJsonCount(0, 'data');
+        $this->assertSame($c['otherAgent']->id, (int) $existing->fresh()->user_id);
+    }
+
     private function context(): array
     {
         $branchA = Branch::firstOrCreate(['name' => 'Branch A']);

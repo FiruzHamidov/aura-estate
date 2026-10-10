@@ -93,6 +93,9 @@ final class AttendanceReportController extends Controller
     public function unmapped(Request $request)
     {
         $this->access->assertCanManageMappings($request->user());
+        if ($request->user()->hasRole('rop')) {
+            return response()->json(['data' => [], 'total' => 0, 'current_page' => 1, 'last_page' => 1]);
+        }
         if ($request->has('grouped')) {
             $request->merge(['grouped' => $request->boolean('grouped')]);
         }

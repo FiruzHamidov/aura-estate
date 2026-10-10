@@ -41,6 +41,27 @@ final class AttendanceAccessService
         $this->assertRoleIn($user, config('attendance.mapping_roles', []), 'ATTENDANCE_MAPPING_FORBIDDEN', 'Нет права управлять сопоставлениями терминала.');
     }
 
+    public function mappingUsersQuery(User $viewer): Builder
+    {
+        $query = $this->participants->query();
+        if ($viewer->hasRole('rop')) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id');
+            $query->whereHas('role', fn ($roles) => $roles->whereIn('slug', ['intern', 'agent', 'mop']));
+        }
+        return $query;
+    }
+
+    public function mappingDevicesQuery(User $viewer): Builder
+    {
+        $query = \App\Models\AttendanceDevice::query();
+        if ($viewer->hasRole('rop')) {
+            $query->where('branch_id', $viewer->branch_id ?? 0)->where(function ($devices) use ($viewer) {
+                $devices->whereNull('branch_group_id')->orWhereIn('branch_group_id', app(\App\Support\RopGroupAccess::class)->groupsQuery($viewer));
+            });
+        }
+        return $query;
+    }
+
     public function assertCanViewPresence(User $user): void
     {
         $this->assertRoleIn($user, ['rop', 'branch_director', 'admin', 'superadmin', 'owner'], 'ATTENDANCE_PRESENCE_FORBIDDEN', 'Нет права просматривать местонахождение сотрудников.');

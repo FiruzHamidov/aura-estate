@@ -34,6 +34,10 @@ final class AttendanceMappingController extends Controller
             ->addSelect(['processed_events_count' => AttendanceEvent::query()->selectRaw('COUNT(*)')
                 ->whereColumn('attendance_events.device_id', 'attendance_device_users.device_id')
                 ->whereColumn('attendance_events.device_user_id', 'attendance_device_users.device_user_id')]);
+        if ($request->user()->hasRole('rop')) {
+            $query->whereIn('user_id', $this->access->mappingUsersQuery($request->user())->select('users.id'))
+                ->whereIn('device_id', $this->access->mappingDevicesQuery($request->user())->select('id'));
+        }
         foreach (['device_id', 'user_id'] as $field) {
             if (isset($validated[$field])) {
                 $query->where($field, $validated[$field]);
@@ -53,60 +57,72 @@ final class AttendanceMappingController extends Controller
             'card_number' => ['nullable', 'string', 'max:100'],
             'is_active' => ['sometimes', 'boolean'],
         ]);
-        $target = User::query()->findOrFail($data['user_id']);
-        $this->participants->assertEligible($target);
+        return \Illuminate\Support\Facades\DB::transaction(function () use ($request, $data) {
+            $actor = User::query()->lockForUpdate()->findOrFail($request->user()->id);
+            $this->access->assertCanManageMappings($actor);
+            $target = ($actor->hasRole('rop') ? $this->access->mappingUsersQuery($actor) : User::query())->lockForUpdate()->findOrFail($data['user_id']);
+            $this->access->mappingDevicesQuery($actor)->lockForUpdate()->findOrFail($data['device_id']);
+            $this->participants->assertEligible($target);
 
-        $mapping = AttendanceDeviceUser::query()
-            ->where('device_id', $data['device_id'])
-            ->where('device_user_id', $data['device_user_id'])
-            ->first();
-        if ($mapping !== null
-            && (int) $mapping->user_id !== (int) $data['user_id']
-            && AttendanceEvent::query()
+            $mapping = AttendanceDeviceUser::query()
+                ->where('device_id', $data['device_id'])
+                ->where('device_user_id', $data['device_user_id'])
+                ->lockForUpdate()->first();
+            if ($actor->hasRole('rop')) {
+                abort_if($mapping && (int) $mapping->user_id !== (int) $target->id, 403, 'Этот ZKTeco ID уже связан с другим сотрудником. Обратитесь к HR.');
+                abort_if(AttendanceEvent::query()->where('device_id', $data['device_id'])
+                    ->where('device_user_id', $data['device_user_id'])->where('user_id', '!=', $target->id)->exists(),
+                    403, 'У этого ZKTeco ID есть история другого сотрудника. Обратитесь к HR.');
+            }
+            if ($mapping !== null
+                && (int) $mapping->user_id !== (int) $data['user_id']
+                && AttendanceEvent::query()
+                    ->where('device_id', $mapping->device_id)
+                    ->where('device_user_id', $mapping->device_user_id)
+                    ->exists()) {
+                throw ValidationException::withMessages([
+                    'user_id' => ['Нельзя переназначить ID терминала после сохранения посещений. Создайте новый ID сотрудника.'],
+                ]);
+            }
+            $old = $mapping?->only(['user_id', 'card_number', 'is_active']) ?? [];
+            $mapping ??= new AttendanceDeviceUser([
+                'device_id' => $data['device_id'],
+                'device_user_id' => $data['device_user_id'],
+            ]);
+            $mapping->fill([
+                'user_id' => $data['user_id'],
+                'card_number' => $data['card_number'] ?? null,
+                'is_active' => $data['is_active'] ?? true,
+                'mapped_by' => $request->user()->id,
+                'mapped_at' => now(),
+            ])->save();
+            $this->audit->record(
+                $request->user(),
+                $old === [] ? 'attendance_mapping.created' : 'attendance_mapping.updated',
+                $mapping,
+                $old,
+                $mapping->only(['user_id', 'card_number', 'is_active']),
+                $request
+            );
+
+            $reprocessed = ['processed' => 0, 'unmapped' => 0, 'already_processed' => 0];
+            AttendanceRawEvent::query()
                 ->where('device_id', $mapping->device_id)
                 ->where('device_user_id', $mapping->device_user_id)
-                ->exists()) {
-            throw ValidationException::withMessages([
-                'user_id' => ['Нельзя переназначить ID терминала после сохранения посещений. Создайте новый ID сотрудника.'],
-            ]);
-        }
-        $old = $mapping?->only(['user_id', 'card_number', 'is_active']) ?? [];
-        $mapping ??= new AttendanceDeviceUser([
-            'device_id' => $data['device_id'],
-            'device_user_id' => $data['device_user_id'],
-        ]);
-        $mapping->fill([
-            'user_id' => $data['user_id'],
-            'card_number' => $data['card_number'] ?? null,
-            'is_active' => $data['is_active'] ?? true,
-            'mapped_by' => $request->user()->id,
-            'mapped_at' => now(),
-        ])->save();
-        $this->audit->record(
-            $request->user(),
-            $old === [] ? 'attendance_mapping.created' : 'attendance_mapping.updated',
-            $mapping,
-            $old,
-            $mapping->only(['user_id', 'card_number', 'is_active']),
-            $request
-        );
+                ->where('processing_status', 'unmapped')
+                ->orderBy('id')
+                ->each(function (AttendanceRawEvent $raw) use (&$reprocessed) {
+                    $reprocessed[$this->ingestion->reprocess($raw)]++;
+                });
 
-        $reprocessed = ['processed' => 0, 'unmapped' => 0, 'already_processed' => 0];
-        AttendanceRawEvent::query()
-            ->where('device_id', $mapping->device_id)
-            ->where('device_user_id', $mapping->device_user_id)
-            ->where('processing_status', 'unmapped')
-            ->orderBy('id')
-            ->each(function (AttendanceRawEvent $raw) use (&$reprocessed) {
-                $reprocessed[$this->ingestion->reprocess($raw)]++;
-            });
-
-        return response()->json(['data' => $mapping->fresh(['device', 'user.role']), 'reprocessed' => $reprocessed]);
+            return response()->json(['data' => $mapping->fresh(['device', 'user.role']), 'reprocessed' => $reprocessed]);
+        });
     }
 
     public function destroy(Request $request, AttendanceDeviceUser $mapping)
     {
         $this->access->assertCanManageMappings($request->user());
+        abort_if($request->user()->hasRole('rop'), 403, 'Удалить связь может HR или администратор.');
         $old = $mapping->only([
             'device_id',
             'device_user_id',

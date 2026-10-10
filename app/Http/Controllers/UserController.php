@@ -715,8 +715,10 @@ class UserController extends Controller
             ]);
 
             if ($authUser->hasRole('rop')) {
-                // Profile editing must not bypass organization or dismissal workflows.
-                foreach (['role_id', 'branch_id', 'branch_group_id', 'status'] as $field) {
+                // Group transfers and dismissal use their dedicated, audited workflows.
+                $requestedRole = $this->resolveRequestedRole($request, $user);
+                abort_unless(in_array($requestedRole?->slug, ['intern', 'agent', 'mop'], true), 403, 'FORBIDDEN_ACTION');
+                foreach (['branch_id', 'branch_group_id', 'status'] as $field) {
                     abort_if($request->exists($field) && (string) $request->input($field) !== (string) $user->{$field},
                         403, 'FORBIDDEN_ACTION');
                 }
