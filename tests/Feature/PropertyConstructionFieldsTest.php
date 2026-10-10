@@ -202,6 +202,7 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->timestamp('expires_at')->nullable();
             $table->timestamps();
         });
+        (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
     }
 
     protected function tearDown(): void
