@@ -56,6 +56,14 @@ class RolePermissionsTest extends TestCase
         }
     }
 
+    public function test_object_report_filter_defaults_preserve_existing_role_scopes(): void
+    {
+        foreach (Role::all() as $role) {
+            $this->assertSame(in_array($role->slug, ['rop', 'branch_director'], true), $role->hasPermission('properties.reports.own_branch'), $role->slug);
+            $this->assertSame($role->slug === 'mop', $role->hasPermission('properties.reports.own_group'), $role->slug);
+        }
+    }
+
     public function test_booking_editor_stays_disabled_after_migration_and_can_be_enabled_explicitly(): void
     {
         foreach (Role::all() as $role) {
