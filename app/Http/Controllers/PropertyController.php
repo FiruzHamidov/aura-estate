@@ -171,11 +171,6 @@ class PropertyController extends Controller
         return $user;
     }
 
-    private function hasOwnPropertyScope(User $user): bool
-    {
-        return $user->hasRole('agent') || $user->hasRole('intern');
-    }
-
     private function authorizePropertyMutation(Property $property): User
     {
         /** @var User|null $user */
@@ -729,8 +724,8 @@ class PropertyController extends Controller
         $perPage = (int) $request->input('per_page', 20);
 
         $summary = null;
-        if ($request->user()?->hasRole('security')) {
-            $reportProperties = Property::query()->whereIn('moderation_status', config('security-property-control.trigger_statuses', []));
+        if ($request->user()?->hasPermission('properties.list.closed_only')) {
+            $reportProperties = $this->baseQueryMyProperties($request)->withoutEagerLoads();
             $reportUsers = User::query()->select(['id', 'name', 'status', 'branch_id', 'branch_group_id'])->where(function ($users) use ($reportProperties) {
                 $users->whereIn('id', (clone $reportProperties)->select('created_by'))
                     ->orWhereIn('id', (clone $reportProperties)->select('agent_id'));
@@ -851,82 +846,40 @@ class PropertyController extends Controller
     {
         $user = auth()->user();
         $query = Property::query()->with(array_merge($this->propertyListRelations(), ['saleAgents']));
-        if ($user?->hasRole('security')) {
+        if ($user?->hasPermission('properties.list.closed_only')) {
             $query->whereIn('properties.moderation_status', config('security-property-control.trigger_statuses', []));
         }
-        if ($user?->hasRole('rop')) {
-            app(\App\Support\RopGroupAccess::class)->scope($query, $user, 'properties.branch_group_id', 'properties.branch_id');
-        }
 
-        $hasStatusFilter = $request->filled('moderation_status');
-
-        if ($user && ($user->hasRole('admin') || $user->hasRole('superadmin'))) {
-            // без ограничений
-        } elseif (! $user || $user->hasRole('client')) {
-            $query->publicSearchable();
-        } elseif ($this->hasOwnPropertyScope($user)) {
-            $query->where(function (Builder $ownerQuery) use ($user) {
-                $ownerQuery->where('created_by', $user->id);
-
-                if ($this->supportsPropertyCoOwner()) {
-                    $ownerQuery->orWhere('co_owner_user_id', $user->id);
-                }
-            });
-            if (! $hasStatusFilter) {
-                $query->where('moderation_status', '!=', 'deleted');
-            }
-        } elseif ($user->hasRole('mop')) {
-            if (empty($user->branch_group_id)) {
-                $query->whereRaw('1 = 0');
-            } else {
-                $this->applyBranchGroupFilter($query, [$user->branch_group_id]);
-            }
-
-            if (! $hasStatusFilter) {
-                $query->where('moderation_status', '!=', 'deleted');
-            }
-        }
-
-        return $query;
+        return $this->scopePropertyList($query, $user, $request);
     }
 
-    // ==== Общая база для index/map: роли, связи, базовые статусы ====
     private function baseQuery(Request $request, ?array $relations = null): Builder
     {
-        $user = $this->propertyShowAuthUser($request);
         $query = Property::query()->with($relations ?? $this->propertyListRelations());
-        if ($user?->hasRole('rop')) {
+
+        return $this->scopePropertyList($query, $this->propertyShowAuthUser($request), $request);
+    }
+
+    private function scopePropertyList(Builder $query, ?User $user, Request $request): Builder
+    {
+        if (! $user) return $query->publicSearchable();
+        if ($user->hasRole('rop')) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $user, 'properties.branch_group_id', 'properties.branch_id');
         }
+        if ($user->hasPermission('properties.list.scope.all')) return $query;
+        if ($user->hasPermission('properties.list.scope.public')) return $query->publicSearchable();
 
-        $hasStatusFilter = $request->filled('moderation_status');
-
-        if ($user && ($user->hasRole('admin') || $user->hasRole('superadmin'))) {
-            // без ограничений
-        } elseif (! $user || $user->hasRole('client')) {
-            $query->publicSearchable();
-        } elseif ($this->hasOwnPropertyScope($user)) {
+        if ($user->hasPermission('properties.list.scope.own')) {
             $query->where(function (Builder $ownerQuery) use ($user) {
                 $ownerQuery->where('created_by', $user->id);
-
-                if ($this->supportsPropertyCoOwner()) {
-                    $ownerQuery->orWhere('co_owner_user_id', $user->id);
-                }
+                if ($this->supportsPropertyCoOwner()) $ownerQuery->orWhere('co_owner_user_id', $user->id);
             });
-            if (! $hasStatusFilter) {
-                $query->where('moderation_status', '!=', 'deleted');
-            }
-        } elseif ($user->hasRole('mop')) {
-            if (empty($user->branch_group_id)) {
-                $query->whereRaw('1 = 0');
-            } else {
-                $this->applyBranchGroupFilter($query, [$user->branch_group_id]);
-            }
-
-            if (! $hasStatusFilter) {
-                $query->where('moderation_status', '!=', 'deleted');
-            }
+        } elseif ($user->hasPermission('properties.list.scope.group')) {
+            $this->applyBranchGroupFilter($query, $user->branch_group_id ? [$user->branch_group_id] : []);
+        } else {
+            return $query->whereRaw('1 = 0');
         }
+        if (! $request->filled('moderation_status')) $query->where('moderation_status', '!=', 'deleted');
 
         return $query;
     }

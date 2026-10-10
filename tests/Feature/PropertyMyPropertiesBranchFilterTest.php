@@ -118,6 +118,62 @@ class PropertyMyPropertiesBranchFilterTest extends TestCase
         });
     }
 
+    public function test_custom_list_scopes_are_shared_by_list_count_map_and_my_properties(): void
+    {
+        Schema::table('properties', function (Blueprint $table): void {
+            $table->unsignedBigInteger('co_owner_user_id')->nullable();
+            $table->decimal('latitude', 10, 8)->nullable();
+            $table->decimal('longitude', 11, 8)->nullable();
+            $table->decimal('discount_price', 15, 2)->nullable();
+        });
+        $role = Role::create(['name' => 'Custom list reader', 'slug' => 'custom_list_reader']);
+        $actor = User::create(['name' => 'Actor', 'phone' => 'scope-actor', 'role_id' => $role->id, 'branch_id' => 2, 'branch_group_id' => 20]);
+        $other = User::create(['name' => 'Other', 'phone' => 'scope-other', 'role_id' => $role->id, 'branch_id' => 3, 'branch_group_id' => 30]);
+        $type = PropertyType::create(['name' => 'Apartment']);
+        $status = PropertyStatus::create(['name' => 'Active']);
+        $make = fn (array $extra) => Property::create(array_merge([
+            'title' => 'Scoped object', 'type_id' => $type->id, 'status_id' => $status->id,
+            'price' => 100000, 'currency' => 'TJS', 'offer_type' => 'sale', 'moderation_status' => 'approved',
+            'created_by' => $other->id, 'agent_id' => $other->id, 'branch_id' => 3, 'branch_group_id' => 30,
+            'latitude' => 38.5, 'longitude' => 68.8,
+        ], $extra));
+        $own = $make(['created_by' => $actor->id, 'agent_id' => $actor->id, 'branch_id' => 2, 'branch_group_id' => 20]);
+        $group = $make(['moderation_status' => 'pending', 'branch_id' => 2, 'branch_group_id' => 20]);
+        $foreign = $make([]);
+        $deleted = $make(['created_by' => $actor->id, 'branch_id' => 2, 'branch_group_id' => 20, 'moderation_status' => 'deleted']);
+        $coOwned = $make(['co_owner_user_id' => $actor->id]);
+        $assignedOnly = $make(['agent_id' => $actor->id]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $this->assertContains('properties.list.scope.all', $role->fresh()->permissions);
+        $grant = function (array $permissions) use ($role, $actor): void {
+            $role->forceFill(['permissions' => $permissions])->save();
+            Sanctum::actingAs($actor->fresh());
+        };
+        foreach ([
+            'own' => [$own->id, $coOwned->id],
+            'group' => [$own->id, $group->id],
+            'public' => [$own->id, $foreign->id, $coOwned->id, $assignedOnly->id],
+            'all' => [$own->id, $group->id, $foreign->id, $deleted->id, $coOwned->id, $assignedOnly->id],
+            'none' => [],
+        ] as $scope => $ids) {
+            $grant($scope === 'none' ? [] : ['properties.list.scope.'.$scope]);
+            foreach (['/api/properties', '/api/my-properties'] as $url) {
+                $response = $this->getJson($url)->assertOk();
+                $this->assertEqualsCanonicalizing($ids, array_column($response->json('data'), 'id'), $scope.' '.$url);
+            }
+            $this->getJson('/api/properties/count')->assertOk()->assertJsonPath('count', count($ids));
+            $map = $this->getJson('/api/properties/map?bbox=38.4,68.6,38.8,69.1&zoom=12')->assertOk();
+            $this->assertEqualsCanonicalizing($ids, array_column(array_column($map->json('features'), 'properties'), 'id'));
+        }
+        $grant(['properties.list.scope.own']);
+        $this->getJson('/api/my-properties?moderation_status=deleted')->assertOk()->assertJsonPath('total', 1)->assertJsonPath('data.0.id', $deleted->id);
+        $own->forceFill(['moderation_status' => 'sold'])->saveQuietly();
+        $foreign->forceFill(['moderation_status' => 'sold'])->saveQuietly();
+        $grant(['properties.list.scope.own', 'properties.list.closed_only']);
+        $report = $this->getJson('/api/my-properties')->assertOk()->assertJsonPath('total', 1)->assertJsonPath('data.0.id', $own->id);
+        $this->assertSame([$actor->id], array_column($report->json('security_summary.agents'), 'id'));
+    }
+
     public function test_security_report_only_returns_control_stages_and_scoped_totals(): void
     {
         $role = Role::create(['name' => 'СБ', 'slug' => 'security']);
