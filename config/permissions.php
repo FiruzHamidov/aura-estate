@@ -554,6 +554,19 @@ foreach (['view' => ['Просмотр и раздел управления', '�
     $permissions['reels.'.$action] = ['group' => 'Ролики', 'name' => $name, 'description' => $description, 'roles' => $reelRoles];
 }
 
+$storyRoles = [...array_column((require __DIR__.'/roles.php')['system'], 'slug'), 'owner'];
+$storyWriters = array_values(array_diff($storyRoles, ['client']));
+$permissions['stories.own.view'] = ['group' => 'Истории', 'name' => 'Просмотр своих историй', 'description' => 'Список своих историй, включая черновики, архив и удалённые записи. Публичная лента доступна отдельно. Для РОП внутренний раздел историй закрыт до появления надёжной групповой принадлежности.', 'roles' => $storyRoles];
+foreach (['create' => ['Создание историй', 'Создание своих историй из медиа, объекта или опубликованного ролика. Для немедленной публикации нужно право изменения статуса своих историй.'], 'update' => ['Редактирование своих историй', 'Изменение текста, времени начала и медиа своих историй.'], 'delete' => ['Удаление своих историй', 'Перевод своих историй в удалённые с сохранением записи в истории.'], 'status' => ['Публикация и скрытие своих историй', 'Публикация, повторная публикация, архивирование и скрытие своих историй. Лимиты активных историй сохраняются.']] as $action => [$name, $description]) {
+    $permissions['stories.'.$action] = ['group' => 'Истории', 'name' => $name, 'description' => $description.' Для РОП внутренние операции с историями закрыты.', 'roles' => $storyWriters];
+}
+$permissions['stories.manage_all'] = ['group' => 'Истории', 'name' => 'Редактирование и удаление чужих историй', 'description' => 'Расширяет права редактирования и удаления на истории любых авторов. Для каждой операции требуется соответствующее право. Не открывает список модерации; для РОП внутренние операции закрыты.', 'roles' => ['admin', 'superadmin'], 'sensitive' => true];
+foreach (['all' => ['Все истории для модерации', 'Истории авторов всех филиалов.', ['admin', 'superadmin']], 'branch' => ['Модерация своего филиала', 'Истории авторов своего филиала. Требуется назначенный филиал.', ['rop', 'branch_director']], 'group' => ['Модерация своей группы', 'Истории авторов своей группы. Требуется назначенная группа.', ['mop']]] as $scope => [$name, $description, $roles]) {
+    $permissions['stories.moderation.scope.'.$scope] = ['group' => 'Истории', 'name' => $name, 'description' => $description.' Просмотр и изменение статуса разрешаются отдельно. Для РОП внутренний раздел историй закрыт до появления надёжной групповой принадлежности.', 'roles' => $roles, 'exclusive_group' => 'stories.moderation.scope'];
+}
+$permissions['stories.moderation.view'] = ['group' => 'Истории', 'name' => 'Просмотр очереди модерации', 'description' => 'Список историй в выбранной области модерации, включая черновики и скрытые записи. Для РОП раздел закрыт.', 'roles' => ['admin', 'superadmin', 'mop', 'rop', 'branch_director']];
+$permissions['stories.moderation.status'] = ['group' => 'Истории', 'name' => 'Изменение статуса чужих историй', 'description' => 'Публикация, повторная публикация, скрытие и архивирование историй в области модерации. Лимиты активных историй сохраняются. Для РОП операция закрыта.', 'roles' => ['admin', 'superadmin', 'mop', 'rop', 'branch_director']];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],
