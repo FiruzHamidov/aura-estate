@@ -32,7 +32,7 @@ class CrmTaskController extends Controller
             'per_page' => 'nullable|integer|min:1|max:100',
         ]);
 
-        if (! empty($validated['assignee_id']) && $this->branchScope->isBranchScopedManager($authUser)
+        if (! empty($validated['assignee_id']) && ($authUser->hasRole('rop') || $authUser->hasPermission('tasks.scope.branch'))
             && ! app(\App\Support\RopGroupAccess::class)->hasVisibleTaskHistory($authUser, (int) $validated['assignee_id'])) {
             $this->branchScope->ensureUserInUserBranchOrDeny((int) $validated['assignee_id'], $authUser);
         }
@@ -99,8 +99,10 @@ class CrmTaskController extends Controller
             [$authUser] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquireMany(
                 $authUser, $parent ? [$parent] : [], [$validated['assignee_id']], [$validated['branch_group_id'] ?? null]
             );
+            abort_unless($authUser->hasPermission('tasks.create'), 403, 'FORBIDDEN_ACTION');
+            abort_unless($authUser->hasPermission('tasks.assign.all') || $authUser->hasPermission('tasks.assign.branch'), 403, 'FORBIDDEN_ACTION');
             $assignee = User::query()->findOrFail($validated['assignee_id']);
-            if ($this->branchScope->isBranchScopedManager($authUser)) {
+            if ($authUser->hasRole('rop') || !$authUser->hasPermission('tasks.assign.all')) {
                 $this->branchScope->ensureUserInUserBranchOrDeny((int) $assignee->id, $authUser);
             }
 
@@ -133,6 +135,7 @@ class CrmTaskController extends Controller
                 $this->authUser(), array_filter(['task' => $crmTask, 'parent' => $parent])
             );
             $crmTask = $locked['task'];
+            abort_unless($authUser->hasPermission('tasks.update'), 403, 'FORBIDDEN_ACTION');
             $this->ensureTaskVisible($crmTask, $authUser);
             // A concurrent completion may turn this edit into a reopen after waiting.
             $freshDraft = (clone $crmTask)->fill($validated);
@@ -148,13 +151,15 @@ class CrmTaskController extends Controller
     {
         $authUser->loadMissing('role');
 
-        match ($authUser->role?->slug) {
-            'admin', 'superadmin' => null,
-            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'crm_tasks.branch_group_id'),
-            'branch_director' => $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id)),
-            'mop' => $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_group_id', $authUser->branch_group_id)),
-            default => $query->where('assignee_id', $authUser->id),
-        };
+        if ($authUser->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'crm_tasks.branch_group_id');
+        if ($authUser->hasPermission('tasks.scope.all')) return;
+        if ($authUser->hasPermission('tasks.scope.branch')) {
+            if (!$authUser->hasRole('rop')) $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id));
+        } elseif ($authUser->hasPermission('tasks.scope.group')) {
+            $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_group_id', $authUser->branch_group_id));
+        } elseif ($authUser->hasPermission('tasks.scope.own')) {
+            $query->where('assignee_id', $authUser->id);
+        } else $query->whereRaw('1 = 0');
     }
 
     private function ensureTaskVisible(CrmTask $task, User $authUser): void

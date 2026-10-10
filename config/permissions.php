@@ -487,6 +487,19 @@ $permissions['users.dismissal.change_group'] = ['group' => 'Перенос за�
 $permissions['users.group_transfer'] = ['group' => 'Перенос записей', 'name' => 'Перевод сотрудника в другую группу', 'description' => 'Перевод агента, стажёра или МОП с явным планом обработки каждой активной записи. Перенос записей требует соответствующих разрешений. Групповые ограничения РОП сохраняются.', 'roles' => ['admin', 'superadmin', 'branch_director', 'rop']];
 $permissions['users.group_transfer.all_branches'] = ['group' => 'Перенос записей', 'name' => 'Перевод сотрудника между филиалами', 'description' => 'Разрешает выбирать исходного сотрудника и целевую группу в других филиалах. Для переноса записей между филиалами требуется отдельное право.', 'roles' => ['admin', 'superadmin'], 'sensitive' => true];
 
+$taskRoles = [...array_column((require __DIR__.'/roles.php')['system'], 'slug'), 'owner'];
+$taskOwnRoles = array_values(array_diff($taskRoles, ['admin', 'superadmin', 'rop', 'branch_director', 'mop']));
+$taskGlobalAssignees = array_values(array_diff($taskRoles, ['rop', 'branch_director']));
+$permissions['tasks.scope.all'] = ['group' => 'CRM · Задачи', 'name' => 'Все задачи', 'description' => 'Просмотр задач всех сотрудников. Для РОП сохраняются закреплённые группы.', 'roles' => ['admin', 'superadmin'], 'exclusive_group' => 'tasks.scope'];
+$permissions['tasks.scope.branch'] = ['group' => 'CRM · Задачи', 'name' => 'Задачи своего филиала', 'description' => 'Просмотр задач исполнителей своего филиала. Для РОП — задачи закреплённых групп.', 'roles' => ['branch_director', 'rop'], 'exclusive_group' => 'tasks.scope'];
+$permissions['tasks.scope.group'] = ['group' => 'CRM · Задачи', 'name' => 'Задачи своей группы', 'description' => 'Просмотр задач исполнителей своей группы.', 'roles' => ['mop'], 'exclusive_group' => 'tasks.scope'];
+$permissions['tasks.scope.own'] = ['group' => 'CRM · Задачи', 'name' => 'Назначенные задачи', 'description' => 'Просмотр задач, в которых сотрудник указан исполнителем.', 'roles' => $taskOwnRoles, 'exclusive_group' => 'tasks.scope'];
+$permissions['tasks.create'] = ['group' => 'CRM · Задачи', 'name' => 'Создание задач', 'description' => 'Создание задач с проверкой типа, результата звонка, исполнителя и связанных записей.', 'roles' => $taskRoles];
+$permissions['tasks.update'] = ['group' => 'CRM · Задачи', 'name' => 'Изменение и выполнение задач', 'description' => 'Изменение доступных задач, завершение и возврат в работу. Связанные задачи сохраняют группу родительской записи.', 'roles' => $taskRoles];
+$permissions['tasks.assign.all'] = ['group' => 'CRM · Задачи', 'name' => 'Исполнители задач всех филиалов', 'description' => 'Разрешает назначать создаваемую задачу исполнителю из любого филиала. Групповые проверки РОП и связи с родительской записью сохраняются.', 'roles' => $taskGlobalAssignees, 'exclusive_group' => 'tasks.assign'];
+$permissions['tasks.assign.branch'] = ['group' => 'CRM · Задачи', 'name' => 'Исполнители задач своего филиала', 'description' => 'Разрешает назначать создаваемые задачи исполнителям своего филиала. Для РОП сохраняются закреплённые группы.', 'roles' => ['branch_director', 'rop'], 'exclusive_group' => 'tasks.assign'];
+$permissions['tasks.module.view'] = ['group' => 'CRM · Задачи', 'name' => 'Раздел задач на сайте', 'description' => 'Открывает раздел задач CRM на сайте. Нужна также область видимости задач; действия разрешаются отдельно.', 'roles' => ['admin', 'superadmin', 'marketing', 'agent', 'mop', 'manager', 'operator', 'rop', 'branch_director']];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],
