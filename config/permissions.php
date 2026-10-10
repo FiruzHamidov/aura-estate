@@ -703,6 +703,9 @@ foreach (['all' => ['Карта всех филиалов', 'Агенты, МО�
     $permissions['locations.scope.'.$scope] = ['group' => 'Местоположение', 'name' => $name, 'description' => $description.' Требуется просмотр местоположения. РОП дополнительно ограничен закреплёнными группами; для истории используется группа записи.', 'roles' => $roles, 'exclusive_group' => 'locations.scope'];
 }
 
+$permissions['properties.deal.assign_users'] = ['group' => 'Недвижимость', 'name' => 'Назначение сотрудников сделки по объекту', 'description' => 'Разрешает указать получателя депозита, продавца и соисполнителей в доступной сделке по объекту. Право управления сделкой обязательно. Сохранение прежнего получателя депозита или продавца не требует нового назначения. Для передачи списка соисполнителей право обязательно; ограничения закреплённых групп РОП сохраняются.', 'roles' => ['admin', 'superadmin', 'agent', 'intern', 'mop', 'rop', 'branch_director', 'manager', 'operator']];
+$permissions['properties.deal.colleague'] = ['group' => 'Недвижимость', 'name' => 'Сделка по объекту коллеги', 'description' => 'Разрешает оформить депозит или закрытие сделки по чужому объекту без права редактирования объявления. Для продажи продавцом может быть только сам сотрудник. Требуется управление сделкой; назначение участников регулируется отдельно. Границы групп РОП сохраняются.', 'roles' => ['agent']];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],

@@ -351,6 +351,35 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
         $this->assertTrue(true);
     }
 
+    public function test_custom_role_deal_assignment_and_colleague_grants_are_independent(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $role = Role::create(['name' => 'Custom deal worker', 'slug' => 'custom_deal_worker']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $actor = $this->makeUser($role, $branch->id, 'custom-deal-worker');
+        $other = $this->makeUser($agentRole, $branch->id, 'other-agent');
+        $type = PropertyType::create(['name' => 'Apartment']);
+        $status = PropertyStatus::create(['name' => 'New']);
+        Property::unsetEventDispatcher();
+        $own = $this->makeProperty($actor, $type, $status);
+        $colleague = $this->makeProperty($other, $type, $status);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $base = ['properties.edit', 'properties.deal.manage'];
+        $role->forceFill(['permissions' => $base])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/properties/'.$own->id.'/deal', $this->depositPayload(['deposit_user_id' => $other->id]))->assertForbidden();
+        $role->forceFill(['permissions' => [...$base, 'properties.deal.assign_users']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/properties/'.$own->id.'/deal', $this->depositPayload(['deposit_user_id' => $other->id]))->assertOk();
+        $this->postJson('/api/properties/'.$colleague->id.'/deal', $this->depositPayload())->assertForbidden();
+        $role->forceFill(['permissions' => [...$base, 'properties.deal.assign_users', 'properties.deal.colleague']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/properties/'.$colleague->id.'/deal', $this->depositPayload())->assertOk();
+        $this->postJson('/api/properties/'.$colleague->id.'/deal', $this->salePayload(['sale_user_id' => $other->id]))->assertForbidden();
+        $this->postJson('/api/properties/'.$colleague->id.'/deal', $this->salePayload(['sale_user_id' => $actor->id]))->assertOk();
+        $this->assertSame($actor->id, $colleague->fresh()->sale_user_id);
+    }
+
     public function test_agent_can_deposit_or_sell_another_agents_property_from_any_branch_but_can_only_assign_self_as_seller(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);

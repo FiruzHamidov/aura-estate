@@ -63,10 +63,10 @@ final class PropertyModerationAccess
 
     public function canManageDeal(User $user, Property $property): bool
     {
-        $role = $this->role($user);
+        if ($user->hasRole('rop') && ! app(RopGroupAccess::class)->allows($user, $property)) return false;
 
         return $user->hasPermission('properties.deal.manage')
-            && ($this->canEdit($user, $property) || $role === 'agent');
+            && ($this->canEdit($user, $property) || $user->hasPermission('properties.deal.colleague'));
     }
 
     public function canModerate(User $user, Property $property): bool

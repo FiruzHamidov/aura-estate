@@ -260,7 +260,7 @@ class PropertyController extends Controller
             || in_array($moderationStatus, ['sold', 'sold_by_owner', 'rented'], true);
 
         $canManageColleagueDeal = $isColleagueDealAction
-            && $user->hasRole('agent')
+            && $user->hasPermission('properties.deal.colleague')
             && (
                 $moderationStatus === 'deposit'
                 || $saleUserId === null
@@ -274,15 +274,7 @@ class PropertyController extends Controller
 
     private function canAssignDealUser(User $actor): bool
     {
-        return $actor->hasRole('admin')
-            || $actor->hasRole('superadmin')
-            || $actor->hasRole('agent')
-            || $actor->hasRole('intern')
-            || $actor->hasRole('mop')
-            || $actor->hasRole('rop')
-            || $actor->hasRole('branch_director')
-            || $actor->hasRole('manager')
-            || $actor->hasRole('operator');
+        return $actor->hasPermission('properties.deal.assign_users');
     }
 
     /** Fields that belong exclusively to the deal DTO, not publication. */
