@@ -9,10 +9,6 @@ use Illuminate\Support\Facades\Schema;
 
 class PublicRealtorController extends Controller
 {
-    /**
-     * Roles allowed to expose a public team profile.
-     */
-    private const PUBLIC_ROLE_SLUGS = ['agent', 'mop'];
 
     public function __construct(
         private readonly RealtorReviewService $reviewService
@@ -31,7 +27,7 @@ class PublicRealtorController extends Controller
             ->with('role:id,name,slug')
             ->whereKey($id)
             ->where('status', 'active')
-            ->whereHas('role', fn ($query) => $query->whereIn('slug', self::PUBLIC_ROLE_SLUGS))
+            ->whereHas('role', fn ($query) => $query->withPermission('public_team.subject.profile'))
             ->first();
 
         abort_if(!$realtor, 404, 'Realtor not found or not public');
@@ -55,7 +51,7 @@ class PublicRealtorController extends Controller
                 'review_count' => $summary['count'],
                 'reviews' => $reviews,
             ])
-            ->header('Cache-Control', 'public, max-age=300, s-maxage=900, stale-while-revalidate=3600');
+            ->header('Cache-Control', 'no-store');
     }
 
     private function resolvePosition(User $realtor): ?string

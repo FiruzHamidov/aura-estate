@@ -255,7 +255,7 @@ class UserController extends Controller
             $this->authorizeHrCreationRole($authUser, $targetRole);
         }
 
-        abort_if(! $currentIsClient && $nextIsClient, 422, 'HR cannot change an employee into a client.');
+        abort_if(! $currentIsClient && $nextIsClient && ! $authUser->hasPermission('users.hr.convert_employee_to_client'), 422, 'HR cannot change an employee into a client.');
     }
 
     private function resolveRequestedRole(Request $request, ?User $targetUser = null): ?Role

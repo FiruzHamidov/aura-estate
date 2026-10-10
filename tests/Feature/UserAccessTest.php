@@ -1182,6 +1182,39 @@ class UserAccessTest extends TestCase
         $this->deleteJson('/api/user/'.$client->id, ['distribute_to_agents' => true])->assertStatus(403);
     }
 
+    public function test_hr_employee_to_client_transition_requires_opt_in_assignment_and_record_handover(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $branch = Branch::create(['name' => 'Branch']);
+        $group = BranchGroup::create(['name' => 'Group', 'branch_id' => $branch->id]);
+        $role = Role::create(['name' => 'Employee', 'slug' => 'custom_employee_transition']);
+        $role->forceFill(['permissions' => ['users.subject.hr_edit']])->save();
+        $clientRole = Role::create(['name' => 'Client', 'slug' => 'client']);
+        $clientRole->forceFill(['permissions' => []])->save();
+        $hrRole = Role::create(['name' => 'HR', 'slug' => 'hr']);
+        $base = [...app(\App\Services\Rbac\PermissionCatalog::class)->defaults('hr'), 'users.assign_role.client'];
+        $hrRole->forceFill(['permissions' => $base])->save();
+        $hr = User::create(['name' => 'HR', 'phone' => '900092001', 'role_id' => $hrRole->id]);
+        $employee = User::create(['name' => 'Employee', 'phone' => '900092002', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($hr);
+        $path = '/api/user/'.$employee->id;
+        $payload = ['role_id' => $clientRole->id];
+        $this->patchJson($path, $payload)->assertUnprocessable();
+        $hrRole->forceFill(['permissions' => [...$base, 'users.hr.convert_employee_to_client']])->save();
+        Sanctum::actingAs($hr->fresh());
+        $propertyId = DB::table('properties')->insertGetId(['title' => 'Active work', 'agent_id' => $employee->id]);
+        $this->patchJson($path, $payload)->assertConflict();
+        $this->assertDatabaseHas('users', ['id' => $employee->id, 'role_id' => $role->id, 'branch_group_id' => $group->id]);
+        $this->assertDatabaseHas('properties', ['id' => $propertyId, 'agent_id' => $employee->id]);
+        DB::table('properties')->where('id', $propertyId)->update(['moderation_status' => 'archived']);
+        $hrRole->forceFill(['permissions' => [...array_diff($base, ['users.assign_role.client']), 'users.hr.convert_employee_to_client']])->save();
+        Sanctum::actingAs($hr->fresh());
+        $this->patchJson($path, $payload)->assertUnprocessable();
+        $hrRole->forceFill(['permissions' => [...$base, 'users.hr.convert_employee_to_client']])->save();
+        Sanctum::actingAs($hr->fresh());
+        $this->patchJson($path, $payload)->assertOk()->assertJsonPath('role.slug', 'client')->assertJsonPath('branch_id', null)->assertJsonPath('branch_group_id', null);
+    }
+
     public function test_hr_can_convert_clients_only_to_creatable_roles_with_required_scope(): void
     {
         $branch = Branch::create(['name' => 'Branch']);
