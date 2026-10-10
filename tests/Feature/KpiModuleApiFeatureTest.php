@@ -363,6 +363,19 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->postJson('/api/kpi/daily?v=2', ['rows' => [[...$row, 'calls' => 8], [...$row, 'employee_id' => $foreign->id]]])->assertForbidden();
         $this->assertEquals(7, DailyReport::where('user_id', $target->id)->firstOrFail()->calls_count);
         $this->assertDatabaseMissing('daily_reports', ['user_id' => $foreign->id]);
+        $paths = ['/api/kpi/daily?date=2026-05-05&v=2', '/api/kpi/weekly?year=2026&week=19&v=2'];
+        foreach (['branch' => 1, 'all' => 2, 'own' => 0] as $scope => $count) {
+            $role->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.'.$scope]])->save();
+            Sanctum::actingAs($actor->fresh());
+            foreach ($paths as $path) {
+                $response = $this->getJson($path)->assertOk()->assertJsonCount($count, 'data');
+                if ($scope === 'branch') $response->assertJsonPath('data.0.employee_id', $target->id);
+            }
+        }
+        $role->forceFill(['permissions' => ['kpi.reports.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        foreach ($paths as $path) $this->getJson($path)->assertForbidden();
+
         $role->forceFill(['permissions' => ['kpi.daily.input.scope.branch']])->save();
         Sanctum::actingAs($actor->fresh());
         $this->postJson('/api/kpi/daily?v=2', ['rows' => [$row]])->assertForbidden();

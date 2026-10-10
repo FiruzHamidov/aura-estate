@@ -636,6 +636,11 @@ foreach (['all' => ['Ежедневный ввод всех филиалов', '
     $permissions['kpi.daily.input.scope.'.$scope] = ['group' => 'KPI', 'name' => $name, 'description' => $description.' Требуется сохранение ежедневного ввода. РОП ограничен закреплёнными группами; для старых отчётов используется историческая группа.', 'roles' => $roles, 'exclusive_group' => 'kpi.daily.input.scope'];
 }
 
+$permissions['kpi.reports.view'] = ['group' => 'KPI', 'name' => 'Просмотр показателей KPI', 'description' => 'Чтение дневных и сводных показателей KPI и связанных задач. Требуется область просмотра; состав показателей и целевые должности сотрудников сохраняются. Доступ к странице сайта задаётся отдельно.', 'roles' => $kpiPlanAllRoles];
+foreach (['all' => ['Показатели всех филиалов', 'Просмотр показателей всех филиалов.', ['admin', 'superadmin', 'owner']], 'branch' => ['Показатели своего филиала', 'Просмотр показателей сотрудников своего филиала.', ['rop', 'branch_director']], 'group' => ['Показатели своей группы', 'Просмотр показателей сотрудников своей группы.', ['mop']], 'own' => ['Только свои показатели', 'Просмотр только собственных показателей и задач.', array_values(array_diff($kpiPlanAllRoles, $kpiPlanManagers))]] as $scope => [$name, $description, $roles]) {
+    $permissions['kpi.reports.scope.'.$scope] = ['group' => 'KPI', 'name' => $name, 'description' => $description.' Требуется просмотр показателей. РОП ограничен закреплёнными группами; для истории сохраняется принадлежность отчётов на дату записи.', 'roles' => $roles, 'exclusive_group' => 'kpi.reports.scope'];
+}
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],

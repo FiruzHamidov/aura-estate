@@ -1935,13 +1935,7 @@ class KpiModuleService
             $query->whereHas('role', fn (Builder $q) => $q->where('slug', (string) $filters['role']));
         }
 
-        match ($authUser->role?->slug) {
-            'admin', 'superadmin', 'owner' => null,
-            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'users.branch_group_id', 'users.branch_id')->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop'])),
-            'branch_director' => $query->where('users.branch_id', (int) $authUser->branch_id),
-            'mop' => $query->where('users.branch_group_id', (int) $authUser->branch_group_id),
-            default => $query->where('users.id', (int) $authUser->id),
-        };
+        $this->applyReadScope($query, $authUser, 'users');
 
         return $query;
     }
@@ -2251,13 +2245,35 @@ class KpiModuleService
                 : $query->whereHas('user.role', fn (Builder $q) => $q->where('slug', (string) $filters['role']));
         }
 
-        match ($authUser->role?->slug) {
-            'admin', 'superadmin', 'owner' => null,
-            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'daily_reports.branch_group_id'),
-            'branch_director' => $query->whereHas('user', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id)),
-            'mop' => $query->whereHas('user', fn (Builder $q) => $q->where('branch_group_id', $authUser->branch_group_id)),
-            default => $query->where('user_id', $authUser->id),
-        };
+        $this->applyReadScope($query, $authUser, 'reports');
+    }
+
+    private function applyReadScope(Builder $query, User $actor, string $kind): void
+    {
+        abort_unless($actor->hasPermission('kpi.reports.view'), 403, 'KPI_FORBIDDEN_SCOPE');
+        $historical = $actor->hasRole('rop');
+        $relation = $kind === 'reports' ? 'user' : 'assignee';
+        $userColumn = match ($kind) { 'users' => 'users.id', 'reports' => 'daily_reports.user_id', default => 'crm_tasks.assignee_id' };
+        $groupColumn = match ($kind) { 'users' => 'users.branch_group_id', 'reports' => 'daily_reports.branch_group_id', default => 'crm_tasks.branch_group_id' };
+        if ($historical) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $actor, $groupColumn);
+            if ($kind === 'users') $query->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop']));
+        }
+        if ($actor->hasPermission('kpi.reports.scope.all')) return;
+        if ($actor->hasPermission('kpi.reports.scope.branch')) {
+            if (! $actor->branch_id) { $query->whereRaw('1 = 0'); return; }
+            if ($historical) return; // Assigned historical groups already belong to the actor's branch.
+            $kind === 'users' ? $query->where('users.branch_id', $actor->branch_id)
+                : $query->whereHas($relation, fn (Builder $q) => $q->where('branch_id', $actor->branch_id));
+            return;
+        }
+        if ($actor->hasPermission('kpi.reports.scope.group')) {
+            if (! $actor->branch_group_id) { $query->whereRaw('1 = 0'); return; }
+            ($historical || $kind === 'users') ? $query->where($groupColumn, $actor->branch_group_id)
+                : $query->whereHas($relation, fn (Builder $q) => $q->where('branch_group_id', $actor->branch_group_id));
+            return;
+        }
+        $actor->hasPermission('kpi.reports.scope.own') ? $query->where($userColumn, $actor->id) : $query->whereRaw('1 = 0');
     }
 
     private function metricProgress(float $fact, float $target): array
@@ -2351,13 +2367,7 @@ class KpiModuleService
 
         $authUser->loadMissing('role');
 
-        match ($authUser->role?->slug) {
-            'admin', 'superadmin', 'owner' => null,
-            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'crm_tasks.branch_group_id'),
-            'branch_director' => $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id)),
-            'mop' => $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_group_id', $authUser->branch_group_id)),
-            default => $query->where('assignee_id', $authUser->id),
-        };
+        $this->applyReadScope($query, $authUser, 'tasks');
     }
 
     private function ensureCanUpsertDailyForUser(User $authUser, User $targetUser, ?DailyReport $report = null): void
