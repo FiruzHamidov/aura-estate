@@ -533,8 +533,8 @@ class UserController extends Controller
             $data = $this->normalizeBranchIdForMutation($data, $authUser, $targetRole);
             $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
             if ($request->exists('security_attendance_branch_ids')) {
-                abort_unless($authUser->hasPermission('users.security_attendance.assign'), 403, 'Нет права назначать филиалы посещаемости СБ.');
-                abort_unless($targetRole->slug === 'security', 422, 'Филиалы посещаемости назначаются только сотрудникам СБ.');
+                abort_unless($authUser->hasPermission('users.security_attendance.assign'), 403, 'Нет права назначать филиалы посещаемости.');
+                abort_unless($targetRole->hasPermission('attendance.scope.assigned_branches'), 422, 'Роли сотрудника нужен доступ к посещаемости назначенных филиалов.');
                 $data['security_attendance_branch_ids'] = array_values(array_map('intval', $request->input('security_attendance_branch_ids')));
             }
 
@@ -697,8 +697,8 @@ class UserController extends Controller
             $data = $this->normalizeBranchIdForMutation($data, $authUser, $targetRole);
             $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
             if ($request->exists('security_attendance_branch_ids')) {
-                abort_unless($authUser->hasPermission('users.security_attendance.assign'), 403, 'Нет права назначать филиалы посещаемости СБ.');
-                abort_unless($targetRole->slug === 'security', 422, 'Филиалы посещаемости назначаются только сотрудникам СБ.');
+                abort_unless($authUser->hasPermission('users.security_attendance.assign'), 403, 'Нет права назначать филиалы посещаемости.');
+                abort_unless($targetRole->hasPermission('attendance.scope.assigned_branches'), 422, 'Роли сотрудника нужен доступ к посещаемости назначенных филиалов.');
                 $data['security_attendance_branch_ids'] = array_values(array_map('intval', $request->input('security_attendance_branch_ids')));
             }
 

@@ -180,7 +180,7 @@ final class AttendanceReportController extends Controller
                 'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             ])->deleteFileAfterSend(true);
             $actor = $request->user();
-            return ($actor->hasRole('rop') || $actor->hasRole('security'))
+            return ($actor->hasRole('rop') || $actor->hasPermission('attendance.scope.assigned_branches'))
                 ? new \App\Http\Responses\CheckedTemporaryDownload($download, fn () => $this->assertExportScope($actor))
                 : $download;
         }
@@ -207,9 +207,9 @@ final class AttendanceReportController extends Controller
 
     private function assertExportScope(User $actor): void
     {
-        if ($actor->hasRole('security')) {
+        if ($actor->hasPermission('attendance.scope.assigned_branches')) {
             $fresh = User::query()->with('role')->find($actor->id);
-            abort_unless($fresh && $fresh->hasRole('security') && $fresh->status === User::STATUS_ACTIVE
+            abort_unless($fresh && $fresh->hasPermission('attendance.scope.assigned_branches') && $fresh->status === User::STATUS_ACTIVE
                 && $this->access->securityBranchIds($fresh) === $this->access->securityBranchIds($actor),
                 409, 'ACCESS_SCOPE_VERSION_CONFLICT');
             return;
@@ -278,7 +278,7 @@ final class AttendanceReportController extends Controller
     private function scopeEvents(Builder $query, User $viewer): void
     {
         $this->access->assertCanViewModule($viewer);
-        if ($viewer->hasRole('security')) $this->groupScope->apply($query, $viewer);
+        if ($viewer->hasPermission('attendance.scope.assigned_branches')) $this->groupScope->apply($query, $viewer);
         if ($viewer->hasRole('rop')) {
             $this->groupScope->apply($query, $viewer);
         } else {

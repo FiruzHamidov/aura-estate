@@ -70,7 +70,7 @@ final class AttendanceWebController extends Controller
                 'date_to' => $to->toDateString(),
                 'permissions' => $this->access->permissions($request->user()),
                 'access_scope' => app(\App\Support\RopGroupAccess::class)->describe($request->user()),
-                'selectable_branches' => $request->user()->hasRole('security')
+                'selectable_branches' => $request->user()->hasPermission('attendance.scope.assigned_branches')
                     ? \App\Models\Branch::query()->whereIn('id', $this->access->securityBranchIds($request->user()))->orderBy('name')->get(['id', 'name'])
                     : null,
                 'summary' => $this->summary($request->user(), $activeUsersCount, $from, $to),

@@ -142,7 +142,7 @@ final class AttendanceAccessService
             return $query;
         }
 
-        if ($viewer->hasRole('security')) {
+        if ($viewer->hasPermission('attendance.scope.assigned_branches')) {
             return $query->whereIn('users.branch_id', $this->securityBranchIds($viewer));
         }
         if ($viewer->hasRole('rop')) {

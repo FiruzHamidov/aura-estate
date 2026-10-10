@@ -118,6 +118,35 @@ class SecurityAttendanceFeatureTest extends \Tests\TestCase
         $this->putJson('/api/user/'.$sb->id, ['security_attendance_branch_ids' => [$c->id]])->assertForbidden();
         $this->assertSame([], $sb->fresh()->security_attendance_branch_ids);
     }
+    public function test_custom_role_can_use_assigned_attendance_branches_and_revocation_removes_scope(): void
+    {
+        extract($this->securityFixture());
+        $adminRole = Role::create(['slug' => 'admin', 'name' => 'Admin']);
+        $admin = User::create(['name' => 'Admin', 'phone' => 'admin', 'role_id' => $adminRole->id, 'branch_id' => $a->id]);
+        $custom = Role::create(['slug' => 'custom_attendance', 'name' => 'Custom attendance']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $custom->forceFill(['permissions' => ['attendance.table.view', 'attendance.scope.assigned_branches']])->save();
+        $sb->update(['role_id' => $custom->id]);
+        Sanctum::actingAs($admin->fresh());
+        $this->putJson('/api/user/'.$sb->id, ['security_attendance_branch_ids' => [$a->id, $b->id]])->assertOk();
+        Sanctum::actingAs($sb->fresh());
+        $url = '/api/attendance/matrix?date_from=2026-09-17&date_to=2026-09-17';
+        $response = $this->getJson($url)->assertOk()->assertJsonCount(2, 'meta.selectable_branches');
+        $ids = collect($response->json('data'))->pluck('user.id')->all();
+        $this->assertContains($one->id, $ids);
+        $this->assertContains($two->id, $ids);
+        $this->assertNotContains($hidden->id, $ids);
+        $this->getJson('/api/attendance/users/'.$two->id.'/days/2026-09-17')->assertOk();
+        $this->getJson('/api/attendance/users/'.$hidden->id.'/days/2026-09-17')->assertForbidden();
+        $custom->forceFill(['permissions' => ['attendance.table.view']])->save();
+        Sanctum::actingAs($sb->fresh());
+        $response = $this->getJson($url)->assertOk();
+        $this->assertSame([$sb->id], collect($response->json('data'))->pluck('user.id')->all());
+        $this->getJson('/api/attendance/users/'.$two->id.'/days/2026-09-17')->assertForbidden();
+        Sanctum::actingAs($admin->fresh());
+        $this->putJson('/api/user/'.$sb->id, ['security_attendance_branch_ids' => [$c->id]])->assertUnprocessable();
+    }
+
     private function createBaseSchema(): void
     {
         Schema::create('roles', fn (Blueprint $t) => [$t->id(), $t->string('name'), $t->string('slug')->unique(), $t->timestamps()]);
