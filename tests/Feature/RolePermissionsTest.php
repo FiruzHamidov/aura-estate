@@ -56,6 +56,37 @@ class RolePermissionsTest extends TestCase
         }
     }
 
+    public function test_booking_editor_stays_disabled_after_migration_and_can_be_enabled_explicitly(): void
+    {
+        foreach (Role::all() as $role) {
+            $this->assertFalse($role->hasPermission('bookings.site.edit'), $role->slug);
+        }
+        $this->actor('superadmin');
+        $role = Role::where('slug', 'agent')->firstOrFail();
+        $this->assertTrue($role->hasPermission('bookings.update.own'));
+        $this->putJson('/api/rbac/roles/'.$role->id, [
+            'version' => 1,
+            'permissions' => [...$role->permissionKeys(), 'bookings.site.edit'],
+        ])->assertOk();
+        $this->assertTrue($role->fresh()->hasPermission('bookings.site.edit'));
+    }
+
+    public function test_user_website_defaults_preserve_restrictions_beyond_api_permissions(): void
+    {
+        foreach (['agent', 'mop'] as $slug) {
+            $role = Role::where('slug', $slug)->firstOrFail();
+            $this->assertTrue($role->hasPermission('users.update'));
+            $this->assertFalse($role->hasPermission('users.site.mutate'));
+        }
+        $marketing = Role::where('slug', 'marketing')->firstOrFail();
+        $this->assertTrue($marketing->hasPermission('users.site.mutate'));
+        $this->assertFalse($marketing->hasPermission('users.site.admin_targets'));
+        $this->assertTrue($marketing->hasPermission('users.site.dismiss_clients'));
+        $director = Role::where('slug', 'branch_director')->firstOrFail();
+        $this->assertTrue($director->hasPermission('users.site.mutate'));
+        $this->assertFalse($director->hasPermission('users.site.dismiss_clients'));
+    }
+
     public function test_edit_is_audited_and_takes_effect_for_existing_user(): void
     {
         $agent = $this->actor('agent');
