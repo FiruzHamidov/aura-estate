@@ -36,6 +36,23 @@ class RolePermissionsTest extends TestCase
         return $user;
     }
 
+    public function test_common_profile_page_defaults_preserve_previous_access(): void
+    {
+        foreach (Role::all() as $role) {
+            $common = !in_array($role->slug, ['accountant', 'security', 'external_agent'], true);
+            $this->assertSame($common, $role->hasPermission('messaging.site.view'), $role->slug);
+            $this->assertSame($common, $role->hasPermission('favorites.site.view'), $role->slug);
+            $this->assertSame($common && $role->slug !== 'hr', $role->hasPermission('favorites.site.menu'), $role->slug);
+            $this->assertSame($common && $role->slug !== 'client', $role->hasPermission('wallet.site.view'), $role->slug);
+        }
+        $catalog = app(PermissionCatalog::class);
+        foreach (['messaging.site.view', 'favorites.site.view', 'favorites.site.menu'] as $key) {
+            $this->assertContains($key, $catalog->migrationDefaults('legacy_custom'));
+            $this->assertNotContains($key, $catalog->defaults('new_custom'));
+        }
+        $this->assertNotContains('wallet.site.view', $catalog->migrationDefaults('legacy_custom'));
+    }
+
     public function test_crm_report_subject_defaults_preserve_operator_and_manager_reports(): void
     {
         foreach (Role::all() as $role) {
