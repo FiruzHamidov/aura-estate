@@ -200,6 +200,27 @@ class BranchGroupFeatureTest extends TestCase
             ->assertJsonPath('message', 'Нельзя удалить группу: к ней привязаны пользователи или контакты.');
     }
 
+    public function test_group_count_policy_includes_custom_role_without_cross_branch_users(): void
+    {
+        $branch = Branch::create(['name' => 'Local']);
+        $other = Branch::create(['name' => 'Other']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Team']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $role = Role::create(['name' => 'Custom counted employee', 'slug' => 'custom_counted_employee']);
+        $rop = $this->createUser($ropRole, $branch, 'ROP', $group);
+        $this->createUser($role, $branch, 'Local', $group);
+        $this->createUser($role, $other, 'Foreign', $group);
+        $rop->supervisedGroups()->attach($group->id);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        Sanctum::actingAs($rop->fresh());
+        foreach ([[], ['users.subject.group_count'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            $count = $rights ? 1 : 0;
+            $this->getJson('/api/branch-groups')->assertOk()->assertJsonPath('data.0.users_count', $count);
+            $this->getJson('/api/branch-groups/'.$group->id)->assertOk()->assertJsonPath('users_count', $count);
+        }
+    }
+
     public function test_rop_group_counts_include_only_accessible_employees_and_clients(): void
     {
         $branch = Branch::create(['name' => 'Source']);

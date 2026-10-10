@@ -870,6 +870,26 @@ class RopGroupAssignmentsTest extends TestCase
         $this->assertSame($this->a->id, (int) $client->fresh()->branch_group_id);
     }
 
+    public function test_custom_group_profile_policy_controls_nested_fields_without_exposing_foreign_users(): void
+    {
+        $role = Role::create(['name' => 'Custom employee', 'slug' => 'custom_group_profile']);
+        $local = $this->user($role->slug, $this->a);
+        $foreign = $this->user($role->slug, $this->c);
+        $this->rop->supervisedGroups()->attach($this->a->id);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $projection = app(\App\Services\GroupAccess\GroupDataProjection::class);
+        foreach ([[], ['users.subject.group_profile'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            $record = new Client();
+            $record->setRelation('responsibleAgent', $local->fresh());
+            $record->setRelation('creator', $foreign->fresh());
+            $result = $projection->relations($record, $this->rop->fresh());
+            $this->assertSame($rights !== [], array_key_exists('phone', $result['responsible_agent']));
+            $this->assertSame($local->id, $result['responsible_agent']['id']);
+            $this->assertSame(['id' => $foreign->id, 'name' => $foreign->name], $result['creator']);
+        }
+    }
+
     public function test_group_projection_removes_foreign_card_and_preserves_only_author_label(): void
     {
         $this->rop->supervisedGroups()->attach($this->a->id);

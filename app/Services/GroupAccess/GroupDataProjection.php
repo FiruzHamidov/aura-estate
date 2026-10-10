@@ -173,7 +173,7 @@ final class GroupDataProjection
             return $value->map(fn ($item) => $this->value($item, $actor))->filter(fn ($item) => $item !== null)->values()->all();
         }
         if ($value instanceof User && (int) $value->id !== (int) $actor->id) {
-            if (! in_array($value->role?->slug, ['agent', 'mop'], true) || ! $this->visible($value, $actor)) {
+            if (! $value->hasPermission('users.subject.group_profile') || ! $this->visible($value, $actor)) {
                 return $value->only(['id', 'name']);
             }
         } elseif ($value instanceof \App\Models\PropertyDuplicateCandidate) {

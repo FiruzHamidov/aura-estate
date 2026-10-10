@@ -37,7 +37,7 @@ class BranchGroupController extends Controller
             if (!$authUser->hasPermission('branch_groups.scope.all') && !$authUser->hasPermission('branch_groups.scope.branch')) return $query->whereRaw('1 = 0');
             $query->withCount([
                 'users' => fn ($users) => $users->where('branch_id', $authUser->branch_id)
-                    ->whereHas('role', fn ($roles) => $roles->whereIn('slug', ['agent', 'mop'])),
+                    ->whereHas('role', fn ($roles) => $roles->withPermission('users.subject.group_count')),
                 'clients' => fn ($clients) => $clients->where('branch_id', $authUser->branch_id),
             ]);
             return app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'branch_groups.id', 'branch_groups.branch_id');

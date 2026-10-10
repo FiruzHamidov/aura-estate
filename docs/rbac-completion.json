@@ -188,6 +188,13 @@
           "logs": [
             "/tmp/aura-rbac-directory-subjects.log"
           ]
+        },
+        {
+          "change": "users.subject.group_profile управляет раскрытием профиля сотрудника во вложенных отношениях карточек закреплённых групп; без допуска остаются id/name. users.subject.group_count управляет счётчиком сотрудников группы. Оба исходных списка agent/mop сохранены; профиль помечен чувствительной настройкой.",
+          "verification": "106 тестов / 2920 проверок прошли. Пользовательская роль: независимое включение и отзыв, отсутствие раскрытия чужой группы, отсутствие подсчёта сотрудника другого филиала, совместимость существующих групповых сценариев.",
+          "logs": [
+            "/tmp/aura-rbac-group-subjects.log"
+          ]
         }
       ],
       "remaining_checks": [
@@ -396,20 +403,12 @@
     ],
     "pending_followups": [
       {
-        "file": "app/Services/GroupAccess/GroupDataProjection.php",
-        "reason": "Вложенный профиль доступен только agent/mop; перенести ограничение полей."
-      },
-      {
         "file": "app/Services/GroupAccess/TaskGroupOwnership.php",
         "reason": "Проверка группы ответственного при новой задаче зависит от agent/mop; согласовать с целостностью и настройками."
       },
       {
         "file": "app/Http/Controllers/AccountDeletionController.php",
         "reason": "Прямая проверка agent/mop требует классификации."
-      },
-      {
-        "file": "app/Http/Controllers/BranchGroupController.php",
-        "reason": "Подсчёт сотрудников группы ограничен agent/mop."
       },
       {
         "file": "app/Http/Controllers/PropertyController.php",
