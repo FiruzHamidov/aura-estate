@@ -731,6 +731,13 @@ foreach ([
 }
 $permissions['properties.list.closed_only'] = ['group' => 'Недвижимость', 'name' => 'Режим закрытых объектов в разделе «Мои объекты»', 'description' => 'Ограничивает раздел «Мои объекты» закрытыми стадиями отчёта контроля и включает сводки по статусам, валютам и сотрудникам. Дополнительно применяется выбранная область списка и границы групп РОП. На общий список и карту этот режим не влияет. Открытие карточек требует отдельного права.', 'roles' => ['security']];
 
+foreach (['own' => 'Мои объекты', 'all' => 'Все объекты'] as $kind => $title) {
+    $permissions['properties.site.'.$kind] = ['group' => 'Недвижимость', 'name' => 'Страница «'.$title.'»', 'description' => 'Разрешает открыть страницу «'.$title.'» на сайте. Для загрузки данных нужна выбранная область списков объектов. Наличие страницы не расширяет область данных и не разрешает изменения.', 'roles' => ['admin', 'superadmin', 'marketing', 'hr', 'agent', 'mop', 'rop', 'branch_director', 'manager', 'operator', 'reels_manager', 'intern']];
+    $permissions['properties.menu.'.$kind] = ['group' => 'Недвижимость', 'name' => 'Ссылка «'.$title.'» в меню', 'description' => 'Показывает ссылку на страницу «'.$title.'» в меню профиля. Требуются доступ к самой странице и область списков объектов.', 'roles' => $kind === 'all' ? ['admin', 'superadmin', 'marketing', 'mop', 'rop', 'branch_director'] : ['admin', 'superadmin', 'marketing', 'agent', 'mop', 'rop', 'branch_director', 'manager', 'operator', 'reels_manager', 'intern']];
+}
+
+$permissions['properties.filters.own_author'] = ['group' => 'Недвижимость', 'name' => 'Личный фильтр автора на странице «Все объекты»', 'description' => 'На странице «Все объекты» автоматически ограничивает выборку объектами, где текущий сотрудник указан автором, независимо от выбранного фильтра автора. Сохраняет прежний режим стажёра. Дополнительно действует серверная область списков; фильтр не выдаёт доступ к странице или чужим объектам.', 'roles' => ['intern']];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],
