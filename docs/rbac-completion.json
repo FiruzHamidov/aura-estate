@@ -319,6 +319,14 @@
             "/tmp/aura-rbac-mapping-picker-node.log",
             "/tmp/aura-rbac-mapping-picker-tsc.log"
           ]
+        },
+        {
+          "change": "Общий DailyReportGate использует daily_reports.submission.required вместо жёсткого agent/mop. Состояние несданного отчёта приходит с сервера; отзыв обязательности снимает экран даже при старых флагах в профиле. Форма отчёта остаётся доступна.",
+          "verification": "Четыре браузерных сценария прошли: пользовательская роль с несданным отчётом, отзыв права, агент без обязательности, отсутствие задолженности и доступ к форме. TypeScript прошёл.",
+          "logs": [
+            "/tmp/aura-rbac-daily-gate-browser.log",
+            "/tmp/aura-rbac-daily-gate-tsc.log"
+          ]
         }
       ],
       "remaining_checks": [
@@ -495,5 +503,25 @@
     "frontend_head": "13c37eb",
     "backend_log": "/tmp/aura-rbac-group-policy-final.log",
     "browser_log": "/tmp/aura-rbac-group-ui-all-browser.log"
+  },
+  "frontend_role_reference_audit": {
+    "reviewed": [
+      {
+        "file": "services/new-buildings/access.ts",
+        "classification": "explicit_permissions_authoritative_legacy_role_fallback"
+      },
+      {
+        "file": "services/daily-reports/access.ts",
+        "classification": "explicit_permissions_and_server_employee_eligibility_authoritative_legacy_fallback"
+      },
+      {
+        "file": "app/apartment/[slug]/_components/GalleryWrapper.tsx",
+        "classification": "creator_role_branch_inspected: company display label only; authorization helpers require separate audit"
+      },
+      {
+        "file": "app/_components/daily-report/DailyReportGate.tsx",
+        "classification": "migrated mandatory report permission with browser coverage"
+      }
+    ]
   }
 }
