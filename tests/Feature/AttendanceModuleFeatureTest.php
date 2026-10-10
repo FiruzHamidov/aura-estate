@@ -2020,6 +2020,32 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->assertSame(2, AttendanceDailySummary::count());
     }
 
+    public function test_mapping_picker_uses_own_permission_subject_policy_and_search(): void
+    {
+        $c = $this->context();
+        $role = Role::create(['name' => 'Custom participant', 'slug' => 'custom_mapping_picker']);
+        $c['agent']->forceFill(['role_id' => $role->id])->save();
+        $c['otherAgent']->forceFill(['role_id' => $role->id])->save();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        Sanctum::actingAs($c['rop']->fresh());
+        $url = '/api/attendance/mapping-users?search='.$c['agent']->id;
+        $this->getJson($url)->assertOk()->assertJsonCount(0, 'data');
+        $role->forceFill(['permissions' => ['attendance.subject.mapping_assigned_groups']])->save();
+        $this->getJson($url)->assertOk()->assertJsonPath('data.0.id', $c['agent']->id)->assertJsonMissingPath('data.0.email');
+        $this->getJson('/api/attendance/mapping-users?search='.$c['otherAgent']->id)->assertOk()->assertJsonCount(0, 'data');
+        $role->forceFill(['permissions' => ['attendance.subject.mapping_assigned_groups', 'attendance.subject.exclude_mapping_picker']])->save();
+        $this->getJson($url)->assertOk()->assertJsonCount(0, 'data');
+        $c['hr']->role->forceFill(['permissions' => ['attendance.mappings.manage']])->save();
+        Sanctum::actingAs($c['hr']->fresh());
+        $role->forceFill(['permissions' => []])->save();
+        $this->getJson($url)->assertOk()->assertJsonPath('data.0.id', $c['agent']->id);
+        $c['agent']->forceFill(['status' => 'inactive'])->save();
+        $this->getJson($url)->assertOk()->assertJsonCount(0, 'data');
+        $c['hr']->role->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($c['hr']->fresh());
+        $this->getJson($url)->assertForbidden();
+    }
+
     private function context(): array
     {
         $branchA = Branch::firstOrCreate(['name' => 'Branch A']);

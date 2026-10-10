@@ -309,10 +309,20 @@
             "/tmp/aura-rbac-attendance-ui-policy-browser.log",
             "/tmp/aura-rbac-attendance-ui-policy-tsc.log"
           ]
+        },
+        {
+          "change": "Выбор сотрудника для привязки терминала получает отдельный /attendance/mapping-users с правом управления сопоставлениями, активностью, политикой закреплённых групп и настраиваемым исключением роли из списка. Исходные исключения клиента/внешнего агента перенесены в attendance.subject.exclude_mapping_picker. Общие права users/roles больше не требуются для этой формы. Ответ ограничен id/name/phone, поиск по имени, телефону и ID. Кэш разделён по контексту доступа; смена контекста сбрасывает черновик, отзыв закрывает форму.",
+          "verification": "103 серверных теста / 3135 проверок, 5 Node-тестов, TypeScript и два браузерных сценария прошли. Проверены пользовательская роль, поиск, отзыв, активность, чужая группа, отсутствие email и запроса общего списка пользователей; сохранён ввод ID терминала с ведущими нулями.",
+          "logs": [
+            "/tmp/aura-rbac-mapping-picker-backend.log",
+            "/tmp/aura-rbac-mapping-picker-browser.log",
+            "/tmp/aura-rbac-mapping-picker-node.log",
+            "/tmp/aura-rbac-mapping-picker-tsc.log"
+          ]
         }
       ],
       "remaining_checks": [
-        "AttendanceSynchronization: выбор сотрудников пока использует общий useUsers и старый фильтр должностей. Нужна отдельная серверная выборка по mappingUsersQuery и настройке допустимости, с сохранением прежних исключений интерфейса. Остальные прямые ссылки frontend собраны в /tmp/aura-rbac-front-roles.txt; файл временный, не считать аудит завершённым."
+        "Продолжить полный аудит остальных прямых ссылок frontend; временный результат поиска /tmp/aura-rbac-front-roles.txt не подтверждает завершение аудита."
       ]
     },
     {

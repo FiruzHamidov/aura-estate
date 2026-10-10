@@ -22,6 +22,24 @@ final class AttendanceMappingController extends Controller
         private readonly AttendanceParticipantService $participants,
     ) {}
 
+    public function users(Request $request)
+    {
+        $this->access->assertCanManageMappings($request->user());
+        $data = $request->validate(['search' => ['nullable', 'string', 'max:150'],
+            'per_page' => ['nullable', 'integer', 'between:1,100']]);
+        $query = $this->access->mappingUsersQuery($request->user())
+            ->where('status', User::STATUS_ACTIVE)
+            ->whereHas('role', fn ($role) => $role->withPermission('attendance.subject.exclude_mapping_picker', false));
+        if (($search = trim($data['search'] ?? '')) !== '') {
+            $query->where(function ($users) use ($search) {
+                $users->where('name', 'like', '%'.$search.'%')->orWhere('phone', 'like', '%'.$search.'%');
+                if (ctype_digit($search)) $users->orWhere('id', (int) $search);
+            });
+        }
+        return response()->json($query->select(['id', 'name', 'phone'])->orderBy('name')->orderBy('id')
+            ->paginate($data['per_page'] ?? 20));
+    }
+
     public function index(Request $request)
     {
         $this->access->assertCanManageMappings($request->user());

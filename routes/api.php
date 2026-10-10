@@ -205,6 +205,7 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         Route::get('/devices', [AttendanceDeviceController::class, 'index']);
         Route::post('/devices', [AttendanceDeviceController::class, 'store']);
         Route::patch('/devices/{device}', [AttendanceDeviceController::class, 'update']);
+        Route::get('/mapping-users', [AttendanceMappingController::class, 'users']);
         Route::get('/device-users', [AttendanceMappingController::class, 'index']);
         Route::put('/device-users', [AttendanceMappingController::class, 'upsert']);
         Route::delete('/device-users/{mapping}', [AttendanceMappingController::class, 'destroy'])->whereNumber('mapping');
