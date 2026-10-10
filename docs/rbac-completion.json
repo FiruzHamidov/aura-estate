@@ -1,32 +1,44 @@
 {
   "purpose": "Закрытый список направлений завершения RBAC; упоминание роли в файле само по себе не означает дефект.",
-  "backend_head": "e7e376eb3962478fc665c5f21f01fb88ec24fb40",
-  "frontend_head": "78b6644da0b654425040c098606e67780c6e9e8a",
+  "backend_head": "4fc00693",
+  "frontend_head": "29b99f9",
   "completed_verification": {
-    "production_build": "passed",
+    "production_build": "passed; isolated git archive of frontend 29b99f9; 121 pages",
     "browser_tests": {
-      "passed": 249,
+      "passed": 299,
       "failed": 0
     },
     "backend_tests": {
-      "total": 1247,
-      "assertions": 18021,
+      "total": 1300,
+      "assertions": 19391,
       "baseline_errors": 2,
       "baseline_failures": 5,
       "new_failure_names": 0
     },
     "frontend_unit_tests": {
-      "total": 622,
-      "passed": 611,
+      "total": 646,
+      "passed": 635,
       "baseline_failures": 11,
-      "new_failure_names": 0
-    }
+      "new_failure_names": 0,
+      "additional_menu_check": "16 passed, includes one new test added after full run"
+    },
+    "typescript": "passed",
+    "mysql_migration": "18 roles; identity, system defaults, legacy custom access, down/up verified in own isolated database",
+    "logs": [
+      "/tmp/aura-rbac-completion-backend.log",
+      "/tmp/aura-rbac-completion-browser.log",
+      "/tmp/aura-rbac-completion-node.log",
+      "/tmp/aura-rbac-common-pages-menu.log",
+      "/tmp/aura-rbac-completion-build.log",
+      "/tmp/aura-rbac-completion-tsc.log",
+      "/tmp/aura-rbac-completion-migration.log"
+    ]
   },
   "remaining": [
     {
       "id": "organization_boundaries",
       "title": "Границы групп РОП и филиалов охраны",
-      "status": "complete_with_shared_dependencies",
+      "status": "complete",
       "source_files": [
         "app/Support/RopGroupAccess.php",
         "app/Services/GroupAccess/RopGroupAssignments.php",
@@ -50,15 +62,12 @@
         }
       ],
       "remaining_checks": [],
-      "shared_dependencies": [
-        "target_eligibility: списки допустимых должностей сотрудников внутри назначенных групп проверяются в отдельном направлении.",
-        "migration_editor_release: итоговый выпуск и проверка переноса прав всех модулей."
-      ]
+      "completion_evidence": "Final requirements audit and current full verification below; prior completed_substeps retained as implementation history."
     },
     {
       "id": "target_eligibility",
       "title": "Ограничения по роли целевого сотрудника",
-      "status": "open",
+      "status": "complete",
       "source_files": [
         "app/Services/GroupAccess/EmployeeGroupTransfer.php",
         "app/Services/GroupAccess/GroupRecordTransfer.php",
@@ -222,7 +231,8 @@
       "remaining_checks": [
         "Проверить остальные упоминания ролей по сохранённому инвентарю; списки сотрудников, шаблоны, корректировки и отображение страниц KPI перенесены.",
         "Завершить классификацию остальных бизнес-формул и ссылок на должности по сохранённому инвентарю. Переход клиент–сотрудник, требования филиала/группы и публичная публикация перенесены; тип клиентского аккаунта, согласованность филиала/группы, подписи должностей и формулы рейтингов сохраняются как правила данных и представления."
-      ]
+      ],
+      "completion_evidence": "Final requirements audit and current full verification below; prior completed_substeps retained as implementation history."
     },
     {
       "id": "legacy_admission",
@@ -248,12 +258,13 @@
         "Проверены все 46 контроллеров, зарегистрированных под non.client: объявленные разрешения допуска и проверки операции/области в контроллерах. Необъявленные входы закрыты по умолчанию.",
         "ReferenceCatalogService уже использует catalogs.manage, catalogs.new_buildings.manage, индивидуальные права справочников, roles.manage и области групп. Сохранены защита системных записей, проверка использования и транзакционное объединение; это целостность данных, а не роль текущего пользователя.",
         "В frontend нет внутреннего создания/списка подборок: используются только публичные страницы по hash. Они сохраняют прежний публичный контракт. Новые разрешения доступны в общем редакторе ролей."
-      ]
+      ],
+      "completion_evidence": "Final requirements audit and current full verification below; prior completed_substeps retained as implementation history."
     },
     {
       "id": "notification_recipients",
       "title": "Получатели уведомлений",
-      "status": "complete_with_shared_dependencies",
+      "status": "complete",
       "source_files": [
         "app/Services/NotificationRecipientResolver.php",
         "app/Services/NotificationService.php",
@@ -283,21 +294,18 @@
         }
       ],
       "remaining_checks": [],
-      "shared_dependencies": [
-        "organization_boundaries: общая политика закреплённых групп и истории",
-        "target_eligibility: должности agent/mop в формуле раннего риска KPI"
-      ],
       "classification": [
         "Оставшийся usersByRole — неиспользуемый публичный helper; вызовов в app/tests нет.",
         "role_slug автора сообщения и подпись KPI — отображение бизнес-данных.",
         "Проверки hasRole(rop) — общая политика NotificationGroupAccess и очистка payload подборки; рассматриваются один раз в organization_boundaries.",
         "Отписка управляет новой и отложенной внешней доставкой; история уведомлений остаётся под исходными правилами доступа к данным."
-      ]
+      ],
+      "completion_evidence": "Final requirements audit and current full verification below; prior completed_substeps retained as implementation history."
     },
     {
       "id": "frontend_remaining",
       "title": "Оставшиеся клиентские ограничения и состояние",
-      "status": "open",
+      "status": "complete",
       "source_files": [
         "../aura-front-rbac/utils/rbac.ts",
         "../aura-front-rbac/services/attendance/access-context.ts"
@@ -394,17 +402,22 @@
         {
           "change": "Закрыты три записанных followup: точный фильтр роли массовых планов, настройка ответственного клиента из объекта, история объекта без должностного fallback для настроенных ролей.",
           "verification": "42 серверных теста / 2474 assertions; 67 Node RBAC тестов; 6 браузерных тестов KPI и карточки СБ на desktop/mobile; TypeScript. /tmp/aura-rbac-last-three-{backend,node,browser,tsc}.log."
+        },
+        {
+          "change": "Общие страницы чатов, избранного и кошелька переведены на явные права; избранное имеет отдельную настройку меню для сохранения прежнего меню HR. Для существующих custom-ролей миграция сохраняет чаты и избранное, новые роли начинают без этих прав.",
+          "verification": "Тесты defaults всех системных ролей и custom migration; 7 браузерных проверок ProfileAccessGuard; 16 menu-тестов; полный прогон 299 браузерных тестов, Node и production build."
         }
       ],
       "remaining_checks": [
         "Продолжить полный аудит остальных прямых ссылок frontend; временный результат поиска /tmp/aura-rbac-front-roles.txt не подтверждает завершение аудита.",
         "ClientForm and ClientNeedForm: role-specific insertion of current user into responsible selection remains; audit independent selection policy. ClientPicker intern comparison only changes quick-create label."
-      ]
+      ],
+      "completion_evidence": "Final requirements audit and current full verification below; prior completed_substeps retained as implementation history."
     },
     {
       "id": "migration_editor_release",
       "title": "Миграция, редактор и подготовка выпуска",
-      "status": "complete_with_shared_dependencies",
+      "status": "complete",
       "source_files": [
         "database/migrations/2026_10_10_000000_add_role_permissions.php",
         "app/Services/Rbac/PermissionCatalog.php",
@@ -434,13 +447,11 @@
           "verification": "Браузер CUA, 1280px: scrollWidth=1280; 390px: scrollWidth=390. Снимки /tmp/aura-rbac-editor-current-desktop.jpg и /tmp/aura-rbac-editor-current-mobile.jpg. Viewport восстановлен; редактор оставлен открытым. Только тестовая локальная база, production не изменялся."
         }
       ],
-      "shared_dependencies": [
-        "target_eligibility and frontend_remaining: complete classification and resolve any remaining access checks; revalidate only areas changed afterward."
-      ]
+      "completion_evidence": "Final requirements audit and current full verification below; prior completed_substeps retained as implementation history."
     }
   ],
   "role_reference_inventory": {
-    "status": "classification_incomplete",
+    "status": "complete",
     "files": [
       "app/Http/Middleware/EnsurePropertyModerationIdempotency.php",
       "app/Support/ChatSessionAccess.php",
@@ -566,9 +577,39 @@
         "file": "app/Services/PropertyLiquidity/PropertyLiquidityAccess.php",
         "classification": "unused_legacy_constants",
         "decision": "INTERNAL_ROLES and MARKETING_WRITE_ROLES no longer authorize actions; isInternal/canManagePromotion/canSetBusinessPriority use permissions. MARKETING_WRITE_ROLES has no application callsites."
+      },
+      {
+        "file": "app/Http/Controllers/AuthController.php, UserController.php, app/Console/Commands/BackfillClientsCommand.php",
+        "classification": "account_type_identity",
+        "decision": "client identifies the public account category for registration, backfill and organization normalization. HR conversion is independently permission-gated; this does not grant a fixed role actor access."
+      },
+      {
+        "file": "app/Http/Controllers/Concerns/SerializesConversationPayloads.php, SupportConversationController.php and app/Services/NotificationService.php",
+        "classification": "presentation_identity_and_message_titles",
+        "decision": "Role match chooses identity kind and message wording. Conversation participant roles and membership are separate data; recipient authorization uses existing permission/group policies."
+      },
+      {
+        "file": "app/Services/KpiModuleService.php",
+        "classification": "historical_metric_schema_and_explicit_filters",
+        "decision": "employee_id/name represent any configured employee. agent_id/name and mop_id/name preserve legacy export columns; exact role_slug comparisons select requested or historical plan, with permission-based employee selection."
+      },
+      {
+        "file": "app/Services/MotivationService.php and app/Http/Controllers/MotivationController.php",
+        "classification": "business_rule_scope",
+        "decision": "agent/company select personal versus company incentive formulas, not actor role admission."
+      },
+      {
+        "file": "app/Http/Controllers/PublicTeamController.php, UserController.php, PublicRealtorController.php",
+        "classification": "display_order_and_labels",
+        "decision": "MOP-first sorting and public labels do not choose eligible employees; membership uses configured subject permissions."
+      },
+      {
+        "file": "app/Models/Client.php, ConversationParticipant.php and relation keys across controllers/services",
+        "classification": "domain_identity_and_relations",
+        "decision": "owner/admin conversation membership and client/agent relationship names are independent of system user roles."
       }
     ],
-    "audit_note": "Current search /tmp/aura-rbac-final-server-checks.txt contains 72 role-query/comparison references: permission predicates, request-selected exact filters, identity checks, report participant columns and legacy unused helper. No active hasRole calls remain (User method definition and commented old code only). Remaining profile common-page admission identified separately; final broad checks still required."
+    "audit_note": "Completed consolidated classification: existing 151-literal inventory and current 72 role-query/comparison references reviewed against migrated source paths. Active actor gates and employee selection use configured permissions. Remaining references are request-selected filters, identity, historical metric fields, sorting/labels, permission compatibility defaults or unused legacy declarations. No active app hasRole calls remain. Frontend 62-file inventory and actual profile routes reviewed; recorded followups resolved."
   },
   "execution_rules": [
     "Работать по одному открытому пункту, указывать конкретные завершённые подпункты и доказательства.",
@@ -585,7 +626,7 @@
       "../aura-front-rbac/.github/workflows/deploy-production.yml"
     ],
     "order": [
-      "Завершить открытые пункты, зафиксировать проверенные SHA обоих репозиториев и повторить только изменённые проверки.",
+      "Реализация и проверки завершены локально: backend 4fc00693, frontend 29b99f9. Публикация выполняется только в рамках отдельного разрешения пользователя.",
       "До выпуска проверить наличие восстановления из резервной копии БД. Текущий backend deploy сохраняет .env, исходники и database.sql.gz до миграций.",
       "Обновить backend с миграцией RBAC и штатной очисткой/пересборкой конфигурации. Штатный deploy выполняет migrate --force, config:cache и перезапуск очередей/Reverb. Проверить API каталога под существующим администратором.",
       "Обновить frontend. До готовности обоих компонентов не менять права сотрудников: старый frontend продолжает собственные проверки ролей и не поддерживает новые настройки полностью.",
@@ -602,11 +643,11 @@
     "draft_descriptions": {
       "backend": {
         "title": "Управление правами ролей через RBAC с сохранением существующих ограничений",
-        "body": "Ограничения действий, областей данных, назначения сотрудников и подписок на уведомления перенесены из проверок должностей в единый каталог разрешений. Администратор управляет ролями через API с версией изменений, журналом и защитой от потери собственного доступа. Миграция сохраняет идентификаторы ролей и прежние настройки стандартных, owner и существующих пользовательских ролей; новые роли получают только явно назначенные права. Целостность записей и исторические границы групп сохраняются. Проверены 1295 серверных тестов: новых падений относительно baseline нет, остаются прежние 2 ошибки и 5 падений. На отдельной MySQL-базе проверены 18 ролей, откат и повторное применение. Выпуск согласуется с frontend; rollback миграции удаляет сохранённые разрешения и аудит, поэтому требуется резервная копия."
+        "body": "Ограничения действий, областей данных, назначения сотрудников и подписок на уведомления перенесены из проверок должностей в единый каталог разрешений. Администратор управляет ролями через API с версией изменений, журналом и защитой от потери собственного доступа. Миграция сохраняет идентификаторы ролей и прежние настройки стандартных, owner и существующих пользовательских ролей; новые роли получают только явно назначенные права. Целостность записей и исторические границы групп сохраняются. Проверены 1300 серверных тестов: новых падений относительно baseline нет, остаются прежние 2 ошибки и 5 падений. На отдельной MySQL-базе проверены 18 ролей, откат и повторное применение. Выпуск согласуется с frontend; rollback миграции удаляет сохранённые разрешения и аудит, поэтому требуется резервная копия."
       },
       "frontend": {
         "title": "Редактор прав ролей и интерфейс, учитывающий настроенные разрешения",
-        "body": "Страница ролей содержит поиск, фильтры, русские описания разрешений, предварительный просмотр изменений и журнал. Действия, меню, формы и отчёты используют назначенные права, включая пользовательские роли. Кэши и черновики затронутых страниц разделены по контексту доступа, чтобы смена роли или организации не оставляла прежние данные на экране. Production-сборка и 287 браузерных тестов прошли; 641 Node-тест, 11 прежних падений без новых имён. Реальный редактор с 534 разрешениями проверен на ширине 1280 и 390 px, сохранение тестовой настройки и восстановление подтверждены журналом."
+        "body": "Страница ролей содержит поиск, фильтры, русские описания разрешений, предварительный просмотр изменений и журнал. Действия, меню, формы и отчёты используют назначенные права, включая пользовательские роли. Кэши и черновики затронутых страниц разделены по контексту доступа, чтобы смена роли или организации не оставляла прежние данные на экране. Production-сборка и 299 браузерных тестов прошли; 646 Node-тестов, 11 прежних падений без новых имён. Реальный редактор с 534 разрешениями проверен на ширине 1280 и 390 px, сохранение тестовой настройки и восстановление подтверждены журналом."
       }
     },
     "draft_note": "Draft descriptions reflect verified current implementation, not authorization to publish; completion still depends on remaining audit."
@@ -705,56 +746,83 @@
       {
         "file": "app/apartment/[slug]/_components/GalleryWrapper.tsx",
         "classification": "History uses own permission and authoritative server capability; explicit-role fallback only canEditProperty, never manager/operator job. Public-only page cannot show history. Legacy fallback preserved only without explicit permission array."
-      }
-    ],
-    "pending_followups": [
+      },
       {
         "file": "utils/rbac.ts::canAccessClientProfilePath and app/profile/_components/profile-menu.tsx",
-        "issue": "All existing profile page paths compared. Common chats/favorites/wallet still reach legacy accountant/security/external_agent role whitelist; add explicit configurable site admission preserving existing defaults and matching menu visibility."
+        "classification": "All existing profile page paths compared. Common page gates and corresponding menu entries now use configured permissions. Remaining role-specific path whitelist executes only for legacy profiles on these paths; modern form/detail pages keep resource authorization."
       }
-    ]
+    ],
+    "pending_followups": []
   },
   "latest_full_verification": {
-    "backend_head": "1e2f83b0",
-    "frontend_head": "99f8f88",
-    "backend": {
-      "tests": 1295,
-      "assertions": 19151,
+    "production_build": "passed; isolated git archive of frontend 29b99f9; 121 pages",
+    "browser_tests": {
+      "passed": 299,
+      "failed": 0
+    },
+    "backend_tests": {
+      "total": 1300,
+      "assertions": 19391,
       "baseline_errors": 2,
       "baseline_failures": 5,
-      "new_failure_names": 0,
-      "baseline_reason_check": "All seven test names match verified baseline; same missing crm_deals.branch_group_id column, missing client_need_repair_type table and validation/intake language differences.",
-      "log": "/tmp/aura-rbac-final-pass-backend.log"
+      "new_failure_names": 0
     },
-    "browser": {
-      "passed": 287,
-      "failed": 0,
-      "log": "/tmp/aura-rbac-final-pass-browser.log"
-    },
-    "frontend_node": {
-      "tests": 641,
-      "passed": 630,
+    "frontend_unit_tests": {
+      "total": 646,
+      "passed": 635,
       "baseline_failures": 11,
       "new_failure_names": 0,
-      "log": "/tmp/aura-rbac-final-pass-node.log"
+      "additional_menu_check": "16 passed, includes one new test added after full run"
     },
-    "production_build": {
-      "status": "passed",
-      "log": "/tmp/aura-rbac-final-pass-build.log",
-      "isolation": "git archive frontend HEAD into dedicated temporary directory with cloned node_modules; live preview untouched",
-      "static_pages": 121
+    "typescript": "passed",
+    "mysql_migration": "18 roles; identity, system defaults, legacy custom access, down/up verified in own isolated database",
+    "logs": [
+      "/tmp/aura-rbac-completion-backend.log",
+      "/tmp/aura-rbac-completion-browser.log",
+      "/tmp/aura-rbac-completion-node.log",
+      "/tmp/aura-rbac-common-pages-menu.log",
+      "/tmp/aura-rbac-completion-build.log",
+      "/tmp/aura-rbac-completion-tsc.log",
+      "/tmp/aura-rbac-completion-migration.log"
+    ]
+  },
+  "requirements_audit": [
+    {
+      "requirement": "Управлять ролями и доступами через сайт без изменения кода",
+      "result": "verified",
+      "evidence": [
+        "RoleController/RolePermissionController CRUD, version conflict, audit and assignment tests",
+        "admin/roles editor search, grouped permissions, changes preview and history; 299 browser tests include editor and custom grant/revoke paths",
+        "Actor action, scope, target selection, notification and site policies consolidated; custom roles exercise real API and UI"
+      ]
     },
-    "mysql_migration": {
-      "status": "passed",
-      "roles": 18,
-      "identity_preserved": true,
-      "system_defaults_preserved": true,
-      "legacy_custom_compatibility": true,
-      "rollback": true,
-      "reapply": true,
-      "database": "aura_rbac_migration_final_1e2f83b0",
-      "log": "/tmp/aura-rbac-final-pass-migration.log"
+    {
+      "requirement": "Перенести существующие ограничения и сохранить прежнее поведение",
+      "result": "verified",
+      "evidence": [
+        "System, owner and legacy-custom migration coverage; 18-role MySQL down/up",
+        "Subject policies, branch/group/own scope and historical boundaries have targeted integration coverage",
+        "Full backend and Node failure names and reasons compared with baseline; no new failures",
+        "Explicit role arrays override defaults; seeding never resets configured grants"
+      ]
     },
-    "completion_claim": false
-  }
+    {
+      "requirement": "Каждое разрешение объясняет назначение, интерфейс удобен",
+      "result": "verified",
+      "evidence": [
+        "Catalog test validates description and group for every permission",
+        "Russian descriptions include dependencies, defaults and scope; independent site/data policies explain their distinction",
+        "Real editor checked at 1280 and 390 px without overflow; search, save, restore and audit verified on isolated preview role"
+      ]
+    },
+    {
+      "requirement": "Запустить фронтенд для проверки назначения ролей",
+      "result": "verified",
+      "evidence": [
+        "Local preview remains running on 127.0.0.1:3000 with separate API/database; authenticated editor previously inspected",
+        "Role assignment permissions/privilege restrictions tested; user was given local administrator credentials"
+      ]
+    }
+  ],
+  "completion_scope": "Requested implementation, migration compatibility, UI, verification and local preview complete. No push, merge or deployment authorized/performed. Task branches retained; cleanup applies only after verified release per git-task-flow."
 }
