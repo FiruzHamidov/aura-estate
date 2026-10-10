@@ -305,7 +305,7 @@ class ExternalPropertyRequestController extends Controller
 
     public function assign(Request $request, ExternalPropertyRequest $externalPropertyRequest)
     {
-        $user = $this->internalUser($request);
+        $user = $this->internalUser($request, 'external_requests.assign');
         $this->service->ensureInternalCanAccess($user, $externalPropertyRequest);
         $validated = $request->validate([
             'assigned_agent_id' => ['nullable', 'integer', 'exists:users,id'],
@@ -328,7 +328,7 @@ class ExternalPropertyRequestController extends Controller
 
     public function changeStatus(Request $request, ExternalPropertyRequest $externalPropertyRequest)
     {
-        $user = $this->internalUser($request);
+        $user = $this->internalUser($request, 'external_requests.status');
         $this->service->ensureInternalCanAccess($user, $externalPropertyRequest);
         $validated = $request->validate([
             'status' => ['required', Rule::in(array_diff(
@@ -348,7 +348,7 @@ class ExternalPropertyRequestController extends Controller
 
     public function prefill(Request $request, ExternalPropertyRequest $externalPropertyRequest)
     {
-        $user = $this->internalUser($request);
+        $user = $this->internalUser($request, 'external_requests.convert');
         $this->service->ensureInternalCanAccess($user, $externalPropertyRequest);
         $externalPropertyRequest->load(['externalAgent', 'photos', 'type']);
 
@@ -368,7 +368,7 @@ class ExternalPropertyRequestController extends Controller
 
     public function convert(Request $request, ExternalPropertyRequest $externalPropertyRequest)
     {
-        $user = $this->internalUser($request);
+        $user = $this->internalUser($request, 'external_requests.convert');
         $this->service->ensureInternalCanAccess($user, $externalPropertyRequest);
         $this->moderation->assertNoProtectedFields($request, ['branch_id', 'branch_group_id'], $user);
 
@@ -632,13 +632,14 @@ class ExternalPropertyRequestController extends Controller
         return $user;
     }
 
-    private function internalUser(Request $request): User
+    private function internalUser(Request $request, string $permission = 'external_requests.view'): User
     {
         /** @var User|null $user */
         $user = $request->user();
         abort_unless($user, 401, 'Unauthenticated.');
         $user->loadMissing('role');
-        abort_if($user->hasRole('client') || $user->hasRole('external_agent'), 403, 'Доступ запрещён');
+        abort_if($user->hasRole('rop'), 403, 'FORBIDDEN_ACTION');
+        abort_unless($user->hasPermission($permission), 403, 'Доступ запрещён');
 
         return $user;
     }

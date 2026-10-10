@@ -43,11 +43,11 @@ class ExternalPropertyRequestService
                 'photos',
             ]);
 
-        if ($user->hasRole('admin') || $user->hasRole('superadmin')) {
+        if ($user->hasPermission('external_requests.scope.all')) {
             return $query;
         }
 
-        if ($user->hasRole('mop')) {
+        if ($user->hasPermission('external_requests.scope.group')) {
             if (empty($user->branch_group_id)) {
                 return $query->whereRaw('1 = 0');
             }
@@ -55,7 +55,7 @@ class ExternalPropertyRequestService
             return $query->where('branch_group_id', $user->branch_group_id);
         }
 
-        if ($user->hasRole('branch_director')) {
+        if ($user->hasPermission('external_requests.scope.branch')) {
             if (empty($user->branch_id)) {
                 return $query->whereRaw('1 = 0');
             }
@@ -63,7 +63,7 @@ class ExternalPropertyRequestService
             return $query->where('branch_id', $user->branch_id);
         }
 
-        if ($user->hasRole('agent') || $user->hasRole('manager') || $user->hasRole('operator')) {
+        if ($user->hasPermission('external_requests.scope.assigned_or_org')) {
             return $query->where(function (Builder $scope) use ($user) {
                 $scope->where('assigned_agent_id', $user->id);
 

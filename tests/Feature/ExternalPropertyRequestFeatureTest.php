@@ -282,6 +282,38 @@ class ExternalPropertyRequestFeatureTest extends TestCase
         ]);
     }
 
+    public function test_internal_request_actions_and_scopes_can_be_configured_for_a_custom_role(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Request reader', 'slug' => 'request_reader']);
+        $actor = $this->user($role, '939111111', branchId: 1, branchGroupId: 1);
+        $owner = $this->user($this->externalRole, '939111112', branchId: 1, branchGroupId: 1);
+        $own = ExternalPropertyRequest::create(['external_agent_id' => $owner->id, 'status' => 'submitted', 'branch_id' => 1, 'branch_group_id' => 1]);
+        ExternalPropertyRequest::create(['external_agent_id' => $owner->id, 'status' => 'submitted', 'branch_id' => 1, 'branch_group_id' => 2]);
+        ExternalPropertyRequest::create(['external_agent_id' => $owner->id, 'status' => 'submitted', 'branch_id' => 2, 'branch_group_id' => 3, 'assigned_agent_id' => $actor->id]);
+        $grant = function (array $permissions) use ($actor, $role) {
+            $role->forceFill(['permissions' => $permissions])->save();
+            Sanctum::actingAs($actor->fresh());
+        };
+        $grant([]);
+        $this->getJson('/api/external-agent-requests')->assertForbidden();
+        foreach (['group' => 1, 'branch' => 2, 'assigned_or_org' => 3, 'all' => 3] as $scope => $total) {
+            $grant(['external_requests.view', 'external_requests.scope.'.$scope]);
+            $this->getJson('/api/external-agent-requests')->assertOk()->assertJsonPath('total', $total);
+        }
+        $this->getJson('/api/external-agent-requests/'.$own->id)->assertOk();
+        $this->patchJson('/api/external-agent-requests/'.$own->id.'/assign', ['assigned_agent_id' => $actor->id])->assertForbidden();
+        $this->patchJson('/api/external-agent-requests/'.$own->id.'/status', ['status' => 'rejected'])->assertForbidden();
+        $this->getJson('/api/external-agent-requests/'.$own->id.'/prefill')->assertForbidden();
+        $grant(['external_requests.status', 'external_requests.scope.group']);
+        $this->patchJson('/api/external-agent-requests/'.$own->id.'/status', ['status' => 'needs_info', 'comment' => 'Нужны подробности'])->assertOk();
+        $this->getJson('/api/external-agent-requests')->assertForbidden();
+        $grant(['external_requests.view']);
+        $this->getJson('/api/external-agent-requests')->assertOk()->assertJsonPath('total', 0);
+        $grant([]);
+        $this->getJson('/api/external-agent-requests/'.$own->id)->assertForbidden();
+    }
+
     public function test_request_photos_are_private_and_require_current_parent_access(): void
     {
         \Illuminate\Support\Facades\Storage::fake('public');
@@ -300,6 +332,15 @@ class ExternalPropertyRequestFeatureTest extends TestCase
         $this->get($url)->assertOk()->assertHeader('X-Content-Type-Options', 'nosniff');
         $this->assertStringContainsString('no-store', $this->get($url)->headers->get('Cache-Control'));
         Sanctum::actingAs($other);
+        $this->getJson($url)->assertNotFound();
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Media reader', 'slug' => 'media_reader']);
+        $reader = $this->user($role, '939000003');
+        $role->forceFill(['permissions' => ['external_requests.view', 'external_requests.scope.all']])->save();
+        Sanctum::actingAs($reader->fresh());
+        $this->get($url)->assertOk();
+        $role->forceFill(['permissions' => ['external_requests.scope.all']])->save();
+        Sanctum::actingAs($reader->fresh());
         $this->getJson($url)->assertNotFound();
         Sanctum::actingAs($owner);
         $request->delete();
