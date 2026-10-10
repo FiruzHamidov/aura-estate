@@ -127,7 +127,7 @@ final class GroupDataProjection
         return $attributes;
     }
 
-    /** Filter display results only; duplicate detection itself remains global. */
+    /** Cross-group matches remain visible without exposing private owner data. */
     public function duplicateResults(Collection $results, User $actor): Collection
     {
         if (! $actor->hasRole('rop') || $results->isEmpty()) {
@@ -136,7 +136,18 @@ final class GroupDataProjection
         $ids = app(RopGroupAccess::class)->scope(Property::query(), $actor, 'properties.branch_group_id', 'properties.branch_id')
             ->whereIn('id', $results->pluck('id'))->pluck('id')->all();
 
-        return $results->filter(fn ($item) => in_array((int) $item['id'], $ids, true))->values();
+        return $results->map(function ($item) use ($ids) {
+            if (in_array((int) $item['id'], $ids, true)) return $item;
+            // Free text and photos can contain private contacts; expose comparison facts only.
+            $safe = array_intersect_key($item, array_flip([
+                'id', 'score', 'risk', 'type_id', 'location_id', 'rooms', 'total_area',
+                'floor', 'total_floors', 'repair_type_id', 'year_built', 'price', 'currency',
+                'moderation_status',
+            ]));
+            $safe['scope_notice'] = 'Совпадение в другой группе или филиале. Для проверки обратитесь к администратору.';
+            $safe['details_restricted'] = true;
+            return $safe;
+        })->values();
     }
 
     public function relations(Model $record, User $actor): array
