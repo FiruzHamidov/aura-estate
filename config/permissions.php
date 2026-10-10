@@ -623,6 +623,11 @@ foreach (['common.view' => ['Просмотр общих планов', 'Про�
 $permissions['kpi.plans.common.global.view'] = ['group' => 'KPI', 'name' => 'Просмотр общего шаблона компании', 'description' => 'Позволяет явно открыть общий план без филиала и группы при ограниченной области KPI. Требуется просмотр общих планов. Наследование общего шаблона внутри доступного филиала сохраняется.', 'roles' => ['rop', 'branch_director', 'mop']];
 $permissions['kpi.plans.common.global.manage'] = ['group' => 'KPI', 'name' => 'Изменение общего шаблона компании', 'description' => 'Позволяет изменять общий план без филиала и группы при ограниченной области KPI. Требуются управление планами и изменение общих планов. Сохраняет прежнюю возможность директора филиала; закреплённые группы РОП остаются обязательными.', 'roles' => ['rop', 'branch_director'], 'sensitive' => true];
 
+$permissions['kpi.plans.list.view'] = ['group' => 'KPI', 'name' => 'История планов KPI', 'description' => 'Просмотр списка сохранённых общих и персональных планов с датами и количеством показателей. Область истории задаётся отдельно; открытие карточек требует соответствующих прав просмотра.', 'roles' => $kpiPlanAllRoles];
+foreach (['all' => ['История планов всех филиалов', 'Список истории всех филиалов.', array_values(array_diff($kpiPlanAllRoles, ['rop', 'branch_director', 'mop']))], 'branch' => ['История планов своего филиала', 'Персональные планы сотрудников своего филиала, общие планы филиала и общие шаблоны без филиала.', ['rop', 'branch_director']], 'group' => ['История планов своей группы', 'Персональные планы сотрудников своей группы, общие планы группы и шаблоны без группы.', ['mop']]] as $scope => [$name, $description, $roles]) {
+    $permissions['kpi.plans.list.scope.'.$scope] = ['group' => 'KPI', 'name' => $name, 'description' => $description.' Требуется просмотр истории. Для РОП сохраняется историческая принадлежность плана к закреплённым группам.', 'roles' => $roles, 'exclusive_group' => 'kpi.plans.list.scope'];
+}
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],

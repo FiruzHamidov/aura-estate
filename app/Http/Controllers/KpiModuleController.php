@@ -461,7 +461,7 @@ class KpiModuleController extends Controller
             'per_page' => 'nullable|integer|min:1|max:200',
         ]);
 
-        $this->kpiPlanScopePolicy->ensureCanReadCommonPlan($actor, $validated);
+        $this->kpiPlanScopePolicy->ensureCanSelectUsers($actor, $validated);
         if ($actor->hasPermission('kpi.plans.scope.group') && isset($validated['role']) && (string) $validated['role'] === 'rop') {
             $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
         }

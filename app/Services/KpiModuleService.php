@@ -346,11 +346,13 @@ class KpiModuleService
             $query->whereDate('kp.effective_to', '<=', (string) $filters['effective_to_to']);
         }
 
-        $actor->loadMissing('role');
-        $role = (string) ($actor->role?->slug ?? '');
-        if ($role === 'rop') {
+        abort_unless($actor->hasPermission('kpi.plans.list.view'), 403);
+        if ($actor->hasRole('rop')) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'kp.branch_group_id', 'kp.branch_id');
-        } elseif ($role === 'branch_director') {
+        }
+        if ($actor->hasPermission('kpi.plans.list.scope.all')) {
+            // No additional restriction; the ROP boundary above still applies.
+        } elseif ($actor->hasPermission('kpi.plans.list.scope.branch')) {
             $query->where(function ($scope) use ($actor) {
                 $scope->where(function ($q) use ($actor) {
                     $q->whereNotNull('kp.user_id')->where('u.branch_id', (int) $actor->branch_id);
@@ -360,7 +362,7 @@ class KpiModuleService
                     });
                 });
             });
-        } elseif ($role === 'mop') {
+        } elseif ($actor->hasPermission('kpi.plans.list.scope.group')) {
             $query->where(function ($scope) use ($actor) {
                 $scope->where(function ($q) use ($actor) {
                     $q->whereNotNull('kp.user_id')->where('u.branch_group_id', (int) $actor->branch_group_id);
@@ -371,6 +373,8 @@ class KpiModuleService
                     });
                 });
             });
+        } else {
+            $query->whereRaw('1 = 0');
         }
 
         $paginator = $query->paginate($perPage, ['*'], 'page', $page);
@@ -903,15 +907,20 @@ class KpiModuleService
             $query->where('users.branch_group_id', (int) $filters['branch_group_id']);
         }
 
-        match ($actor->role?->slug) {
-            'admin', 'superadmin', 'owner' => null,
-            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'users.branch_group_id', 'users.branch_id')->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop'])),
-            'branch_director' => $query->where('users.branch_id', (int) $actor->branch_id),
-            'mop' => $query
-                ->where('users.branch_group_id', (int) $actor->branch_group_id)
-                ->whereHas('role', fn (Builder $roleQ) => $roleQ->whereIn('slug', ['agent', 'intern'])),
-            default => $query->where('users.id', (int) $actor->id),
-        };
+        if ($actor->hasRole('rop')) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'users.branch_group_id', 'users.branch_id')
+                ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop']));
+        }
+        if ($actor->hasPermission('kpi.plans.scope.all')) {
+            // Every branch is available, subject to the ROP boundary above.
+        } elseif ($actor->hasPermission('kpi.plans.scope.branch')) {
+            $query->where('users.branch_id', (int) $actor->branch_id);
+        } elseif ($actor->hasPermission('kpi.plans.scope.group')) {
+            $query->where('users.branch_group_id', (int) $actor->branch_group_id)
+                ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'intern']));
+        } else {
+            $query->whereRaw('1 = 0');
+        }
 
         $perPage = max(1, min(200, (int) ($filters['per_page'] ?? 20)));
         $page = max(1, (int) ($filters['page'] ?? 1));

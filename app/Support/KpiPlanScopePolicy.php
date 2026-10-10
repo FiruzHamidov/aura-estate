@@ -18,6 +18,12 @@ class KpiPlanScopePolicy
         $this->ensureGlobalTemplateAccess($actor, $scope, 'view');
     }
 
+    public function ensureCanSelectUsers(User $actor, array $scope): void
+    {
+        if (! $actor->hasPermission('kpi.plans.common.view')) $this->denyScope();
+        $this->ensureScope($actor, $scope);
+    }
+
     public function ensureCanManageCommonPlan(User $actor, array $scope): void
     {
         if (! $actor->hasPermission('kpi.plans.common.manage')) {
