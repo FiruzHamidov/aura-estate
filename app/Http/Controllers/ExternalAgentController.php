@@ -7,13 +7,14 @@ use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
 class ExternalAgentController extends Controller
 {
     public function index(Request $request)
     {
-        $actor = $this->actor($request);
+        $actor = $this->actor($request, 'external_agents.view');
         $validated = $request->validate([
             'q' => ['sometimes', 'nullable', 'string', 'max:255'],
             'status' => ['sometimes', Rule::in([User::STATUS_ACTIVE, User::STATUS_INACTIVE])],
@@ -47,7 +48,7 @@ class ExternalAgentController extends Controller
             $request->merge(['phone' => \App\Support\InternationalPhone::accountValue($request->input('phone'))]);
         }
 
-        $actor = $this->actor($request);
+        $actor = $this->actor($request, 'external_agents.create');
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
             'phone' => [new \App\Rules\InternationalPhoneNumber, 'required', 'string', 'max:255', new \App\Rules\UniqueUserPhone],
@@ -57,49 +58,61 @@ class ExternalAgentController extends Controller
             'password' => ['nullable', 'string', 'min:6', 'required_if:auth_method,password'],
         ]);
 
-        $externalRole = Role::query()->where('slug', 'external_agent')->firstOrFail();
-        $authMethod = $validated['auth_method'] ?? 'sms';
+        return DB::transaction(function () use ($request, $validated) {
+            [$actor] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($request->user(), null, null, null);
+            $this->ensureActor($actor, 'external_agents.create');
+            $externalRole = Role::query()->where('slug', 'external_agent')->firstOrFail();
+            $authMethod = $validated['auth_method'] ?? 'sms';
 
-        $externalAgent = User::query()->create([
-            'name' => $validated['name'],
-            'phone' => $validated['phone'],
-            'email' => $validated['email'] ?? null,
-            'description' => $validated['description'] ?? null,
-            'role_id' => $externalRole->id,
-            'branch_id' => $actor->branch_id,
-            'branch_group_id' => $actor->branch_group_id,
-            'auth_method' => $authMethod,
-            'status' => User::STATUS_ACTIVE,
-            'password' => $authMethod === 'password' ? Hash::make($validated['password']) : null,
-        ]);
+            $externalAgent = User::query()->create([
+                'name' => $validated['name'],
+                'phone' => $validated['phone'],
+                'email' => $validated['email'] ?? null,
+                'description' => $validated['description'] ?? null,
+                'role_id' => $externalRole->id,
+                'branch_id' => $actor->branch_id,
+                'branch_group_id' => $actor->branch_group_id,
+                'auth_method' => $authMethod,
+                'status' => User::STATUS_ACTIVE,
+                'password' => $authMethod === 'password' ? Hash::make($validated['password']) : null,
+            ]);
 
-        return response()->json($externalAgent->load(['role', 'branch', 'branchGroup']), 201);
+            return response()->json($externalAgent->load(['role', 'branch', 'branchGroup']), 201);
+        });
     }
 
-    private function actor(Request $request): User
+    private function actor(Request $request, string $permission): User
     {
         /** @var User|null $actor */
         $actor = $request->user();
         abort_unless($actor, 401, 'Unauthenticated.');
-        $actor->loadMissing('role');
-        abort_unless($actor->hasRole('agent') || $actor->hasRole('mop'), 403, 'Доступ запрещён');
-        abort_unless($actor->branch_id, 403, 'Для добавления внешнего агента нужен филиал.');
-
-        if ($actor->hasRole('mop')) {
-            abort_unless($actor->branch_group_id, 403, 'Для МОП нужна группа.');
-        }
-
+        $this->ensureActor($actor, $permission);
         return $actor;
+    }
+
+    private function ensureActor(User $actor, string $permission): void
+    {
+        abort_unless($actor->hasPermission($permission), 403, 'Доступ запрещён');
+        abort_unless($actor->branch_id, 403, 'Для работы с внешними агентами нужен филиал.');
+        if ($actor->hasPermission('external_agents.require_group')) {
+            abort_unless($actor->branch_group_id, 403, 'Для работы с внешними агентами нужна группа.');
+        }
     }
 
     private function applyActorScope(Builder $query, User $actor): void
     {
-        if ($actor->hasRole('mop')) {
-            $query->where('branch_group_id', $actor->branch_group_id);
-
+        if ($actor->hasRole('rop')) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'users.branch_group_id', 'users.branch_id');
+        }
+        if ($actor->hasPermission('external_agents.scope.all')) return;
+        if ($actor->hasPermission('external_agents.scope.group')) {
+            $actor->branch_group_id ? $query->where('branch_group_id', $actor->branch_group_id) : $query->whereRaw('1 = 0');
             return;
         }
-
-        $query->where('branch_id', $actor->branch_id);
+        if ($actor->hasPermission('external_agents.scope.branch')) {
+            $query->where('branch_id', $actor->branch_id);
+            return;
+        }
+        $query->whereRaw('1 = 0');
     }
 }

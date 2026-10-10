@@ -2532,6 +2532,46 @@ class UserAccessTest extends TestCase
         ])->assertForbidden();
     }
 
+    public function test_external_agents_are_managed_by_explicit_actions_and_scopes(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $branch = Branch::create(['name' => 'A']);
+        $foreignBranch = Branch::create(['name' => 'B']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'A1']);
+        $otherGroup = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'A2']);
+        $role = Role::create(['name' => 'Partner operator', 'slug' => 'partner_operator']);
+        $external = Role::create(['name' => 'External', 'slug' => 'external_agent']);
+        $actor = User::create(['name' => 'Operator', 'phone' => '900000301', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'active']);
+        User::create(['name' => 'Same branch partner', 'phone' => '900000302', 'role_id' => $external->id, 'branch_id' => $branch->id, 'branch_group_id' => $otherGroup->id, 'status' => 'active']);
+        User::create(['name' => 'Foreign partner', 'phone' => '900000303', 'role_id' => $external->id, 'branch_id' => $foreignBranch->id, 'status' => 'active']);
+        $grant = function (array $permissions) use ($role, $actor) {
+            $role->forceFill(['permissions' => $permissions])->save();
+            Sanctum::actingAs($actor->fresh());
+        };
+        $payload = ['name' => 'New partner', 'phone' => '900000304', 'branch_id' => $foreignBranch->id];
+        $grant([]);
+        $this->getJson('/api/external-agents')->assertForbidden();
+        $this->postJson('/api/external-agents', $payload)->assertForbidden();
+        $grant(['external_agents.create']);
+        $this->postJson('/api/external-agents', $payload)->assertCreated()->assertJsonPath('branch_id', $branch->id)->assertJsonPath('branch_group_id', $group->id);
+        $this->getJson('/api/external-agents')->assertForbidden();
+        foreach (['group' => 1, 'branch' => 2, 'all' => 3] as $scope => $count) {
+            $grant(['external_agents.view', 'external_agents.scope.'.$scope]);
+            $this->getJson('/api/external-agents')->assertOk()->assertJsonPath('total', $count);
+        }
+        $grant(['external_agents.view']);
+        $this->getJson('/api/external-agents')->assertOk()->assertJsonPath('total', 0);
+        DB::table('users')->where('id', $actor->id)->update(['branch_group_id' => null]);
+        $grant(['external_agents.view', 'external_agents.create', 'external_agents.scope.branch', 'external_agents.require_group']);
+        $this->getJson('/api/external-agents')->assertForbidden();
+        $this->postJson('/api/external-agents', ['name' => 'Blocked partner', 'phone' => '900000305'])->assertForbidden();
+        $grant(['external_agents.create']);
+        // The request retains a loaded actor while the saved role loses its grant.
+        DB::table('roles')->where('id', $role->id)->update(['permissions' => json_encode([])]);
+        $this->postJson('/api/external-agents', ['name' => 'Revoked partner', 'phone' => '900000306'])->assertForbidden();
+        $this->assertDatabaseMissing('users', ['phone' => '900000306']);
+    }
+
     public function test_mop_user_index_returns_only_active_users_from_own_branch(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);
