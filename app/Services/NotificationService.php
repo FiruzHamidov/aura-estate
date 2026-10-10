@@ -124,7 +124,7 @@ class NotificationService
                 'action_url' => '/profile/crm/leads?leadId='.$lead->id.'&mode=view',
                 'action_type' => 'open_lead',
                 'dedupe_key' => 'lead:new:'.$lead->id,
-                'data' => ['lead_id' => $lead->id],
+                'data' => ['lead_id' => $lead->id, 'delivery_audience' => 'public_lead'],
             ]
         );
     }
@@ -144,6 +144,7 @@ class NotificationService
                 'dedupe_key' => 'lead:new:'.$lead->id,
                 'data' => [
                     'lead_id' => $lead->id,
+                    'delivery_audience' => 'lead_managers',
                     'status' => $lead->status,
                     'source' => $lead->source,
                 ],

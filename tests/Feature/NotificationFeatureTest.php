@@ -603,6 +603,40 @@ class NotificationFeatureTest extends TestCase
         $job->handle($firebase);
     }
 
+    public function test_mixed_delivery_revokes_role_subscription_but_keeps_personal_assignment(): void
+    {
+        Queue::fake();
+        $branch = Branch::create(['name' => 'Central']);
+        $role = Role::create(['name' => 'Subscriber', 'slug' => 'mixed_subscriber']);
+        $observer = $this->createUser($role, $branch, 'Observer');
+        $assignee = $this->createUser($role, $branch, 'Assignee');
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role->forceFill(['permissions' => ['notifications.receive.leads']])->save();
+        $lead = Lead::create(['full_name' => 'Assigned lead', 'branch_id' => $branch->id,
+            'responsible_agent_id' => $assignee->id, 'status' => Lead::STATUS_NEW]);
+        app(NotificationService::class)->handleLeadCreated($lead);
+        $broadcast = Notification::where('user_id', $observer->id)->where('type', NotificationType::LEAD_NEW)->firstOrFail();
+        $personal = Notification::where('user_id', $assignee->id)->where('type', NotificationType::LEAD_ASSIGNED)->firstOrFail();
+        $policy = app(\App\Services\NotificationDeliveryAccess::class);
+        $this->assertSame('lead_managers', $broadcast->data['delivery_audience']);
+        $this->assertTrue($policy->allows($broadcast, $observer->fresh()));
+        $role->forceFill(['permissions' => []])->save();
+        $firebase = \Mockery::mock(\App\Services\FirebasePushService::class);
+        $firebase->shouldReceive('send')->once()->with(\Mockery::on(fn ($item) => $item->id === $personal->id));
+        (new SendFirebasePushNotification($broadcast->id))->handle($firebase);
+        $firebase->shouldNotHaveReceived('send');
+        (new SendFirebasePushNotification($personal->id))->handle($firebase);
+        $this->assertFalse($policy->allows($broadcast, $observer->fresh()));
+        $public = (new Notification)->forceFill(['type' => NotificationType::LEAD_NEW, 'data' => ['delivery_audience' => 'public_lead']]);
+        $public->setRelation('subject', $lead->fresh());
+        $this->assertTrue($policy->allows($public, $assignee->fresh()));
+        $this->assertFalse($policy->allows($public, $observer->fresh()));
+        $role->forceFill(['permissions' => ['notifications.receive.leads']])->save();
+        $otherBranch = Branch::create(['name' => 'Other']);
+        $observer->update(['branch_id' => $otherBranch->id]);
+        $this->assertFalse($policy->allows($broadcast, $observer->fresh()));
+    }
+
     private function createUser(Role $role, Branch $branch, string $name): User
     {
         return User::create([
