@@ -15,6 +15,7 @@ class MyReminderController extends Controller
     public function showDailyReport()
     {
         $user = $this->authUser();
+        abort_unless($user->hasPermission('daily_reports.reminders.view'), 403, 'Forbidden');
         $hasAllowEditColumn = $this->hasAllowEditColumn();
 
         $defaults = [
@@ -51,25 +52,32 @@ class MyReminderController extends Controller
             ])],
         ]);
 
-        $user = $this->authUser();
-        $setting = UserDailyReportReminderSetting::query()->firstOrNew(['user_id' => $user->id]);
-        $payload = [
-            'enabled' => $validated['enabled'],
-            'remind_time' => $validated['remind_time'],
-            'timezone' => $validated['timezone'],
-            'channels' => array_values($validated['channels'] ?? [NotificationChannel::IN_APP]),
-        ];
+        return \Illuminate\Support\Facades\DB::transaction(function () use ($validated) {
+            [$user] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($this->authUser(), null, null, null);
+            abort_unless($user->hasPermission('daily_reports.reminders.update'), 403, 'Forbidden');
+            $setting = UserDailyReportReminderSetting::query()->firstOrNew(['user_id' => $user->id]);
+            $payload = [
+                'enabled' => $validated['enabled'],
+                'remind_time' => $validated['remind_time'],
+                'timezone' => $validated['timezone'],
+                'channels' => array_values($validated['channels'] ?? [NotificationChannel::IN_APP]),
+            ];
 
-        if ($this->hasAllowEditColumn()) {
-            $payload['allow_edit_submitted_daily_report'] = array_key_exists('allow_edit_submitted_daily_report', $validated)
-                ? (bool) $validated['allow_edit_submitted_daily_report']
-                : (bool) $setting->allow_edit_submitted_daily_report;
-        }
+            if ($this->hasAllowEditColumn()) {
+                if (array_key_exists('allow_edit_submitted_daily_report', $validated)
+                    && (bool) $validated['allow_edit_submitted_daily_report'] !== (bool) $setting->allow_edit_submitted_daily_report) {
+                    abort_unless($user->hasPermission('daily_reports.reminders.resubmission'), 403, 'Forbidden');
+                }
+                $payload['allow_edit_submitted_daily_report'] = array_key_exists('allow_edit_submitted_daily_report', $validated)
+                    ? (bool) $validated['allow_edit_submitted_daily_report']
+                    : (bool) $setting->allow_edit_submitted_daily_report;
+            }
 
-        $setting->fill($payload);
-        $setting->save();
+            $setting->fill($payload);
+            $setting->save();
 
-        return response()->json($this->payload($setting));
+            return response()->json($this->payload($setting));
+        });
     }
 
     private function payload(UserDailyReportReminderSetting $setting): array

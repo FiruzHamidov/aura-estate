@@ -168,6 +168,35 @@ class KpiDailyReminderAndProgressTest extends TestCase
             ->assertJsonPath('metrics.objects.fact', 0);
     }
 
+    public function test_reminder_permissions_separate_read_write_and_resubmission_setting(): void
+    {
+        $role = Role::create(['name' => 'Reminder user', 'slug' => 'custom_reminder']);
+        $user = User::create(['name' => 'Reader', 'phone' => '919970001', 'role_id' => $role->id]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $url = '/api/me/reminders/daily-report';
+        $payload = ['enabled' => true, 'remind_time' => '19:00', 'timezone' => 'Asia/Dushanbe', 'channels' => ['in_app']];
+        Sanctum::actingAs($user->fresh());
+        $this->getJson($url)->assertOk();
+        $this->putJson($url, $payload)->assertOk();
+        $role->forceFill(['permissions' => ['daily_reports.reminders.view']])->save();
+        Sanctum::actingAs($user->fresh());
+        $this->getJson($url)->assertOk();
+        $this->putJson($url, $payload)->assertForbidden();
+        $role->forceFill(['permissions' => ['daily_reports.reminders.update']])->save();
+        Sanctum::actingAs($user->fresh());
+        $this->getJson($url)->assertForbidden();
+        $this->putJson($url, $payload)->assertOk();
+        $this->putJson($url, [...$payload, 'allow_edit_submitted_daily_report' => true])->assertForbidden();
+        $this->assertDatabaseHas('user_daily_report_reminder_settings', ['user_id' => $user->id, 'allow_edit_submitted_daily_report' => false]);
+        $role->forceFill(['permissions' => ['daily_reports.reminders.update', 'daily_reports.reminders.resubmission']])->save();
+        Sanctum::actingAs($user->fresh());
+        $this->putJson($url, [...$payload, 'allow_edit_submitted_daily_report' => true])->assertOk()->assertJsonPath('allow_edit_submitted_daily_report', true);
+        $role->forceFill(['permissions' => ['daily_reports.reminders.update']])->save();
+        Sanctum::actingAs($user->fresh());
+        $this->putJson($url, [...$payload, 'allow_edit_submitted_daily_report' => true])->assertOk();
+        $this->putJson($url, [...$payload, 'allow_edit_submitted_daily_report' => false])->assertForbidden();
+    }
+
     public function test_dispatch_daily_report_reminder_is_idempotent_for_same_day(): void
     {
         Carbon::setTestNow(Carbon::parse('2026-05-05 18:32:00', 'Asia/Dushanbe'));

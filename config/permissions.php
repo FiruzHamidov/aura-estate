@@ -687,6 +687,12 @@ foreach (['all' => ['Достижения всех сотрудников', 'П�
     $permissions['motivation.achievements.scope.'.$scope] = ['group' => 'Мотивация', 'name' => $name, 'description' => $description.' Требуется просмотр списка достижений. Ограничение доступа РОП к модулю сохраняется.', 'roles' => $roles, 'exclusive_group' => 'motivation.achievements.scope'];
 }
 
+$reminderRoles = [...array_column((require __DIR__.'/roles.php')['system'], 'slug'), 'owner'];
+foreach (['view' => ['Просмотр своих напоминаний', 'Чтение времени, каналов и состояния личного напоминания о ежедневном отчёте.'], 'update' => ['Изменение своих напоминаний', 'Изменение времени, часового пояса, каналов и включения личного напоминания. Разрешение повторной правки отчёта задаётся отдельно.'], 'resubmission' => ['Личная настройка повторной правки отчёта', 'Разрешает менять личную настройку повторной правки отправленного отчёта. Требуется изменение своих напоминаний. Права редактирования отчёта, дедлайн и блокировки сохраняются.']] as $action => [$name, $description]) {
+    $permissions['daily_reports.reminders.'.$action] = ['group' => 'Ежедневные отчёты', 'name' => $name, 'description' => $description, 'roles' => $reminderRoles, 'sensitive' => $action === 'resubmission'];
+}
+$permissions['daily_reports.reminders.site'] = ['group' => 'Ежедневные отчёты', 'name' => 'Настройки напоминаний в профиле', 'description' => 'Показывает карточку личного напоминания в профиле. Требуется просмотр своих напоминаний; изменение включается отдельным правом.', 'roles' => ['agent', 'mop']];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],
