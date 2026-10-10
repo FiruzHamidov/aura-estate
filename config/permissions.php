@@ -631,6 +631,11 @@ foreach (['all' => ['История планов всех филиалов', 'С
 $permissions['kpi.plans.site.view'] = ['group' => 'KPI', 'name' => 'Страница планов на сайте', 'description' => 'Открывает страницу персональных, общих и массовых планов KPI. Просмотр данных, область доступа и действия на странице разрешаются отдельно.', 'roles' => ['admin', 'superadmin', 'rop', 'branch_director', 'mop']];
 $permissions['kpi.plans.site.menu'] = ['group' => 'KPI', 'name' => 'Планы KPI в основном меню', 'description' => 'Показывает пункт «Планы KPI» в основном меню сайта. Требуется доступ к странице планов. Сохраняет прежнюю видимость меню отдельно от доступа по ссылке.', 'roles' => ['admin', 'superadmin', 'rop', 'branch_director']];
 
+$permissions['kpi.daily.input.manage'] = ['group' => 'KPI', 'name' => 'Сохранение ежедневного ввода KPI', 'description' => 'Сохраняет показатели сотрудников через таблицу ежедневного ввода KPI v2. Требуется область ввода. Права на планы KPI, личную форму отчёта и карточку отчёта сотрудника задаются отдельно. Ограничения исторических групп и блокировок РОП сохраняются.', 'roles' => $kpiPlanManagers];
+foreach (['all' => ['Ежедневный ввод всех филиалов', 'Изменение показателей сотрудников всех филиалов.', ['admin', 'superadmin', 'owner']], 'branch' => ['Ежедневный ввод своего филиала', 'Изменение показателей сотрудников своего филиала.', ['rop', 'branch_director']], 'group' => ['Ежедневный ввод своей группы', 'Изменение показателей сотрудников своей группы.', ['mop']], 'own' => ['Ежедневный ввод только за себя', 'Изменение только собственных показателей.', []]] as $scope => [$name, $description, $roles]) {
+    $permissions['kpi.daily.input.scope.'.$scope] = ['group' => 'KPI', 'name' => $name, 'description' => $description.' Требуется сохранение ежедневного ввода. РОП ограничен закреплёнными группами; для старых отчётов используется историческая группа.', 'roles' => $roles, 'exclusive_group' => 'kpi.daily.input.scope'];
+}
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],

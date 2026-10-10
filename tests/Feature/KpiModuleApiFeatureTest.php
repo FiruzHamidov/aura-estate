@@ -341,6 +341,33 @@ class KpiModuleApiFeatureTest extends TestCase
 
     }
 
+    public function test_daily_input_permissions_are_independent_of_plan_management(): void
+    {
+        $role = Role::create(['name' => 'KPI operator', 'slug' => 'custom_kpi_input']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Local']);
+        $other = Branch::create(['name' => 'Other']);
+        $actor = User::create(['name' => 'Operator', 'phone' => '919900001', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $target = User::create(['name' => 'Local', 'phone' => '919900002', 'role_id' => $agentRole->id, 'branch_id' => $branch->id]);
+        $foreign = User::create(['name' => 'Foreign', 'phone' => '919900003', 'role_id' => $agentRole->id, 'branch_id' => $other->id]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $row = ['employee_id' => $target->id, 'date' => '2026-05-05', 'calls' => 7];
+        foreach ([[], ['kpi.plans.user.manage', 'kpi.plans.scope.all'], ['kpi.daily.input.manage']] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->postJson('/api/kpi/daily?v=2', ['rows' => [$row]])->assertForbidden();
+        }
+        $role->forceFill(['permissions' => ['kpi.daily.input.manage', 'kpi.daily.input.scope.branch']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/kpi/daily?v=2', ['rows' => [$row]])->assertCreated();
+        $this->postJson('/api/kpi/daily?v=2', ['rows' => [[...$row, 'calls' => 8], [...$row, 'employee_id' => $foreign->id]]])->assertForbidden();
+        $this->assertEquals(7, DailyReport::where('user_id', $target->id)->firstOrFail()->calls_count);
+        $this->assertDatabaseMissing('daily_reports', ['user_id' => $foreign->id]);
+        $role->forceFill(['permissions' => ['kpi.daily.input.scope.branch']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/kpi/daily?v=2', ['rows' => [$row]])->assertForbidden();
+    }
+
     public function test_daily_v2_write_uses_report_group_and_rolls_back_mixed_scope_batch(): void
     {
         $branch = Branch::create(['name' => 'Main']);
@@ -362,6 +389,16 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertEquals(7, $own->fresh()->calls_count);
         $this->assertEquals(9, $own->fresh()->new_properties_count);
         $this->assertSame('2000-01-01 12:00:00', $own->fresh()->submitted_at->format('Y-m-d H:i:s'));
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $defaults = $role->fresh()->permissions;
+        foreach (['kpi.daily.input.manage', 'kpi.daily.input.scope.branch'] as $revoked) {
+            $role->forceFill(['permissions' => array_values(array_diff($defaults, [$revoked]))])->save();
+            Sanctum::actingAs($rop->fresh());
+            $this->postJson('/api/kpi/daily?v=2', ['rows' => [$row]])->assertForbidden();
+        }
+        $role->forceFill(['permissions' => $defaults])->save();
+        Sanctum::actingAs($rop->fresh());
+
         $this->postJson('/api/kpi-period-locks', ['period_type' => 'month', 'period_key' => '2000-01'])->assertCreated();
         $this->postJson('/api/kpi/daily?v=2', ['rows' => [array_replace($row, ['calls' => 11])]])->assertUnprocessable();
         $this->assertEquals(7, $own->fresh()->calls_count);

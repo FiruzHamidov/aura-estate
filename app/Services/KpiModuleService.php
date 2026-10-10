@@ -1027,9 +1027,8 @@ class KpiModuleService
                 if ($authUser->hasRole('rop') && $report) {
                     app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $report);
                     abort_unless(in_array($report->role_slug, ['agent', 'mop'], true), 404, 'NOT_FOUND');
-                } else {
-                    $this->ensureCanUpsertDailyForUser($authUser, $targetUser);
                 }
+                $this->ensureCanUpsertDailyForUser($authUser, $targetUser, $report);
                 if ($authUser->hasRole('rop')) {
                     abort_if(! $report && $date !== now(self::TZ)->toDateString(), 422, 'HISTORICAL_GROUP_UNCLASSIFIED');
                     $groupId = $report?->branch_group_id ?? $targetUser->branch_group_id;
@@ -2361,9 +2360,24 @@ class KpiModuleService
         };
     }
 
-    private function ensureCanUpsertDailyForUser(User $authUser, User $targetUser): void
+    private function ensureCanUpsertDailyForUser(User $authUser, User $targetUser, ?DailyReport $report = null): void
     {
-        $this->ensurePlanScopeAccess($authUser, $targetUser);
+        abort_unless($authUser->hasPermission('kpi.daily.input.manage'), 403, 'KPI_FORBIDDEN_ROLE_ACTION');
+        $branchId = $targetUser->branch_id;
+        $groupId = $targetUser->branch_group_id;
+        if ($authUser->hasRole('rop')) {
+            if ($report) {
+                $groupId = $report->branch_group_id;
+                $branchId = \App\Models\BranchGroup::query()->whereKey($groupId)->value('branch_id');
+            } else {
+                abort_unless(app(\App\Support\RopGroupAccess::class)->employees($authUser)->whereKey($targetUser->id)->exists(), 403, 'KPI_FORBIDDEN_SCOPE');
+            }
+        }
+        $allowed = $authUser->hasPermission('kpi.daily.input.scope.all')
+            || ($authUser->hasPermission('kpi.daily.input.scope.branch') && $authUser->branch_id && (int) $authUser->branch_id === (int) $branchId)
+            || ($authUser->hasPermission('kpi.daily.input.scope.group') && $authUser->branch_group_id && (int) $authUser->branch_group_id === (int) $groupId)
+            || ($authUser->hasPermission('kpi.daily.input.scope.own') && (int) $authUser->id === (int) $targetUser->id);
+        abort_unless($allowed, 403, 'KPI_FORBIDDEN_SCOPE');
     }
 
     private function strictPeriodRows(User $authUser, string $periodType, Carbon $from, Carbon $to, array $filters): array
