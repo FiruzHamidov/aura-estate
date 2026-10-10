@@ -824,5 +824,58 @@
       ]
     }
   ],
-  "completion_scope": "Requested implementation, migration compatibility, UI, verification and local preview complete. No push, merge or deployment authorized/performed. Task branches retained; cleanup applies only after verified release per git-task-flow."
+  "completion_scope": "Requested implementation, migration compatibility, UI, verification and local preview complete. No push, merge or deployment authorized/performed. Task branches retained; cleanup applies only after verified release per git-task-flow.",
+  "user_requested_recheck": {
+    "backend_head": "42a5bf7a",
+    "frontend_head": "29b99f9",
+    "employee_page": "Opened /admin/users in in-app browser; authenticated administrator and two original preview users visible.",
+    "full_browser": {
+      "passed": 299,
+      "failed": 0
+    },
+    "full_node": {
+      "total": 647,
+      "passed": 636,
+      "failed": 11,
+      "comparison": "Same pre-existing failures as baseline."
+    },
+    "full_backend": {
+      "total": 1300,
+      "assertions": 19388,
+      "errors": 2,
+      "failures": 6,
+      "comparison": "Seven previously recorded issues plus pre-existing time-dependent liquidity test, reproduced identically in baseline and current code."
+    },
+    "liquidity_investigation": {
+      "single_retry": "passed in current and baseline",
+      "module_retry": "current 18 tests/295 assertions passed; baseline 14 tests/133 assertions passed",
+      "deterministic_reproduction": "Set test bootstrap clock to 2026-10-10 12:00:01. Both baseline and current history test fail with 11 vs 6 rows. Fixtures precede test startOfMinute time travel, so the next second crosses their day boundary. No RBAC regression."
+    },
+    "live_assignment": {
+      "passed": 8,
+      "checks": [
+        "empty role denied",
+        "role assignment grants access with same bearer token",
+        "grant revocation denies with same token and updates profile",
+        "regrant restores",
+        "assigning empty role removes access",
+        "stale permission write rejected 409",
+        "unknown permission rejected 422",
+        "employee role creation denied 403"
+      ],
+      "cleanup": "Only isolated QA user and two QA roles removed with exact identity guards; original administrator, employee and role settings untouched. QA bearer tokens logged out."
+    },
+    "typescript": "passed",
+    "build": "Existing successful production build remains applicable: frontend source HEAD unchanged.",
+    "logs": [
+      "/tmp/aura-rbac-user-recheck-backend.log",
+      "/tmp/aura-rbac-user-recheck-browser.log",
+      "/tmp/aura-rbac-user-recheck-node.log",
+      "/tmp/aura-rbac-user-recheck-tsc.log",
+      "/tmp/aura-rbac-live-assignment-check.log",
+      "/tmp/aura-rbac-liquidity-clock-current.log",
+      "/tmp/aura-rbac-liquidity-clock-baseline.log"
+    ],
+    "conclusion": "No new RBAC regressions found. Suite is not wholly green because pre-existing failures remain. Production untouched."
+  }
 }
