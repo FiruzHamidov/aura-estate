@@ -94,7 +94,7 @@ class ConversationController extends Controller
             'meta' => 'nullable|array',
         ]);
 
-        if (! $this->access->isInternalUser($authUser)) {
+        if (! ($this->access->canJoinGroup($authUser) || $authUser->hasPermission('messaging.groups.create'))) {
             abort_unless(count($validated['participant_ids']) === 1, 422, 'Direct conversations require exactly one participant.');
 
             $target = $this->access->eligibleDirectUsers($authUser)

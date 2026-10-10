@@ -996,6 +996,58 @@ class MessagingFeatureTest extends TestCase
         ];
     }
 
+    public function test_persisted_group_chat_defaults_match_existing_role_boundaries(): void
+    {
+        foreach (Role::systemRoles() as $role) Role::firstOrCreate(['slug' => $role['slug']], $role);
+        $member = $this->createUser('agent', 'Member', '991009101');
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $access = app(\App\Services\Messaging\MessageAccessService::class);
+        $oldGroupRoles = ['admin', 'superadmin', 'marketing', 'rop', 'branch_director', 'manager', 'operator', 'agent', 'reels_manager'];
+        foreach (Role::all() as $role) {
+            $actor = new User(['role_id' => $role->id, 'status' => 'active']);
+            $actor->setRelation('role', $role);
+            $allowed = in_array($role->slug, $oldGroupRoles, true);
+            $this->assertSame($allowed, $access->canJoinGroup($actor), $role->slug);
+            $this->assertSame($allowed, $access->canCreateGroupConversation($actor, [$member]), $role->slug);
+            $this->assertSame(in_array($role->slug, ['admin', 'superadmin', 'manager', 'operator'], true), $actor->hasPermission('messaging.groups.manage_all'), $role->slug);
+        }
+    }
+
+    public function test_group_chat_grants_control_creation_invites_and_management_without_exposing_history(): void
+    {
+        $actor = $this->createUser('client', 'Creator', '991009001', ['branch_id' => 1]);
+        $member = $this->createUser('agent', 'Member', '991009002', ['branch_id' => 1]);
+        $invitee = $this->createUser('operator', 'Invitee', '991009003', ['branch_id' => 1]);
+        $outsider = $this->createUser('marketing', 'Outsider', '991009004', ['branch_id' => 1]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role = $actor->role;
+        $role->forceFill(['permissions' => ['messaging.groups.join']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $payload = ['name' => 'Custom group', 'participant_ids' => [$member->id]];
+        $this->postJson('/api/conversations', $payload)->assertForbidden();
+        $role->forceFill(['permissions' => ['messaging.groups.join', 'messaging.groups.create']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $id = $this->postJson('/api/conversations', $payload)->assertCreated()->json('id');
+        $path = '/api/conversations/'.$id;
+        $this->postJson($path.'/participants', ['user_id' => $invitee->id])->assertForbidden();
+        $role->forceFill(['permissions' => ['messaging.groups.manage_own']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson($path)->assertOk();
+        $this->postJson($path.'/participants', ['user_id' => $invitee->id])->assertCreated();
+        $this->deleteJson($path.'/participants/'.$actor->id)->assertForbidden();
+        $invitee->role->forceFill(['permissions' => []])->save();
+        $this->deleteJson($path.'/participants/'.$invitee->id)->assertOk();
+        $this->postJson($path.'/participants', ['user_id' => $invitee->id])->assertForbidden();
+
+        $outsider->role->forceFill(['permissions' => ['messaging.groups.manage_all']])->save();
+        Sanctum::actingAs($outsider->fresh());
+        $this->getJson($path)->assertForbidden();
+        $this->deleteJson($path.'/participants/'.$member->id)->assertOk();
+        $outsider->role->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($outsider->fresh());
+        $this->deleteJson($path.'/participants/'.$member->id)->assertForbidden();
+    }
+
     private function createUser(string $roleSlug, string $name, string $phone, array $attributes = []): User
     {
         $role = Role::query()->firstOrCreate(

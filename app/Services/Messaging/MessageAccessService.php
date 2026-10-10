@@ -11,18 +11,6 @@ use Illuminate\Database\Eloquent\Builder;
 
 class MessageAccessService
 {
-    private const INTERNAL_ROLE_SLUGS = [
-        'admin',
-        'superadmin',
-        'marketing',
-        'rop',
-        'branch_director',
-        'manager',
-        'operator',
-        'agent',
-        'reels_manager',
-    ];
-
     private const SUPPORT_ROLE_SLUGS = [
         'admin',
         'superadmin',
@@ -47,9 +35,9 @@ class MessageAccessService
         return $user?->role?->slug;
     }
 
-    public function isInternalUser(?User $user): bool
+    public function canJoinGroup(?User $user): bool
     {
-        return in_array($this->roleSlug($user), self::INTERNAL_ROLE_SLUGS, true);
+        return $user?->hasPermission('messaging.groups.join') ?? false;
     }
 
     public function isClient(?User $user): bool
@@ -140,12 +128,12 @@ class MessageAccessService
 
     public function canCreateGroupConversation(User $actor, array $participants): bool
     {
-        if (! $this->isInternalUser($actor)) {
+        if (! $this->canJoinGroup($actor) || ! $actor->hasPermission('messaging.groups.create')) {
             return false;
         }
 
         foreach ($participants as $participant) {
-            if (! $participant instanceof User || ! $this->isInternalUser($participant)) {
+            if (! $participant instanceof User || ! $this->canJoinGroup($participant)) {
                 return false;
             }
         }
@@ -185,7 +173,7 @@ class MessageAccessService
             return false;
         }
 
-        if ($this->isSupportStaff($actor) || in_array($this->roleSlug($actor), ['admin', 'superadmin'], true)) {
+        if ($actor->hasPermission('messaging.groups.manage_all')) {
             return true;
         }
 
@@ -193,7 +181,7 @@ class MessageAccessService
             ->where('user_id', $actor->id)
             ->first();
 
-        return $participant
+        return $actor->hasPermission('messaging.groups.manage_own') && $participant
             && in_array($participant->role, [ConversationParticipant::ROLE_OWNER, ConversationParticipant::ROLE_ADMIN], true);
     }
 
@@ -207,7 +195,7 @@ class MessageAccessService
             return false;
         }
 
-        return $this->isInternalUser($target)
+        return $this->canJoinGroup($target)
             && $this->isActiveVisibleUser($target)
             && ($this->isGlobalPersonalMessagingUser($actor)
                 || $this->isGlobalPersonalMessagingUser($target)
