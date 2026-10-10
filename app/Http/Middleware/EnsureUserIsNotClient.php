@@ -13,8 +13,14 @@ class EnsureUserIsNotClient
         $user = $request->user();
         $user?->loadMissing('role');
 
-        // Catalog mutation grants replace the old internal-role blanket access.
         $action = $request->route()?->getActionName();
+        // Only audited property actions may replace the legacy role gate.
+        // Controllers/services still enforce the operation, record scope and fresh write checks.
+        foreach ($this->propertyActionGrants($action) as $permission) {
+            if ($user?->hasPermission($permission)) return $next($request);
+        }
+
+        // Catalog mutation grants replace the old internal-role blanket access.
         foreach (config('catalog_permissions', []) as $catalog => $definition) {
             $controller = 'App\\Http\\Controllers\\'.$definition['controller'].'@';
             if (!$action || !str_starts_with($action, $controller)) continue;
@@ -117,5 +123,40 @@ class EnsureUserIsNotClient
         }
 
         return $next($request);
+    }
+
+    private function propertyActionGrants(?string $action): array
+    {
+        [$controller, $method] = array_pad(explode('@', $action ?? '', 2), 2, '');
+        if ($controller === \App\Http\Controllers\PropertyController::class) {
+            return match ($method) {
+                'store' => ['properties.create'],
+                'update', 'destroy', 'duplicateCandidates', 'updateModerationAndListingType' => ['properties.edit'],
+                'updateCoOwner' => ['properties.co_owner.manage'],
+                'refreshListingDate' => ['properties.listing_date.refresh'],
+                'logs' => ['properties.history.view'],
+                'saveDeal' => ['properties.deal.manage'],
+                'matchingClients' => ['properties.matching.view'],
+                default => [],
+            };
+        }
+        if ($controller === \App\Http\Controllers\PropertyPhotoController::class) {
+            return in_array($method, ['store', 'destroy', 'reorder'], true) ? ['properties.edit'] : [];
+        }
+        if ($controller === \App\Http\Controllers\PropertyModerationController::class) {
+            return match ($method) {
+                'submit', 'withdrawChanges', 'withdrawCase', 'withdrawCaseForProperty', 'withdrawListing', 'appeal', 'appealForProperty' => ['properties.edit'],
+                'queue', 'promotionQueue', 'trustReport', 'approve', 'approveAll', 'reject', 'approveForProperty', 'rejectForProperty',
+                'markDetectedDuplicate', 'decideDuplicate', 'mergeDuplicate', 'rejectDuplicate', 'resolveAppeal',
+                'decideDuplicateForProperty', 'confirmDuplicateForProperty', 'dismissDuplicateForProperty', 'mergeDuplicateForProperty', 'rejectDuplicateForProperty', 'reopen' => ['properties.moderate'],
+                'breakGlassApprove' => ['properties.break_glass'],
+                'transfer' => ['properties.transfer'],
+                'requestPromotion' => ['properties.promotions.request'],
+                'setPromotion', 'approvePromotion', 'rejectPromotion', 'approvePromotionForProperty', 'rejectPromotionForProperty' => ['properties.promotions.manage'],
+                'revokePromotion', 'revokePromotionForProperty' => ['properties.promotions.request', 'properties.promotions.manage'],
+                default => [],
+            };
+        }
+        return [];
     }
 }

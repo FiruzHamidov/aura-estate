@@ -212,6 +212,42 @@ class PropertyConstructionFieldsTest extends TestCase
         parent::tearDown();
     }
 
+    public function test_property_creation_grant_overrides_legacy_client_partner_and_accountant_gate(): void
+    {
+        (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        foreach (['client', 'external_agent', 'accountant'] as $index => $slug) {
+            $role = Role::firstOrCreate(['slug' => $slug], ['name' => $slug]);
+            $user = User::create(['name' => $slug, 'phone' => '93000008'.$index, 'role_id' => $role->id, 'status' => 'active']);
+            $payload = ['type_id' => $type->id, 'price' => 500000 + $index * 500000, 'currency' => 'TJS', 'offer_type' => 'sale'];
+            Sanctum::actingAs($user->fresh());
+            $this->postJson('/api/properties', $payload)->assertForbidden();
+            $role->forceFill(['permissions' => ['properties.create']])->save();
+            Sanctum::actingAs($user->fresh());
+            $this->postJson('/api/properties', $payload)->assertOk();
+            $created = \App\Models\Property::query()->where('created_by', $user->id)->sole();
+            // Passing the outer gate never replaces the edit check or enables unrelated endpoints.
+            $this->putJson('/api/properties/'.$created->id, ['title' => 'Forbidden'])->assertForbidden();
+            $this->postJson('/api/roles', ['name' => 'Unexpected', 'slug' => 'unexpected'])->assertForbidden();
+            $role->forceFill(['permissions' => ['properties.edit', 'properties.history.view']])->save();
+            Sanctum::actingAs($user->fresh());
+            $this->putJson('/api/properties/'.$created->id, ['title' => 'Allowed edit', 'version' => $created->moderation_version])->assertOk();
+            $this->getJson('/api/properties/'.$created->id.'/logs')->assertOk();
+            $this->getJson('/api/property-moderation-cases')->assertForbidden();
+            $role->forceFill(['permissions' => ['properties.history.view', 'properties.moderate']])->save();
+            Sanctum::actingAs($user->fresh());
+            $this->getJson('/api/property-moderation-cases')->assertOk()->assertJsonCount(0, 'data');
+            // A history grant alone cannot read this pending object without edit access.
+            $this->getJson('/api/properties/'.$created->id.'/logs')->assertForbidden();
+
+            $role->forceFill(['permissions' => []])->save();
+            Sanctum::actingAs($user->fresh());
+            $this->postJson('/api/properties', $payload)->assertForbidden();
+        }
+        $this->assertDatabaseCount('properties', 3);
+    }
+
     public function test_custom_writer_can_be_restricted_to_its_assigned_group(): void
     {
         Schema::table('users', fn (Blueprint $table) => $table->unsignedBigInteger('branch_group_id')->nullable());

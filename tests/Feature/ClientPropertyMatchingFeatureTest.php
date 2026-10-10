@@ -409,6 +409,15 @@ class ClientPropertyMatchingFeatureTest extends TestCase
         $role->forceFill(['permissions' => ['clients.scope.all']])->save();
         Sanctum::actingAs($agentA->fresh());
         $this->getJson('/api/properties/'.$property->id.'/matching-clients')->assertForbidden();
+        foreach (['client', 'external_agent', 'accountant'] as $slug) {
+            $role->forceFill(['slug' => $slug, 'permissions' => ['clients.scope.all', 'properties.matching.view']])->save();
+            Sanctum::actingAs($agentA->fresh());
+            $this->getJson('/api/properties/'.$property->id.'/matching-clients')->assertOk()->assertJsonCount(2, 'matches');
+            $role->forceFill(['permissions' => ['clients.scope.all']])->save();
+            Sanctum::actingAs($agentA->fresh());
+            $this->getJson('/api/properties/'.$property->id.'/matching-clients')->assertForbidden();
+        }
+
 
     }
 
