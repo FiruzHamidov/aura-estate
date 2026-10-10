@@ -628,6 +628,9 @@ foreach (['all' => ['История планов всех филиалов', 'С
     $permissions['kpi.plans.list.scope.'.$scope] = ['group' => 'KPI', 'name' => $name, 'description' => $description.' Требуется просмотр истории. Для РОП сохраняется историческая принадлежность плана к закреплённым группам.', 'roles' => $roles, 'exclusive_group' => 'kpi.plans.list.scope'];
 }
 
+$permissions['kpi.plans.site.view'] = ['group' => 'KPI', 'name' => 'Страница планов на сайте', 'description' => 'Открывает страницу персональных, общих и массовых планов KPI. Просмотр данных, область доступа и действия на странице разрешаются отдельно.', 'roles' => ['admin', 'superadmin', 'rop', 'branch_director', 'mop']];
+$permissions['kpi.plans.site.menu'] = ['group' => 'KPI', 'name' => 'Планы KPI в основном меню', 'description' => 'Показывает пункт «Планы KPI» в основном меню сайта. Требуется доступ к странице планов. Сохраняет прежнюю видимость меню отдельно от доступа по ссылке.', 'roles' => ['admin', 'superadmin', 'rop', 'branch_director']];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],
