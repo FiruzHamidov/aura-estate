@@ -28,34 +28,13 @@ class BranchGroupController extends Controller
         return $user;
     }
 
-    private function roleSlug(?User $user): ?string
-    {
-        return $user?->role?->slug;
-    }
-
-    private function isPrivilegedRole(?string $roleSlug): bool
-    {
-        return in_array($roleSlug, ['superadmin', 'admin', 'marketing'], true);
-    }
-
-    private function isBranchScopedManager(?string $roleSlug): bool
-    {
-        return $roleSlug === 'branch_director';
-    }
-
-    private function isBranchScopedRole(?string $roleSlug): bool
-    {
-        return in_array($roleSlug, ['branch_director', 'rop', 'agent', 'manager', 'operator'], true);
-    }
-
     private function visibleQuery(User $authUser)
     {
-        $roleSlug = $this->roleSlug($authUser);
-
         $query = BranchGroup::query()
             ->with(['branch', 'rops:id,name,branch_id']);
 
-        if ($roleSlug === 'rop') {
+        if ($authUser->hasRole('rop')) {
+            if (!$authUser->hasPermission('branch_groups.scope.all') && !$authUser->hasPermission('branch_groups.scope.branch')) return $query->whereRaw('1 = 0');
             $query->withCount([
                 'users' => fn ($users) => $users->where('branch_id', $authUser->branch_id)
                     ->whereHas('role', fn ($roles) => $roles->whereIn('slug', ['agent', 'mop'])),
@@ -65,11 +44,11 @@ class BranchGroupController extends Controller
         }
         $query->withCount(['users', 'clients']);
 
-        if ($this->isPrivilegedRole($roleSlug)) {
+        if ($authUser->hasPermission('branch_groups.scope.all')) {
             return $query;
         }
 
-        if (!$this->isBranchScopedRole($roleSlug) || empty($authUser->branch_id)) {
+        if (!$authUser->hasPermission('branch_groups.scope.branch') || empty($authUser->branch_id)) {
             return $query->whereRaw('1 = 0');
         }
 
@@ -87,7 +66,7 @@ class BranchGroupController extends Controller
             ->exists();
 
         if (! $allowed) {
-            if ($this->branchScope->isBranchScopedManager($authUser)) {
+            if (($authUser->hasRole('rop') || $authUser->hasPermission('branch_groups.scope.branch'))) {
                 $this->branchScope->denyBranchScopeViolation();
             }
 
@@ -97,14 +76,13 @@ class BranchGroupController extends Controller
 
     private function ensureManageable(User $authUser, ?int $branchId = null, ?BranchGroup $branchGroup = null): void
     {
-        $roleSlug = $this->roleSlug($authUser);
-
-        if ($this->isPrivilegedRole($roleSlug)) {
+        abort_if($authUser->hasRole('rop'), 403, 'Forbidden');
+        if ($authUser->hasPermission('branch_groups.manage.all')) {
             return;
         }
 
         abort_unless(
-            $this->isBranchScopedManager($roleSlug) && !empty($authUser->branch_id),
+            $authUser->hasPermission('branch_groups.manage.branch') && !empty($authUser->branch_id),
             403,
             'Forbidden'
         );
@@ -120,7 +98,7 @@ class BranchGroupController extends Controller
 
     private function normalizedBranchId(array $data, User $authUser): int
     {
-        if ($this->isPrivilegedRole($this->roleSlug($authUser))) {
+        if ($authUser->hasPermission('branch_groups.manage.all')) {
             $branchId = $data['branch_id'] ?? null;
             abort_if(empty($branchId), 422, 'branch_id is required.');
 
@@ -145,7 +123,7 @@ class BranchGroupController extends Controller
         ]);
 
         // Attendance and HR user creation only need group labels, not CRM counts/settings.
-        $query = in_array($this->roleSlug($authUser), ['accountant', 'hr'], true)
+        $query = ($authUser->hasPermission('branch_groups.labels.list') && !$authUser->hasPermission('branch_groups.scope.all') && !$authUser->hasPermission('branch_groups.scope.branch') && !$authUser->hasRole('rop'))
             ? BranchGroup::query()->select(['id', 'name', 'branch_id'])
             : $this->visibleQuery($authUser);
 
@@ -158,7 +136,7 @@ class BranchGroupController extends Controller
         }
 
         if (!empty($validated['branch_id'])) {
-            if ($this->branchScope->isBranchScopedManager($authUser)) {
+            if (($authUser->hasRole('rop') || $authUser->hasPermission('branch_groups.scope.branch'))) {
                 $this->branchScope->ensureSameBranchOrDeny((int) $validated['branch_id'], $authUser);
             }
 
@@ -181,15 +159,14 @@ class BranchGroupController extends Controller
     {
         return DB::transaction(function () use ($request) {
             $authUser = User::query()->lockForUpdate()->findOrFail($this->authUser()->id);
-            $roleSlug = $this->roleSlug($authUser);
-
+            abort_if($authUser->hasRole('rop'), 403, 'Forbidden');
             abort_unless(
-                $this->isPrivilegedRole($roleSlug) || $this->isBranchScopedManager($roleSlug),
+                $authUser->hasPermission('branch_groups.manage.all') || $authUser->hasPermission('branch_groups.manage.branch'),
                 403,
                 'Forbidden'
             );
 
-            $effectiveBranchId = $this->isPrivilegedRole($roleSlug)
+            $effectiveBranchId = $authUser->hasPermission('branch_groups.manage.all')
                 ? $request->integer('branch_id')
                 : (int) $authUser->branch_id;
 
@@ -227,7 +204,7 @@ class BranchGroupController extends Controller
     public function show(BranchGroup $branchGroup)
     {
         $authUser = $this->authUser();
-        if ($this->roleSlug($authUser) === 'hr') {
+        if ($authUser->hasPermission('branch_groups.labels.show') && !$authUser->hasPermission('branch_groups.scope.all') && !$authUser->hasPermission('branch_groups.scope.branch') && !$authUser->hasRole('rop')) {
             return response()->json($branchGroup->only(['id', 'name', 'branch_id']));
         }
 

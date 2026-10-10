@@ -83,6 +83,12 @@ class EnsureUserIsNotClient
             }
         }
 
+        if ($request->is('api/branch-groups', 'api/branch-groups/*')) {
+            foreach (['scope.all', 'scope.branch', 'labels.list', 'labels.show', 'manage.all', 'manage.branch'] as $grant) {
+                if ($user?->hasPermission('branch_groups.'.$grant)) return $next($request);
+            }
+        }
+
         // HR can select existing roles/groups, but cannot change these dictionaries.
         if ($user?->role?->slug === 'hr'
             && $request->is('api/roles', 'api/roles/*', 'api/branch-groups', 'api/branch-groups/*')

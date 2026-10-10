@@ -21,6 +21,10 @@ class ReferenceCatalogService
             $this->deny('REFERENCE_CATALOG_FORBIDDEN', 'Нет права изменять этот справочник.');
         }
 
+        if ($catalog === 'branch-groups' && ($user->hasRole('rop') || !$user->hasPermission('branch_groups.scope.all') || !$user->hasPermission('branch_groups.manage.all'))) {
+            $this->deny('REFERENCE_CATALOG_FORBIDDEN', 'Для объединения групп требуется просмотр и управление группами всех филиалов.');
+        }
+
         if ($catalog === 'roles') {
             if ($user->hasPermission('roles.manage')) return;
         } elseif ($user->hasPermission('catalogs.manage')

@@ -283,6 +283,33 @@ class BranchGroupFeatureTest extends TestCase
         $this->deleteJson('/api/branch-groups/'.$historical->id)->assertConflict();
     }
 
+    public function test_custom_group_permissions_preserve_scope_and_separate_labels_from_management(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $branchA = Branch::create(['name' => 'A']);
+        $branchB = Branch::create(['name' => 'B']);
+        $role = Role::create(['name' => 'Custom', 'slug' => 'client']);
+        $role->forceFill(['permissions' => ['branch_groups.labels.list', 'branch_groups.labels.show']])->save();
+        $actor = $this->createUser($role, $branchA, 'Reader');
+        $groupA = BranchGroup::create(['name' => 'A', 'branch_id' => $branchA->id]);
+        $groupB = BranchGroup::create(['name' => 'B', 'branch_id' => $branchB->id]);
+        Sanctum::actingAs($actor);
+        $this->getJson('/api/branch-groups')->assertOk()->assertJsonCount(2, 'data')->assertJsonMissingPath('data.0.users_count')->assertJsonMissingPath('data.0.contact_visibility_mode');
+        $this->getJson('/api/branch-groups/'.$groupB->id)->assertOk()->assertJsonMissingPath('contact_visibility_mode');
+        $this->patchJson('/api/branch-groups/'.$groupA->id, ['name' => 'Forbidden'])->assertForbidden();
+        $role->forceFill(['permissions' => ['branch_groups.scope.branch', 'branch_groups.manage.branch']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/branch-groups')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $groupA->id);
+        $this->patchJson('/api/branch-groups/'.$groupA->id, ['name' => 'Allowed'])->assertOk();
+        $this->patchJson('/api/branch-groups/'.$groupB->id, ['name' => 'Forbidden'])->assertForbidden();
+        $role->forceFill(['permissions' => ['branch_groups.scope.all', 'branch_groups.manage.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson('/api/branch-groups/'.$groupB->id, ['name' => 'Allowed globally'])->assertOk();
+        $role->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson('/api/branch-groups/'.$groupA->id, ['name' => 'Revoked'])->assertForbidden();
+    }
+
     private function createUser(Role $role, Branch $branch, string $name, ?BranchGroup $group = null): User
     {
         return User::create([

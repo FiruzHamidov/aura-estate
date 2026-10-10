@@ -519,6 +519,14 @@ foreach (require __DIR__.'/catalog_permissions.php' as $catalog => $definition) 
     ];
 }
 
+$permissions['branch_groups.scope.all'] = ['group' => 'Группы сотрудников', 'name' => 'Группы всех филиалов', 'description' => 'Просмотр групп, настроек видимости контактов и количества связанных записей всех филиалов. Для РОП сохраняются закреплённые группы.', 'roles' => ['admin', 'superadmin', 'marketing'], 'exclusive_group' => 'branch_groups.scope'];
+$permissions['branch_groups.scope.branch'] = ['group' => 'Группы сотрудников', 'name' => 'Группы своего филиала', 'description' => 'Просмотр групп и связанных счётчиков своего филиала. РОП видит только закреплённые группы.', 'roles' => ['branch_director', 'rop', 'agent', 'manager', 'operator'], 'exclusive_group' => 'branch_groups.scope'];
+$permissions['branch_groups.labels.list'] = ['group' => 'Группы сотрудников', 'name' => 'Названия групп для выбора', 'description' => 'Список названий и филиалов групп для табеля и назначения сотрудников, без CRM-счётчиков и настроек. Полная область просмотра имеет приоритет.', 'roles' => ['hr', 'accountant']];
+$permissions['branch_groups.labels.show'] = ['group' => 'Группы сотрудников', 'name' => 'Название отдельной группы', 'description' => 'Получение названия и филиала выбранной группы без настроек и связанных данных.', 'roles' => ['hr']];
+$permissions['branch_groups.manage.all'] = ['group' => 'Группы сотрудников', 'name' => 'Изменение групп всех филиалов', 'description' => 'Создание групп, изменение настроек и удаление пустых групп во всех филиалах. Для существующих групп требуется область просмотра. РОП не меняет структуру групп.', 'roles' => ['admin', 'superadmin', 'marketing'], 'exclusive_group' => 'branch_groups.manage'];
+$permissions['branch_groups.manage.branch'] = ['group' => 'Группы сотрудников', 'name' => 'Изменение групп своего филиала', 'description' => 'Создание, изменение и удаление пустых групп своего филиала. Для существующих групп требуется область просмотра. Защита связанных записей сохраняется; РОП не меняет структуру групп.', 'roles' => ['branch_director'], 'exclusive_group' => 'branch_groups.manage'];
+$permissions['branch_groups.module.view'] = ['group' => 'Группы сотрудников', 'name' => 'Раздел управления группами на сайте', 'description' => 'Открывает страницу групп. Область просмотра и изменение структуры назначаются отдельно.', 'roles' => ['admin', 'superadmin', 'marketing', 'rop', 'branch_director']];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],
