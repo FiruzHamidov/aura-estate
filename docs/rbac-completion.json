@@ -344,11 +344,20 @@
             "/tmp/aura-rbac-user-help-policy-browser-focused.log",
             "/tmp/aura-rbac-user-help-policy-tsc.log"
           ]
+        },
+        {
+          "change": "Нижнее мобильное меню выбирается настройками navigation.mobile.* с единственным вариантом на роль. Восемь прежних схем ссылок сохранены в defaults существующих ролей; без выбора используется публичная схема. Пользовательская роль может выбрать любую схему, доступ к самим страницам остаётся отдельным. Названия и описания перечисляют ссылки и поясняют разделение доступа и меню.",
+          "verification": "37 серверных тестов / 2238 проверок, 2 Node-теста, TypeScript и браузерный сценарий 390px прошли. Проверены исходные назначения, конфликт двух схем, пользовательская роль, переключение attendance→deals и отзыв→public.",
+          "logs": [
+            "/tmp/aura-rbac-mobile-menu-backend.log",
+            "/tmp/aura-rbac-mobile-menu-node.log",
+            "/tmp/aura-rbac-mobile-menu-browser.log",
+            "/tmp/aura-rbac-mobile-menu-tsc.log"
+          ]
         }
       ],
       "remaining_checks": [
         "Продолжить полный аудит остальных прямых ссылок frontend; временный результат поиска /tmp/aura-rbac-front-roles.txt не подтверждает завершение аудита.",
-        "MobileBottomNavigation: direct role switch still defines bottom navigation links; audit migration to configurable settings while preserving initial layouts.",
         "ClientForm and ClientNeedForm: role-specific insertion of current user into responsible selection remains; audit independent selection policy. ClientPicker intern comparison only changes quick-create label."
       ]
     },

@@ -36,6 +36,23 @@ class RolePermissionsTest extends TestCase
         return $user;
     }
 
+    public function test_mobile_navigation_preserves_default_layouts_and_rejects_multiple_choices(): void
+    {
+        foreach (['agent' => 'sales', 'intern' => 'personal', 'manager' => 'deals', 'operator' => 'leads',
+            'rop' => 'team', 'branch_director' => 'team', 'admin' => 'management', 'superadmin' => 'management',
+            'marketing' => 'management', 'reels_manager' => 'media', 'accountant' => 'attendance'] as $slug => $layout) {
+            $role = Role::where('slug', $slug)->firstOrFail();
+            $this->assertTrue($role->hasPermission('navigation.mobile.'.$layout), $slug);
+        }
+        $this->actor('superadmin');
+        $target = Role::create(['name' => 'Custom menu', 'slug' => 'custom_mobile_menu', 'permissions' => []]);
+        $this->putJson('/api/rbac/roles/'.$target->id, ['version' => $target->fresh()->permissions_version,
+            'permissions' => ['navigation.mobile.sales', 'navigation.mobile.team']])->assertUnprocessable()->assertJsonPath('details.errors.permissions.0', 'Для одного раздела можно выбрать только одну область данных.');
+        $this->putJson('/api/rbac/roles/'.$target->id, ['version' => $target->fresh()->permissions_version,
+            'permissions' => ['navigation.mobile.team']])->assertOk();
+        $this->assertTrue($target->fresh()->hasPermission('navigation.mobile.team'));
+    }
+
     public function test_role_catalog_read_grant_works_independently_of_role_name_and_management(): void
     {
         $target = Role::where('slug', 'agent')->firstOrFail();
