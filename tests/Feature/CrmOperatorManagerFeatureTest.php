@@ -438,6 +438,25 @@ class CrmOperatorManagerFeatureTest extends TestCase
             ->assertJsonPath('branch_id', $branchA->id);
     }
 
+    public function test_custom_report_subject_policy_preserves_branch_scope_and_revocation(): void
+    {
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+        $directorRole = Role::forceCreate(['name' => 'Reader', 'slug' => 'custom_reader', 'permissions' => ['crm_reports.scope.branch']]);
+        $subjectRole = Role::forceCreate(['name' => 'Subject', 'slug' => 'custom_subject', 'permissions' => ['crm_reports.subject.operator']]);
+        $reader = $this->createUser($directorRole, $branchA, 'Reader');
+        $own = $this->createUser($subjectRole, $branchA, 'Own branch');
+        $this->createUser($subjectRole, $branchB, 'Other branch');
+        $this->createLead($branchA, $own, $own, 'Custom lead');
+        Sanctum::actingAs($reader);
+        $this->getJson('/api/crm/reports/performance?role_type=operator&period=month')
+            ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.user.id', $own->id);
+        $this->getJson('/api/crm/reports/performance?role_type=operator&branch_id='.$branchB->id)->assertForbidden();
+        $subjectRole->forceFill(['permissions' => []])->save();
+        $this->getJson('/api/crm/reports/performance?role_type=operator&period=month')->assertOk()->assertJsonCount(0, 'data');
+    }
+
     public function test_branch_director_report_is_limited_to_own_branch_operators(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);

@@ -52,7 +52,7 @@ class CrmReportController extends Controller
 
         $users = User::query()
             ->with(['role', 'branch'])
-            ->whereHas('role', fn ($query) => $query->where('slug', $validated['role_type']))
+            ->whereHas('role', fn ($query) => $query->withPermission('crm_reports.subject.'.$validated['role_type']))
             ->when($scope['branch_id'], fn ($query, $branchId) => $query->where('branch_id', $branchId))
             ->when($scope['responsible_user_id'], fn ($query, $responsibleUserId) => $query->whereKey($responsibleUserId))
             ->orderBy('name')

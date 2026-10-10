@@ -213,6 +213,10 @@
         {
           "change": "Три дополнительные серверные проверки перенесены: KpiEarlyRiskAlert сохраняет текущую группу по kpi.subject.assigned_groups; плановая очистка координат без индивидуальных настроек использует locations.subject.default_retention с прежним tracked_roles default; фильтр сотрудников контроля объектов использует property_control.subject.report_filter с default security. Все настройки описаны по-русски.",
           "verification": "179 серверных тестов / 3949 проверок прошли. Custom roles: сохранение текущего снимка группы и неизменность истории после отзыва; удаление только старых координат, отзыв общей политики и независимость индивидуального срока; появление/исчезновение сотрудника в фильтре контроля. Прежние сценарии группы, карты и отчёта также прошли."
+        },
+        {
+          "change": "CRM performance выбирает сотрудников по crm_reports.subject.operator/manager вместо фиксированного slug. Формулы двух отчётов прежние; defaults operator/manager.",
+          "verification": "45 целевых серверных тестов / 2478 assertions, включая custom subject, доступ только своего филиала, запрет чужого филиала, отзыв и defaults всех системных ролей. /tmp/aura-rbac-crm-subject.log."
         }
       ],
       "remaining_checks": [
@@ -382,6 +386,10 @@
         {
           "change": "Создание тегов и подстановка/фиксация автора в формах лида, сделки и календаря перенесены в каталог прав с русскими описаниями и прежними defaults.",
           "verification": "41 серверный тест / 2417 assertions; 64 Node RBAC теста; 3 браузерных сценария (теги, реальная форма лида и сделки с grant/revoke); TypeScript. Логи /tmp/aura-rbac-tag-{backend,node,tsc}.log и /tmp/aura-rbac-form-policies-browser.log. Календарная настройка проверена helper/default тестами и типизацией; отдельный браузерный сценарий календаря ещё не выполнен."
+        },
+        {
+          "change": "Общий ProfileAccessGuard пропускает новые роли в создание/редактирование объекта и redirect-адреса KPI/карты по соответствующим правам; конкретные страницы сохраняют проверки объекта. Сообщение отказа для настроенных ролей больше не называет сотрудника клиентом.",
+          "verification": "65 Node RBAC тестов, 4 браузерных grant/revoke сценария настоящего ProfileAccessGuard, TypeScript. /tmp/aura-rbac-route-{node,browser,tsc}.log."
         }
       ],
       "remaining_checks": [
@@ -539,9 +547,24 @@
         "file": "app/Services/NotificationRecipientResolver.php::usersByRole",
         "classification": "unused_legacy_helper",
         "decision": "No application callsites in current app search; active recipients use usersByPermission."
+      },
+      {
+        "file": "app/Http/Controllers/ExternalAgentController.php",
+        "classification": "account_type_identity",
+        "decision": "Directory and creation specifically manage external-agent accounts. Actor admission/create/group requirement and data scope use external_agents.* permissions; fixed external_agent slug selects/creates the account type."
+      },
+      {
+        "file": "app/Http/Controllers/CrmReportController.php",
+        "classification": "metric_schema_with_configurable_subjects",
+        "decision": "operator/manager select fixed metric formulas; employee inclusion now uses crm_reports.subject.* permissions. Branch and own-reader scopes unchanged."
+      },
+      {
+        "file": "app/Services/PropertyLiquidity/PropertyLiquidityAccess.php",
+        "classification": "unused_legacy_constants",
+        "decision": "INTERNAL_ROLES and MARKETING_WRITE_ROLES no longer authorize actions; isInternal/canManagePromotion/canSetBusinessPriority use permissions. MARKETING_WRITE_ROLES has no application callsites."
       }
     ],
-    "audit_note": "Current literal scan /tmp/aura-rbac-server-role-literals-current.txt: 151 references across app; actual location role-filter validation and tracked_roles payload found and migrated. Relationship names, report metric types and account categories still require final consolidated classification; no completion claim."
+    "audit_note": "Backend literal inventory reviewed; CRM report subject whitelist found and migrated. Frontend current inventory /tmp/aura-rbac-final-front-role-inventory.txt contains 62 files; three concrete followups recorded. Account identities, relationship names and metric schemas must be consolidated before completion."
   },
   "execution_rules": [
     "Работать по одному открытому пункту, указывать конкретные завершённые подпункты и доказательства.",
@@ -668,7 +691,20 @@
         "classification": "Migrated agent/mop creator prefill and calendar picker lock to three independent site policies preserving prior defaults; server creator defaults and assignment authorization remain independent. Calendar responds to newly applied lock; CRM forms reset when prefill changes."
       }
     ],
-    "pending_followups": []
+    "pending_followups": [
+      {
+        "file": "app/profile/kpi/plans/page.tsx:219",
+        "issue": "bulkRoles still aliases rop to branch_director although backend bulk validation requires exact selected role. Resolve and test with distinct configured roles."
+      },
+      {
+        "file": "app/profile/edit-post/[id]/page.tsx:298",
+        "issue": "Default client responsible still uses isAgentLikeRole to select actor vs property creator; migrate preserving old defaults."
+      },
+      {
+        "file": "app/apartment/[slug]/_components/GalleryWrapper.tsx:366",
+        "issue": "History legacy fallback still checks manager/operator. Verify every modern payload supplies capabilities; avoid hardcoded-role fallback for explicit permissions."
+      }
+    ]
   },
   "latest_full_verification": {
     "backend_head": "1e2f83b0",

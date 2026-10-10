@@ -36,6 +36,15 @@ class RolePermissionsTest extends TestCase
         return $user;
     }
 
+    public function test_crm_report_subject_defaults_preserve_operator_and_manager_reports(): void
+    {
+        foreach (Role::all() as $role) {
+            foreach (['operator', 'manager'] as $kind) {
+                $this->assertSame($role->slug === $kind, $role->hasPermission('crm_reports.subject.'.$kind), $role->slug);
+            }
+        }
+    }
+
     public function test_creator_form_policy_defaults_preserve_agent_and_mop_behavior(): void
     {
         foreach (Role::all() as $role) {
