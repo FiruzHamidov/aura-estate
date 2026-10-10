@@ -1036,7 +1036,7 @@ class ReelFeatureTest extends TestCase
         $role->forceFill(['permissions' => ['reels.view', 'reels.scope.all', 'reels.delete']])->save();
         Sanctum::actingAs($actor->fresh());
         $this->deleteJson($path)->assertOk();
-        $this->assertDatabaseMissing('reels', ['id' => $reels[0]->id]);
+        $this->assertSoftDeleted('reels', ['id' => $reels[0]->id]);
     }
 
     private function createUser(string $roleSlug, string $phone, ?int $branchId = null): User
