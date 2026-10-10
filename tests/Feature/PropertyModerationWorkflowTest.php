@@ -775,6 +775,35 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertSame(1, $calls);
     }
 
+    public function test_moderation_notification_subscription_follows_custom_permissions_and_branch_scope(): void
+    {
+        [$agent, $rop, $director] = $this->users();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role = Role::forceCreate(['name' => 'Custom notifications', 'slug' => 'custom_moderation_notifications', 'permissions' => ['notifications.receive.property_moderation']]);
+        $subscriber = User::forceCreate(['name' => 'Subscriber', 'phone' => '900000099', 'role_id' => $role->id, 'branch_id' => 1, 'status' => 'active']);
+        $notifier = app(\App\Services\PropertyModeration\PropertyModerationNotifier::class);
+        $send = function (array $overrides = []) use ($notifier, $agent) {
+            $property = Property::forceCreate($this->propertyPayload($agent, $overrides));
+            $notifier->moderationEvent($property, 'property_sent_to_moderation', $agent);
+            return DB::table('notifications')->where('subject_id', $property->id)->pluck('user_id')->all();
+        };
+        $this->assertContains($subscriber->id, $send());
+        $this->assertNotContains($subscriber->id, $send(['branch_id' => 2, 'branch_group_id' => null]));
+        $role->forceFill(['permissions' => ['notifications.receive.property_moderation', 'notifications.receive.property_moderation.all_branches']])->save();
+        $this->assertContains($subscriber->id, $send(['branch_id' => 2, 'branch_group_id' => null]));
+        $role->forceFill(['permissions' => ['notifications.receive.property_moderation', 'notifications.receive.property_moderation.all_branches', 'data.scope.assigned_groups']])->save();
+        $this->assertNotContains($subscriber->id, $send());
+        $subscriber->supervisedGroups()->attach(1);
+        $this->assertContains($subscriber->id, $send());
+        $this->assertNotContains($subscriber->id, $send(['branch_id' => 2, 'branch_group_id' => null]));
+        $role->forceFill(['permissions' => ['notifications.receive.property_moderation.all_branches']])->save();
+        $recipients = $send();
+        $this->assertNotContains($subscriber->id, $recipients);
+        $this->assertContains($agent->id, $recipients);
+        $director->role->forceFill(['permissions' => []])->save();
+        $this->assertNotContains($director->id, $send());
+    }
+
     public function test_moderation_notifications_use_a_numeric_priority_and_are_deduplicated(): void
     {
         [$agent, $rop, $director] = $this->users();

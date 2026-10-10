@@ -131,9 +131,9 @@ final class PropertyModerationNotifier
 
         return User::query()
             ->where('status', User::STATUS_ACTIVE)
-            ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', config('property-moderation.moderator_roles', [])))
+            ->whereHas('role', fn (Builder $roles) => $roles->withPermission('notifications.receive.property_moderation'))
             ->where(function (Builder $query) use ($branchId): void {
-                $query->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', config('property-moderation.global_moderator_roles', [])));
+                $query->whereHas('role', fn (Builder $roles) => $roles->withPermission('notifications.receive.property_moderation.all_branches'));
                 if ($branchId) {
                     $query->orWhere('branch_id', $branchId);
                 }

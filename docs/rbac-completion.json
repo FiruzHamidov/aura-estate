@@ -268,6 +268,10 @@
         {
           "change": "Смешанные рассылки перед доставкой повторно разрешают получателей по текущему лиду, объекту или карточке контроля. Для новых лидов записывается источник рассылки; персональные назначения не требуют подписки.",
           "verification": "14 целевых тестов, 125 проверок. Фактические queued jobs подтверждают отзыв рассылки, сохранение персонального назначения и исключение после смены филиала."
+        },
+        {
+          "change": "Дополнительный аудит обнаружил отдельный PropertyModerationNotifier с прежними списками moderator_roles/global_moderator_roles. Получатели переведены на notifications.receive.property_moderation и отдельное расширение all_branches; defaults взяты из прежней конфигурации. Собственники, активность и NotificationGroupAccess сохранены.",
+          "verification": "120 серверных тестов / 2841 проверка прошли. Custom role: свой/чужой филиал, подписка всех филиалов, пустые/назначенные группы, отзыв подписки при сохранённом all_branches; владелец получает событие без подписки. Прежняя дедупликация проверена существующим тестом."
         }
       ],
       "remaining_checks": [],
@@ -486,7 +490,20 @@
       "app/Http/Controllers/DailyReportController.php",
       "app/Http/Controllers/AttendanceWebController.php"
     ],
-    "pending_followups": [],
+    "pending_followups": [
+      {
+        "file": "app/Models/KpiEarlyRiskAlert.php",
+        "finding": "creating observer infers current group only for hardcoded agent/mop; align with configurable subject policy after checking caller/history semantics."
+      },
+      {
+        "file": "app/Console/Commands/PruneUserLocationHistoryCommand.php",
+        "finding": "default-retention query still uses tracked_roles; align with transmission eligibility without losing retention semantics for existing settings."
+      },
+      {
+        "file": "app/Http/Controllers/PropertyControlReportController.php::meta",
+        "finding": "security_officers filter list still hardcoded security; determine intended target policy for custom control staff."
+      }
+    ],
     "classified_business_references": [
       {
         "file": "app/Services/PropertyReportStaff.php",
@@ -497,6 +514,21 @@
           "tests/Feature/PropertyMyPropertiesBranchFilterTest.php checks paid ROP amount and absence without report access"
         ],
         "decision": "Сохраняются должности участников выплат и текущие организационные связи. Это содержание отчёта, а не правило допуска читателя."
+      },
+      {
+        "file": "app/Services/Crm/PropertyControlWorkflow.php::capabilities",
+        "classification": "workflow_stage_slugs",
+        "decision": "whereIn slug selects allowed deal stages, not user roles."
+      },
+      {
+        "file": "app/Services/KpiModuleService.php::applyCommonPlanToUsers",
+        "classification": "explicit_template_role_filter",
+        "decision": "Exact role selected by request; template roles and actor scope validated before query. No fixed staff whitelist."
+      },
+      {
+        "file": "app/Services/NotificationRecipientResolver.php::usersByRole",
+        "classification": "unused_legacy_helper",
+        "decision": "No application callsites in current app search; active recipients use usersByPermission."
       }
     ],
     "audit_note": "Дополнительный поиск по всему app выявил observer и DealAccess вне первоначального списка; оба перенесены. Pending followups очищен только для разобранного списка, полный аудит сервера и frontend остаётся открытым."
