@@ -34,6 +34,24 @@ class EnsureUserIsNotClient
             }
         }
 
+        if (($request->is('api/clients/duplicate-check') && $user?->hasPermission('clients.duplicates.search'))
+            || ($request->is('api/clients/attach-existing') && $user?->hasPermission('clients.attach'))) {
+            return $next($request);
+        }
+        if ($request->is('api/clients/settings') && $user?->hasPermission('clients.settings.manage')) {
+            return $next($request);
+        }
+        if ($request->is('api/clients', 'api/clients/*', 'api/client-needs/*')) {
+            foreach (['all', 'branch', 'own', 'agent_policy', 'group_policy'] as $scope) {
+                if ($user?->hasPermission('clients.scope.'.$scope)) {
+                    return $next($request);
+                }
+            }
+            if ($user?->hasPermission('clients.shared.view')) {
+                return $next($request);
+            }
+        }
+
         // HR can select existing roles/groups, but cannot change these dictionaries.
         if ($user?->role?->slug === 'hr'
             && $request->is('api/roles', 'api/roles/*', 'api/branch-groups', 'api/branch-groups/*')

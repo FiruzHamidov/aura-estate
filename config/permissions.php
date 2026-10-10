@@ -356,4 +356,47 @@ return [
     'deals.properties.own' => [
         'group' => 'CRM · Сделки', 'name' => 'Привязка: Свои объекты', 'description' => 'Определяет, какие объявления можно прикреплять к доступным сделкам. Само изменение сделки требует отдельного разрешения.', 'exclusive_group' => 'deals.properties', 'roles' => ['agent', 'intern'],
     ],
+    'clients.scope.all' => [
+        'group' => 'CRM · Клиенты', 'name' => 'Клиенты всех филиалов', 'description' => 'Просмотр всех клиентов. Изменение клиентов требует отдельных разрешений. Закреплённые группы РОП остаются обязательным ограничением.', 'roles' => ['admin', 'superadmin', 'marketing'], 'exclusive_group' => 'clients.scope',
+    ],
+    'clients.scope.branch' => [
+        'group' => 'CRM · Клиенты', 'name' => 'Клиенты своего филиала', 'description' => 'Просмотр клиентов своего филиала без ограничений по типу контакта. Для РОП — только закреплённые группы.', 'roles' => ['branch_director', 'rop'], 'exclusive_group' => 'clients.scope',
+    ],
+    'clients.scope.own' => [
+        'group' => 'CRM · Клиенты', 'name' => 'Свои клиенты', 'description' => 'Просмотр клиентов своего филиала, которых сотрудник создал или за которых отвечает. При создании сотрудник назначается автором и ответственным.', 'roles' => ['intern'], 'exclusive_group' => 'clients.scope',
+    ],
+    'clients.scope.agent_policy' => [
+        'group' => 'CRM · Клиенты', 'name' => 'Клиенты по настройкам агентов', 'description' => 'Применяет настройки видимости клиентов и продавцов, а также режим видимости контактов группы. Сохраняет действующие правила агента, менеджера и оператора.', 'roles' => ['agent', 'manager', 'operator'], 'exclusive_group' => 'clients.scope',
+    ],
+    'clients.scope.group_policy' => [
+        'group' => 'CRM · Клиенты', 'name' => 'Клиенты по настройкам группы', 'description' => 'Применяет режим видимости контактов группы. Без собственной группы доступ закрыт; ограничения видимости продавцов для агентов не применяются.', 'roles' => ['mop'], 'exclusive_group' => 'clients.scope',
+    ],
+    'clients.shared.view' => [
+        'group' => 'CRM · Клиенты', 'name' => 'Клиенты совместной работы', 'description' => 'Дополнительно показывает клиентов, к которым сотрудник добавлен как участник совместной работы. Ограничения закреплённых групп РОП сохраняются.', 'roles' => ['agent', 'manager', 'operator', 'mop', 'hr', 'security', 'reels_manager', 'owner'],
+    ],
+    'clients.collaborators.manage_all' => [
+        'group' => 'CRM · Клиенты', 'name' => 'Участники доступных клиентов', 'description' => 'Разрешает управлять участниками любого доступного клиента. Без этого права — только у клиентов, за которых сотрудник отвечает. Добавление и удаление требуют отдельных разрешений.', 'roles' => ['admin', 'superadmin', 'marketing', 'branch_director', 'rop'],
+    ],
+    'clients.settings.manage' => [
+        'group' => 'CRM · Клиенты', 'name' => 'Настройки видимости клиентов', 'description' => 'Изменение общих настроек видимости клиентов и продавцов для ролей с областью «Клиенты по настройкам агентов».', 'roles' => ['admin', 'superadmin', 'marketing'],
+    ],
+    'clients.properties.all' => [
+        'group' => 'CRM · Клиенты', 'name' => 'Связь клиентов с любыми объектами', 'description' => 'Разрешает прикреплять существующего клиента к объектам всех филиалов.', 'roles' => ['admin', 'superadmin', 'marketing'], 'exclusive_group' => 'clients.properties',
+    ],
+    'clients.properties.branch' => [
+        'group' => 'CRM · Клиенты', 'name' => 'Связь клиентов с объектами филиала', 'description' => 'Разрешает прикреплять клиента к объектам своего филиала. Для РОП сохраняется ограничение закреплённых групп.', 'roles' => ['branch_director', 'rop', 'manager', 'operator'], 'exclusive_group' => 'clients.properties',
+    ],
+    'clients.properties.own' => [
+        'group' => 'CRM · Клиенты', 'name' => 'Связь клиентов со своими объектами', 'description' => 'Разрешает прикреплять клиента к своим объектам в своём филиале.', 'roles' => ['agent', 'mop', 'intern'], 'exclusive_group' => 'clients.properties',
+    ],
+    'clients.attach' => [
+        'group' => 'CRM · Клиенты', 'name' => 'Использование существующего клиента',
+        'description' => 'Прикрепление существующего контакта к доступному контексту CRM и включение в совместную работу. Сохраняются проверки филиала, группы и доступа к связанному объекту.',
+        'roles' => ['admin', 'superadmin', 'marketing', 'hr', 'security', 'branch_director', 'rop', 'mop', 'agent', 'intern', 'manager', 'operator', 'reels_manager', 'owner'],
+    ],
+    'clients.duplicates.search' => [
+        'group' => 'CRM · Клиенты', 'name' => 'Поиск дубликатов клиентов',
+        'description' => 'Проверка совпадений по телефону, имени и почте. Недоступные контакты показываются с маскировкой личных данных.',
+        'roles' => ['admin', 'superadmin', 'marketing', 'hr', 'security', 'branch_director', 'rop', 'mop', 'agent', 'intern', 'manager', 'operator', 'reels_manager', 'owner'],
+    ],
 ];

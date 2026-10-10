@@ -260,4 +260,51 @@ class RolePermissionsTest extends TestCase
         }
     }
 
+    public function test_existing_custom_role_keeps_shared_contacts_but_new_role_starts_empty(): void
+    {
+        $migration = require database_path('migrations/2026_10_10_000000_add_role_permissions.php');
+        $migration->down();
+        $legacy = Role::create(['name' => 'Legacy colleague', 'slug' => 'legacy_colleague']);
+        $migration->up();
+        $this->assertSame(['clients.shared.view', 'clients.attach', 'clients.duplicates.search'], $legacy->fresh()->permissionKeys());
+        $new = Role::create(['name' => 'New colleague', 'slug' => 'new_colleague']);
+        $this->assertSame([], $new->permissionKeys());
+    }
+
+    public function test_client_scope_and_shared_access_can_be_changed_independently(): void
+    {
+        Schema::create('clients', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('created_by')->nullable();
+            $table->unsignedBigInteger('responsible_agent_id')->nullable(); $table->softDeletes();
+        });
+        Schema::create('client_collaborators', function (Blueprint $table) {
+            $table->unsignedBigInteger('client_id'); $table->unsignedBigInteger('user_id');
+        });
+        $actor = $this->actor('intern');
+        $actor->branch_id = 10;
+        DB::table('clients')->insert([
+            ['id' => 1, 'branch_id' => 10, 'created_by' => $actor->id],
+            ['id' => 2, 'branch_id' => 10, 'created_by' => 999],
+            ['id' => 3, 'branch_id' => 20, 'created_by' => 999],
+            ['id' => 4, 'branch_id' => 20, 'created_by' => 999],
+        ]);
+        DB::table('client_collaborators')->insert(['client_id' => 3, 'user_id' => $actor->id]);
+        $access = app(\App\Support\ClientAccess::class);
+        foreach ([
+            [['clients.scope.own'], [1]],
+            [['clients.scope.branch'], [1, 2]],
+            [['clients.scope.branch', 'clients.shared.view'], [1, 2, 3]],
+            [['clients.shared.view'], [3]],
+            [['clients.scope.all'], [1, 2, 3, 4]],
+            [[], []],
+        ] as [$permissions, $ids]) {
+            $actor->role->permissions = $permissions;
+            $this->assertSame($ids, $access->visibleQuery($actor)->orderBy('id')->pluck('id')->all());
+        }
+        $actor->role->permissions = ['clients.scope.all'];
+        $this->expectException(\Illuminate\Http\Exceptions\HttpResponseException::class);
+        $access->ensureCanMutateClients($actor, 'clients.update');
+    }
+
 }

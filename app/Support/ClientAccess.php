@@ -14,8 +14,11 @@ use Illuminate\Http\Exceptions\HttpResponseException;
 class ClientAccess
 {
     public const VISIBILITY_SETTING_KEY = 'clients.agent_visibility_mode';
+
     public const AGENT_CAN_VIEW_SELLERS_SETTING_KEY = 'clients.agent_can_view_sellers';
+
     public const VISIBILITY_ALL_BRANCH = 'all_branch';
+
     public const VISIBILITY_OWN_ONLY = 'own_only';
 
     public function roleSlug(?User $user): ?string
@@ -25,34 +28,25 @@ class ClientAccess
         return $user?->role?->slug;
     }
 
-    public function isPrivilegedRole(?string $roleSlug): bool
+    public function scopeType(User $user): string
     {
-        return in_array($roleSlug, ['superadmin', 'admin', 'marketing'], true);
+        foreach (['all', 'branch', 'own', 'agent_policy', 'group_policy'] as $scope) {
+            if ($user->hasPermission('clients.scope.'.$scope)) {
+                return $scope;
+            }
+        }
+
+        return 'none';
     }
 
-    public function isBranchScopedManager(?string $roleSlug): bool
+    public function canReadAll(User $user): bool
     {
-        return in_array($roleSlug, ['branch_director', 'rop'], true);
+        return $this->scopeType($user) === 'all';
     }
 
-    public function isBranchScopedRole(?string $roleSlug): bool
+    public function isBranchScoped(User $user): bool
     {
-        return in_array($roleSlug, ['branch_director', 'rop', 'agent', 'manager', 'operator', 'intern', 'mop'], true);
-    }
-
-    public function isAgentScopedRole(?string $roleSlug): bool
-    {
-        return in_array($roleSlug, ['agent', 'manager', 'operator'], true);
-    }
-
-    public function isMopRole(?string $roleSlug): bool
-    {
-        return $roleSlug === 'mop';
-    }
-
-    public function isInternRole(?string $roleSlug): bool
-    {
-        return $roleSlug === 'intern';
+        return in_array($this->scopeType($user), ['branch', 'own', 'agent_policy', 'group_policy'], true);
     }
 
     public function visibilityMode(): string
@@ -120,67 +114,43 @@ class ClientAccess
 
     public function visibleQuery(User $authUser): Builder
     {
-        $roleSlug = $this->roleSlug($authUser);
-
         $query = Client::query()->with(['branch', 'branchGroup', 'creator', 'responsibleAgent', 'type']);
-
-        if ($roleSlug === 'rop') {
-            return app(RopGroupAccess::class)->scope($query, $authUser, 'clients.branch_group_id', 'clients.branch_id');
+        if ($authUser->hasRole('rop')) {
+            app(RopGroupAccess::class)->scope($query, $authUser, 'clients.branch_group_id', 'clients.branch_id');
         }
-
-        if ($this->isPrivilegedRole($roleSlug)) {
+        $scope = $this->scopeType($authUser);
+        if ($scope === 'all') {
             return $query;
         }
 
-        if ($this->isBranchScopedManager($roleSlug)) {
-            if (empty($authUser->branch_id)) {
-                return $query->whereRaw('1 = 0');
+        return $query->where(function (Builder $builder) use ($authUser, $scope) {
+            // Start with a false predicate so an empty grant set cannot become an unrestricted query.
+            $builder->whereRaw('1 = 0');
+            if ($authUser->hasPermission('clients.shared.view')) {
+                $builder->orWhere(fn (Builder $shared) => $this->applyCollaboratorVisibility($shared, $authUser));
             }
-
-            return $query->where('branch_id', $authUser->branch_id);
-        }
-
-        if ($this->isInternRole($roleSlug)) {
-            if (empty($authUser->branch_id)) {
-                return $query->whereRaw('1 = 0');
-            }
-
-            return $this->restrictToOwnContacts(
-                $query->where('branch_id', $authUser->branch_id),
-                $authUser
-            );
-        }
-
-        return $query->where(function (Builder $builder) use ($authUser, $roleSlug) {
-            $this->applyCollaboratorVisibility($builder, $authUser);
-
-            if (!$this->isBranchScopedRole($roleSlug) || empty($authUser->branch_id)) {
+            if (! $this->isBranchScoped($authUser) || empty($authUser->branch_id)) {
                 return;
             }
-
-            $builder->orWhere(function (Builder $scopedQuery) use ($authUser, $roleSlug) {
+            $builder->orWhere(function (Builder $scopedQuery) use ($authUser, $scope) {
                 $scopedQuery->where('branch_id', $authUser->branch_id);
-
-                if (!$this->isAgentScopedRole($roleSlug) && !$this->isMopRole($roleSlug)) {
+                if ($scope === 'branch') {
                     return;
                 }
+                if ($scope === 'own') {
+                    $this->restrictToOwnContacts($scopedQuery, $authUser);
 
-                $scopedQuery = $this->applyGroupVisibilityScope($scopedQuery, $authUser);
-
-                if ($this->isMopRole($roleSlug)) {
                     return;
                 }
-
+                $this->applyGroupVisibilityScope($scopedQuery, $authUser);
+                if ($scope === 'group_policy') {
+                    return;
+                }
                 if ($this->visibilityMode() === self::VISIBILITY_OWN_ONLY) {
-                    $this->filterSellerVisibilityForAgent(
-                        $this->restrictToOwnContacts($scopedQuery, $authUser),
-                        $authUser,
-                        true
-                    );
+                    $this->filterSellerVisibilityForAgent($this->restrictToOwnContacts($scopedQuery, $authUser), $authUser, true);
 
                     return;
                 }
-
                 $this->filterSellerVisibilityForAgent($scopedQuery, $authUser);
             });
         });
@@ -194,7 +164,7 @@ class ClientAccess
             ->whereKey($client->id)
             ->exists();
 
-        if (!$allowed) {
+        if (! $allowed) {
             $this->denyWithCode('RBAC_SCOPE_VIOLATION', 'Forbidden in current scope.', 403, $authUser, $ability);
         }
     }
@@ -212,7 +182,7 @@ class ClientAccess
     {
         $roleSlug = $this->roleSlug($authUser);
 
-        if ($this->isBranchScopedRole($roleSlug)) {
+        if ($this->isBranchScoped($authUser)) {
             abort_if(empty($authUser->branch_id), 422, 'branch_id is required for this user.');
             $data['branch_id'] = $authUser->branch_id;
         }
@@ -225,32 +195,32 @@ class ClientAccess
 
         $data['created_by'] ??= $authUser->id;
 
-        if ($this->isInternRole($roleSlug)) {
+        if ($this->scopeType($authUser) === 'own') {
             $data['created_by'] = $authUser->id;
             $data['responsible_agent_id'] = $authUser->id;
         }
 
         if (
-            $this->isAgentScopedRole($roleSlug)
+            $this->scopeType($authUser) === 'agent_policy'
             && empty($data['responsible_agent_id'])
         ) {
             $data['responsible_agent_id'] = $authUser->id;
         }
 
-        if ($this->isAgentScopedRole($roleSlug)) {
+        if ($this->scopeType($authUser) === 'agent_policy') {
             $data['branch_group_id'] = $authUser->branch_group_id ?: null;
-        } elseif ($this->isBranchScopedRole($roleSlug)) {
-            if (empty($data['branch_group_id']) && !empty($authUser->branch_group_id)) {
+        } elseif ($this->isBranchScoped($authUser)) {
+            if (empty($data['branch_group_id']) && ! empty($authUser->branch_group_id)) {
                 $data['branch_group_id'] = $authUser->branch_group_id;
             }
-        } elseif (empty($data['branch_id']) && !empty($data['branch_group_id'])) {
+        } elseif (empty($data['branch_id']) && ! empty($data['branch_group_id'])) {
             $group = BranchGroup::query()->find($data['branch_group_id']);
             if ($group) {
                 $data['branch_id'] = $group->branch_id;
             }
         }
 
-        if (empty($data['contact_kind']) || !in_array($data['contact_kind'], Client::contactKinds(), true)) {
+        if (empty($data['contact_kind']) || ! in_array($data['contact_kind'], Client::contactKinds(), true)) {
             $data['contact_kind'] = Client::CONTACT_KIND_BUYER;
         }
 
@@ -263,13 +233,12 @@ class ClientAccess
 
     public function validateMutationTargets(User $authUser, array $data): void
     {
-        $roleSlug = $this->roleSlug($authUser);
         $branchId = $data['branch_id'] ?? null;
 
-        if (!empty($data['branch_group_id'])) {
+        if (! empty($data['branch_group_id'])) {
             $targetGroup = BranchGroup::query()->find($data['branch_group_id']);
 
-            if (!$targetGroup) {
+            if (! $targetGroup) {
                 $this->denyWithCode(
                     'RBAC_VALIDATION_FAILED',
                     'branch_group_id is invalid.',
@@ -292,7 +261,7 @@ class ClientAccess
             }
         }
 
-        if (!$this->isBranchScopedRole($roleSlug)) {
+        if (! $this->isBranchScoped($authUser)) {
             return;
         }
 
@@ -314,7 +283,7 @@ class ClientAccess
 
             $targetUser = User::query()->find($data[$field]);
 
-            if (!$targetUser || (int) $targetUser->branch_id !== (int) $authUser->branch_id) {
+            if (! $targetUser || (int) $targetUser->branch_id !== (int) $authUser->branch_id) {
                 $this->denyWithCode(
                     'RBAC_VALIDATION_FAILED',
                     sprintf('%s must belong to your branch.', $field),
@@ -341,8 +310,7 @@ class ClientAccess
         Client $client,
         array $data,
         string $ability = 'client_needs.create'
-    ): void
-    {
+    ): void {
         $this->ensureVisible($authUser, $client);
 
         $roleSlug = $this->roleSlug($authUser);
@@ -351,10 +319,11 @@ class ClientAccess
             if (! empty($data['responsible_agent_id'])) {
                 app(RopGroupAccess::class)->ensureEmployee($authUser, (int) $data['responsible_agent_id'], (int) $client->branch_group_id, true);
             }
+
             return;
         }
 
-        if (!$this->isBranchScopedRole($roleSlug)) {
+        if (! $this->isBranchScoped($authUser)) {
             return;
         }
 
@@ -365,7 +334,7 @@ class ClientAccess
 
             $targetUser = User::query()->find($data[$field]);
 
-            if (!$targetUser || (int) $targetUser->branch_id !== (int) $client->branch_id) {
+            if (! $targetUser || (int) $targetUser->branch_id !== (int) $client->branch_id) {
                 $this->denyWithCode(
                     'RBAC_VALIDATION_FAILED',
                     sprintf('%s must belong to the client branch.', $field),
@@ -391,9 +360,8 @@ class ClientAccess
 
     public function canManageCollaborators(User $authUser, Client $client): bool
     {
-        $roleSlug = $this->roleSlug($authUser);
 
-        if ($this->isPrivilegedRole($roleSlug) || $this->isBranchScopedManager($roleSlug)) {
+        if ($authUser->hasPermission('clients.collaborators.manage_all')) {
             return true;
         }
 
@@ -402,7 +370,7 @@ class ClientAccess
 
     public function ensureCanManageCollaborators(User $authUser, Client $client): void
     {
-        if (!$this->canManageCollaborators($authUser, $client)) {
+        if (! $this->canManageCollaborators($authUser, $client)) {
             $this->denyWithCode('FORBIDDEN_ACTION', 'Forbidden action.', 403, $authUser, 'clients.collaborators.manage');
         }
     }
@@ -434,10 +402,9 @@ class ClientAccess
 
     private function applyGroupVisibilityScope(Builder $query, User $authUser): Builder
     {
-        $roleSlug = $this->roleSlug($authUser);
         $authUser->loadMissing('branchGroup');
 
-        if ($roleSlug === 'mop' && empty($authUser->branch_group_id)) {
+        if ($this->scopeType($authUser) === 'group_policy' && empty($authUser->branch_group_id)) {
             return $query->whereRaw('1 = 0');
         }
 
@@ -463,8 +430,7 @@ class ClientAccess
         ?User $authUser = null,
         ?string $ability = null,
         array $details = []
-    ): never
-    {
+    ): never {
         $scope = null;
         if ($authUser) {
             $scope = [
@@ -490,7 +456,7 @@ class ClientAccess
         User $authUser,
         bool $allVisibleContactsAlreadyOwn = false
     ): Builder {
-        if (!$this->agentCanViewSellers()) {
+        if (! $this->agentCanViewSellers()) {
             return $query->where(function (Builder $builder) {
                 $this->applyNonSellerConstraint($builder);
             });

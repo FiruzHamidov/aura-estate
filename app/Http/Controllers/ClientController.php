@@ -51,7 +51,7 @@ class ClientController extends Controller
 
     private function isPrivilegedRole(User $user): bool
     {
-        return $this->clientAccess->isPrivilegedRole($this->clientAccess->roleSlug($user));
+        return $this->clientAccess->canReadAll($user);
     }
 
     private function catalog(string $modelClass, string $table, array $orderColumns = ['sort_order', 'id'], bool $activeOnly = false): array
@@ -363,6 +363,7 @@ class ClientController extends Controller
 
     public function duplicateCheck(Request $request)
     {
+        abort_unless($request->user()?->hasPermission('clients.duplicates.search'), 403);
         $authUser = $this->authUser();
 
         $validated = $request->validate([
@@ -1128,7 +1129,7 @@ class ClientController extends Controller
     public function updateSettings(Request $request)
     {
         $authUser = $this->authUser();
-        abort_unless($this->isPrivilegedRole($authUser), 403, 'Forbidden');
+        abort_unless($authUser->hasPermission('clients.settings.manage'), 403, 'Forbidden');
 
         $validated = $request->validate([
             'agent_visibility_mode' => ['sometimes', Rule::in([

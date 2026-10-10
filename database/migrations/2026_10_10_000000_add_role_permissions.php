@@ -19,7 +19,7 @@ return new class extends Migration
         DB::table('roles')->orderBy('id')->chunkById(100, function ($roles) use ($catalog) {
             foreach ($roles as $role) {
                 DB::table('roles')->where('id', $role->id)->update([
-                    'permissions' => json_encode($catalog->defaults($role->slug), JSON_THROW_ON_ERROR),
+                    'permissions' => json_encode($catalog->migrationDefaults($role->slug), JSON_THROW_ON_ERROR),
                 ]);
             }
         });
