@@ -385,6 +385,47 @@ class ExternalPropertyRequestFeatureTest extends TestCase
         $this->assertSame('submitted', $request->fresh()->status);
     }
 
+    public function test_new_request_notifications_preserve_default_recipients_and_support_custom_roles(): void
+    {
+        (require database_path('migrations/2025_06_23_004510_create_notifications_table.php'))->up();
+        (require database_path('migrations/2026_04_04_180000_expand_notifications_table.php'))->up();
+        Schema::table('notifications', fn (Blueprint $table) => $table->unsignedBigInteger('branch_group_id')->nullable());
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $owner = $this->user($this->externalRole, '939333330');
+        $request = ExternalPropertyRequest::create(['external_agent_id' => $owner->id, 'status' => 'submitted', 'branch_id' => 1, 'branch_group_id' => 1]);
+        $expected = [];
+        $phone = 939333331;
+        foreach (['admin' => [0, 1, 2, 3], 'superadmin' => [0, 1, 2, 3], 'rop' => [0, 1], 'branch_director' => [0, 1], 'mop' => [0, 3], 'agent' => [0, 1, 3], 'manager' => [0, 1, 3], 'operator' => [0, 1, 3], 'client' => [], 'intern' => []] as $slug => $eligible) {
+            $role = Role::firstOrCreate(['slug' => $slug], ['name' => $slug]);
+            foreach ([[1, 1], [1, 2], [2, 3], [2, 1]] as $index => [$branch, $group]) {
+                $user = $this->user($role, (string) $phone++, branchId: $branch, branchGroupId: $group);
+                if (in_array($index, $eligible, true)) $expected[] = $user->id;
+            }
+        }
+        $custom = Role::create(['name' => 'Notification subscriber', 'slug' => 'notification_subscriber']);
+        $subscriber = $this->user($custom, (string) $phone++, branchId: 1, branchGroupId: 2);
+        $inactive = $this->user($this->agentRole, (string) $phone++, branchId: 1, branchGroupId: 1);
+        $inactive->forceFill(['status' => User::STATUS_INACTIVE])->saveQuietly();
+        $service = app(\App\Services\ExternalPropertyRequestService::class);
+        $assertRecipients = function (array $ids) use ($service, $request, $owner) {
+            \App\Models\Notification::query()->delete();
+            $service->notifyInternalNewRequest($request, $owner);
+            $actual = \App\Models\Notification::query()->pluck('user_id')->all();
+            sort($ids);
+            sort($actual);
+            $this->assertSame($ids, $actual);
+        };
+        $assertRecipients($expected);
+        $custom->forceFill(['permissions' => ['external_requests.notifications.branch']])->save();
+        $assertRecipients([...$expected, $subscriber->id]);
+        $custom->forceFill(['permissions' => ['external_requests.notifications.group']])->save();
+        $assertRecipients($expected);
+        $custom->forceFill(['permissions' => ['external_requests.notifications.all']])->save();
+        $assertRecipients([...$expected, $subscriber->id]);
+        $custom->forceFill(['permissions' => []])->save();
+        $assertRecipients($expected);
+    }
+
     public function test_request_photos_are_private_and_require_current_parent_access(): void
     {
         \Illuminate\Support\Facades\Storage::fake('public');

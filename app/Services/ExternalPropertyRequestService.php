@@ -10,6 +10,7 @@ use App\Models\Property;
 use App\Models\PropertyPhoto;
 use App\Models\PropertyStatus;
 use App\Models\PropertyType;
+use App\Models\Role;
 use App\Models\User;
 use App\Services\PropertyModeration\PropertyModerationService;
 use App\Support\ClientPhone;
@@ -657,47 +658,25 @@ class ExternalPropertyRequestService
 
     private function internalNotificationRecipients(ExternalPropertyRequest $request)
     {
+        $roles = Role::query()->get();
+        $roleIds = fn (string $scope) => $roles
+            ->filter(fn (Role $role) => $role->hasPermission('external_requests.notifications.'.$scope))
+            ->pluck('id')->all();
+
         return User::query()
             ->with('role')
             ->where('status', User::STATUS_ACTIVE)
-            ->whereHas('role', fn (Builder $query) => $query->whereIn('slug', [
-                'admin',
-                'superadmin',
-                'rop',
-                'branch_director',
-                'mop',
-                'agent',
-                'manager',
-                'operator',
-            ]))
-            ->where(function (Builder $query) use ($request) {
-                $query->whereHas('role', fn (Builder $roleQuery) => $roleQuery->whereIn('slug', ['admin', 'superadmin']));
-
+            ->where(function (Builder $query) use ($request, $roleIds) {
+                $query->whereIn('role_id', $roleIds('all'));
                 if ($request->branch_id) {
-                    $query->orWhere(function (Builder $branchQuery) use ($request) {
-                        $branchQuery
-                            ->where('branch_id', $request->branch_id)
-                            ->whereHas('role', fn (Builder $roleQuery) => $roleQuery->whereIn('slug', [
-                                'rop',
-                                'branch_director',
-                                'agent',
-                                'manager',
-                                'operator',
-                            ]));
-                    });
+                    $query->orWhere(fn (Builder $branch) => $branch
+                        ->where('branch_id', $request->branch_id)
+                        ->whereIn('role_id', $roleIds('branch')));
                 }
-
                 if ($request->branch_group_id) {
-                    $query->orWhere(function (Builder $groupQuery) use ($request) {
-                        $groupQuery
-                            ->where('branch_group_id', $request->branch_group_id)
-                            ->whereHas('role', fn (Builder $roleQuery) => $roleQuery->whereIn('slug', [
-                                'mop',
-                                'agent',
-                                'manager',
-                                'operator',
-                            ]));
-                    });
+                    $query->orWhere(fn (Builder $group) => $group
+                        ->where('branch_group_id', $request->branch_group_id)
+                        ->whereIn('role_id', $roleIds('group')));
                 }
             })
             ->limit(50)
