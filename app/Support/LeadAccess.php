@@ -19,42 +19,50 @@ class LeadAccess
         return $user?->role?->slug;
     }
 
-    public function isPrivilegedRole(?string $roleSlug): bool
+    public function canReadAll(?User $user): bool
     {
-        return in_array($roleSlug, ['superadmin', 'admin', 'owner', 'marketing'], true);
+        return $user?->hasPermission('leads.scope.all') ?? false;
     }
 
-    public function isBranchWideLeadRole(?string $roleSlug): bool
+    public function canReadBranch(?User $user): bool
     {
-        return in_array($roleSlug, ['branch_director', 'rop', 'operator', 'manager'], true);
+        return $user?->hasPermission('leads.scope.branch') ?? false;
     }
 
-    public function isBranchScopedRole(?string $roleSlug): bool
+    public function isBranchScoped(?User $user): bool
     {
-        return in_array($roleSlug, ['branch_director', 'rop', 'agent', 'mop', 'manager', 'operator'], true);
+        return ! $this->canReadAll($user)
+            && ($this->canReadBranch($user) || ($user?->hasPermission('leads.scope.own') ?? false));
+    }
+
+    public function ensureAction(User $user, string $action): void
+    {
+        abort_unless($user->hasPermission('leads.'.$action)
+            && ($this->canReadAll($user) || $this->isBranchScoped($user)), 403, 'Нет права на это действие с лидами.');
     }
 
     public function visibleQuery(User $authUser): Builder
     {
-        $roleSlug = $this->roleSlug($authUser);
-
         $query = Lead::query()->with(['branch', 'creator', 'responsibleAgent', 'client']);
 
-        if ($roleSlug === 'rop') {
-            return app(RopGroupAccess::class)->scope($query, $authUser, 'leads.branch_group_id', 'leads.branch_id');
+        if ($authUser?->usesAssignedGroupScope()) {
+            if (! $this->canReadAll($authUser) && ! $this->isBranchScoped($authUser)) {
+                return $query->whereRaw('1 = 0');
+            }
+            app(RopGroupAccess::class)->scope($query, $authUser, 'leads.branch_group_id', 'leads.branch_id');
         }
 
-        if ($this->isPrivilegedRole($roleSlug)) {
+        if ($this->canReadAll($authUser)) {
             return $query;
         }
 
-        if (! $this->isBranchScopedRole($roleSlug) || empty($authUser->branch_id)) {
+        if (! $this->isBranchScoped($authUser) || empty($authUser->branch_id)) {
             return $query->whereRaw('1 = 0');
         }
 
         $query->where('branch_id', $authUser->branch_id);
 
-        if ($this->isBranchWideLeadRole($roleSlug)) {
+        if ($this->canReadBranch($authUser)) {
             return $query;
         }
 
@@ -86,9 +94,7 @@ class LeadAccess
 
     public function normalizeCreationData(array $data, User $authUser): array
     {
-        $roleSlug = $this->roleSlug($authUser);
-
-        if ($this->isBranchScopedRole($roleSlug)) {
+        if ($this->isBranchScoped($authUser)) {
             abort_if(empty($authUser->branch_id), 422, 'branch_id is required for this user.');
             $data['branch_id'] = $authUser->branch_id;
         }
@@ -96,7 +102,7 @@ class LeadAccess
         $data['created_by'] = $authUser->id;
 
         if (
-            in_array($roleSlug, ['agent', 'mop', 'manager', 'operator'], true)
+            $authUser->hasPermission('leads.defaults.assign_creator')
             && empty($data['responsible_agent_id'])
         ) {
             $data['responsible_agent_id'] = $authUser->id;
@@ -107,9 +113,7 @@ class LeadAccess
 
     public function normalizeUpdateData(array $data, User $authUser, Lead $lead): array
     {
-        $roleSlug = $this->roleSlug($authUser);
-
-        if ($this->isBranchScopedRole($roleSlug)) {
+        if ($this->isBranchScoped($authUser)) {
             $data['branch_id'] = $lead->branch_id ?: $authUser->branch_id;
         }
 
@@ -118,9 +122,7 @@ class LeadAccess
 
     public function validateMutationTargets(User $authUser, array $data): void
     {
-        $roleSlug = $this->roleSlug($authUser);
-
-        if (! $this->isBranchScopedRole($roleSlug)) {
+        if (! $this->isBranchScoped($authUser)) {
             return;
         }
 

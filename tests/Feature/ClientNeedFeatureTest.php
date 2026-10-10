@@ -194,6 +194,49 @@ class ClientNeedFeatureTest extends TestCase
         ]);
     }
 
+    public function test_dictionary_grant_works_for_formerly_blocked_roles_and_revocation_stops_writes(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        foreach (['client', 'external_agent', 'accountant', 'custom_dictionary'] as $index => $slug) {
+            $role = Role::create(['name' => $slug, 'slug' => $slug]);
+            $role->forceFill(['permissions' => ['clients.dictionaries.manage']])->save();
+            $actor = User::withoutEvents(fn () => User::create(['name' => $slug, 'phone' => '91800000'.$index, 'role_id' => $role->id]));
+            Sanctum::actingAs($actor->fresh());
+            $ids = [];
+            foreach (['client-types', 'client-need-types', 'client-need-statuses'] as $catalog) {
+                $ids[$catalog] = $this->postJson('/api/'.$catalog, ['name' => $slug, 'slug' => $slug])->assertCreated()->json('id');
+                $this->getJson('/api/'.$catalog.'/'.$ids[$catalog])->assertOk();
+                $this->patchJson('/api/'.$catalog.'/'.$ids[$catalog], ['name' => 'Updated '.$slug])->assertOk();
+            }
+            $role->forceFill(['permissions' => []])->save();
+            Sanctum::actingAs($actor->fresh());
+            foreach ($ids as $catalog => $id) {
+                $this->postJson('/api/'.$catalog, ['name' => 'Denied', 'slug' => 'denied'])->assertForbidden();
+                $this->patchJson('/api/'.$catalog.'/'.$id, ['name' => 'Denied'])->assertForbidden();
+                $this->deleteJson('/api/'.$catalog.'/'.$id)->assertForbidden();
+            }
+        }
+    }
+
+    public function test_details_read_permission_is_separate_from_public_lists_and_dictionary_writes(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Reader', 'slug' => 'client']);
+        $role->forceFill(['permissions' => ['catalogs.details.view']])->save();
+        $actor = User::create(['name' => 'Reader', 'phone' => '918000099', 'role_id' => $role->id]);
+        Sanctum::actingAs($actor->fresh());
+        foreach (['client-types', 'client-need-types', 'client-need-statuses'] as $catalog) {
+            $this->getJson('/api/'.$catalog.'/1')->assertOk();
+            $this->patchJson('/api/'.$catalog.'/1', ['name' => 'Denied'])->assertForbidden();
+        }
+        $role->forceFill(['permissions' => [], 'slug' => 'admin'])->save();
+        Sanctum::actingAs($actor->fresh());
+        foreach (['client-types', 'client-need-types', 'client-need-statuses'] as $catalog) {
+            $this->getJson('/api/'.$catalog.'/1')->assertForbidden();
+            $this->getJson('/api/'.$catalog)->assertOk();
+        }
+    }
+
     public function test_public_can_fetch_client_reference_dictionaries(): void
     {
         $this->getJson('/api/client-types')

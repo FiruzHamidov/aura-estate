@@ -212,6 +212,107 @@ class PropertyConstructionFieldsTest extends TestCase
         parent::tearDown();
     }
 
+    public function test_property_creation_grant_overrides_legacy_client_partner_and_accountant_gate(): void
+    {
+        (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        foreach (['client', 'external_agent', 'accountant'] as $index => $slug) {
+            $role = Role::firstOrCreate(['slug' => $slug], ['name' => $slug]);
+            $user = User::create(['name' => $slug, 'phone' => '93000008'.$index, 'role_id' => $role->id, 'status' => 'active']);
+            $payload = ['type_id' => $type->id, 'price' => 500000 + $index * 500000, 'currency' => 'TJS', 'offer_type' => 'sale'];
+            Sanctum::actingAs($user->fresh());
+            $this->postJson('/api/properties', $payload)->assertForbidden();
+            $role->forceFill(['permissions' => ['properties.create']])->save();
+            Sanctum::actingAs($user->fresh());
+            $this->postJson('/api/properties', $payload)->assertOk();
+            $created = \App\Models\Property::query()->where('created_by', $user->id)->sole();
+            // Passing the outer gate never replaces the edit check or enables unrelated endpoints.
+            $this->putJson('/api/properties/'.$created->id, ['title' => 'Forbidden'])->assertForbidden();
+            $this->postJson('/api/roles', ['name' => 'Unexpected', 'slug' => 'unexpected'])->assertForbidden();
+            $role->forceFill(['permissions' => ['properties.edit', 'properties.history.view']])->save();
+            Sanctum::actingAs($user->fresh());
+            $this->putJson('/api/properties/'.$created->id, ['title' => 'Allowed edit', 'version' => $created->moderation_version])->assertOk();
+            $this->getJson('/api/properties/'.$created->id.'/logs')->assertOk();
+            $this->getJson('/api/property-moderation-cases')->assertForbidden();
+            $role->forceFill(['permissions' => ['properties.history.view', 'properties.moderate']])->save();
+            Sanctum::actingAs($user->fresh());
+            $this->getJson('/api/property-moderation-cases')->assertOk()->assertJsonCount(0, 'data');
+            // A history grant alone cannot read this pending object without edit access.
+            $this->getJson('/api/properties/'.$created->id.'/logs')->assertForbidden();
+
+            $role->forceFill(['permissions' => []])->save();
+            Sanctum::actingAs($user->fresh());
+            $this->postJson('/api/properties', $payload)->assertForbidden();
+        }
+        $this->assertDatabaseCount('properties', 3);
+    }
+
+    public function test_custom_writer_can_be_restricted_to_its_assigned_group(): void
+    {
+        Schema::table('users', fn (Blueprint $table) => $table->unsignedBigInteger('branch_group_id')->nullable());
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedBigInteger('branch_group_id')->nullable());
+        Schema::create('branch_groups', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+        });
+        \Illuminate\Support\Facades\DB::table('branch_groups')->insert([['id' => 1, 'name' => 'Own group'], ['id' => 2, 'name' => 'Other group']]);
+        (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
+        $role = Role::create(['name' => 'Group writer', 'slug' => 'custom_group_writer']);
+        $user = User::create(['name' => 'Writer', 'phone' => '930000097', 'role_id' => $role->id, 'status' => 'active']);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $base = ['properties.create', 'properties.edit'];
+        $role->forceFill(['permissions' => [...$base, 'properties.write.own_group']])->save();
+        Sanctum::actingAs($user->fresh());
+        $payload = ['type_id' => $type->id, 'price' => 991000, 'currency' => 'TJS', 'offer_type' => 'sale'];
+        $this->postJson('/api/properties', $payload)->assertForbidden();
+        $user->forceFill(['branch_group_id' => 1])->saveQuietly();
+        Sanctum::actingAs($user->fresh());
+        $this->postJson('/api/properties', [...$payload, 'branch_group_id' => 2])->assertForbidden();
+        $this->assertDatabaseCount('properties', 0);
+        $this->postJson('/api/properties', $payload)->assertOk();
+        $property = \App\Models\Property::query()->sole();
+        $this->assertSame(1, (int) $property->getRawOriginal('branch_group_id'));
+
+        $property->forceFill(['branch_group_id' => 2])->saveQuietly();
+        $this->putJson('/api/properties/'.$property->id, ['title' => 'Own group edit', 'version' => $property->moderation_version])->assertOk();
+        $this->assertSame(1, (int) $property->fresh()->getRawOriginal('branch_group_id'));
+
+        $role->forceFill(['permissions' => $base])->save();
+        Sanctum::actingAs($user->fresh());
+        $property = $property->fresh();
+        $property->forceFill(['branch_group_id' => 2])->saveQuietly();
+        $this->putJson('/api/properties/'.$property->id, ['title' => 'Unrestricted group edit', 'version' => $property->moderation_version])->assertOk();
+        $this->assertSame(2, (int) $property->fresh()->getRawOriginal('branch_group_id'));
+    }
+
+    public function test_custom_creator_needs_promotion_permission_only_for_promoted_listing(): void
+    {
+        (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
+        $role = Role::create(['name' => 'Custom creator', 'slug' => 'custom_creator']);
+        $user = User::create(['name' => 'Creator', 'phone' => '930000098', 'role_id' => $role->id, 'status' => 'active']);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $base = ['properties.create', 'properties.edit'];
+        $role->forceFill(['permissions' => $base])->save();
+        Sanctum::actingAs($user->fresh());
+        $payload = ['type_id' => $type->id, 'price' => 990000, 'currency' => 'TJS', 'offer_type' => 'sale'];
+        $this->postJson('/api/properties', [...$payload, 'requested_listing_type' => 'vip'])->assertForbidden();
+        $this->assertDatabaseCount('properties', 0);
+        $this->assertDatabaseCount('property_promotions', 0);
+        $this->postJson('/api/properties', [...$payload, 'requested_listing_type' => 'regular'])->assertOk();
+        $role->forceFill(['permissions' => [...$base, 'properties.promotions.request']])->save();
+        Sanctum::actingAs($user->fresh());
+        $this->postJson('/api/properties', [...$payload, 'requested_listing_type' => 'urgent'])->assertOk();
+        $this->assertDatabaseCount('property_promotions', 1);
+        $role->forceFill(['permissions' => $base])->save();
+        Sanctum::actingAs($user->fresh());
+        $this->postJson('/api/properties', [...$payload, 'requested_listing_type' => 'vip'])->assertForbidden();
+        $this->assertDatabaseCount('properties', 2);
+        $this->assertDatabaseCount('property_promotions', 1);
+    }
+
     public function test_agent_can_select_vip_or_urgent_when_creating_a_listing(): void
     {
         (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
@@ -1808,6 +1909,88 @@ class PropertyConstructionFieldsTest extends TestCase
         $this->assertSame('regular', $property->listing_type);
         $this->assertSame('approved', $property->moderation_status);
         $this->assertNull($property->status_comment);
+    }
+
+    public function test_custom_role_closed_card_and_history_permissions_are_independent(): void
+    {
+        [$owner, $property] = $this->createListingDateRefreshFixture('sold', '930000412');
+        $role = Role::create(['name' => 'Closed card reader', 'slug' => 'closed_card_reader']);
+        $reader = User::create(['name' => 'Reader', 'phone' => '930000413', 'role_id' => $role->id, 'status' => 'active']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $grant = function (array $permissions) use ($role, $reader): void {
+            $role->forceFill(['permissions' => $permissions])->save();
+            Sanctum::actingAs($reader->fresh());
+        };
+        $grant(['properties.history.view']);
+        $this->getJson('/api/properties/'.$property->id)->assertNotFound();
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        $grant(['properties.closed.view']);
+        $this->getJson('/api/properties/'.$property->id)->assertOk()
+            ->assertJsonPath('capabilities.can_edit', false)
+            ->assertJsonPath('capabilities.can_view_history', false);
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        $grant(['properties.closed.view', 'properties.history.view']);
+        foreach (['deposit', 'sold', 'sold_by_owner', 'rented', 'deleted'] as $status) {
+            $property->forceFill(['moderation_status' => $status])->save();
+            $this->getJson('/api/properties/'.$property->id)->assertOk();
+            $this->getJson('/api/properties/'.$property->id.'/logs')->assertOk();
+        }
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertOk();
+        $this->postJson('/api/properties/'.$property->id.'/refresh-listing-date')->assertForbidden();
+        foreach (['draft', 'pending'] as $status) {
+            $property->forceFill(['moderation_status' => $status])->save();
+            $this->getJson('/api/properties/'.$property->id)->assertNotFound();
+            $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        }
+        $property->forceFill(['moderation_status' => 'sold'])->save();
+        $grant([]);
+        $this->getJson('/api/properties/'.$property->id)->assertNotFound();
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+    }
+
+    public function test_security_history_default_preserves_closed_stage_boundary_and_can_be_revoked(): void
+    {
+        [$owner, $property] = $this->createListingDateRefreshFixture('sold', '930000410');
+        $role = Role::create(['name' => 'Security', 'slug' => 'security']);
+        $security = User::create(['name' => 'Security', 'phone' => '930000411', 'role_id' => $role->id, 'status' => 'active']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        Sanctum::actingAs($security->fresh());
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertOk();
+        $this->postJson('/api/properties/'.$property->id.'/refresh-listing-date')->assertForbidden();
+        $property->forceFill(['moderation_status' => 'approved'])->save();
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        $property->forceFill(['moderation_status' => 'sold'])->save();
+        $role->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($security->fresh());
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+    }
+
+    public function test_history_and_listing_refresh_permissions_can_be_revoked_independently(): void
+    {
+        [$owner, $property] = $this->createListingDateRefreshFixture('approved', '930000409');
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role = Role::create(['name' => 'Custom editor', 'slug' => 'custom_history_editor', 'permissions' => ['properties.edit']]);
+        $owner->forceFill(['role_id' => $role->id])->save();
+        $grant = function (array $permissions) use ($role, $owner): void {
+            $role->forceFill(['permissions' => ['properties.edit', ...$permissions]])->save();
+            Sanctum::actingAs($owner->fresh());
+        };
+        $grant([]);
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        $this->postJson('/api/properties/'.$property->id.'/refresh-listing-date')->assertForbidden();
+        $grant(['properties.history.view']);
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertOk();
+        $this->postJson('/api/properties/'.$property->id.'/refresh-listing-date')->assertForbidden();
+        $grant(['properties.listing_date.refresh']);
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        $this->postJson('/api/properties/'.$property->id.'/refresh-listing-date')->assertOk()
+            ->assertJsonPath('data.capabilities.can_manage_listing_date', true)
+            ->assertJsonPath('data.capabilities.can_refresh_listing_date', false);
+        $grant([]);
+        $this->postJson('/api/properties/'.$property->id.'/refresh-listing-date')->assertForbidden();
+        $this->getJson('/api/properties/'.$property->id)->assertOk()
+            ->assertJsonPath('capabilities.can_manage_listing_date', false)
+            ->assertJsonPath('capabilities.can_view_history', false);
     }
 
     public function test_owner_can_refresh_listing_date_without_changing_created_at_and_cooldown_blocks_repeat(): void

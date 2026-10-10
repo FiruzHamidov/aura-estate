@@ -15,7 +15,7 @@ class NotificationRecipientResolver
 {
     public function branchManagers(?int $branchId): Collection
     {
-        return $this->usersByRole(['manager'], $branchId);
+        return $this->usersByPermission('notifications.receive.leads', $branchId);
     }
 
     public function leadManagers(Lead $lead): Collection
@@ -29,7 +29,7 @@ class NotificationRecipientResolver
                 ->where('status', User::STATUS_ACTIVE)
                 ->first();
 
-            if ($responsible?->role?->slug === 'manager') {
+            if ($responsible?->hasPermission('notifications.receive.leads')) {
                 $users->push($responsible);
             }
         }
@@ -43,8 +43,8 @@ class NotificationRecipientResolver
     public function publicLeadSubscribers(Lead $lead): Collection
     {
         // An unassigned intake goes to global CRM operators, never every branch manager.
-        $users = $this->usersByRole(['admin', 'superadmin', 'owner']);
-        if ($lead->branch_id) $users = $users->merge($this->usersByRole(['manager', 'rop', 'branch_director'], $lead->branch_id));
+        $users = $this->usersByPermission('notifications.receive.public_leads.all');
+        if ($lead->branch_id) $users = $users->merge($this->usersByPermission('notifications.receive.public_leads.branch', $lead->branch_id));
         if ($lead->responsibleAgent && $lead->responsibleAgent->status === User::STATUS_ACTIVE) $users->push($lead->responsibleAgent);
         return $users->filter(fn (User $user) => ! $user->isDeletedAccount())->unique('id')->values();
     }
@@ -61,7 +61,7 @@ class NotificationRecipientResolver
 
     public function securityOfficers(): Collection
     {
-        return $this->usersByRole(['security']);
+        return $this->usersByPermission('notifications.receive.property_control.security');
     }
 
     public function propertyControlBranchRecipients(Deal $deal): Collection
@@ -72,7 +72,7 @@ class NotificationRecipientResolver
             $deal->primaryProperty?->agent,
             $deal->primaryProperty?->creator,
         ])->filter()
-            ->merge($this->usersByRole(['rop', 'branch_director'], $deal->branch_id))
+            ->merge($this->usersByPermission('notifications.receive.property_control.branch', $deal->branch_id))
             ->filter(fn ($user) => $user instanceof User && $user->status === User::STATUS_ACTIVE)
             ->unique('id')
             ->values();
@@ -90,7 +90,7 @@ class NotificationRecipientResolver
 
     public function propertyControlEscalationRecipients(Deal $deal): Collection
     {
-        return $this->usersByRole(['admin', 'superadmin', 'owner'])
+        return $this->usersByPermission('notifications.receive.property_control.escalation')
             ->merge($this->propertyControlParticipants($deal))
             ->unique('id')
             ->values();
@@ -123,7 +123,7 @@ class NotificationRecipientResolver
             ?: $property->agent?->branch_id
             ?: $property->creator?->branch_id;
 
-        $heads = $this->usersByRole(['rop', 'branch_director'], $branchId);
+        $heads = $this->usersByPermission('notifications.receive.properties.escalation', $branchId);
 
         return $agents
             ->merge($heads)
@@ -152,6 +152,19 @@ class NotificationRecipientResolver
             ->first();
 
         return collect([$owner])->filter()->values();
+    }
+
+    public function roleIdsWithPermission(string $permission): array
+    {
+        return \App\Models\Role::query()->get()
+            ->filter(fn ($role) => $role->hasPermission($permission))->modelKeys();
+    }
+
+    public function usersByPermission(string $permission, ?int $branchId = null): Collection
+    {
+        return User::query()->with('role')->where('status', User::STATUS_ACTIVE)
+            ->when($branchId, fn ($query) => $query->where('branch_id', $branchId))
+            ->whereIn('role_id', $this->roleIdsWithPermission($permission))->get();
     }
 
     public function usersByRole(array $roleSlugs, ?int $branchId = null): Collection

@@ -13,65 +13,56 @@ class KpiPlanScopePolicy
 
     public function ensureCanReadCommonPlan(User $actor, array $scope): void
     {
-        $actor->loadMissing('role');
-        $role = (string) ($actor->role?->slug ?? '');
+        if (! $actor->hasPermission('kpi.plans.common.view')) $this->denyScope();
+        $this->ensureScope($actor, $scope);
+        $this->ensureGlobalTemplateAccess($actor, $scope, 'view');
+    }
 
-        if (in_array($role, ['admin', 'superadmin', 'owner'], true)) {
-            return;
-        }
-
-        if (in_array($role, ['rop', 'branch_director'], true)) {
-            $this->assertBranchScope($actor, $scope);
-            return;
-        }
-
-        if ($role === 'mop') {
-            if (((string) ($scope['role'] ?? '')) === 'rop') {
-                $this->denyScope();
-            }
-
-            $this->assertMopScope($actor, $scope);
-            return;
-        }
-
-        $this->denyScope();
+    public function ensureCanSelectUsers(User $actor, array $scope): void
+    {
+        if (! $actor->hasPermission('kpi.plans.common.view')) $this->denyScope();
+        $this->ensureScope($actor, $scope);
     }
 
     public function ensureCanManageCommonPlan(User $actor, array $scope): void
     {
-        $actor->loadMissing('role');
-        $role = (string) ($actor->role?->slug ?? '');
-
-        if (in_array($role, ['admin', 'superadmin', 'owner', 'rop', 'branch_director'], true)) {
-            $this->assertBranchScope($actor, $scope);
-            return;
-        }
-
-        if ($role === 'mop') {
+        if (! $actor->hasPermission('kpi.plans.common.manage')) {
             $this->branchScope->denyWithCode('KPI_FORBIDDEN_ROLE_ACTION', 'Role is not allowed to edit common KPI plan.');
         }
-
-        $this->denyScope();
+        $this->ensureScope($actor, $scope);
+        $this->ensureGlobalTemplateAccess($actor, $scope, 'manage');
     }
 
     public function ensureCanManageBulkScope(User $actor, array $scope): void
     {
-        $actor->loadMissing('role');
-        $role = (string) ($actor->role?->slug ?? '');
+        if (! $actor->hasPermission('kpi.plans.bulk.manage')) $this->denyScope();
+        $this->ensureScope($actor, $scope);
+    }
 
-        if (in_array($role, ['admin', 'superadmin', 'owner', 'rop', 'branch_director'], true)) {
+    private function ensureGlobalTemplateAccess(User $actor, array $scope, string $action): void
+    {
+        if (! isset($scope['branch_id']) && ! isset($scope['branch_group_id'])
+            && ! $actor->hasPermission('kpi.plans.scope.all')
+            && ! $actor->hasPermission('kpi.plans.common.global.'.$action)) {
+            $this->denyScope();
+        }
+    }
+
+    private function ensureScope(User $actor, array $scope): void
+    {
+        if ($actor->usesAssignedGroupScope()) {
+            app(RopGroupAccess::class)->ensureGroup($actor, isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null);
+        }
+        if ($actor->hasPermission('kpi.plans.scope.all')) return;
+        if ($actor->hasPermission('kpi.plans.scope.branch')) {
             $this->assertBranchScope($actor, $scope);
             return;
         }
-
-        if ($role === 'mop') {
-            if (((string) ($scope['role'] ?? '')) === 'rop') {
-                $this->denyScope();
-            }
+        if ($actor->hasPermission('kpi.plans.scope.group')) {
+            if (isset($scope['role']) && ! app(\App\Services\KpiRoleCatalog::class)->allowsGroupTemplates((string) $scope['role'])) $this->denyScope();
             $this->assertMopScope($actor, $scope);
             return;
         }
-
         $this->denyScope();
     }
 
@@ -95,20 +86,25 @@ class KpiPlanScopePolicy
         $this->ensureCanManageUserPlan($actor, $target, true);
     }
 
+    public function ensureCanReadHistoricalUserPlan(User $actor, array $plan): void
+    {
+        if (! $actor->hasPermission('kpi.plans.user.view')) $this->denyScope();
+        app(RopGroupAccess::class)->ensureGroup($actor, $plan['branch_group_id'] ?? null);
+        $allowed = $actor->hasPermission('kpi.plans.scope.all')
+            || ($actor->hasPermission('kpi.plans.scope.branch') && $actor->branch_id && (int) $actor->branch_id === (int) ($plan['branch_id'] ?? 0))
+            || ($actor->hasPermission('kpi.plans.scope.group') && $actor->branch_group_id && (int) $actor->branch_group_id === (int) ($plan['branch_group_id'] ?? 0))
+            || ($actor->hasPermission('kpi.plans.scope.own') && (int) $actor->id === (int) ($plan['user_id'] ?? 0));
+        if (! $allowed) $this->denyScope();
+    }
+
     public function ensureCanManageUserPlan(User $actor, User $target, bool $allowSelf = false): void
     {
-        $actor->loadMissing('role');
-        $target->loadMissing('role');
-
-        $role = (string) ($actor->role?->slug ?? '');
-
-        $allowed = match ($role) {
-            'admin', 'superadmin', 'owner' => true,
-            'rop' => app(RopGroupAccess::class)->employees($actor)->whereKey($target->id)->exists(),
-            'branch_director' => (int) $actor->branch_id === (int) $target->branch_id,
-            'mop' => (int) $actor->branch_group_id === (int) $target->branch_group_id,
-            default => $allowSelf && (int) $actor->id === (int) $target->id,
-        };
+        if (! $actor->hasPermission($allowSelf ? 'kpi.plans.user.view' : 'kpi.plans.user.manage')) $this->denyScope();
+        if ($actor->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->employees($actor, 'kpi.subject.assigned_groups')->whereKey($target->id)->exists()) $this->denyScope();
+        $allowed = $actor->hasPermission('kpi.plans.scope.all')
+            || ($actor->hasPermission('kpi.plans.scope.branch') && $actor->branch_id && (int) $actor->branch_id === (int) $target->branch_id)
+            || ($actor->hasPermission('kpi.plans.scope.group') && $actor->branch_group_id && (int) $actor->branch_group_id === (int) $target->branch_group_id)
+            || ($actor->hasPermission('kpi.plans.scope.own') && (int) $actor->id === (int) $target->id);
 
         if (! $allowed) {
             $this->denyScope();
@@ -117,15 +113,6 @@ class KpiPlanScopePolicy
 
     private function assertBranchScope(User $actor, array $scope): void
     {
-        $role = (string) ($actor->role?->slug ?? '');
-        if (in_array($role, ['admin', 'superadmin', 'owner'], true)) {
-            return;
-        }
-
-        if ($role === 'rop') {
-            app(RopGroupAccess::class)->ensureGroup($actor, isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null);
-        }
-
         $branchId = isset($scope['branch_id']) ? (int) $scope['branch_id'] : null;
         $branchGroupId = isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null;
 

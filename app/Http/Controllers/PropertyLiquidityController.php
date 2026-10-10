@@ -28,7 +28,7 @@ class PropertyLiquidityController extends Controller
         /** @var User|null $user */
         $user = auth('sanctum')->user();
 
-        if (! $user || $user->hasRole('client') || ! $this->access->isInternal($user)) {
+        if (! $user || ! $this->access->isInternal($user)) {
             $this->moderation->publicOrFail($property, null);
             return response()->json(['data' => [
                 'public_price_badge' => $property->publicPriceBadge(),
@@ -36,10 +36,10 @@ class PropertyLiquidityController extends Controller
             ]]);
         }
 
-        if ($user->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->ensureVisible($user, $property);
+        if ($user->usesAssignedGroupScope()) app(\App\Support\RopGroupAccess::class)->ensureVisible($user, $property);
         abort_unless($this->access->canView($user, $property), 403, 'Доступ запрещён');
         $property->loadMissing(['photos', 'type', 'agent', 'creator', 'latestSocialPromotion']);
-        $snapshot = $user->hasRole('rop')
+        $snapshot = $user->usesAssignedGroupScope()
             ? $this->calculator->previewForRop($property, $user)
             : ($property->liquidity_score !== null ? $property->latestLiquiditySnapshot()->first() : null);
         $eligibility = $this->calculator->eligibility($property);
@@ -70,14 +70,14 @@ class PropertyLiquidityController extends Controller
         $query = $this->scopedActiveQuery($user)
             ->with(['photos', 'type:id,name,slug', 'agent:id,name,branch_id,branch_group_id', 'creator:id,name,branch_id,branch_group_id', 'latestSocialPromotion']);
         $query->select('properties.*');
-        if ($user->hasRole('rop')) {
+        if ($user->usesAssignedGroupScope()) {
             $query->addSelect('scoped_liquidity.snapshot as rop_liquidity_snapshot');
         } else {
             $query->with('latestLiquiditySnapshot')->whereHas('latestLiquiditySnapshot');
         }
 
         if ($purpose === 'social') {
-            abort_unless(in_array($user->role?->slug, ['marketing', 'reels_manager', 'rop', 'mop', 'branch_director', 'admin', 'superadmin'], true), 403);
+            abort_unless($user->hasPermission('liquidity.queue.view'), 403);
             $query->whereIn($this->liquidityColumn($user, 'promotion_eligibility'), ['eligible', 'content_needed'])
                 ->orderByDesc($this->liquidityColumn($user, 'promotion_priority_score'));
         } else {
@@ -91,7 +91,7 @@ class PropertyLiquidityController extends Controller
         }
 
         $page = $query->orderByDesc('properties.id')->paginate($validated['per_page'] ?? 20);
-        $page->through(fn (Property $property) => $this->serialize($property, $user->hasRole('rop')
+        $page->through(fn (Property $property) => $this->serialize($property, $user->usesAssignedGroupScope()
             ? new PropertyLiquiditySnapshot(json_decode($property->rop_liquidity_snapshot, true, flags: JSON_THROW_ON_ERROR))
             : $property->latestLiquiditySnapshot, false));
 
@@ -147,10 +147,10 @@ class PropertyLiquidityController extends Controller
     {
         /** @var User $user */
         $user = $request->user();
-        if ($user->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->ensureVisible($user, $property);
+        if ($user->usesAssignedGroupScope()) app(\App\Support\RopGroupAccess::class)->ensureVisible($user, $property);
         abort_unless($this->access->isInternal($user) && $this->access->canView($user, $property), 403, 'Доступ запрещён');
 
-        if ($user->hasRole('rop')) {
+        if ($user->usesAssignedGroupScope()) {
             return response()->json(['data' => app(\App\Services\PropertyLiquidity\RopLiquidityResults::class)
                 ->history($user, $property)->get(['score', 'price_delta_pct', 'price_position', 'confidence_score', 'calculated_at'])
                 ->map(function ($row) {
@@ -167,10 +167,13 @@ class PropertyLiquidityController extends Controller
 
     public function recalculate(Request $request, Property $property)
     {
-        abort_unless(in_array($request->user()?->role?->slug, ['admin', 'superadmin'], true), 403, 'Доступ запрещён');
-        RecalculatePropertyLiquidity::dispatch($property->id);
+        return DB::transaction(function () use ($request, $property) {
+            [$user, $property] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($request->user(), $property, null, null);
+            abort_unless($user->hasPermission('liquidity.settings.manage') && $this->access->canView($user, $property), 403, 'Доступ запрещён');
+            RecalculatePropertyLiquidity::dispatch($property->id)->afterCommit();
 
-        return response()->json(['message' => 'Пересчет поставлен в очередь.'], 202);
+            return response()->json(['message' => 'Пересчет поставлен в очередь.'], 202);
+        });
     }
 
     public function updatePromotion(Request $request, Property $property)
@@ -191,16 +194,20 @@ class PropertyLiquidityController extends Controller
             'metrics' => ['nullable', 'array'],
         ]);
 
-        $promotion = PropertySocialPromotion::query()->create($data + [
-            'property_id' => $property->id,
-            'priority_score_snapshot' => $property->promotion_priority_score,
-            'liquidity_score_snapshot' => $property->liquidity_score,
-            'published_by' => $data['status'] === 'published' ? $user->id : null,
-            'published_at' => $data['status'] === 'published' ? ($data['published_at'] ?? now()) : ($data['published_at'] ?? null),
-        ]);
-        RecalculatePropertyLiquidity::dispatch($property->id);
+        return DB::transaction(function () use ($request, $property, $data) {
+            [$user, $property] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($request->user(), $property, null, null);
+            abort_unless($this->access->canManagePromotion($user) && $this->access->canView($user, $property), 403, 'Доступ запрещён');
+            $promotion = PropertySocialPromotion::query()->create($data + [
+                'property_id' => $property->id,
+                'priority_score_snapshot' => $property->promotion_priority_score,
+                'liquidity_score_snapshot' => $property->liquidity_score,
+                'published_by' => $data['status'] === 'published' ? $user->id : null,
+                'published_at' => $data['status'] === 'published' ? ($data['published_at'] ?? now()) : ($data['published_at'] ?? null),
+            ]);
+            RecalculatePropertyLiquidity::dispatch($property->id)->afterCommit();
 
-        return response()->json(['data' => $promotion], 201);
+            return response()->json(['data' => $promotion], 201);
+        });
     }
 
     public function updateBusinessPriority(Request $request, Property $property)
@@ -211,7 +218,7 @@ class PropertyLiquidityController extends Controller
         ]);
         return DB::transaction(function () use ($request, $property, $data) {
             [$user, $property] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($request->user(), $property, null, null);
-            if ($user->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->ensureVisible($user, $property);
+            if ($user->usesAssignedGroupScope()) app(\App\Support\RopGroupAccess::class)->ensureVisible($user, $property);
             abort_unless($this->access->canSetBusinessPriority($user) && $this->access->canView($user, $property), 403, 'Доступ запрещён');
             $changedAt = now();
 
@@ -311,12 +318,12 @@ class PropertyLiquidityController extends Controller
     {
         $scalars = ['liquidity_score' => 'score', 'liquidity_category' => 'category', 'liquidity_confidence' => 'confidence_score',
             'price_position' => 'price_position', 'promotion_priority_score' => 'promotion_priority_score', 'promotion_eligibility' => 'promotion_eligibility'];
-        return $user->hasRole('rop') && isset($scalars[$column]) ? 'scoped_liquidity.'.$scalars[$column] : 'properties.'.$column;
+        return $user->usesAssignedGroupScope() && isset($scalars[$column]) ? 'scoped_liquidity.'.$scalars[$column] : 'properties.'.$column;
     }
 
     private function scopedActiveQuery(User $user): Builder
     {
-        if ($user->hasRole('rop')) {
+        if ($user->usesAssignedGroupScope()) {
             $results = app(\App\Services\PropertyLiquidity\RopLiquidityResults::class);
             $results->refresh($user);
             return Property::query()->joinSub($results->query($user), 'scoped_liquidity',

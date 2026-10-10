@@ -31,7 +31,7 @@ class PropertyLiquidityCalculator
 
     public function previewForRop(Property $property, User $actor): ?PropertyLiquiditySnapshot
     {
-        abort_unless($actor->hasRole('rop'), 403, 'FORBIDDEN_ACTION');
+        abort_unless($actor->usesAssignedGroupScope(), 403, 'FORBIDDEN_ACTION');
         app(RopGroupAccess::class)->ensureVisible($actor, $property);
 
         return $this->buildSnapshot($property, $actor);

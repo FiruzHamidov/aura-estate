@@ -15,7 +15,7 @@ class BookingReportCounts
 
     public function select(Builder $query, ?User $actor): void
     {
-        if (! $actor?->hasRole('rop')) {
+        if (! $actor?->usesAssignedGroupScope()) {
             $query->selectRaw('COUNT(DISTINCT bookings.property_id) as unique_properties')
                 ->selectRaw('COUNT(DISTINCT COALESCE(bookings.crm_client_id, bookings.client_id)) as unique_clients');
             return;

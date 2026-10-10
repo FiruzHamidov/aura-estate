@@ -12,6 +12,55 @@ class Role extends Model
 
     protected $fillable = ['name', 'description', 'slug'];
 
+    protected $casts = ['permissions' => 'array', 'permissions_version' => 'integer'];
+
+    /** Central policy predicate; used by both loaded users and fresh SQL selections. */
+    public function usesAssignedGroupScope(): bool
+    {
+        return $this->hasPermission('data.scope.assigned_groups');
+    }
+
+    public function scopeUsingAssignedGroups(\Illuminate\Database\Eloquent\Builder $query, bool $enabled = true): void
+    {
+        $this->scopeWithPermission($query, 'data.scope.assigned_groups', $enabled);
+    }
+
+    /** SQL equivalent of a static catalog permission, including legacy defaults. */
+    public function scopeWithPermission(\Illuminate\Database\Eloquent\Builder $query, string $permission, bool $enabled = true): void
+    {
+        $definition = config('permissions', [])[$permission] ?? null;
+        if (! $definition) throw new \InvalidArgumentException('A registered catalog permission is required.');
+        $defaults = $definition['roles'] ?? config($definition['roles_config'], []);
+        // Keep the predicate in SQL, so repeated group subqueries do not fetch all roles.
+        // The legacy branch also supports deployments before the RBAC migration.
+        if (! \Illuminate\Support\Facades\Schema::hasColumn($query->getModel()->getTable(), 'permissions')) {
+            $query->whereIn($query->qualifyColumn('slug'), $defaults, 'and', ! $enabled);
+            return;
+        }
+        $column = $query->qualifyColumn('permissions');
+        $slug = $query->qualifyColumn('slug');
+        $condition = fn ($roles) => $roles
+            ->where(fn ($legacy) => $legacy->whereNull($column)->whereIn($slug, $defaults))
+            ->orWhere(fn ($configured) => $configured->whereNotNull($column)->whereJsonContains($column, $permission));
+        $enabled ? $query->where($condition) : $query->whereNot($condition);
+    }
+
+    public function permissionKeys(): array
+    {
+        // An explicit empty array revokes every grant. Null preserves pre-migration behavior.
+        return $this->permissions ?? app(\App\Services\Rbac\PermissionCatalog::class)->defaults($this->slug);
+    }
+
+    public function hasPermission(string $permission): bool
+    {
+        if (!in_array($permission, $this->permissionKeys(), true)) return false;
+        if (array_key_exists($permission, config('permissions', []))) return true;
+        foreach (['users.assign_role.', 'kpi.reports.dashboard.role.'] as $prefix) {
+            if (str_starts_with($permission, $prefix)) return self::query()->where('slug', substr($permission, strlen($prefix)))->exists();
+        }
+        return false;
+    }
+
     public static function systemRoles(): array
     {
         return config('roles.system', []);

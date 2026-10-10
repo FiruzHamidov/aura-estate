@@ -30,7 +30,7 @@ class PruneUserLocationHistoryCommand extends Command
             });
 
         User::query()
-            ->whereHas('role', fn ($query) => $query->whereIn('slug', config('location_tracking.tracked_roles', ['agent', 'mop'])))
+            ->whereHas('role', fn ($query) => $query->withPermission('locations.subject.default_retention'))
             ->whereDoesntHave('locationTrackingSetting')
             ->select('id')
             ->orderBy('id')

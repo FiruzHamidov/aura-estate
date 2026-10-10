@@ -20,18 +20,6 @@ use RuntimeException;
 
 class ReelController extends Controller
 {
-    private const GLOBAL_REEL_MANAGER_ROLES = [
-        'admin',
-        'superadmin',
-        'marketing',
-        'reels_manager',
-    ];
-
-    private const BRANCH_REEL_MANAGER_ROLES = [
-        'rop',
-        'branch_director',
-    ];
-
     public function __construct(
         private readonly ReelUploadService $uploadService
     ) {
@@ -60,19 +48,19 @@ class ReelController extends Controller
 
     private function canManageProperty(?User $user, Property $property): bool
     {
-        if (!$user) {
+        if (!$user || !$user->hasPermission('reels.view') || (!$user->hasPermission('reels.scope.all') && !$user->hasPermission('reels.scope.branch'))) {
             return false;
         }
 
-        if ($user->hasRole('rop')) {
+        if ($user->usesAssignedGroupScope()) {
             return app(\App\Support\RopGroupAccess::class)->allows($user, $property);
         }
 
-        if ($this->userHasAnyRole($user, self::GLOBAL_REEL_MANAGER_ROLES)) {
+        if ($user->hasPermission('reels.scope.all')) {
             return true;
         }
 
-        if ($this->userHasAnyRole($user, self::BRANCH_REEL_MANAGER_ROLES)) {
+        if ($user->hasPermission('reels.scope.branch')) {
             $property->loadMissing(['agent.role', 'creator.role']);
 
             $propertyBranchId = $property->agent?->branch_id ?: $property->creator?->branch_id;
@@ -87,21 +75,21 @@ class ReelController extends Controller
 
     private function canManageStandaloneReel(?User $user, ?Reel $reel = null): bool
     {
-        if (!$user) {
+        if (!$user || !$user->hasPermission('reels.view') || (!$user->hasPermission('reels.scope.all') && !$user->hasPermission('reels.scope.branch'))) {
             return false;
         }
 
-        if ($user->hasRole('rop')) {
+        if ($user->usesAssignedGroupScope()) {
             $access = app(\App\Support\RopGroupAccess::class);
 
             return $reel ? $access->allows($user, $reel) : $access->groupIds($user) !== [];
         }
 
-        if ($this->userHasAnyRole($user, self::GLOBAL_REEL_MANAGER_ROLES)) {
+        if ($user->hasPermission('reels.scope.all')) {
             return true;
         }
 
-        if ($this->userHasAnyRole($user, self::BRANCH_REEL_MANAGER_ROLES)) {
+        if ($user->hasPermission('reels.scope.branch')) {
             if (!$reel) {
                 return !empty($user->branch_id);
             }
@@ -123,28 +111,17 @@ class ReelController extends Controller
 
             return $property->branch_group_id;
         }
-        if ($user->hasRole('rop')) {
+        if ($user->usesAssignedGroupScope()) {
             return app(\App\Support\RopGroupAccess::class)->creationGroup($user, $requested);
         }
         $groupId = $requested ?? $user->branch_group_id;
         if ($groupId !== null) {
             $group = \App\Models\BranchGroup::query()->findOrFail($groupId);
-            abort_unless($this->userHasAnyRole($user, self::GLOBAL_REEL_MANAGER_ROLES)
+            abort_unless($user->hasPermission('reels.scope.all')
                 || (int) $group->branch_id === (int) $user->branch_id, 403, 'Forbidden');
         }
 
         return $groupId;
-    }
-
-    private function userHasAnyRole(User $user, array $slugs): bool
-    {
-        foreach ($slugs as $slug) {
-            if ($user->hasRole($slug)) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private function ensureCanManageProperty(Property $property): User
@@ -404,6 +381,7 @@ class ReelController extends Controller
             [, , $lockedProperty] = app(ReelWriteLock::class)->acquire(
                 $this->authUser(), null, $request->integer('property_id') ?: null, $request->integer('branch_group_id') ?: null
             );
+            abort_unless($this->authUser()?->hasPermission('reels.create'), 403, 'Forbidden');
             $validated = $request->validate([
                 'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
                 'property_id' => 'nullable|integer|exists:properties,id',
@@ -473,6 +451,7 @@ class ReelController extends Controller
             [, , $lockedProperty] = app(ReelWriteLock::class)->acquire(
                 $this->authUser(), null, $request->integer('property_id') ?: null, $request->integer('branch_group_id') ?: null
             );
+            abort_unless($this->authUser()?->hasPermission('reels.create'), 403, 'Forbidden');
             $validated = $request->validate([
                 'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
                 'property_id' => 'nullable|integer|exists:properties,id',
@@ -549,6 +528,7 @@ class ReelController extends Controller
             [, $reel, $lockedProperty] = app(ReelWriteLock::class)->acquire(
                 $this->authUser(), $reel, $request->integer('property_id') ?: null, $request->integer('branch_group_id') ?: null
             );
+            abort_unless($this->authUser()?->hasPermission('reels.create'), 403, 'Forbidden');
             $this->ensureCanManageReel($reel);
 
             $request->validate([
@@ -583,6 +563,7 @@ class ReelController extends Controller
             [, $reel, $lockedProperty] = app(ReelWriteLock::class)->acquire(
                 $this->authUser(), $reel, $request->integer('property_id') ?: null, $request->integer('branch_group_id') ?: null
             );
+            abort_unless($this->authUser()?->hasPermission('reels.update'), 403, 'Forbidden');
             $this->ensureCanManageReel($reel);
 
             $validated = $request->validate([
@@ -605,7 +586,7 @@ class ReelController extends Controller
                 if ($validated['property_id']) {
                     $targetProperty = $lockedProperty;
                     $this->ensureCanManageProperty($targetProperty);
-                    abort_if($this->authUser()?->hasRole('rop') && (int) $sourceGroup !== (int) $targetProperty->branch_group_id,
+                    abort_if($this->authUser()?->usesAssignedGroupScope() && (int) $sourceGroup !== (int) $targetProperty->branch_group_id,
                         403, 'GROUP_TRANSFER_REQUIRED');
                     $validated['branch_group_id'] = $targetProperty->branch_group_id;
                 } else {
@@ -615,7 +596,7 @@ class ReelController extends Controller
                         'Forbidden'
                     );
                     $validated['branch_group_id'] = $sourceGroup;
-                    if ($this->authUser()?->hasRole('rop')) {
+                    if ($this->authUser()?->usesAssignedGroupScope()) {
                         app(\App\Support\RopGroupAccess::class)->ensureGroup($this->authUser(), $sourceGroup);
                     }
                 }
@@ -687,6 +668,7 @@ class ReelController extends Controller
             [, $reel, $lockedProperty] = app(ReelWriteLock::class)->acquire(
                 $this->authUser(), $reel, $request->integer('property_id') ?: null, $request->integer('branch_group_id') ?: null
             );
+            abort_unless($this->authUser()?->hasPermission('reels.publish'), 403, 'Forbidden');
             $this->ensureCanManageReel($reel);
 
             $request->validate([
@@ -714,6 +696,7 @@ class ReelController extends Controller
             [, $reel, $lockedProperty] = app(ReelWriteLock::class)->acquire(
                 $this->authUser(), $reel, null, null
             );
+            abort_unless($this->authUser()?->hasPermission('reels.delete'), 403, 'Forbidden');
             $this->ensureCanManageReel($reel);
 
             $filesToDelete = [

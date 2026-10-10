@@ -15,7 +15,6 @@ use Illuminate\Validation\Rule;
 
 class PublicTeamController extends Controller
 {
-    private const PUBLIC_ROLE_SLUGS = ['agent', 'mop'];
 
     public function index(): JsonResponse
     {
@@ -32,7 +31,7 @@ class PublicTeamController extends Controller
                 'photo' => $user->photo,
             ]);
 
-        return response()->json($agents);
+        return response()->json($agents)->header('Cache-Control', 'no-store');
     }
 
     private function resolveSaleAgentColumn(): ?string
@@ -113,7 +112,7 @@ class PublicTeamController extends Controller
                     ),
                 ],
             ])
-            ->header('Cache-Control', 'public, max-age=300, s-maxage=900, stale-while-revalidate=3600');
+            ->header('Cache-Control', 'no-store');
     }
 
     private function resolveDateRange(array $validated): array
@@ -146,7 +145,7 @@ class PublicTeamController extends Controller
     {
         return User::query()
             ->where('status', User::STATUS_ACTIVE)
-            ->whereHas('role', fn ($query) => $query->whereIn('slug', self::PUBLIC_ROLE_SLUGS))
+            ->whereHas('role', fn ($query) => $query->withPermission('public_team.subject.profile'))
             ->when(
                 $branchId && Schema::hasColumn('users', 'branch_id'),
                 fn ($query) => $query->where('branch_id', $branchId)

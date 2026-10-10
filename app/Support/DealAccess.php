@@ -24,40 +24,34 @@ class DealAccess
         return $this->pipelineAccess->roleSlug($user);
     }
 
-    public function isPrivilegedRole(?string $roleSlug): bool
+    public function scopeType(?User $user): string
     {
-        return $this->pipelineAccess->isPrivilegedRole($roleSlug);
+        foreach (['all', 'hr', 'control', 'branch', 'own'] as $scope) {
+            if ($user?->hasPermission('deals.scope.'.$scope)) {
+                return $scope;
+            }
+        }
+
+        return 'none';
     }
 
-    public function isBranchManager(?string $roleSlug): bool
+    public function canReadAll(?User $user): bool
     {
-        return $this->pipelineAccess->isBranchManager($roleSlug);
+        return $this->scopeType($user) === 'all';
     }
 
-    public function isBranchWideDealRole(?string $roleSlug): bool
+    private function isBranchScoped(User $user): bool
     {
-        return in_array($roleSlug, ['branch_director', 'rop', 'manager'], true);
+        return in_array($this->scopeType($user), ['branch', 'own'], true);
     }
 
-    public function isBranchScopedRole(?string $roleSlug): bool
+    public function ensureAction(User $user, string $action): void
     {
-        return $this->pipelineAccess->isBranchScopedRole($roleSlug);
-    }
-
-    public function isHrRole(?string $roleSlug): bool
-    {
-        return $this->pipelineAccess->isHrRole($roleSlug);
-    }
-
-    public function isSecurityRole(?string $roleSlug): bool
-    {
-        return $this->pipelineAccess->isSecurityRole($roleSlug);
+        abort_unless($user->hasPermission('deals.'.$action) && $this->scopeType($user) !== 'none', 403, 'Нет права на это действие со сделкой.');
     }
 
     public function visibleQuery(User $authUser): Builder
     {
-        $roleSlug = $this->roleSlug($authUser);
-
         $query = Deal::query()->with([
             'client',
             'lead',
@@ -69,19 +63,19 @@ class DealAccess
             'primaryProperty',
         ]);
 
-        if ($roleSlug === 'rop') {
-            return app(RopGroupAccess::class)->scope($query, $authUser, 'crm_deals.branch_group_id', 'crm_deals.branch_id');
+        if ($authUser?->usesAssignedGroupScope()) {
+            app(RopGroupAccess::class)->scope($query, $authUser, 'crm_deals.branch_group_id', 'crm_deals.branch_id');
         }
 
-        if ($this->isPrivilegedRole($roleSlug)) {
+        if ($this->canReadAll($authUser)) {
             return $query;
         }
 
-        if ($this->isHrRole($roleSlug)) {
+        if (($this->scopeType($authUser) === 'hr')) {
             return $query->whereHas('pipeline', fn (Builder $builder) => $builder->where('code', DealPipeline::CODE_HR_RECRUITMENT));
         }
 
-        if ($this->isSecurityRole($roleSlug)) {
+        if (($this->scopeType($authUser) === 'control')) {
             return $query->whereHas(
                 'pipeline',
                 fn (Builder $builder) => $builder
@@ -90,22 +84,22 @@ class DealAccess
             );
         }
 
-        if (! $this->isBranchScopedRole($roleSlug) || empty($authUser->branch_id)) {
+        if (! $this->isBranchScoped($authUser) || empty($authUser->branch_id)) {
             return $query->whereRaw('1 = 0');
         }
 
         $query->where('branch_id', $authUser->branch_id);
 
-        if ($this->isBranchWideDealRole($roleSlug)) {
+        if (($this->scopeType($authUser) === 'branch')) {
             return $query;
         }
 
-        return $query->where(function (Builder $builder) use ($authUser, $roleSlug) {
+        return $query->where(function (Builder $builder) use ($authUser) {
             $builder
                 ->where('responsible_agent_id', $authUser->id)
                 ->orWhere('created_by', $authUser->id);
 
-            if (in_array($roleSlug, ['agent', 'intern'], true)) {
+            if ($authUser->hasPermission('deals.related_control.view')) {
                 $builder->orWhere(function (Builder $propertyControl) use ($authUser) {
                     $propertyControl
                         ->whereHas('pipeline', fn (Builder $pipeline) => $pipeline->where('code', DealPipeline::CODE_PROPERTY_CONTROL))
@@ -140,21 +134,19 @@ class DealAccess
 
     public function normalizeMutationData(array $data, User $authUser): array
     {
-        $roleSlug = $this->roleSlug($authUser);
-
-        if ($this->isBranchScopedRole($roleSlug)) {
+        if ($this->isBranchScoped($authUser)) {
             abort_if(empty($authUser->branch_id), 422, 'branch_id is required for this user.');
             $data['branch_id'] = $authUser->branch_id;
         }
 
-        if ($this->isHrRole($roleSlug)) {
+        if (($this->scopeType($authUser) === 'hr')) {
             $data['branch_id'] = null;
         }
 
         $data['created_by'] ??= $authUser->id;
 
         if (
-            in_array($roleSlug, ['agent', 'manager', 'operator'], true)
+            $authUser->hasPermission('deals.defaults.assign_creator')
             && empty($data['responsible_agent_id'])
         ) {
             $data['responsible_agent_id'] = $authUser->id;
@@ -165,46 +157,27 @@ class DealAccess
 
     public function ensureCanCreate(User $authUser): void
     {
-        abort_if(
-            $this->isSecurityRole($this->roleSlug($authUser)),
-            403,
-            'Security users cannot create CRM deals.'
-        );
+        $this->ensureAction($authUser, 'create');
     }
 
     public function ensureCanUpdate(User $authUser, Deal $deal): void
     {
-        $roleSlug = $this->roleSlug($authUser);
-
-        abort_if(
-            $this->isSecurityRole($roleSlug),
-            403,
-            'Security users can update control cards only through CRM activities and workflow actions.'
-        );
-
+        $this->ensureAction($authUser, 'update');
         $deal->loadMissing('pipeline');
-        abort_if(
-            $deal->isPropertyControl() && ! in_array($roleSlug, ['admin', 'superadmin'], true),
-            403,
-            'Property control cards can be changed only through CRM activities and workflow actions.'
-        );
+        abort_if($deal->isPropertyControl() && ! $authUser->hasPermission('deals.control.edit'), 403,
+            'Property control cards can be changed only through CRM activities and workflow actions.');
     }
 
     public function ensureCanDelete(User $authUser, ?Deal $deal = null): void
     {
-        abort_if(
-            $this->isSecurityRole($this->roleSlug($authUser)) || $deal?->isPropertyControl(),
-            403,
-            'System property-control cards cannot be deleted.'
-        );
+        $this->ensureAction($authUser, 'delete');
+        abort_if($deal?->isPropertyControl(), 403, 'System property-control cards cannot be deleted.');
     }
 
     public function validateMutationTargets(User $authUser, array $data): void
     {
-        $roleSlug = $this->roleSlug($authUser);
-
-        if (! $this->isBranchScopedRole($roleSlug)) {
-            if ($this->isHrRole($roleSlug)) {
+        if (! $this->isBranchScoped($authUser)) {
+            if (($this->scopeType($authUser) === 'hr')) {
                 $pipelineId = $data['pipeline_id'] ?? null;
                 $stageId = $data['stage_id'] ?? null;
 

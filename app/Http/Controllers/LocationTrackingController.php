@@ -163,7 +163,7 @@ class LocationTrackingController extends Controller
     {
         $validated = $request->validate([
             'search' => ['nullable', 'string', 'max:100'],
-            'role' => ['nullable', Rule::in(['agent', 'mop'])],
+            'role' => ['nullable', 'string', Rule::exists('roles', 'slug')],
             'branch_id' => ['nullable', 'integer'],
             'branch_group_id' => ['nullable', 'integer'],
             'tracking_enabled' => ['nullable', 'boolean'],
@@ -215,6 +215,7 @@ class LocationTrackingController extends Controller
                 'phone' => $user->phone,
                 'photo' => $user->photo,
                 'role' => $user->role?->slug,
+                'role_name' => $user->role?->name,
                 'branch_id' => $user->branch_id,
                 'branch' => $this->branchPayload($user),
                 'branch_group_id' => $user->branch_group_id,
@@ -287,7 +288,7 @@ class LocationTrackingController extends Controller
     public function map(Request $request)
     {
         $filters = $request->validate([
-            'role' => ['nullable', Rule::in(['agent', 'mop'])],
+            'role' => ['nullable', 'string', Rule::exists('roles', 'slug')],
             'branch_id' => ['nullable', 'integer'],
             'branch_group_id' => ['nullable', 'integer'],
             'status' => ['nullable', Rule::in([
@@ -380,7 +381,7 @@ class LocationTrackingController extends Controller
 
     public function settings(Request $request, User $user)
     {
-        $this->access->assertCanConfigure($request->user(), $user);
+        $this->access->assertCanConfigure($request->user(), $user, false);
 
         return response()->json(['data' => $this->policies->payload($user)]);
     }
@@ -390,7 +391,7 @@ class LocationTrackingController extends Controller
         $actor = $request->user();
         $this->access->assertCanConfigure($actor, $user);
         if (! $this->policies->isEligible($user)) {
-            $this->access->deny('LOCATION_FORBIDDEN_ROLE', 'Отслеживать можно только агентов и МОПов.', 422);
+            $this->access->deny('LOCATION_FORBIDDEN_ROLE', 'У роли сотрудника нет права передачи местоположения.', 422);
         }
         $data = $request->validate([
             'tracking_enabled' => ['sometimes', 'boolean'],
@@ -405,18 +406,24 @@ class LocationTrackingController extends Controller
             'change_reason' => ['required', 'string', 'max:500'],
         ]);
 
-        $settings = UserLocationTrackingSetting::query()->firstOrNew(['user_id' => $user->id]);
-        if (! $settings->exists) {
-            $defaults = $this->policies->settingsFor($user)->getAttributes();
-            $settings->fill($defaults);
-        }
-        $settings->fill($data);
-        $settings->configured_by = $actor->id;
-        $settings->policy_version = ((int) $settings->policy_version) + 1;
-        $settings->save();
-        $this->audit($request, 'settings_updated', $user, ['policy_version' => $settings->policy_version, 'change_reason' => $data['change_reason']]);
+        return DB::transaction(function () use ($request, $actor, $user, $data) {
+            [$actor] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($actor, null, $user->id, null);
+            $user = $user->fresh('role');
+            $this->access->assertCanConfigure($actor, $user);
+            if (! $this->policies->isEligible($user)) $this->access->deny('LOCATION_FORBIDDEN_ROLE', 'У роли сотрудника нет права передачи местоположения.', 422);
+            $settings = UserLocationTrackingSetting::query()->firstOrNew(['user_id' => $user->id]);
+            if (! $settings->exists) {
+                $defaults = $this->policies->settingsFor($user)->getAttributes();
+                $settings->fill($defaults);
+            }
+            $settings->fill($data);
+            $settings->configured_by = $actor->id;
+            $settings->policy_version = ((int) $settings->policy_version) + 1;
+            $settings->save();
+            $this->audit($request, 'settings_updated', $user, ['policy_version' => $settings->policy_version, 'change_reason' => $data['change_reason']]);
 
-        return response()->json(['data' => $this->policies->payload($user)]);
+            return response()->json(['data' => $this->policies->payload($user)]);
+        });
     }
 
     private function mapItem(User $user): array
@@ -438,6 +445,7 @@ class LocationTrackingController extends Controller
                 'name' => $user->name,
                 'photo' => $user->photo,
                 'role' => $user->role?->slug,
+                'role_name' => $user->role?->name,
                 'branch_id' => $user->branch_id,
                 'branch' => $this->branchPayload($user),
                 'branch_group_id' => $user->branch_group_id,

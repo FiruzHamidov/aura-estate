@@ -13,7 +13,7 @@ class KpiQualityIssue extends Model
 
     public function scopeForRop(\Illuminate\Database\Eloquent\Builder $query, User $actor, ?int $groupId = null): \Illuminate\Database\Eloquent\Builder
     {
-        if ($actor->hasRole('rop')) {
+        if ($actor->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'kpi_quality_issues.branch_group_id');
             if ($groupId !== null) $query->where('kpi_quality_issues.branch_group_id', $groupId);
         }

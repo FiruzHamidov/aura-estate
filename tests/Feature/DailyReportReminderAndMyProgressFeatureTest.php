@@ -208,6 +208,19 @@ class DailyReportReminderAndMyProgressFeatureTest extends TestCase
         $this->assertSame('/daily-report', $notifications->first()->action_url);
         $this->assertSame('daily-report:reminder:'.$agent->id.':2026-05-06', $notifications->first()->dedupe_key);
 
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $custom = Role::create(['name' => 'Custom reporter', 'slug' => 'custom_reporter']);
+        $custom->forceFill(['permissions' => ['notifications.receive.daily_report']])->save();
+        $agent->forceFill(['role_id' => $custom->id])->save();
+        Carbon::setTestNow(Carbon::create(2026, 5, 7, 13, 31, 0, 'UTC'));
+        $this->assertSame(1, $method->invoke($service));
+        $this->assertSame(2, DB::table('notifications')->where('user_id', $agent->id)->count());
+        $custom->forceFill(['permissions' => []])->save();
+        Carbon::setTestNow(Carbon::create(2026, 5, 8, 13, 31, 0, 'UTC'));
+        $this->assertSame(0, $method->invoke($service));
+        $this->assertSame(2, DB::table('notifications')->where('user_id', $agent->id)->count());
+
+
         Carbon::setTestNow();
     }
 }

@@ -9,6 +9,7 @@ use App\Models\StoryAttachment;
 use App\Models\StoryItem;
 use App\Models\StoryView;
 use App\Models\User;
+use App\Support\StoryAccess;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -17,7 +18,7 @@ use Illuminate\Validation\Rule;
 
 class StoryController extends Controller
 {
-    private const MANAGER_ROLE_SLUGS = ['mop', 'rop', 'branch_director'];
+    public function __construct(private readonly StoryAccess $access) {}
 
     public function feed(Request $request): JsonResponse
     {
@@ -110,6 +111,7 @@ class StoryController extends Controller
     public function myStories(Request $request): JsonResponse
     {
         $user = $this->authUser($request);
+        abort_unless($user->hasPermission('stories.own.view'), 403, 'Forbidden');
 
         $validated = $request->validate([
             'status' => ['nullable', Rule::in([
@@ -173,6 +175,7 @@ class StoryController extends Controller
             $this->syncItems($story, $validated['items'] ?? []);
 
             if ($status === Story::STATUS_ACTIVE) {
+                abort_unless($user->hasPermission('stories.status'), 403, 'Forbidden');
                 $this->activateStory($story);
             }
 
@@ -220,6 +223,7 @@ class StoryController extends Controller
             ]);
 
             if ($status === Story::STATUS_ACTIVE) {
+                abort_unless($user->hasPermission('stories.status'), 403, 'Forbidden');
                 $this->activateStory($story);
             }
 
@@ -268,6 +272,7 @@ class StoryController extends Controller
             ]);
 
             if ($status === Story::STATUS_ACTIVE) {
+                abort_unless($user->hasPermission('stories.status'), 403, 'Forbidden');
                 $this->activateStory($story);
             }
 
@@ -280,11 +285,7 @@ class StoryController extends Controller
     public function update(Request $request, Story $story): JsonResponse
     {
         $user = $this->authUser($request);
-        abort_unless((int) $story->user_id === (int) $user->id || $this->isAdmin($user), 403, 'Forbidden');
-
-        if ($user->hasRole('client') && !$this->isAdmin($user)) {
-            abort(403, 'Clients cannot modify stories.');
-        }
+        abort_unless($this->access->canEdit($user, $story, 'update'), 403, 'Forbidden');
 
         $validated = $request->validate([
             'caption' => ['nullable', 'string', 'max:500'],
@@ -316,11 +317,7 @@ class StoryController extends Controller
     public function destroy(Request $request, Story $story): JsonResponse
     {
         $user = $this->authUser($request);
-        abort_unless((int) $story->user_id === (int) $user->id || $this->isAdmin($user), 403, 'Forbidden');
-
-        if ($user->hasRole('client') && !$this->isAdmin($user)) {
-            abort(403, 'Clients cannot delete stories.');
-        }
+        abort_unless($this->access->canEdit($user, $story, 'delete'), 403, 'Forbidden');
 
         $story->update(['status' => Story::STATUS_DELETED]);
 
@@ -336,23 +333,13 @@ class StoryController extends Controller
         ]);
 
         $action = $validated['action'];
-        $isOwner = (int) $story->user_id === (int) $user->id;
-        $isManager = $this->isManager($user);
-        $isAdmin = $this->isAdmin($user);
-
-        abort_if($user->hasRole('client') && !$isAdmin, 403, 'Clients cannot manage stories.');
+        abort_unless($this->access->canChangeStatus($user, $story), 403, 'Forbidden');
 
         if ($action === 'republish') {
-            $canRepublish = $isOwner || $isAdmin || ($isManager && $this->canManagerControlStory($user, $story));
-            abort_unless($canRepublish, 403, 'Forbidden');
-
             $this->activateStory($story, true);
         }
 
         if (in_array($action, ['archive', 'hide'], true)) {
-            $canManage = $isOwner || $isAdmin || ($isManager && $this->canManagerControlStory($user, $story));
-            abort_unless($canManage, 403, 'Forbidden');
-
             $status = $action === 'archive' ? Story::STATUS_ARCHIVED : Story::STATUS_HIDDEN;
             $story->update(['status' => $status]);
         }
@@ -421,7 +408,7 @@ class StoryController extends Controller
 
     private function ensureCanCreateStory(User $user): void
     {
-        abort_if($user->role?->slug === 'client', 403, 'Clients cannot create stories.');
+        abort_unless($user->hasPermission('stories.create'), 403, 'Forbidden');
         abort_if($user->status !== User::STATUS_ACTIVE, 403, 'Only active users can create stories.');
     }
 
@@ -463,41 +450,6 @@ class StoryController extends Controller
             ->publicFeed()
             ->whereKey($story->id)
             ->exists();
-    }
-
-    private function isManager(User $user): bool
-    {
-        return in_array($user->role?->slug, self::MANAGER_ROLE_SLUGS, true);
-    }
-
-    private function isAdmin(User $user): bool
-    {
-        return in_array($user->role?->slug, ['admin', 'superadmin'], true);
-    }
-
-    private function canManagerControlStory(User $manager, Story $story): bool
-    {
-        $manager->loadMissing('role');
-        $story->loadMissing('user.role');
-        $owner = $story->user;
-
-        if (!$owner) {
-            return false;
-        }
-
-        if ($manager->role?->slug === 'mop') {
-            return !empty($manager->branch_group_id)
-                && !empty($owner->branch_group_id)
-                && (int) $manager->branch_group_id === (int) $owner->branch_group_id;
-        }
-
-        if (in_array($manager->role?->slug, ['rop', 'branch_director'], true)) {
-            return !empty($manager->branch_id)
-                && !empty($owner->branch_id)
-                && (int) $manager->branch_id === (int) $owner->branch_id;
-        }
-
-        return false;
     }
 
     private function serializeStory(Story $story): array

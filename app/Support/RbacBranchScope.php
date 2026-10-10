@@ -20,17 +20,7 @@ class RbacBranchScope
 
     public function isRop(?User $user): bool
     {
-        return $this->roleSlug($user) === 'rop';
-    }
-
-    public function isBranchScopedManager(?User $user): bool
-    {
-        return in_array($this->roleSlug($user), ['rop', 'branch_director'], true);
-    }
-
-    public function isMop(?User $user): bool
-    {
-        return $this->roleSlug($user) === 'mop';
+        return $user?->usesAssignedGroupScope() ?? false;
     }
 
     public function denyBranchScopeViolation(string $message = 'Forbidden'): void

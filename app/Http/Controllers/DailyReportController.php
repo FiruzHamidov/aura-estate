@@ -35,6 +35,7 @@ class DailyReportController extends Controller
     public function status(Request $request)
     {
         $user = $this->authUser();
+        abort_unless($user->hasPermission('daily_reports.self_history.view'), 403, 'Forbidden');
         $payload = $this->dailyReports->reportStatusPayload($user, $request->input('report_date'));
         $reportDate = (string) ($payload['report_date'] ?? $this->dailyReports->defaultReportDate($user));
         $report = $payload['report'] ?? null;
@@ -109,7 +110,7 @@ class DailyReportController extends Controller
                 ? (int) $authUser->branch_id
                 : (int) $validated['branch_id'];
 
-            if ($authUser->hasRole('rop')) {
+            if ($authUser->usesAssignedGroupScope()) {
                 $query->whereIn('daily_reports.branch_group_id', \App\Models\BranchGroup::query()
                     ->where('branch_id', $effectiveBranchId)->select('id'));
             } else {
@@ -118,7 +119,7 @@ class DailyReportController extends Controller
         }
 
         if (! empty($validated['branch_group_id'])) {
-            if ($authUser->hasRole('rop')) {
+            if ($authUser->usesAssignedGroupScope()) {
                 $query->where('daily_reports.branch_group_id', $validated['branch_group_id']);
             } else {
                 $query->whereHas('user', fn (Builder $userQuery) => $userQuery->where('branch_group_id', $validated['branch_group_id']));
@@ -164,11 +165,12 @@ class DailyReportController extends Controller
         ]);
 
         $actor = $this->authUser();
+        abort_unless($actor->hasPermission('daily_reports.self_history.view'), 403, 'Forbidden');
         $query = DailyReport::query()->with(['user.role', 'user.branch', 'user.branchGroup', 'branchGroup', 'historicalRole'])
             ->where('user_id', $actor->id)
             ->orderByDesc('report_date');
 
-        if ($actor->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'daily_reports.branch_group_id');
+        if ($actor->usesAssignedGroupScope()) app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'daily_reports.branch_group_id');
 
         if (! empty($validated['date_from'])) {
             $query->whereDate('report_date', '>=', $validated['date_from']);
@@ -189,6 +191,7 @@ class DailyReportController extends Controller
         abort_unless($this->isDate($date), 422, 'Invalid report date.');
 
         $user = $this->authUser();
+        abort_unless($user->hasPermission('daily_reports.self_history.view'), 403, 'Forbidden');
         $report = DailyReport::query()
             ->where('user_id', $user->id)
             ->whereDate('report_date', $date)
@@ -496,6 +499,7 @@ class DailyReportController extends Controller
             $user = $this->authUser();
             $reportDate = $validated['report_date'] ?? $this->dailyReports->defaultReportDate($user);
             [$user, $existing] = $this->lockOwnReport($user, $reportDate);
+            abort_unless($user->hasPermission('daily_reports.self_submit.create'), 403, 'Forbidden');
             $access = app(\App\Support\RopGroupAccess::class);
             if ($existing) $access->ensureVisible($user, $existing);
             $context = $this->reportContextUser($user, $existing);
@@ -603,20 +607,26 @@ class DailyReportController extends Controller
 
     private function applyVisibilityScope(Builder $query, User $authUser): void
     {
-        $authUser->loadMissing('role');
-
-        match ($authUser->role?->slug) {
-            'admin', 'superadmin', 'owner' => null,
-            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'daily_reports.branch_group_id'),
-            'branch_director' => $query->whereHas('user', fn (Builder $userQuery) => $userQuery->where('branch_id', $authUser->branch_id)),
-            'mop', 'intern' => $query->where('user_id', $authUser->id),
-            default => $query->where('user_id', $authUser->id),
-        };
+        $all = $authUser->hasPermission('daily_reports.list.scope.all');
+        $branch = $authUser->hasPermission('daily_reports.list.scope.branch');
+        $own = $authUser->hasPermission('daily_reports.list.scope.own') || $authUser->hasPermission('daily_reports.list.scope.own_group');
+        abort_unless($all || $branch || $own, 403, 'Forbidden');
+        if ($authUser->usesAssignedGroupScope()) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'daily_reports.branch_group_id');
+            if ($all || $branch) return;
+        }
+        if ($all) return;
+        if ($branch) {
+            if (! $authUser->branch_id) { $query->whereRaw('1 = 0'); return; }
+            $query->whereHas('user', fn (Builder $users) => $users->where('branch_id', $authUser->branch_id));
+            return;
+        }
+        $query->where('user_id', $authUser->id);
     }
 
     private function validateScopeFilters(array $validated, User $authUser): void
     {
-        if ($this->branchScope->isBranchScopedManager($authUser)) {
+        if ($authUser->usesAssignedGroupScope() || $authUser->hasPermission('daily_reports.list.scope.branch')) {
             if (array_key_exists('branch_id', $validated) && $validated['branch_id'] !== null) {
                 $this->branchScope->ensureSameBranchOrDeny((int) $validated['branch_id'], $authUser);
             }
@@ -626,7 +636,7 @@ class DailyReportController extends Controller
             }
 
             if (array_key_exists('user_id', $validated) && $validated['user_id'] !== null) {
-                if (! $authUser->hasRole('rop') || ! app(\App\Support\RopGroupAccess::class)
+                if (! $authUser->usesAssignedGroupScope() || ! app(\App\Support\RopGroupAccess::class)
                     ->hasVisibleDailyReportHistory($authUser, (int) $validated['user_id'])) {
                     $this->branchScope->ensureUserInUserBranchOrDeny((int) $validated['user_id'], $authUser);
                 }
@@ -635,7 +645,7 @@ class DailyReportController extends Controller
             return;
         }
 
-        if ($this->branchScope->isMop($authUser)) {
+        if ($authUser->hasPermission('daily_reports.list.scope.own_group')) {
             if (array_key_exists('branch_group_id', $validated) && $validated['branch_group_id'] !== null) {
                 $this->branchScope->ensureSameBranchGroupOrDeny((int) $validated['branch_group_id'], $authUser);
             }
@@ -652,22 +662,14 @@ class DailyReportController extends Controller
 
     private function authorizeUpdateOrDeny(User $authUser, User $targetUser, DailyReport $report): void
     {
-        $role = $authUser->role?->slug;
-
-        if (in_array($role, ['admin', 'superadmin', 'owner'], true)) {
-            return;
+        if (! $authUser->hasPermission('daily_reports.list.edit')) {
+            $this->branchScope->denyWithCode(RbacBranchScope::DAILY_REPORT_EDIT_FORBIDDEN);
         }
-
-        if ($role === 'rop') {
-            app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $report);
-            return;
+        $query = DailyReport::query()->whereKey($report->id);
+        $this->applyVisibilityScope($query, $authUser);
+        if (! $query->exists()) {
+            $this->branchScope->denyWithCode(RbacBranchScope::DAILY_REPORT_EDIT_FORBIDDEN);
         }
-
-        if ($role === 'branch_director' && (int) $authUser->branch_id === (int) $targetUser->branch_id) {
-            return;
-        }
-
-        $this->branchScope->denyWithCode(RbacBranchScope::DAILY_REPORT_EDIT_FORBIDDEN);
     }
 
     private function authUser(): User
@@ -722,9 +724,8 @@ class DailyReportController extends Controller
         ?DailyReport $report,
         bool $enforceDeadline = false
     ): void {
-        $role = $actor->role?->slug;
-        $isPrivileged = in_array($role, ['admin', 'superadmin', 'owner', 'rop', 'branch_director'], true);
-        $isRestricted = in_array($role, ['agent', 'intern', 'mop'], true);
+        $isPrivileged = $actor->hasPermission('daily_reports.finalized.edit');
+        $isRestricted = ! $actor->hasPermission('daily_reports.locked_period.override');
 
         if ($report && (bool) ($report->is_finalized ?? false) && !$isPrivileged) {
             $this->denyKpi('KPI_FINALIZED_EDIT_FORBIDDEN', 'Finalized KPI report cannot be edited.');
@@ -749,33 +750,36 @@ class DailyReportController extends Controller
 
     private function ensureDailyMyReportReadRole(User $user): void
     {
-        if (! in_array($user->role?->slug, ['agent', 'mop', 'intern', 'rop', 'branch_director', 'admin', 'superadmin', 'owner'], true)) {
+        if (! $user->hasPermission('daily_reports.own.view')) {
             $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Role is not allowed for this action.');
         }
     }
 
     private function ensureDailyMyReportEditRole(User $user): void
     {
-        if (! in_array($user->role?->slug, ['agent', 'mop', 'intern', 'rop', 'branch_director', 'admin', 'superadmin', 'owner'], true)) {
+        if (! $user->hasPermission('daily_reports.own.edit')) {
             $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Role is not allowed for this action.');
         }
     }
 
     private function ensureScopedReportAccess(User $actor, User $employee, ?DailyReport $report, string $date): void
     {
-        if (! $actor->hasRole('rop')) {
+        if (! $actor->usesAssignedGroupScope()) {
             $this->ensureCanReadScopedReport($actor, $employee);
             return;
         }
         $access = app(\App\Support\RopGroupAccess::class);
         if ($report) {
             $access->ensureVisible($actor, $report);
-            abort_unless(in_array($report->role_slug, ['agent', 'mop'], true), 403, 'KPI_FORBIDDEN_ROLE_ACTION');
+            $context = $this->reportContextUser($employee, $report);
+            abort_unless($context->hasPermission('daily_reports.subject.employee'), 403, 'KPI_FORBIDDEN_ROLE_ACTION');
+            $this->ensureCanReadScopedReport($actor, $context);
             return;
         }
         // A missing historical snapshot cannot be assigned to today's team.
         abort_unless($date === Carbon::now($this->timezone())->toDateString(), 404, 'NOT_FOUND');
-        $access->ensureEmployee($actor, (int) $employee->id);
+        $access->ensureEmployee($actor, (int) $employee->id, permission: 'daily_reports.subject.employee');
+        $this->ensureCanReadScopedReport($actor, $employee);
     }
 
     private function preserveReportSnapshot(User $employee, ?DailyReport $report, string $date): bool
@@ -801,38 +805,22 @@ class DailyReportController extends Controller
 
     private function ensureCanReadScopedReport(User $actor, User $targetUser): void
     {
-        $actorRole = (string) ($actor->role?->slug ?? '');
-        $targetRole = (string) ($targetUser->role?->slug ?? '');
-
-        if ($actorRole === 'agent') {
+        if ($actor->hasPermission('daily_reports.employee.scope.own')) {
             if ((int) $actor->id !== (int) $targetUser->id) {
                 $this->denyKpi('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
             }
-
             return;
         }
-
-        if (in_array($actorRole, ['mop', 'intern'], true)) {
-            if ((int) $actor->id !== (int) $targetUser->id) {
-                $this->denyKpi('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
-            }
-
-            return;
-        }
-
-        if (in_array($actorRole, ['rop', 'branch_director', 'admin', 'superadmin', 'owner'], true)) {
-            if (! in_array($targetRole, ['agent', 'mop'], true)) {
+        if ($actor->hasPermission('daily_reports.employee.scope.all') || $actor->hasPermission('daily_reports.employee.scope.branch')) {
+            if (! $targetUser->hasPermission('daily_reports.subject.employee')) {
                 $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Target role is not supported for this action.');
             }
-
-            if (in_array($actorRole, ['rop', 'branch_director'], true)
-                && (int) $actor->branch_id !== (int) $targetUser->branch_id) {
+            if (! $actor->hasPermission('daily_reports.employee.scope.all')
+                && (! $actor->branch_id || (int) $actor->branch_id !== (int) $targetUser->branch_id)) {
                 $this->denyKpi('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
             }
-
             return;
         }
-
         $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Role is not allowed for this action.');
     }
 
@@ -846,18 +834,12 @@ class DailyReportController extends Controller
 
     private function canActorEditTargetInScope(User $actor, User $targetUser): bool
     {
-        $actorRole = (string) ($actor->role?->slug ?? '');
-        $targetRole = (string) ($targetUser->role?->slug ?? '');
-
-        if (in_array($actorRole, ['rop', 'branch_director'], true)) {
-            return in_array($targetRole, ['agent', 'mop'], true) && (int) $actor->branch_id === (int) $targetUser->branch_id;
-        }
-
-        if (in_array($actorRole, ['admin', 'superadmin', 'owner'], true)) {
-            return in_array($targetRole, ['agent', 'mop'], true);
-        }
-
-        return (int) $actor->id === (int) $targetUser->id;
+        if (! $actor->hasPermission('daily_reports.employee.edit')) return false;
+        if ($actor->hasPermission('daily_reports.employee.scope.own')) return (int) $actor->id === (int) $targetUser->id;
+        if (! $targetUser->hasPermission('daily_reports.subject.employee')) return false;
+        return $actor->hasPermission('daily_reports.employee.scope.all')
+            || ($actor->hasPermission('daily_reports.employee.scope.branch') && $actor->branch_id
+                && (int) $actor->branch_id === (int) $targetUser->branch_id);
     }
 
     private function validateStrictMetricKeys(Request $request, array $knownPayloadFields = ['report_date', 'ads', 'calls', 'comment', 'plans_for_tomorrow']): void
@@ -939,7 +921,7 @@ class DailyReportController extends Controller
                 $query->orWhere(function (Builder $context) use ($user, $date, $actor): void {
                     $context->where(fn (Builder $q) => $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $date))
                         ->where(fn (Builder $q) => $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $date));
-                    if ($actor->hasRole('rop')) {
+                    if ($actor->usesAssignedGroupScope()) {
                         $context->where('branch_group_id', $user->branch_group_id)->where('role_slug', $user->role?->slug);
                     }
                     $context->where(function (Builder $q) use ($user): void {
@@ -964,7 +946,7 @@ class DailyReportController extends Controller
 
     private function resolvePlanMap(User $user, string $reportDate): array
     {
-        $rop = $this->authUser()->hasRole('rop');
+        $rop = $this->authUser()->usesAssignedGroupScope();
         $plans = [
             'objects' => ['target_value' => null, 'plan_source' => null, 'source_record_id' => null],
             'shows' => ['target_value' => null, 'plan_source' => null, 'source_record_id' => null],
@@ -1032,7 +1014,7 @@ class DailyReportController extends Controller
         $report->loadMissing(['user.role', 'user.branch', 'user.branchGroup']);
         $user = $report->user;
         $actor = $this->authUser();
-        $userPayload = $actor->hasRole('rop')
+        $userPayload = $actor->usesAssignedGroupScope()
             ? (app(\App\Services\GroupAccess\GroupDataProjection::class)->relations($report, $actor)['user'] ?? null)
             : $user;
         $reportDate = $report->report_date->toDateString();
@@ -1048,6 +1030,7 @@ class DailyReportController extends Controller
             'id' => $report->id,
             'user_id' => $report->user_id,
             'role_slug' => $report->role_slug,
+            'employee_report_eligible' => $user?->hasPermission('daily_reports.subject.employee') ?? false,
             'report_date' => $reportDate,
             'metrics' => $user ? $this->buildMetricsPayload($user, $reportDate, $report, $autoMetrics) : [
                 'objects' => $this->metricPayload((int) ($autoMetrics['new_properties_count'] ?? 0), null, 'system', null),
@@ -1161,8 +1144,7 @@ class DailyReportController extends Controller
             return true;
         }
 
-        $role = $actor->role?->slug;
-        if (in_array($role, ['admin', 'superadmin', 'owner', 'rop', 'branch_director'], true)) {
+        if ($actor->hasPermission('daily_reports.submitted.override')) {
             return true;
         }
 
@@ -1170,7 +1152,7 @@ class DailyReportController extends Controller
             return true;
         }
 
-        if (in_array($role, ['agent', 'intern', 'mop'], true) && $this->isDateLocked($targetUser, $reportDate)) {
+        if (! $actor->hasPermission('daily_reports.locked_period.override') && $this->isDateLocked($targetUser, $reportDate)) {
             return false;
         }
 

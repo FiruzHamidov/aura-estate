@@ -181,6 +181,36 @@ class KpiDailySupervisorScopeFeatureTest extends TestCase
             ->assertJsonPath('code', 'KPI_FORBIDDEN_LOCKED_PERIOD');
     }
 
+    public function test_report_scope_and_edit_permissions_are_independent_and_revocable(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-05-05 12:00:00', 'Asia/Dushanbe'));
+        [$users] = $this->seedContext();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $actor = $users['mop_a1'];
+        $role = $actor->role;
+        $role->forceFill(['permissions' => ['daily_reports.employee.scope.branch']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $local = '/api/kpi/daily/report?date=2026-05-05&employee_id='.$users['agent_a1']->id;
+        $foreign = '/api/kpi/daily/report?date=2026-05-05&employee_id='.$users['agent_b1']->id;
+        $payload = ['report_date' => '2026-05-05', 'employee_id' => $users['agent_a1']->id, 'ads' => 7, 'calls' => 8];
+        $this->getJson($local)->assertOk()->assertJsonPath('editable', false);
+        $this->getJson($foreign)->assertForbidden();
+        $this->patchJson('/api/kpi/daily/report', $payload)->assertForbidden();
+        $role->forceFill(['permissions' => ['daily_reports.employee.scope.branch', 'daily_reports.employee.edit']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson($local)->assertOk()->assertJsonPath('editable', true);
+        $this->patchJson('/api/kpi/daily/report', $payload)->assertOk()->assertJsonPath('manual.calls', 8);
+        $this->patchJson('/api/kpi/daily/report', [...$payload, 'employee_id' => $users['agent_b1']->id])->assertForbidden();
+        $role->forceFill(['permissions' => ['daily_reports.employee.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson($foreign)->assertOk()->assertJsonPath('editable', false);
+        $this->patchJson('/api/kpi/daily/report', $payload)->assertForbidden();
+        $role->forceFill(['permissions' => ['daily_reports.employee.edit']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson($local)->assertForbidden();
+        $this->patchJson('/api/kpi/daily/report', $payload)->assertForbidden();
+    }
+
     private function seedContext(): array
     {
         $roles = collect(['agent', 'mop', 'rop', 'branch_director', 'admin', 'superadmin'])

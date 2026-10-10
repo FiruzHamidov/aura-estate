@@ -1008,6 +1008,37 @@ class ReelFeatureTest extends TestCase
         ])->assertForbidden();
     }
 
+    public function test_reel_grants_separate_edit_publish_delete_and_preserve_branch_scope(): void
+    {
+        Storage::fake('public');
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $actor = $this->createUser('client', '930199001', 20);
+        $creator = $this->createUser('agent', '930199002', 20);
+        $other = $this->createUser('intern', '930199003', 30);
+        $role = $actor->role;
+        $role->forceFill(['permissions' => ['reels.view', 'reels.scope.branch', 'reels.update']])->save();
+        $reels = [];
+        foreach ([$creator, $other] as $author) $reels[] = Reel::create([
+            'created_by' => $author->id, 'title' => 'Draft', 'video_url' => 'reels/originals/fixture.mp4',
+            'mp4_url' => 'reels/originals/fixture.mp4', 'status' => Reel::STATUS_DRAFT,
+            'transcode_status' => Reel::TRANSCODE_COMPLETED,
+        ]);
+        Sanctum::actingAs($actor->fresh());
+        $path = '/api/reels/'.$reels[0]->id;
+        $this->patchJson($path, ['title' => 'Allowed'])->assertOk();
+        $this->patchJson('/api/reels/'.$reels[1]->id, ['title' => 'Foreign'])->assertForbidden();
+        $this->patchJson($path.'/publish', ['status' => 'published'])->assertForbidden();
+        $this->deleteJson($path)->assertForbidden();
+        $role->forceFill(['permissions' => ['reels.view', 'reels.scope.all', 'reels.publish']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson($path.'/publish', ['status' => 'published'])->assertOk();
+        $this->patchJson($path, ['title' => 'Revoked'])->assertForbidden();
+        $role->forceFill(['permissions' => ['reels.view', 'reels.scope.all', 'reels.delete']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->deleteJson($path)->assertOk();
+        $this->assertSoftDeleted('reels', ['id' => $reels[0]->id]);
+    }
+
     private function createUser(string $roleSlug, string $phone, ?int $branchId = null): User
     {
         $role = Role::create([

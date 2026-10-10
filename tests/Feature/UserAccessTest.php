@@ -388,6 +388,31 @@ class UserAccessTest extends TestCase
         $response->assertJsonPath('inactive_count', 0);
     }
 
+    public function test_legacy_dismissal_uses_configured_recipients_for_manual_and_automatic_transfer(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900092001', 'role_id' => $adminRole->id, 'status' => 'active']);
+        $recipientRole = Role::create(['name' => 'Recipient', 'slug' => 'custom_legacy_receiver']);
+        $recipientRole->forceFill(['permissions' => []])->save();
+        $recipient = User::create(['name' => 'Recipient', 'phone' => '900092002', 'role_id' => $recipientRole->id, 'status' => 'active']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agentRole->forceFill(['permissions' => []])->save();
+        $revoked = User::create(['name' => 'Revoked agent', 'phone' => '900092003', 'role_id' => $agentRole->id, 'status' => 'active']);
+        Sanctum::actingAs($admin);
+        foreach ([false, true] as $index => $automatic) {
+            $employee = User::create(['name' => 'Dismissed', 'phone' => '90009201'.$index, 'role_id' => $agentRole->id, 'status' => 'active']);
+            $property = DB::table('properties')->insertGetId(['title' => 'Work', 'agent_id' => $employee->id, 'created_by' => $employee->id, 'moderation_status' => 'approved']);
+            $this->deleteJson('/api/user/'.$employee->id, ['agent_id' => $revoked->id])->assertUnprocessable();
+            $recipientRole->forceFill(['permissions' => []])->save();
+            $this->deleteJson('/api/user/'.$employee->id, ['agent_id' => $recipient->id])->assertUnprocessable();
+            $this->assertDatabaseHas('properties', ['id' => $property, 'agent_id' => $employee->id]);
+            $recipientRole->forceFill(['permissions' => ['users.subject.legacy_property_recipient']])->save();
+            $this->deleteJson('/api/user/'.$employee->id, $automatic ? ['distribute_to_agents' => true] : ['agent_id' => $recipient->id])->assertOk();
+            $this->assertDatabaseHas('properties', ['id' => $property, 'agent_id' => $recipient->id]);
+        }
+    }
+
     public function test_dismissal_transfers_properties_to_co_owner_before_redistribution(): void
     {
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
@@ -751,6 +776,31 @@ class UserAccessTest extends TestCase
             ->assertJsonPath('branch_group_id', $groupA->id);
     }
 
+    public function test_profile_field_permissions_are_independent_and_rechecked_before_saving(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Profile editor', 'slug' => 'profile_editor']);
+        $user = User::create(['name' => 'Original', 'phone' => '939555551', 'role_id' => $role->id, 'status' => 'active']);
+        $grant = function (array $permissions) use ($role, $user) {
+            $role->forceFill(['permissions' => $permissions])->save();
+            Sanctum::actingAs($user->fresh());
+        };
+        $grant([]);
+        $this->patchJson('/api/user/profile', ['name' => 'Denied'])->assertForbidden();
+        $grant(['profile.name.edit']);
+        $this->patchJson('/api/user/profile', ['name' => 'Renamed'])->assertOk()->assertJsonPath('name', 'Renamed');
+        $this->patchJson('/api/user/profile', ['name' => 'Atomic', 'description' => 'Denied'])->assertForbidden();
+        $this->assertSame('Renamed', $user->fresh()->name);
+        $grant(['profile.details.edit']);
+        $this->patchJson('/api/user/profile', ['description' => 'Allowed'])->assertOk()->assertJsonPath('description', 'Allowed');
+        $this->patchJson('/api/user/profile', ['name' => 'Denied'])->assertForbidden();
+        $grant(['profile.name.edit']);
+        auth()->user()->load('role');
+        $role->forceFill(['permissions' => []])->save();
+        $this->patchJson('/api/user/profile', ['name' => 'Stale'])->assertForbidden();
+        $this->assertSame('Renamed', $user->fresh()->name);
+    }
+
     public function test_authenticated_user_can_fetch_own_profile(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);
@@ -940,6 +990,83 @@ class UserAccessTest extends TestCase
         ])->assertStatus(422);
     }
 
+    public function test_custom_role_organization_requirements_preserve_group_branch_integrity(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $branch = Branch::create(['name' => 'Own']);
+        $other = Branch::create(['name' => 'Other']);
+        $group = BranchGroup::create(['name' => 'Own group', 'branch_id' => $branch->id]);
+        $foreign = BranchGroup::create(['name' => 'Other group', 'branch_id' => $other->id]);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900093001', 'role_id' => $adminRole->id, 'branch_id' => $branch->id]);
+        $role = Role::create(['name' => 'Custom organization', 'slug' => 'custom_organization']);
+        $role->forceFill(['permissions' => ['users.subject.branch_required', 'users.subject.group_assignment', 'users.subject.group_required']])->save();
+        Sanctum::actingAs($admin);
+        $payload = ['name' => 'Custom employee', 'phone' => '900093002', 'role_id' => $role->id];
+        $this->postJson('/api/user', $payload)->assertUnprocessable();
+        $this->postJson('/api/user', [...$payload, 'branch_id' => $branch->id])->assertUnprocessable();
+        $this->postJson('/api/user', [...$payload, 'branch_id' => $branch->id, 'branch_group_id' => $foreign->id])->assertUnprocessable();
+        $id = $this->postJson('/api/user', [...$payload, 'branch_id' => $branch->id, 'branch_group_id' => $group->id])->assertCreated()->json('id');
+        $this->assertDatabaseHas('users', ['id' => $id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $role->forceFill(['permissions' => ['users.subject.branch_required', 'users.subject.group_assignment']])->save();
+        $this->patchJson('/api/user/'.$id, ['branch_group_id' => null])->assertOk();
+        $this->assertDatabaseHas('users', ['id' => $id, 'branch_group_id' => null]);
+        $role->forceFill(['permissions' => []])->save();
+        $this->postJson('/api/user', [...$payload, 'phone' => '900093003'])->assertCreated();
+        $this->patchJson('/api/user/'.$id, ['branch_group_id' => $group->id])->assertOk();
+        $this->assertDatabaseHas('users', ['id' => $id, 'branch_group_id' => null]);
+    }
+
+    public function test_custom_role_hr_eligibility_is_independent_for_creation_editing_and_employment(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $branch = Branch::create(['name' => 'HR branch']);
+        $role = Role::create(['name' => 'Custom employee', 'slug' => 'custom_hr_employee']);
+        $role->forceFill(['permissions' => []])->save();
+        $hrRole = Role::create(['name' => 'HR', 'slug' => 'hr']);
+        $hrRole->forceFill(['permissions' => [...app(\App\Services\Rbac\PermissionCatalog::class)->defaults('hr'), 'users.assign_role.custom_hr_employee']])->save();
+        $hr = User::create(['name' => 'HR', 'phone' => '900090001', 'role_id' => $hrRole->id, 'branch_id' => $branch->id, 'status' => 'active']);
+        Sanctum::actingAs($hr);
+        $payload = ['name' => 'Custom employee', 'phone' => '900090002', 'role_id' => $role->id, 'branch_id' => $branch->id];
+        $this->postJson('/api/user', $payload)->assertUnprocessable();
+        $role->forceFill(['permissions' => ['users.subject.hr_create']])->save();
+        $id = $this->postJson('/api/user', $payload)->assertCreated()->json('id');
+        $this->patchJson('/api/user/'.$id, ['name' => 'Edited'])->assertForbidden();
+        $role->forceFill(['permissions' => ['users.subject.hr_edit']])->save();
+        // Retaining the current role needs no new assignment grant.
+        $hrRole->forceFill(['permissions' => app(\App\Services\Rbac\PermissionCatalog::class)->defaults('hr')])->save();
+        $this->patchJson('/api/user/'.$id, ['name' => 'Edited', 'role_id' => $role->id])->assertOk();
+        $this->deleteJson('/api/user/'.$id)->assertForbidden();
+        $role->forceFill(['permissions' => ['users.subject.hr_employment']])->save();
+        $this->deleteJson('/api/user/'.$id, ['distribute_to_agents' => true])->assertOk();
+        $role->forceFill(['permissions' => []])->save();
+        $this->postJson('/api/user/'.$id.'/restore')->assertForbidden();
+        $this->assertDatabaseHas('users', ['id' => $id, 'status' => 'inactive']);
+        $role->forceFill(['permissions' => ['users.subject.hr_employment']])->save();
+        $this->postJson('/api/user/'.$id.'/restore')->assertOk();
+        $this->assertDatabaseHas('users', ['id' => $id, 'status' => 'active']);
+    }
+
+    public function test_branch_manager_custom_target_policy_preserves_branch_scope(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $branch = Branch::create(['name' => 'Branch']);
+        $other = Branch::create(['name' => 'Other']);
+        $managerRole = Role::create(['name' => 'Manager', 'slug' => 'custom_branch_manager']);
+        $managerRole->forceFill(['permissions' => ['users.view', 'users.update', 'users.scope.branch', 'users.manage_branch_roles']])->save();
+        $targetRole = Role::create(['name' => 'Employee', 'slug' => 'custom_branch_employee']);
+        $targetRole->forceFill(['permissions' => ['users.subject.branch_manage']])->save();
+        $actor = User::create(['name' => 'Manager', 'phone' => '900091001', 'role_id' => $managerRole->id, 'branch_id' => $branch->id, 'status' => 'active']);
+        $employee = User::create(['name' => 'Employee', 'phone' => '900091002', 'role_id' => $targetRole->id, 'branch_id' => $branch->id, 'status' => 'active']);
+        $foreign = User::create(['name' => 'Foreign', 'phone' => '900091003', 'role_id' => $targetRole->id, 'branch_id' => $other->id, 'status' => 'active']);
+        Sanctum::actingAs($actor);
+        $this->patchJson('/api/user/'.$employee->id, ['name' => 'Updated', 'role_id' => $targetRole->id])->assertOk();
+        $this->patchJson('/api/user/'.$foreign->id, ['name' => 'Forbidden'])->assertForbidden();
+        $targetRole->forceFill(['permissions' => []])->save();
+        $this->patchJson('/api/user/'.$employee->id, ['name' => 'Revoked'])->assertForbidden();
+        $this->assertDatabaseHas('users', ['id' => $employee->id, 'name' => 'Updated']);
+    }
+
     public function test_hr_can_create_and_manage_only_approved_employee_roles_and_edit_clients(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
@@ -1053,6 +1180,39 @@ class UserAccessTest extends TestCase
         $this->patchJson('/api/user/'.$superadmin->id, ['name' => 'Blocked'])->assertStatus(403);
         $this->deleteJson('/api/user/'.$admin->id, ['distribute_to_agents' => true])->assertStatus(403);
         $this->deleteJson('/api/user/'.$client->id, ['distribute_to_agents' => true])->assertStatus(403);
+    }
+
+    public function test_hr_employee_to_client_transition_requires_opt_in_assignment_and_record_handover(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $branch = Branch::create(['name' => 'Branch']);
+        $group = BranchGroup::create(['name' => 'Group', 'branch_id' => $branch->id]);
+        $role = Role::create(['name' => 'Employee', 'slug' => 'custom_employee_transition']);
+        $role->forceFill(['permissions' => ['users.subject.hr_edit']])->save();
+        $clientRole = Role::create(['name' => 'Client', 'slug' => 'client']);
+        $clientRole->forceFill(['permissions' => []])->save();
+        $hrRole = Role::create(['name' => 'HR', 'slug' => 'hr']);
+        $base = [...app(\App\Services\Rbac\PermissionCatalog::class)->defaults('hr'), 'users.assign_role.client'];
+        $hrRole->forceFill(['permissions' => $base])->save();
+        $hr = User::create(['name' => 'HR', 'phone' => '900092001', 'role_id' => $hrRole->id]);
+        $employee = User::create(['name' => 'Employee', 'phone' => '900092002', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($hr);
+        $path = '/api/user/'.$employee->id;
+        $payload = ['role_id' => $clientRole->id];
+        $this->patchJson($path, $payload)->assertUnprocessable();
+        $hrRole->forceFill(['permissions' => [...$base, 'users.hr.convert_employee_to_client']])->save();
+        Sanctum::actingAs($hr->fresh());
+        $propertyId = DB::table('properties')->insertGetId(['title' => 'Active work', 'agent_id' => $employee->id]);
+        $this->patchJson($path, $payload)->assertConflict();
+        $this->assertDatabaseHas('users', ['id' => $employee->id, 'role_id' => $role->id, 'branch_group_id' => $group->id]);
+        $this->assertDatabaseHas('properties', ['id' => $propertyId, 'agent_id' => $employee->id]);
+        DB::table('properties')->where('id', $propertyId)->update(['moderation_status' => 'archived']);
+        $hrRole->forceFill(['permissions' => [...array_diff($base, ['users.assign_role.client']), 'users.hr.convert_employee_to_client']])->save();
+        Sanctum::actingAs($hr->fresh());
+        $this->patchJson($path, $payload)->assertUnprocessable();
+        $hrRole->forceFill(['permissions' => [...$base, 'users.hr.convert_employee_to_client']])->save();
+        Sanctum::actingAs($hr->fresh());
+        $this->patchJson($path, $payload)->assertOk()->assertJsonPath('role.slug', 'client')->assertJsonPath('branch_id', null)->assertJsonPath('branch_group_id', null);
     }
 
     public function test_hr_can_convert_clients_only_to_creatable_roles_with_required_scope(): void
@@ -1885,6 +2045,75 @@ class UserAccessTest extends TestCase
         $this->assertSame($dismissedAgent->id, $pendingProperty->created_by);
     }
 
+    public function test_deal_default_assignee_is_configurable_and_preserves_explicit_choice(): void
+    {
+        $role = Role::create(['name' => 'Custom creator', 'slug' => 'custom_deal_creator']);
+        $actor = User::create(['name' => 'Creator', 'phone' => '900003112', 'role_id' => $role->id, 'status' => 'active']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $access = app(\App\Support\DealAccess::class);
+        foreach ([[], ['deals.defaults.assign_creator'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            $result = $access->normalizeMutationData([], $actor->fresh());
+            $this->assertSame($rights ? $actor->id : null, $result['responsible_agent_id'] ?? null);
+            $explicit = $access->normalizeMutationData(['responsible_agent_id' => 321], $actor->fresh());
+            $this->assertSame(321, $explicit['responsible_agent_id']);
+        }
+        foreach (['agent', 'mop', 'manager', 'operator', 'rop', 'admin'] as $slug) {
+            $legacy = new Role(['slug' => $slug]);
+            $this->assertSame(in_array($slug, ['agent', 'manager', 'operator']), $legacy->hasPermission('deals.defaults.assign_creator'));
+        }
+    }
+
+    public function test_lead_default_assignee_is_configurable_without_overriding_explicit_choice(): void
+    {
+        $role = Role::create(['name' => 'Custom creator', 'slug' => 'custom_lead_creator']);
+        $actor = User::create(['name' => 'Creator', 'phone' => '900003110', 'role_id' => $role->id, 'status' => 'active']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $access = app(\App\Support\LeadAccess::class);
+        foreach ([[], ['leads.defaults.assign_creator'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            $result = $access->normalizeCreationData([], $actor->fresh());
+            $this->assertSame($rights ? $actor->id : null, $result['responsible_agent_id'] ?? null);
+            $explicit = $access->normalizeCreationData(['responsible_agent_id' => 321], $actor->fresh());
+            $this->assertSame(321, $explicit['responsible_agent_id']);
+            $this->assertSame($actor->id, $explicit['created_by']);
+        }
+        foreach (['agent', 'mop', 'manager', 'operator', 'rop', 'admin'] as $slug) {
+            $legacy = new Role(['slug' => $slug]);
+            $this->assertSame(in_array($slug, ['agent', 'mop', 'manager', 'operator']), $legacy->hasPermission('leads.defaults.assign_creator'));
+        }
+    }
+
+    public function test_custom_role_participates_independently_in_report_public_and_mobile_lists(): void
+    {
+        $branch = Branch::create(['name' => 'Local']);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'superadmin']);
+        $role = Role::create(['name' => 'Custom employee', 'slug' => 'custom_directory_employee']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900003101', 'role_id' => $adminRole->id,
+            'branch_id' => $branch->id, 'status' => 'active']);
+        $employee = User::create(['name' => 'Employee', 'phone' => '900003102', 'role_id' => $role->id,
+            'branch_id' => $branch->id, 'status' => 'active']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        Sanctum::actingAs($admin->fresh());
+        foreach ([[], ['users.subject.report_selection'], ['users.subject.public_agent'],
+            ['clients.subject.mobile_filter'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            foreach ([['/api/user?report_agents=1', 'data', 'users.subject.report_selection'],
+                ['/api/user/agents', null, 'users.subject.public_agent'],
+                ['/api/mobile/clients/filters', 'responsible_agents', 'clients.subject.mobile_filter']] as [$url, $key, $permission]) {
+                $response = $this->getJson($url)->assertOk();
+                $ids = collect($response->json($key))->pluck('id')->all();
+                $this->assertSame(in_array($permission, $rights), in_array($employee->id, $ids), $permission);
+            }
+        }
+        $role->forceFill(['permissions' => ['users.subject.public_agent', 'clients.subject.mobile_filter']])->save();
+        $employee->forceFill(['status' => 'inactive'])->save();
+        $this->getJson('/api/user/agents')->assertOk()->assertJsonCount(0);
+        $this->getJson('/api/mobile/clients/filters')->assertOk()->assertJsonCount(0, 'responsible_agents');
+        $this->getJson('/api/user/agents?status=inactive')->assertOk()->assertJsonPath('0.id', $employee->id);
+        $this->assertNotNull($employee->fresh());
+    }
+
     public function test_user_index_exposes_meta_and_can_filter_report_agents(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);
@@ -2530,6 +2759,46 @@ class UserAccessTest extends TestCase
         $this->postJson('/api/external-agents', [
             'name' => 'Blocked partner', 'phone' => '900000211',
         ])->assertForbidden();
+    }
+
+    public function test_external_agents_are_managed_by_explicit_actions_and_scopes(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $branch = Branch::create(['name' => 'A']);
+        $foreignBranch = Branch::create(['name' => 'B']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'A1']);
+        $otherGroup = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'A2']);
+        $role = Role::create(['name' => 'Partner operator', 'slug' => 'partner_operator']);
+        $external = Role::create(['name' => 'External', 'slug' => 'external_agent']);
+        $actor = User::create(['name' => 'Operator', 'phone' => '900000301', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'active']);
+        User::create(['name' => 'Same branch partner', 'phone' => '900000302', 'role_id' => $external->id, 'branch_id' => $branch->id, 'branch_group_id' => $otherGroup->id, 'status' => 'active']);
+        User::create(['name' => 'Foreign partner', 'phone' => '900000303', 'role_id' => $external->id, 'branch_id' => $foreignBranch->id, 'status' => 'active']);
+        $grant = function (array $permissions) use ($role, $actor) {
+            $role->forceFill(['permissions' => $permissions])->save();
+            Sanctum::actingAs($actor->fresh());
+        };
+        $payload = ['name' => 'New partner', 'phone' => '900000304', 'branch_id' => $foreignBranch->id];
+        $grant([]);
+        $this->getJson('/api/external-agents')->assertForbidden();
+        $this->postJson('/api/external-agents', $payload)->assertForbidden();
+        $grant(['external_agents.create']);
+        $this->postJson('/api/external-agents', $payload)->assertCreated()->assertJsonPath('branch_id', $branch->id)->assertJsonPath('branch_group_id', $group->id);
+        $this->getJson('/api/external-agents')->assertForbidden();
+        foreach (['group' => 1, 'branch' => 2, 'all' => 3] as $scope => $count) {
+            $grant(['external_agents.view', 'external_agents.scope.'.$scope]);
+            $this->getJson('/api/external-agents')->assertOk()->assertJsonPath('total', $count);
+        }
+        $grant(['external_agents.view']);
+        $this->getJson('/api/external-agents')->assertOk()->assertJsonPath('total', 0);
+        DB::table('users')->where('id', $actor->id)->update(['branch_group_id' => null]);
+        $grant(['external_agents.view', 'external_agents.create', 'external_agents.scope.branch', 'external_agents.require_group']);
+        $this->getJson('/api/external-agents')->assertForbidden();
+        $this->postJson('/api/external-agents', ['name' => 'Blocked partner', 'phone' => '900000305'])->assertForbidden();
+        $grant(['external_agents.create']);
+        // The request retains a loaded actor while the saved role loses its grant.
+        DB::table('roles')->where('id', $role->id)->update(['permissions' => json_encode([])]);
+        $this->postJson('/api/external-agents', ['name' => 'Revoked partner', 'phone' => '900000306'])->assertForbidden();
+        $this->assertDatabaseMissing('users', ['phone' => '900000306']);
     }
 
     public function test_mop_user_index_returns_only_active_users_from_own_branch(): void

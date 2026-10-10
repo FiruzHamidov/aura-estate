@@ -70,7 +70,7 @@ final class AttendanceWebController extends Controller
                 'date_to' => $to->toDateString(),
                 'permissions' => $this->access->permissions($request->user()),
                 'access_scope' => app(\App\Support\RopGroupAccess::class)->describe($request->user()),
-                'selectable_branches' => $request->user()->hasRole('security')
+                'selectable_branches' => $request->user()->hasPermission('attendance.scope.assigned_branches')
                     ? \App\Models\Branch::query()->whereIn('id', $this->access->securityBranchIds($request->user()))->orderBy('name')->get(['id', 'name'])
                     : null,
                 'summary' => $this->summary($request->user(), $activeUsersCount, $from, $to),
@@ -137,8 +137,8 @@ final class AttendanceWebController extends Controller
             ->whereDate('date_from', '<=', $date)->whereDate('date_to', '>=', $date)->first();
         $holiday = $this->holidays->holiday($date);
         $schedule = ($settings?->schedule ?? config('attendance.default_schedule', []))[(string) $day->dayOfWeekIso] ?? null;
-        if ($request->user()->hasRole('rop') && ! app(\App\Support\RopGroupAccess::class)->allows($request->user(), $user)) $schedule = null;
-        if ($summary?->schedule_snapshot !== null || ($request->user()->hasRole('rop') && \Schema::hasColumn('attendance_daily_summaries', 'schedule_snapshot'))) {
+        if ($request->user()->usesAssignedGroupScope() && ! app(\App\Support\RopGroupAccess::class)->allows($request->user(), $user)) $schedule = null;
+        if ($summary?->schedule_snapshot !== null || ($request->user()->usesAssignedGroupScope() && \Schema::hasColumn('attendance_daily_summaries', 'schedule_snapshot'))) {
             $schedule = $summary?->schedule_snapshot['schedule'][(string) $day->dayOfWeekIso] ?? null;
         }
         $events = $this->facts(AttendanceEvent::class)
@@ -147,7 +147,7 @@ final class AttendanceWebController extends Controller
             ->whereBetween('occurred_at', [$day->utc(), $day->endOfDay()->utc()])
             ->orderBy('occurred_at')->orderBy('id')->get();
         $comment = $this->comments()->with('author:id,name')->where('user_id', $user->id)->whereDate('work_date', $date)->first();
-        if ($request->user()->hasRole('rop')) {
+        if ($request->user()->usesAssignedGroupScope()) {
             $currentEmployee = app(\App\Support\RopGroupAccess::class)->employees($request->user())->whereKey($user->id)->exists();
             abort_unless($currentEmployee || $summary || $events->isNotEmpty() || $leave || $duty, 404, 'ROP_RECORD_NOT_ACCESSIBLE');
         }
@@ -184,7 +184,7 @@ final class AttendanceWebController extends Controller
     private function comments(): Builder
     {
         $query = $this->facts(AttendanceDailyComment::class);
-        if (request()->user()->hasRole('rop')) {
+        if (request()->user()->usesAssignedGroupScope()) {
             $query->whereExists($this->facts(AttendanceDailySummary::class)->selectRaw('1')
                 ->whereColumn('attendance_daily_summaries.user_id', 'attendance_daily_comments.user_id')
                 ->whereColumn('attendance_daily_summaries.work_date', 'attendance_daily_comments.work_date'));
@@ -232,11 +232,11 @@ final class AttendanceWebController extends Controller
         $this->groupScope->filterUsers($query, request()->user(), $filters, $from->toDateString(), $to->toDateString());
         if (isset($filters['branch_ids'])) $query->whereIn('users.branch_id', $filters['branch_ids']);
         foreach (['branch_id', 'branch_group_id'] as $field) {
-            if (isset($filters[$field]) && ! request()->user()->hasRole('rop')) {
+            if (isset($filters[$field]) && ! request()->user()->usesAssignedGroupScope()) {
                 $query->where('users.'.$field, $filters[$field]);
             }
         }
-        if (isset($filters['role']) && ! request()->user()->hasRole('rop')) {
+        if (isset($filters['role']) && ! request()->user()->usesAssignedGroupScope()) {
             $query->whereHas('role', fn (Builder $roles) => $roles->where('slug', $filters['role']));
         }
         if (isset($filters['user_id'])) {
@@ -320,7 +320,7 @@ final class AttendanceWebController extends Controller
                     $holiday = $data['holidays']->get($date);
 
                     $workingDay = $this->isWorkingDay($data['schedules']->get($user->id), $date, $data['holidays'], $summary?->schedule_snapshot);
-                    if (request()->user()->hasRole('rop') && $summary?->schedule_snapshot === null) $workingDay = $summary !== null;
+                    if (request()->user()->usesAssignedGroupScope() && $summary?->schedule_snapshot === null) $workingDay = $summary !== null;
                     return [$date => $this->dayPayload($summary, $leave === null && $workingDay, $methods, $comment, $leave, $holiday, $duty, $data['events']->get($user->id, collect())->get($date, collect()))];
                 })->all(),
             ];
@@ -331,13 +331,13 @@ final class AttendanceWebController extends Controller
     {
         $data = $this->matrixData($users, $from, $to);
 
-        return $users->groupBy(fn (User $user) => request()->user()->hasRole('rop') ? request()->user()->branch_id : ($user->branch_id ?? 0))->map(function (Collection $branchUsers) use ($dates, $data) {
-            $branch = request()->user()->hasRole('rop') ? request()->user()->branch : $branchUsers->first()?->branch;
+        return $users->groupBy(fn (User $user) => request()->user()->usesAssignedGroupScope() ? request()->user()->branch_id : ($user->branch_id ?? 0))->map(function (Collection $branchUsers) use ($dates, $data) {
+            $branch = request()->user()->usesAssignedGroupScope() ? request()->user()->branch : $branchUsers->first()?->branch;
 
             return [
                 'branch' => ['id' => $branch?->id ?? 0, 'name' => $branch?->name ?? 'Без филиала'],
                 'days' => $dates->mapWithKeys(function (string $date) use ($branchUsers, $data) {
-                    $scheduled = $branchUsers->filter(fn (User $user) => (! request()->user()->hasRole('rop') || $data['summaries']->get($user->id, collect())->has($date)) && $this->leaveForDate($data['leaves']->get($user->id, collect()), $date) === null
+                    $scheduled = $branchUsers->filter(fn (User $user) => (! request()->user()->usesAssignedGroupScope() || $data['summaries']->get($user->id, collect())->has($date)) && $this->leaveForDate($data['leaves']->get($user->id, collect()), $date) === null
                         && $this->isWorkingDay($data['schedules']->get($user->id), $date, $data['holidays']));
                     $summaries = $scheduled->map(fn (User $user) => $data['summaries']->get($user->id, collect())->get($date))->filter();
                     $checkedIn = $summaries->whereIn('status', ['present', 'late', 'incomplete'])->count();
@@ -476,7 +476,7 @@ final class AttendanceWebController extends Controller
             $rows->whereNotExists(function ($query) {
                 $query->selectRaw('1')->from('attendance_leaves')
                     ->whereColumn('attendance_leaves.user_id', 'attendance_daily_summaries.user_id')
-                    ->when(request()->user()->hasRole('rop'), fn ($leaves) => $leaves->whereColumn('attendance_leaves.branch_group_id', 'attendance_daily_summaries.branch_group_id'))
+                    ->when(request()->user()->usesAssignedGroupScope(), fn ($leaves) => $leaves->whereColumn('attendance_leaves.branch_group_id', 'attendance_daily_summaries.branch_group_id'))
                     ->whereColumn('attendance_leaves.date_from', '<=', 'attendance_daily_summaries.work_date')
                     ->whereColumn('attendance_leaves.date_to', '>=', 'attendance_daily_summaries.work_date');
             })->whereNotExists(function ($query) {
@@ -498,7 +498,7 @@ final class AttendanceWebController extends Controller
     private function userPayload(User $user): array
     {
         $viewer = request()->user();
-        if ($viewer->hasRole('rop') && ! app(\App\Support\RopGroupAccess::class)->allows($viewer, $user)) {
+        if ($viewer->usesAssignedGroupScope() && ! app(\App\Support\RopGroupAccess::class)->allows($viewer, $user)) {
             return $user->only(['id', 'name']);
         }
         return [

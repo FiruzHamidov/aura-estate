@@ -438,6 +438,25 @@ class CrmOperatorManagerFeatureTest extends TestCase
             ->assertJsonPath('branch_id', $branchA->id);
     }
 
+    public function test_custom_report_subject_policy_preserves_branch_scope_and_revocation(): void
+    {
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $branchA = Branch::create(['name' => 'Branch A']);
+        $branchB = Branch::create(['name' => 'Branch B']);
+        $directorRole = Role::forceCreate(['name' => 'Reader', 'slug' => 'custom_reader', 'permissions' => ['crm_reports.scope.branch']]);
+        $subjectRole = Role::forceCreate(['name' => 'Subject', 'slug' => 'custom_subject', 'permissions' => ['crm_reports.subject.operator']]);
+        $reader = $this->createUser($directorRole, $branchA, 'Reader');
+        $own = $this->createUser($subjectRole, $branchA, 'Own branch');
+        $this->createUser($subjectRole, $branchB, 'Other branch');
+        $this->createLead($branchA, $own, $own, 'Custom lead');
+        Sanctum::actingAs($reader);
+        $this->getJson('/api/crm/reports/performance?role_type=operator&period=month')
+            ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.user.id', $own->id);
+        $this->getJson('/api/crm/reports/performance?role_type=operator&branch_id='.$branchB->id)->assertForbidden();
+        $subjectRole->forceFill(['permissions' => []])->save();
+        $this->getJson('/api/crm/reports/performance?role_type=operator&period=month')->assertOk()->assertJsonCount(0, 'data');
+    }
+
     public function test_branch_director_report_is_limited_to_own_branch_operators(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
@@ -854,6 +873,43 @@ class CrmOperatorManagerFeatureTest extends TestCase
             'user_id' => $leadAgent->id,
             'role' => Client::COLLABORATOR_ROLE_VIEWER,
         ]);
+    }
+
+    public function test_report_grants_override_role_names_and_can_be_revoked(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $branchA = Branch::create(['name' => 'A']);
+        $branchB = Branch::create(['name' => 'B']);
+        $readerRole = Role::create(['name' => 'Client', 'slug' => 'client']);
+        $readerRole->forceFill(['permissions' => ['crm_reports.scope.branch']])->save();
+        $operatorRole = Role::create(['name' => 'Operator', 'slug' => 'operator']);
+        $reader = $this->createUser($readerRole, $branchA, 'Reader');
+        $operatorA = $this->createUser($operatorRole, $branchA, 'Operator A');
+        $operatorB = $this->createUser($operatorRole, $branchB, 'Operator B');
+        Sanctum::actingAs($reader);
+        $url = '/api/crm/reports/performance?role_type=operator';
+        $this->getJson($url)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.user.id', $operatorA->id);
+        $this->getJson($url.'&branch_id='.$branchB->id)->assertForbidden();
+        $readerRole->forceFill(['permissions' => ['crm_reports.scope.all']])->save();
+        Sanctum::actingAs($reader->fresh());
+        $this->getJson($url)->assertOk()->assertJsonCount(2, 'data');
+        $this->getJson($url.'&responsible_user_id='.$operatorB->id)->assertOk()->assertJsonPath('data.0.user.id', $operatorB->id);
+        $readerRole->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($reader->fresh());
+        $this->getJson($url)->assertForbidden();
+    }
+
+    public function test_personal_report_cannot_select_another_employee_or_report_type(): void
+    {
+        $branch = Branch::create(['name' => 'A']);
+        $role = Role::create(['name' => 'Operator', 'slug' => 'operator']);
+        $actor = $this->createUser($role, $branch, 'Actor');
+        $other = $this->createUser($role, $branch, 'Other');
+        Sanctum::actingAs($actor);
+        $url = '/api/crm/reports/performance?role_type=operator';
+        $this->getJson($url)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.user.id', $actor->id);
+        $this->getJson($url.'&responsible_user_id='.$other->id)->assertForbidden();
+        $this->getJson('/api/crm/reports/performance?role_type=manager')->assertForbidden();
     }
 
     private function createUser(Role $role, Branch $branch, string $name): User

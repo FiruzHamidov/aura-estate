@@ -282,6 +282,217 @@ class ExternalPropertyRequestFeatureTest extends TestCase
         ]);
     }
 
+    public function test_internal_request_actions_and_scopes_can_be_configured_for_a_custom_role(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Request reader', 'slug' => 'request_reader']);
+        $actor = $this->user($role, '939111111', branchId: 1, branchGroupId: 1);
+        $owner = $this->user($this->externalRole, '939111112', branchId: 1, branchGroupId: 1);
+        $own = ExternalPropertyRequest::create(['external_agent_id' => $owner->id, 'status' => 'submitted', 'branch_id' => 1, 'branch_group_id' => 1]);
+        ExternalPropertyRequest::create(['external_agent_id' => $owner->id, 'status' => 'submitted', 'branch_id' => 1, 'branch_group_id' => 2]);
+        ExternalPropertyRequest::create(['external_agent_id' => $owner->id, 'status' => 'submitted', 'branch_id' => 2, 'branch_group_id' => 3, 'assigned_agent_id' => $actor->id]);
+        $grant = function (array $permissions) use ($actor, $role) {
+            $role->forceFill(['permissions' => $permissions])->save();
+            Sanctum::actingAs($actor->fresh());
+        };
+        $grant([]);
+        $this->getJson('/api/external-agent-requests')->assertForbidden();
+        foreach (['group' => 1, 'branch' => 2, 'assigned_or_org' => 3, 'all' => 3] as $scope => $total) {
+            $grant(['external_requests.view', 'external_requests.scope.'.$scope]);
+            $this->getJson('/api/external-agent-requests')->assertOk()->assertJsonPath('total', $total);
+        }
+        $this->getJson('/api/external-agent-requests/'.$own->id)->assertOk();
+        $this->patchJson('/api/external-agent-requests/'.$own->id.'/assign', ['assigned_agent_id' => $actor->id])->assertForbidden();
+        $this->patchJson('/api/external-agent-requests/'.$own->id.'/status', ['status' => 'rejected'])->assertForbidden();
+        $this->getJson('/api/external-agent-requests/'.$own->id.'/prefill')->assertForbidden();
+        $grant(['external_requests.status', 'external_requests.scope.group']);
+        $this->patchJson('/api/external-agent-requests/'.$own->id.'/status', ['status' => 'needs_info', 'comment' => 'Нужны подробности'])->assertOk();
+        $this->getJson('/api/external-agent-requests')->assertForbidden();
+        $grant(['external_requests.view']);
+        $this->getJson('/api/external-agent-requests')->assertOk()->assertJsonPath('total', 0);
+        $grant([]);
+        $this->getJson('/api/external-agent-requests/'.$own->id)->assertForbidden();
+    }
+
+    public function test_assignment_restrictions_and_recipient_eligibility_are_configurable(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Dispatcher', 'slug' => 'dispatcher']);
+        $recipientRole = Role::create(['name' => 'Recipient', 'slug' => 'recipient']);
+        $actor = $this->user($role, '939222221', branchId: 1, branchGroupId: 1);
+        $recipient = $this->user($recipientRole, '939222222', branchId: 2, branchGroupId: 2);
+        $owner = $this->user($this->externalRole, '939222223');
+        $request = ExternalPropertyRequest::create(['external_agent_id' => $owner->id, 'status' => 'submitted', 'branch_id' => 1, 'branch_group_id' => 1]);
+        $base = ['external_requests.assign', 'external_requests.scope.all', 'external_requests.receive'];
+        $grant = function (array $permissions) use ($actor, $role) {
+            $role->forceFill(['permissions' => $permissions])->save();
+            Sanctum::actingAs($actor->fresh());
+        };
+        $url = '/api/external-agent-requests/'.$request->id.'/assign';
+        $grant([...$base, 'external_requests.assign.self']);
+        $this->patchJson($url, ['assigned_agent_id' => $recipient->id])->assertForbidden();
+        $this->patchJson($url, ['assigned_agent_id' => null])->assertForbidden();
+        $this->patchJson($url, ['assigned_agent_id' => $actor->id])->assertOk();
+        $grant($base);
+        $this->patchJson($url, ['assigned_agent_id' => $recipient->id])->assertUnprocessable();
+        $recipientRole->forceFill(['permissions' => ['external_requests.receive']])->save();
+        $this->patchJson($url, ['assigned_agent_id' => $recipient->id])->assertForbidden();
+        $grant([...$base, 'external_requests.assign.across_zones']);
+        $this->patchJson($url, ['assigned_agent_id' => $recipient->id])->assertOk();
+        $recipientRole->forceFill(['permissions' => []])->save();
+        $this->patchJson($url, ['assigned_agent_id' => $recipient->id])->assertUnprocessable();
+        $this->assertSame($recipient->id, $request->fresh()->assigned_agent_id);
+    }
+
+    public function test_request_writes_recheck_revoked_permissions_on_cached_actor(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Writer', 'slug' => 'request_writer']);
+        $role->forceFill(['permissions' => ['external_requests.assign', 'external_requests.status', 'external_requests.scope.all']])->save();
+        $actor = $this->user($role, '939222224');
+        $owner = $this->user($this->externalRole, '939222225');
+        $request = ExternalPropertyRequest::create(['external_agent_id' => $owner->id, 'status' => 'submitted']);
+        $actor->load('role');
+        $role->forceFill(['permissions' => []])->save();
+        $service = app(\App\Services\ExternalPropertyRequestService::class);
+        foreach (['assign', 'status'] as $action) {
+            try {
+                $action === 'assign' ? $service->assign($request, $actor, null) : $service->changeStatus($request, $actor, 'rejected');
+                $this->fail('Revoked permission allowed a write');
+            } catch (\Symfony\Component\HttpKernel\Exception\HttpException $exception) {
+                $this->assertSame(403, $exception->getStatusCode());
+            }
+            $this->assertSame('submitted', $request->fresh()->status);
+        }
+    }
+
+    public function test_request_status_write_rechecks_current_organization(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Scoped writer', 'slug' => 'scoped_writer']);
+        $role->forceFill(['permissions' => ['external_requests.status', 'external_requests.scope.group']])->save();
+        $actor = $this->user($role, '939222226', branchId: 1, branchGroupId: 1);
+        $owner = $this->user($this->externalRole, '939222227');
+        $request = ExternalPropertyRequest::create(['external_agent_id' => $owner->id, 'status' => 'submitted', 'branch_id' => 1, 'branch_group_id' => 1]);
+        $actor->load('role');
+        User::query()->whereKey($actor->id)->update(['branch_group_id' => 2]);
+        try {
+            app(\App\Services\ExternalPropertyRequestService::class)->changeStatus($request, $actor, 'rejected');
+            $this->fail('Former group allowed a write');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $exception) {
+            $this->assertSame(403, $exception->getStatusCode());
+        }
+        $this->assertSame('submitted', $request->fresh()->status);
+    }
+
+    public function test_new_request_notifications_preserve_default_recipients_and_support_custom_roles(): void
+    {
+        (require database_path('migrations/2025_06_23_004510_create_notifications_table.php'))->up();
+        (require database_path('migrations/2026_04_04_180000_expand_notifications_table.php'))->up();
+        Schema::table('notifications', fn (Blueprint $table) => $table->unsignedBigInteger('branch_group_id')->nullable());
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $owner = $this->user($this->externalRole, '939333330');
+        $request = ExternalPropertyRequest::create(['external_agent_id' => $owner->id, 'status' => 'submitted', 'branch_id' => 1, 'branch_group_id' => 1]);
+        $expected = [];
+        $phone = 939333331;
+        foreach (['admin' => [0, 1, 2, 3], 'superadmin' => [0, 1, 2, 3], 'rop' => [0, 1], 'branch_director' => [0, 1], 'mop' => [0, 3], 'agent' => [0, 1, 3], 'manager' => [0, 1, 3], 'operator' => [0, 1, 3], 'client' => [], 'intern' => []] as $slug => $eligible) {
+            $role = Role::firstOrCreate(['slug' => $slug], ['name' => $slug]);
+            foreach ([[1, 1], [1, 2], [2, 3], [2, 1]] as $index => [$branch, $group]) {
+                $user = $this->user($role, (string) $phone++, branchId: $branch, branchGroupId: $group);
+                if (in_array($index, $eligible, true)) $expected[] = $user->id;
+            }
+        }
+        $custom = Role::create(['name' => 'Notification subscriber', 'slug' => 'notification_subscriber']);
+        $subscriber = $this->user($custom, (string) $phone++, branchId: 1, branchGroupId: 2);
+        $inactive = $this->user($this->agentRole, (string) $phone++, branchId: 1, branchGroupId: 1);
+        $inactive->forceFill(['status' => User::STATUS_INACTIVE])->saveQuietly();
+        $service = app(\App\Services\ExternalPropertyRequestService::class);
+        $assertRecipients = function (array $ids) use ($service, $request, $owner) {
+            \App\Models\Notification::query()->delete();
+            $service->notifyInternalNewRequest($request, $owner);
+            $actual = \App\Models\Notification::query()->pluck('user_id')->all();
+            sort($ids);
+            sort($actual);
+            $this->assertSame($ids, $actual);
+        };
+        $assertRecipients($expected);
+        $custom->forceFill(['permissions' => ['external_requests.notifications.branch']])->save();
+        $assertRecipients([...$expected, $subscriber->id]);
+        $custom->forceFill(['permissions' => ['external_requests.notifications.group']])->save();
+        $assertRecipients($expected);
+        $custom->forceFill(['permissions' => ['external_requests.notifications.all']])->save();
+        $assertRecipients([...$expected, $subscriber->id]);
+        $custom->forceFill(['permissions' => []])->save();
+        $assertRecipients($expected);
+    }
+
+    public function test_own_request_permissions_are_independent_and_keep_ownership_boundaries(): void
+    {
+        \Illuminate\Support\Facades\Storage::fake(\App\Services\ExternalRequestMedia::DISK);
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Partner', 'slug' => 'custom_partner']);
+        $actor = $this->user($role, '939444441', branchId: 1, branchGroupId: 1);
+        $other = $this->user($this->externalRole, '939444442');
+        $foreign = ExternalPropertyRequest::create(['external_agent_id' => $other->id, 'status' => 'draft']);
+        $type = PropertyType::create(['name' => 'Квартира', 'slug' => 'apartment']);
+        $payload = ['offer_type' => 'sale', 'type_id' => $type->id, 'price' => 85000, 'currency' => 'USD', 'owner_phone' => '900444441'];
+        $grant = function (array $permissions) use ($role, $actor) {
+            $role->forceFill(['permissions' => array_map(fn ($key) => 'external_requests.own.'.$key, $permissions)])->save();
+            Sanctum::actingAs($actor->fresh());
+        };
+        $base = '/api/external/property-requests';
+        $grant([]);
+        $this->postJson($base, ['draft' => true])->assertForbidden();
+        $grant(['create']);
+        $created = $this->postJson($base, ['draft' => true, 'external_agent_id' => $other->id, 'branch_id' => 2, 'branch_group_id' => 2])->assertCreated()->json('id');
+        $record = ExternalPropertyRequest::findOrFail($created);
+        $this->assertSame($actor->id, $record->external_agent_id);
+        $this->assertSame(1, $record->branch_id);
+        $this->assertSame(1, $record->branch_group_id);
+        $url = $base.'/'.$created;
+        $this->postJson($base, $payload)->assertForbidden();
+        $this->getJson($url)->assertForbidden();
+        $this->patchJson($url, $payload)->assertForbidden();
+        $grant(['view']);
+        $this->getJson($base)->assertOk()->assertJsonPath('total', 1);
+        $this->getJson($base.'/stats')->assertOk();
+        $this->getJson($url)->assertOk();
+        $this->getJson($base.'/'.$foreign->id)->assertForbidden();
+        $this->patchJson($url, $payload)->assertForbidden();
+        $grant(['edit']);
+        $this->patchJson($url, $payload)->assertOk();
+        $this->patchJson($base.'/'.$foreign->id, ['price' => 2])->assertForbidden();
+        $this->postJson($url.'/submit')->assertForbidden();
+        $record->update(['status' => 'needs_info']);
+        $this->patchJson($url, ['price' => 87000])->assertForbidden();
+        $this->assertSame('needs_info', $record->fresh()->status);
+        $grant(['edit', 'submit']);
+        $this->patchJson($url, ['price' => 85000])->assertOk()->assertJsonPath('status', 'submitted');
+        $record->update(['status' => 'converted']);
+        $this->patchJson($url, ['price' => 99999])->assertUnprocessable();
+        $grant(['photos']);
+        $this->postJson($url.'/photos', ['photos' => [\Illuminate\Http\UploadedFile::fake()->image('closed.jpg')]])->assertUnprocessable();
+        $record->update(['status' => 'draft']);
+        $grant(['submit']);
+        $this->postJson($url.'/submit')->assertOk();
+        $this->postJson($base.'/'.$foreign->id.'/submit')->assertForbidden();
+        $record->update(['status' => 'draft']);
+        $grant(['photos']);
+        $photo = $this->postJson($url.'/photos', ['photos' => [\Illuminate\Http\UploadedFile::fake()->image('photo.jpg')]])->assertCreated()->json('data.0.id');
+        $this->getJson('/api/external-request-photos/'.$photo)->assertNotFound();
+        $this->deleteJson($base.'/'.$foreign->id.'/photos/'.$photo)->assertForbidden();
+        $grant(['view']);
+        $this->get('/api/external-request-photos/'.$photo)->assertOk();
+        $this->deleteJson($url.'/photos/'.$photo)->assertForbidden();
+        $grant(['photos']);
+        $this->deleteJson($url.'/photos/'.$photo)->assertOk();
+        $grant(['edit']);
+        auth()->user()->load('role');
+        $role->forceFill(['permissions' => []])->save();
+        $this->patchJson($url, ['price' => 99999])->assertForbidden();
+        $this->assertSame(85000.0, (float) $record->fresh()->price);
+    }
+
     public function test_request_photos_are_private_and_require_current_parent_access(): void
     {
         \Illuminate\Support\Facades\Storage::fake('public');
@@ -300,6 +511,15 @@ class ExternalPropertyRequestFeatureTest extends TestCase
         $this->get($url)->assertOk()->assertHeader('X-Content-Type-Options', 'nosniff');
         $this->assertStringContainsString('no-store', $this->get($url)->headers->get('Cache-Control'));
         Sanctum::actingAs($other);
+        $this->getJson($url)->assertNotFound();
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Media reader', 'slug' => 'media_reader']);
+        $reader = $this->user($role, '939000003');
+        $role->forceFill(['permissions' => ['external_requests.view', 'external_requests.scope.all']])->save();
+        Sanctum::actingAs($reader->fresh());
+        $this->get($url)->assertOk();
+        $role->forceFill(['permissions' => ['external_requests.scope.all']])->save();
+        Sanctum::actingAs($reader->fresh());
         $this->getJson($url)->assertNotFound();
         Sanctum::actingAs($owner);
         $request->delete();
@@ -475,12 +695,25 @@ class ExternalPropertyRequestFeatureTest extends TestCase
             ->assertJsonPath('status', ExternalPropertyRequest::STATUS_SUBMITTED);
     }
 
-    public function test_internal_agent_converts_external_request_to_property_with_source(): void
+    public static function conversionRoles(): array
+    {
+        return [['agent'], ['custom_converter'], ['client'], ['external_agent'], ['intern']];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('conversionRoles')]
+    public function test_internal_agent_converts_external_request_to_property_with_source(string $actorSlug): void
     {
         \Illuminate\Support\Facades\Storage::fake('public');
         \Illuminate\Support\Facades\Storage::fake(\App\Services\ExternalRequestMedia::DISK);
         $externalAgent = $this->user($this->externalRole, '930000011', branchId: 1, branchGroupId: 1);
         $internalAgent = $this->user($this->agentRole, '930000012', branchId: 1, branchGroupId: 1);
+        if ($actorSlug !== 'agent') {
+            Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+            $role = Role::firstOrCreate(['slug' => $actorSlug], ['name' => $actorSlug]);
+            $role->forceFill(['permissions' => ['properties.create', 'external_requests.convert', 'external_requests.scope.all']])->save();
+            $internalAgent->forceFill(['role_id' => $role->id])->saveQuietly();
+        }
+
         $type = PropertyType::create(['name' => 'Квартира', 'slug' => 'apartment']);
         $status = PropertyStatus::create(['name' => 'Вторичка', 'slug' => 'secondary']);
 

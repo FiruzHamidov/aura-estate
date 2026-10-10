@@ -556,6 +556,50 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertSame(PropertyModerationCase::STATUS_WITHDRAWN, $case->fresh()->status);
     }
 
+    public function test_ownership_actions_and_cross_branch_assignment_are_independent_permissions(): void
+    {
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedBigInteger('co_owner_user_id')->nullable());
+        [$actor, , $target] = $this->users();
+        $foreign = User::forceCreate(['name' => 'Other branch', 'phone' => '900000099', 'role_id' => $target->role_id, 'branch_id' => 2, 'status' => 'active']);
+        $property = Property::create($this->propertyPayload($actor, ['moderation_version' => 1]));
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role = Role::create(['name' => 'Ownership operator', 'slug' => 'ownership_operator', 'permissions' => ['properties.edit', 'properties.moderate']]);
+        $actor->forceFill(['role_id' => $role->id])->save();
+        $grant = function (array $permissions) use ($role, $actor): void {
+            $role->forceFill(['permissions' => ['properties.edit', 'properties.moderate', ...$permissions]])->save();
+            $this->actingAs($actor->fresh());
+        };
+        $patch = fn (?int $id) => $this->patchJson('/api/properties/'.$property->id.'/co-owner', [
+            'co_owner_user_id' => $id, 'reason' => 'Проверка назначения', 'version' => $property->fresh()->moderation_version,
+        ]);
+        $transfer = fn (int $id) => $this->postJson('/api/properties/'.$property->id.'/transfer', [
+            'agent_id' => $id, 'reason' => 'Проверка передачи', 'version' => $property->fresh()->moderation_version,
+        ]);
+        $grant([]);
+        $access = app(PropertyModerationAccess::class);
+        $this->assertFalse($access->capabilities($actor->fresh(), $property)['can_manage_co_owner']);
+        $this->assertFalse($access->capabilities($actor->fresh(), $property)['can_transfer']);
+        $patch($target->id)->assertForbidden();
+        $transfer($target->id)->assertForbidden();
+        $grant(['properties.co_owner.manage']);
+        $this->assertTrue($access->capabilities($actor->fresh(), $property)['can_manage_co_owner']);
+        $patch($target->id)->assertOk();
+        $this->assertSame($target->id, $property->fresh()->co_owner_user_id);
+        $patch($foreign->id)->assertForbidden();
+        $grant(['properties.co_owner.manage', 'properties.ownership.assign_across_branches']);
+        $patch($foreign->id)->assertOk();
+        $transfer($target->id)->assertForbidden();
+        $grant(['properties.transfer']);
+        $this->assertTrue($access->capabilities($actor->fresh(), $property)['can_transfer']);
+        $this->assertFalse($access->capabilities($actor->fresh(), $property)['can_manage_co_owner']);
+        $patch(null)->assertForbidden();
+        $transfer($target->id)->assertOk();
+        $this->assertSame($target->id, $property->fresh()->agent_id);
+        $grant([]);
+        $transfer($actor->id)->assertForbidden();
+        $this->assertSame($foreign->id, $property->fresh()->co_owner_user_id);
+    }
+
     public function test_transfer_requires_independent_moderator_and_preserves_moderation_history(): void
     {
         [$agent, $rop, $director] = $this->users();
@@ -731,6 +775,35 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertSame(1, $calls);
     }
 
+    public function test_moderation_notification_subscription_follows_custom_permissions_and_branch_scope(): void
+    {
+        [$agent, $rop, $director] = $this->users();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role = Role::forceCreate(['name' => 'Custom notifications', 'slug' => 'custom_moderation_notifications', 'permissions' => ['notifications.receive.property_moderation']]);
+        $subscriber = User::forceCreate(['name' => 'Subscriber', 'phone' => '900000099', 'role_id' => $role->id, 'branch_id' => 1, 'status' => 'active']);
+        $notifier = app(\App\Services\PropertyModeration\PropertyModerationNotifier::class);
+        $send = function (array $overrides = []) use ($notifier, $agent) {
+            $property = Property::forceCreate($this->propertyPayload($agent, $overrides));
+            $notifier->moderationEvent($property, 'property_sent_to_moderation', $agent);
+            return DB::table('notifications')->where('subject_id', $property->id)->pluck('user_id')->all();
+        };
+        $this->assertContains($subscriber->id, $send());
+        $this->assertNotContains($subscriber->id, $send(['branch_id' => 2, 'branch_group_id' => null]));
+        $role->forceFill(['permissions' => ['notifications.receive.property_moderation', 'notifications.receive.property_moderation.all_branches']])->save();
+        $this->assertContains($subscriber->id, $send(['branch_id' => 2, 'branch_group_id' => null]));
+        $role->forceFill(['permissions' => ['notifications.receive.property_moderation', 'notifications.receive.property_moderation.all_branches', 'data.scope.assigned_groups']])->save();
+        $this->assertNotContains($subscriber->id, $send());
+        $subscriber->supervisedGroups()->attach(1);
+        $this->assertContains($subscriber->id, $send());
+        $this->assertNotContains($subscriber->id, $send(['branch_id' => 2, 'branch_group_id' => null]));
+        $role->forceFill(['permissions' => ['notifications.receive.property_moderation.all_branches']])->save();
+        $recipients = $send();
+        $this->assertNotContains($subscriber->id, $recipients);
+        $this->assertContains($agent->id, $recipients);
+        $director->role->forceFill(['permissions' => []])->save();
+        $this->assertNotContains($director->id, $send());
+    }
+
     public function test_moderation_notifications_use_a_numeric_priority_and_are_deduplicated(): void
     {
         [$agent, $rop, $director] = $this->users();
@@ -801,6 +874,47 @@ class PropertyModerationWorkflowTest extends TestCase
             $this->assertSame($type, $property->fresh()->listing_type);
             $this->assertSame('active', $promotion->fresh()->status);
         }
+    }
+
+    public function test_custom_role_promotion_request_and_management_are_independent(): void
+    {
+        [$actor] = $this->users();
+        $property = Property::create($this->propertyPayload($actor, ['publication_status' => 'published', 'moderation_status' => 'approved', 'moderation_version' => 1]));
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role = Role::create(['name' => 'Promotion worker', 'slug' => 'promotion_worker', 'permissions' => []]);
+        $actor->forceFill(['role_id' => $role->id])->save();
+        $grant = function (array $permissions) use ($role, $actor): User {
+            $role->forceFill(['permissions' => ['properties.edit', 'properties.moderate', ...$permissions]])->save();
+            $fresh = $actor->fresh();
+            $this->actingAs($fresh);
+            return $fresh;
+        };
+        $denied = function (callable $action): void {
+            try { $action(); $this->fail('The promotion action must require its permission.'); }
+            catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) { $this->assertSame(403, $e->getStatusCode()); }
+        };
+        $service = app(PropertyPromotionService::class);
+        $access = app(PropertyModerationAccess::class);
+        $fresh = $grant([]);
+        $denied(fn () => $service->request($property, $fresh, 'vip', 'Проверка доступа', 7, 1));
+        $fresh = $grant(['properties.promotions.request']);
+        $promotion = $service->request($property, $fresh, 'vip', 'Проверка доступа', 7, 1);
+        $this->assertSame('requested', $promotion->status);
+        $this->assertTrue($access->capabilities($fresh, $property->fresh())['can_withdraw_promotion_request']);
+        $denied(fn () => $service->approve($promotion, $fresh, 7, 'Проверено', $promotion->version));
+        $fresh = $grant(['properties.promotions.manage']);
+        $this->assertTrue($access->capabilities($fresh, $property->fresh())['can_approve_promotion']);
+        $this->assertFalse($access->capabilities($fresh, $property->fresh())['can_manage_promotion_directly']);
+        $promotion = $service->approve($promotion, $fresh, 7, 'Проверено', $promotion->version);
+        $this->assertSame('active', $promotion->status);
+        $stale = $fresh;
+        $fresh = $grant([]);
+        $denied(fn () => $service->revoke($promotion, $fresh, 'Отмена', $promotion->version));
+        $denied(fn () => $service->setType($property->fresh(), $stale, 'regular', 7, 'Отмена', $property->fresh()->moderation_version));
+        $this->assertSame('active', $promotion->fresh()->status);
+        $fresh = $grant(['properties.promotions.manage']);
+        $service->revoke($promotion, $fresh, 'Отмена', $promotion->version);
+        $this->assertSame('regular', $property->fresh()->listing_type);
     }
 
     public function test_owner_can_cancel_pending_promotion_but_cannot_revoke_active_promotion(): void
@@ -950,6 +1064,64 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertFalse($capabilities['can_approve']);
         $this->assertTrue($capabilities['can_withdraw_changes']);
         $this->assertTrue($capabilities['can_withdraw_listing']);
+    }
+
+    public function test_custom_role_edit_expansions_are_independent_and_require_edit_permission(): void
+    {
+        [$agent, , $actor] = $this->users();
+        $actor->forceFill(['branch_group_id' => 1])->save();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role = Role::create(['name' => 'Custom editor', 'slug' => 'custom_editor', 'permissions' => []]);
+        $actor->forceFill(['role_id' => $role->id])->save();
+        $own = Property::create($this->propertyPayload($actor));
+        $group = Property::create($this->propertyPayload($agent));
+        $branch = Property::create($this->propertyPayload($agent, ['branch_group_id' => 2]));
+        $foreign = Property::create($this->propertyPayload($agent, ['branch_id' => 2, 'branch_group_id' => 3]));
+        $access = app(PropertyModerationAccess::class);
+        foreach ([
+            [[], [false, false, false, false]],
+            [['properties.edit.group', 'properties.edit.branch'], [false, false, false, false]],
+            [['properties.edit'], [true, false, false, false]],
+            [['properties.edit', 'properties.edit.group'], [true, true, false, false]],
+            [['properties.edit', 'properties.edit.branch'], [true, true, true, false]],
+            [['properties.edit', 'properties.edit.group', 'properties.edit.branch'], [true, true, true, false]],
+            [['properties.edit', 'properties.manage_all'], [true, true, true, true]],
+            [['properties.edit'], [true, false, false, false]],
+        ] as [$permissions, $expected]) {
+            $role->forceFill(['permissions' => $permissions])->save();
+            $fresh = $actor->fresh();
+            $this->assertSame($expected, array_map(fn ($property) => $access->canEdit($fresh, $property), [$own, $group, $branch, $foreign]), implode(',', $permissions));
+        }
+    }
+
+    public function test_closed_card_grant_keeps_rop_group_boundary(): void
+    {
+        [$agent, $rop] = $this->users();
+        $ownGroup = Property::create($this->propertyPayload($agent, ['moderation_status' => 'sold']));
+        $otherGroup = Property::create($this->propertyPayload($agent, ['moderation_status' => 'sold', 'branch_group_id' => 2]));
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $rop->role->forceFill(['permissions' => ['data.scope.assigned_groups', 'properties.closed.view', 'properties.history.view', 'properties.manage_all']])->save();
+        $access = app(PropertyModerationAccess::class);
+        $actor = $rop->fresh();
+        $this->assertTrue($access->canViewClosedProperty($actor, $ownGroup));
+        $this->assertTrue($access->canViewHistory($actor, $ownGroup));
+        $this->assertFalse($access->canViewClosedProperty($actor, $otherGroup));
+        $this->assertFalse($access->canViewHistory($actor, $otherGroup));
+        $this->assertFalse($access->canEdit($actor, $ownGroup));
+    }
+
+    public function test_moderation_queue_requires_action_and_preserves_rop_groups_with_global_grant(): void
+    {
+        [$agent, $rop, $director] = $this->users();
+        $ownGroup = Property::create($this->propertyPayload($agent));
+        $otherGroup = Property::create($this->propertyPayload($agent, ['branch_group_id' => 2]));
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $access = app(PropertyModerationAccess::class);
+        $rop->role->forceFill(['permissions' => ['data.scope.assigned_groups', 'properties.moderate', 'properties.manage_all']])->save();
+        $this->assertSame([$ownGroup->id], $access->scopeModeratable(Property::query(), $rop->fresh())->pluck('id')->all());
+        $this->assertFalse($access->canModerate($rop->fresh(), $otherGroup));
+        $director->role->forceFill(['permissions' => ['properties.manage_all']])->save();
+        $this->assertFalse($access->scopeModeratable(Property::query(), $director->fresh())->exists());
     }
 
     public function test_queue_scope_does_not_follow_creator_into_another_branch(): void
@@ -1335,6 +1507,35 @@ class PropertyModerationWorkflowTest extends TestCase
         $property->forceFill(['publication_status' => 'draft', 'moderation_status' => 'draft'])->saveQuietly();
         $this->postJson("/api/properties/{$property->id}/contact-click", ['action' => 'phone'])->assertNotFound();
         $this->assertEquals(2, $property->fresh()->phone_clicks);
+    }
+
+    public function test_analytics_explicit_grants_work_for_any_role_and_rop_keeps_group_boundaries(): void
+    {
+        (require database_path('migrations/2026_10_10_080000_add_property_contact_counters.php'))->up();
+        (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedInteger('views_count')->default(0));
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        [$agent, $rop, $director] = $this->users();
+        $own = $this->publishedProperty($agent, ['branch_id' => 1, 'branch_group_id' => 1]);
+        $foreign = $this->publishedProperty($director, ['branch_id' => 2, 'branch_group_id' => 2]);
+        $url = '/api/marketing/property-contact-analytics';
+        foreach (['client', 'external_agent', 'accountant', 'custom_analytics'] as $slug) {
+            DB::table('roles')->where('id', $agent->role_id)->update(['slug' => $slug, 'permissions' => json_encode([])]);
+            $this->actingAs($agent->fresh())->getJson($url)->assertForbidden();
+            DB::table('roles')->where('id', $agent->role_id)->update(['permissions' => json_encode(['properties.analytics.view'])]);
+            $this->actingAs($agent->fresh())->getJson($url)->assertOk()->assertJsonCount(2, 'data');
+            DB::table('roles')->where('id', $agent->role_id)->update(['permissions' => json_encode([])]);
+            $this->actingAs($agent->fresh())->getJson($url)->assertForbidden();
+        }
+        DB::table('roles')->where('id', $rop->role_id)->update(['permissions' => json_encode(['data.scope.assigned_groups', 'properties.analytics.view'])]);
+        $this->actingAs($rop->fresh())->getJson($url)->assertOk()
+            ->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $own->id)
+            ->assertJsonCount(1, 'branches')->assertJsonPath('branches.0.id', 1)
+            ->assertJsonCount(1, 'groups')->assertJsonPath('groups.0.id', 1)
+            ->assertJsonCount(1, 'agents')->assertJsonPath('agents.0.id', $agent->id);
+        $rop->supervisedGroups()->detach();
+        $this->actingAs($rop->fresh())->getJson($url)->assertOk()
+            ->assertJsonCount(0, 'data')->assertJsonCount(0, 'branches')->assertJsonCount(0, 'groups')->assertJsonCount(0, 'agents');
     }
 
     public function test_contact_analytics_is_limited_to_marketing_and_admins_and_sorts_globally(): void

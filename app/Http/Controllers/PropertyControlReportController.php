@@ -76,7 +76,7 @@ class PropertyControlReportController extends Controller
             'security_officers' => User::query()
                 ->select(['id', 'name', 'branch_id'])
                 ->where('status', User::STATUS_ACTIVE)
-                ->whereHas('role', fn ($role) => $role->where('slug', 'security'))
+                ->whereHas('role', fn ($role) => $role->withPermission('property_control.subject.report_filter'))
                 ->orderBy('name')
                 ->get(),
         ]);
@@ -134,7 +134,7 @@ class PropertyControlReportController extends Controller
         $user = Auth::user();
         abort_unless($user, 401, 'Unauthenticated.');
         $user->loadMissing('role');
-        abort_unless(in_array($user->role?->slug, ['security', 'admin', 'superadmin'], true), 403, 'CRM_DEAL_FORBIDDEN');
+        abort_unless($user->hasPermission('properties.control_report.view'), 403, 'CRM_DEAL_FORBIDDEN');
 
         $validated = $request->validate($this->dealListQuery->rules());
         $validated['pipeline_type'] = 'property_control';

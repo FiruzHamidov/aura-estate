@@ -11,8 +11,9 @@ class RoleController extends Controller
     // GET /roles — список ролей
     public function index(Request $request)
     {
+        $this->authorizeRead($request);
         // При желании можно добавить фильтры ?q=...
-        $query = Role::query();
+        $query = Role::query()->withCount('users');
 
         if ($search = trim($request->get('q', ''))) {
             $query->where(function ($q) use ($search) {
@@ -32,9 +33,10 @@ class RoleController extends Controller
     // POST /roles — создание
     public function store(Request $request)
     {
+        abort_unless($request->user()?->hasPermission('roles.manage'), 403);
         $validated = $request->validate([
             'name'        => ['required', 'string', 'max:255'],
-            'slug'        => ['required', 'alpha_dash', 'max:255', 'unique:roles,slug'],
+            'slug'        => ['required', 'regex:/^[a-z0-9_-]+$/', 'max:255', 'unique:roles,slug', Rule::notIn([...array_column(Role::systemRoles(), 'slug'), 'owner'])],
             'description' => ['nullable', 'string', 'max:1000'],
         ]);
 
@@ -44,19 +46,21 @@ class RoleController extends Controller
     }
 
     // GET /roles/{role} — просмотр
-    public function show(Role $role)
+    public function show(Request $request, Role $role)
     {
+        $this->authorizeRead($request);
         return response()->json($role);
     }
 
     // PUT /roles/{role} — обновление
     public function update(Request $request, Role $role)
     {
+        abort_unless($request->user()?->hasPermission('roles.manage'), 403);
         $validated = $request->validate([
             'name'        => ['sometimes', 'required', 'string', 'max:255'],
             'slug'        => [
                 'sometimes', 'required', 'alpha_dash', 'max:255',
-                Rule::unique('roles', 'slug')->ignore($role->id),
+                Rule::in([$role->slug]),
             ],
             'description' => ['nullable', 'string', 'max:1000'],
         ]);
@@ -67,17 +71,39 @@ class RoleController extends Controller
     }
 
     // DELETE /roles/{role} — удаление
-    public function destroy(Role $role)
+    public function destroy(Request $request, Role $role)
     {
-        // Защитимся от удаления роли, если к ней привязаны пользователи
-        if ($role->users()->exists()) {
-            return response()->json([
-                'message' => 'Нельзя удалить роль: к ней привязаны пользователи',
-            ], 409);
-        }
-
-        $role->delete();
+        abort_unless($request->user()?->hasPermission('roles.manage'), 403);
+        abort_if(in_array($role->slug, [...array_column(Role::systemRoles(), 'slug'), 'owner'], true), 409, 'Системную роль нельзя удалить.');
+        \Illuminate\Support\Facades\DB::transaction(function () use ($role, $request) {
+            $roles = Role::orderBy('id')->lockForUpdate()->get();
+            $actor = $request->user()->fresh();
+            abort_unless($actor && $roles->firstWhere('id', $actor->role_id)?->hasPermission('roles.manage'), 403);
+            $locked = $roles->firstWhere('id', $role->id);
+            abort_unless($locked, 404);
+            abort_if($locked->users()->exists(), 409, 'Нельзя удалить роль: к ней привязаны пользователи');
+            $dependentKeys = array_map(fn ($prefix) => $prefix.$locked->slug, ['users.assign_role.', 'kpi.reports.dashboard.role.']);
+            foreach ($roles as $affected) {
+                if ($affected->id === $locked->id || array_intersect($dependentKeys, $affected->permissions ?? []) === []) continue;
+                $before = $affected->permissions;
+                $after = array_values(array_diff($before, $dependentKeys));
+                $affected->permissions = $after;
+                $affected->permissions_version++;
+                $affected->save();
+                \Illuminate\Support\Facades\DB::table('role_permission_audits')->insert([
+                    'role_id' => $affected->id, 'role_name' => $affected->name, 'actor_id' => $request->user()->id,
+                    'before' => json_encode($before, JSON_THROW_ON_ERROR), 'after' => json_encode($after, JSON_THROW_ON_ERROR),
+                    'version' => $affected->permissions_version, 'created_at' => now(),
+                ]);
+            }
+            $locked->delete();
+        });
 
         return response()->json(['message' => 'Role deleted']);
     }
+    private function authorizeRead(Request $request): void
+    {
+        abort_unless($request->user()?->hasPermission('roles.view') || $request->user()?->hasPermission('roles.manage'), 403);
+    }
+
 }

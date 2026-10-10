@@ -66,9 +66,9 @@ final class DismissalTransfer
     private function recipients(User $actor, User $employee)
     {
         return User::query()->with(['role', 'branch', 'branchGroup'])->whereKeyNot($employee->id)->where('status', User::STATUS_ACTIVE)
-            ->whereHas('role', fn ($q) => $q->whereIn('slug', ['agent', 'mop']))
-            ->when($actor->hasRole('rop'), fn ($q) => app(RopGroupAccess::class)->scope($q, $actor, 'users.branch_group_id', 'users.branch_id'))
-            ->when($actor->hasRole('branch_director'), fn ($q) => $q->where('branch_id', $actor->branch_id))
+            ->whereHas('role', fn ($q) => $q->withPermission('users.subject.record_recipient'))
+            ->when($actor->usesAssignedGroupScope(), fn ($q) => app(RopGroupAccess::class)->scope($q, $actor, 'users.branch_group_id', 'users.branch_id'))
+            ->when(!$actor->hasPermission('users.dismissal.all_branches'), fn ($q) => $q->where('branch_id', $actor->branch_id))
             ->orderBy('id')->get()->reject(fn (User $user) => $user->isDeletedAccount());
     }
 
@@ -95,14 +95,13 @@ final class DismissalTransfer
 
     private function eligible(User $actor, User $target, array $record): bool
     {
-        if ($actor->hasRole('rop') && ! app(RopGroupAccess::class)->allows($actor, $target)) {
+        if ($actor->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->allows($actor, $target)) {
             return false;
         }
 
         if (empty($record['linked_task_fixed_group']) && $target->branch_group_id
-            && (in_array($actor->role?->slug, ['admin', 'superadmin', 'branch_director'], true)
-                || ($record['type'] !== 'properties' && $actor->hasRole('rop')))
-            && (! $actor->hasRole('branch_director') || (int) $actor->branch_id === (int) $target->branch_id)) {
+            && ($actor->hasPermission('users.dismissal.change_group') && ($record['type'] !== 'properties' || !$actor->usesAssignedGroupScope()))
+            && ($actor->hasPermission('users.dismissal.all_branches') || (int) $actor->branch_id === (int) $target->branch_id)) {
             return $record['type'] !== 'deals' || $this->dealDestination($record, $target) !== null;
         }
 
@@ -128,7 +127,7 @@ final class DismissalTransfer
 
     private function ensureRecordScope(User $actor, array $records): void
     {
-        if ($actor->hasRole('rop')) {
+        if ($actor->usesAssignedGroupScope()) {
             $access = app(RopGroupAccess::class);
             foreach ($records as $record) {
                 abort_unless($actor->branch_id && (int) $record['branch_id'] === (int) $actor->branch_id
@@ -136,7 +135,7 @@ final class DismissalTransfer
             }
         }
 
-        if ($actor->hasRole('branch_director')) {
+        if (!$actor->hasPermission('users.dismissal.all_branches')) {
             foreach ($records as $record) {
                 abort_unless($actor->branch_id && (int) $record['branch_id'] === (int) $actor->branch_id, 403, 'FORBIDDEN_ACTION');
             }
@@ -205,7 +204,7 @@ final class DismissalTransfer
         abort_unless($actual === $expected, 422, 'COMPLETE_TRANSFER_PLAN_REQUIRED');
         $targets = $lockedUsers->filter(fn (User $target) => $target->id !== $employee->id
             && $target->status === User::STATUS_ACTIVE && ! $target->isDeletedAccount()
-            && in_array($target->role?->slug, ['agent', 'mop'], true));
+            && $target->hasPermission('users.subject.record_recipient'));
         $counts = array_fill_keys(array_keys(GroupRecordTransfer::MODELS), 0);
         foreach ($inventory as $record) {
             $reference = $this->parentReference($record);

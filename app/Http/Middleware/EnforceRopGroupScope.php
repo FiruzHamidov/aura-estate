@@ -31,7 +31,7 @@ final class EnforceRopGroupScope
             'App\\Http\\Controllers\\KpiModuleController@updateTelegramConfig',
         ], true), 403, 'FORBIDDEN_ACTION');
         abort_if(! $request->isMethodSafe() && $controller
-            && (str_starts_with($controller, 'App\\Http\\Controllers\\RoleController@')
+            && ((str_starts_with($controller, 'App\\Http\\Controllers\\RoleController@') && ! $actor->hasPermission('roles.manage'))
                 || str_starts_with($controller, 'App\\Http\\Controllers\\BranchController@')), 403, 'FORBIDDEN_ACTION');
         $publicStory = in_array($controller, [
             'App\\Http\\Controllers\\StoryController@feed',
@@ -63,7 +63,7 @@ final class EnforceRopGroupScope
             $fresh = User::query()->whereKey($actor->id)->lockForUpdate()->firstOrFail();
             abort_unless($fresh->status === User::STATUS_ACTIVE && ! $fresh->isDeletedAccount(), 403, 'FORBIDDEN_ACTION');
             $request->attributes->set(RopScopeResponse::VERSION_ATTRIBUTE, (int) $fresh->access_scope_version);
-            abort_unless($fresh->hasRole('rop') && (int) $fresh->access_scope_version === (int) $actor->access_scope_version, 409, 'ACCESS_SCOPE_VERSION_CONFLICT');
+            abort_unless($fresh->usesAssignedGroupScope() && (int) $fresh->access_scope_version === (int) $actor->access_scope_version, 409, 'ACCESS_SCOPE_VERSION_CONFLICT');
 
             $response = $run();
             if ($response->getStatusCode() >= 400) {
@@ -110,7 +110,10 @@ final class EnforceRopGroupScope
                         && $this->access->hasVisibleDailyReportHistory($actor, (int) $id)) {
                         continue;
                     }
-                    $this->access->ensureEmployee($actor, (int) $id, assignable: ! $read);
+                    $permission = request()->is('api/kpi/*', 'api/kpi-reports*')
+                        ? 'kpi.subject.assigned_groups'
+                        : (request()->is('api/daily-reports*') ? 'daily_reports.subject.employee' : 'users.subject.record_recipient');
+                    $this->access->ensureEmployee($actor, (int) $id, assignable: ! $read, permission: $permission);
                 }
             }
         }

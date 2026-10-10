@@ -484,6 +484,196 @@ class NotificationFeatureTest extends TestCase
         Queue::assertPushed(SendFirebasePushNotification::class);
     }
 
+    public function test_custom_notification_subscriptions_obey_branch_status_and_revocation(): void
+    {
+        Queue::fake();
+        $branch = Branch::create(['name' => 'Central']);
+        $otherBranch = Branch::create(['name' => 'Other']);
+        $role = Role::create(['name' => 'Custom subscriber', 'slug' => 'custom_subscriber']);
+        $local = $this->createUser($role, $branch, 'Local');
+        $foreign = $this->createUser($role, $otherBranch, 'Foreign');
+        $inactive = $this->createUser($role, $branch, 'Inactive');
+        $inactive->update(['status' => 'inactive']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $resolver = app(\App\Services\NotificationRecipientResolver::class);
+        $lead = Lead::create(['full_name' => 'New lead', 'branch_id' => $branch->id,
+            'status' => Lead::STATUS_NEW, 'first_contact_due_at' => now()->subMinute()]);
+        foreach (['notifications.receive.leads', 'notifications.receive.public_leads.branch',
+            'notifications.receive.public_leads.all', 'notifications.receive.property_control.security'] as $permission) {
+            $role->forceFill(['permissions' => [$permission]])->save();
+            $users = match ($permission) {
+                'notifications.receive.leads' => $resolver->leadManagers($lead->fresh()),
+                'notifications.receive.property_control.security' => $resolver->securityOfficers(),
+                default => $resolver->publicLeadSubscribers($lead->fresh()),
+            };
+            $this->assertContains($local->id, $users->pluck('id')->all());
+            $this->assertNotContains($inactive->id, $users->pluck('id')->all());
+            $this->assertSame(in_array($permission, ['notifications.receive.public_leads.all', 'notifications.receive.property_control.security']), $users->contains('id', $foreign->id));
+        }
+        $deal = (new Deal)->forceFill(['branch_id' => $branch->id]);
+        $deal->setRelation('primaryProperty', null)->setRelation('responsibleAgent', null);
+        $property = (new \App\Models\Property)->forceFill(['branch_id' => $branch->id]);
+        $property->setRelation('agent', null)->setRelation('creator', null);
+        foreach (['notifications.receive.property_control.branch', 'notifications.receive.property_control.escalation',
+            'notifications.receive.properties.escalation', 'notifications.receive.attendance_offline'] as $permission) {
+            $role->forceFill(['permissions' => [$permission]])->save();
+            $recipients = fn () => match ($permission) {
+                'notifications.receive.property_control.branch' => $resolver->propertyControlBranchRecipients($deal),
+                'notifications.receive.property_control.escalation' => $resolver->propertyControlEscalationRecipients($deal),
+                'notifications.receive.properties.escalation' => $resolver->propertyEscalationRecipients($property),
+                default => $resolver->usersByPermission($permission),
+            };
+            $users = $recipients();
+            $this->assertTrue($users->contains('id', $local->id));
+            $this->assertFalse($users->contains('id', $inactive->id));
+            $this->assertSame(in_array($permission, ['notifications.receive.property_control.escalation', 'notifications.receive.attendance_offline']), $users->contains('id', $foreign->id));
+            $role->forceFill(['permissions' => []])->save();
+            $this->assertCount(0, $recipients());
+        }
+        $role->forceFill(['permissions' => ['notifications.receive.leads']])->save();
+        $method = new \ReflectionMethod(NotificationService::class, 'dispatchLeadSlaOverdue');
+        $method->invoke(app(NotificationService::class));
+        $this->assertDatabaseHas('notifications', ['user_id' => $local->id, 'type' => NotificationType::LEAD_SLA_OVERDUE, 'subject_id' => $lead->id]);
+        $this->assertDatabaseMissing('notifications', ['user_id' => $foreign->id, 'type' => NotificationType::LEAD_SLA_OVERDUE, 'subject_id' => $lead->id]);
+        $role->forceFill(['permissions' => []])->save();
+        $this->assertCount(0, $resolver->leadManagers($lead->fresh()));
+        $this->assertCount(0, $resolver->securityOfficers());
+        $this->assertCount(0, $resolver->publicLeadSubscribers($lead->fresh()));
+        $second = Lead::create(['full_name' => 'After revoke', 'branch_id' => $branch->id,
+            'status' => Lead::STATUS_NEW, 'first_contact_due_at' => now()->subMinute()]);
+        $method->invoke(app(NotificationService::class));
+        $this->assertDatabaseMissing('notifications', ['user_id' => $local->id, 'subject_id' => $second->id]);
+    }
+
+    public function test_digest_subscriptions_work_for_custom_roles_and_stop_on_revocation(): void
+    {
+        Queue::fake();
+        Schema::create('bookings', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('agent_id'); $table->timestamp('start_time');
+        });
+        Schema::create('crm_deals', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('responsible_agent_id');
+            $table->timestamp('closed_at')->nullable(); $table->string('lost_reason')->nullable(); $table->softDeletes();
+        });
+        $branch = Branch::create(['name' => 'Central']);
+        $role = Role::create(['name' => 'Subscriber', 'slug' => 'custom_digest']);
+        $user = $this->createUser($role, $branch, 'Subscriber');
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        foreach ([
+            ['dispatchManagerMorningDigest', 'digest.leads.morning', 8],
+            ['dispatchManagerEveningDigest', 'digest.leads.evening', 18],
+            ['dispatchAgentDayPlan', 'digest.deals.morning', 8],
+            ['dispatchAgentEveningDigest', 'digest.deals.evening', 18],
+        ] as [$methodName, $key, $hour]) {
+            $this->travelTo(\Carbon\CarbonImmutable::parse('2026-10-10')->setHour($hour));
+            $method = new \ReflectionMethod(NotificationService::class, $methodName);
+            $role->forceFill(['permissions' => ['notifications.receive.'.$key]])->save();
+            $this->assertSame(1, $method->invoke(app(NotificationService::class)));
+            $role->forceFill(['permissions' => []])->save();
+            $this->assertSame(0, $method->invoke(app(NotificationService::class)));
+        }
+        $this->assertSame(4, Notification::query()->where('user_id', $user->id)->count());
+        $this->travelBack();
+    }
+
+    public function test_queued_digest_rechecks_subscription_without_removing_saved_history(): void
+    {
+        $branch = Branch::create(['name' => 'Central']);
+        $role = Role::create(['name' => 'Subscriber', 'slug' => 'custom_delivery']);
+        $user = $this->createUser($role, $branch, 'Subscriber');
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $permission = 'notifications.receive.digest.leads.morning';
+        $role->forceFill(['permissions' => [$permission]])->save();
+        $notification = Notification::create(['user_id' => $user->id,
+            'type' => NotificationType::MOTIVATION_MANAGER_MORNING_DIGEST,
+            'category' => NotificationCategory::MOTIVATION, 'status' => NotificationStatus::UNREAD,
+            'priority' => 1, 'channels' => ['push'], 'title' => 'Digest', 'body' => 'Private digest',
+            'dedupe_key' => 'queued-rbac', 'occurrences_count' => 1, 'data' => []]);
+        $job = new SendFirebasePushNotification($notification->id);
+        $firebase = \Mockery::mock(\App\Services\FirebasePushService::class);
+        $firebase->shouldReceive('send')->once()->with(\Mockery::on(fn ($item) => $item->id === $notification->id));
+        $role->forceFill(['permissions' => []])->save();
+        $job->handle($firebase);
+        $firebase->shouldNotHaveReceived('send');
+        $this->assertTrue(app(\App\Services\GroupAccess\NotificationGroupAccess::class)->allows($notification, $user->fresh()));
+        $this->assertDatabaseHas('notifications', ['id' => $notification->id]);
+        $role->forceFill(['permissions' => [$permission]])->save();
+        $job->handle($firebase);
+        $user->update(['status' => 'inactive']);
+        $job->handle($firebase);
+    }
+
+    public function test_mixed_delivery_revokes_role_subscription_but_keeps_personal_assignment(): void
+    {
+        Queue::fake();
+        $branch = Branch::create(['name' => 'Central']);
+        $role = Role::create(['name' => 'Subscriber', 'slug' => 'mixed_subscriber']);
+        $observer = $this->createUser($role, $branch, 'Observer');
+        $assignee = $this->createUser($role, $branch, 'Assignee');
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role->forceFill(['permissions' => ['notifications.receive.leads']])->save();
+        $lead = Lead::create(['full_name' => 'Assigned lead', 'branch_id' => $branch->id,
+            'responsible_agent_id' => $assignee->id, 'status' => Lead::STATUS_NEW]);
+        app(NotificationService::class)->handleLeadCreated($lead);
+        $broadcast = Notification::where('user_id', $observer->id)->where('type', NotificationType::LEAD_NEW)->firstOrFail();
+        $personal = Notification::where('user_id', $assignee->id)->where('type', NotificationType::LEAD_ASSIGNED)->firstOrFail();
+        $policy = app(\App\Services\NotificationDeliveryAccess::class);
+        $this->assertSame('lead_managers', $broadcast->data['delivery_audience']);
+        $this->assertTrue($policy->allows($broadcast, $observer->fresh()));
+        $role->forceFill(['permissions' => []])->save();
+        $firebase = \Mockery::mock(\App\Services\FirebasePushService::class);
+        $firebase->shouldReceive('send')->once()->with(\Mockery::on(fn ($item) => $item->id === $personal->id));
+        (new SendFirebasePushNotification($broadcast->id))->handle($firebase);
+        $firebase->shouldNotHaveReceived('send');
+        (new SendFirebasePushNotification($personal->id))->handle($firebase);
+        $this->assertFalse($policy->allows($broadcast, $observer->fresh()));
+        $public = (new Notification)->forceFill(['type' => NotificationType::LEAD_NEW, 'data' => ['delivery_audience' => 'public_lead']]);
+        $public->setRelation('subject', $lead->fresh());
+        $this->assertTrue($policy->allows($public, $assignee->fresh()));
+        $this->assertFalse($policy->allows($public, $observer->fresh()));
+        $role->forceFill(['permissions' => ['notifications.receive.leads']])->save();
+        $otherBranch = Branch::create(['name' => 'Other']);
+        $observer->update(['branch_id' => $otherBranch->id]);
+        $this->assertFalse($policy->allows($broadcast, $observer->fresh()));
+    }
+
+    public function test_kpi_risk_subject_policy_supports_custom_roles_and_revocation(): void
+    {
+        Queue::fake();
+        $this->travelTo(\Illuminate\Support\Carbon::parse('2026-10-09 18:31:00'));
+        Schema::create('daily_reports', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('user_id'); $table->date('report_date');
+            $table->unsignedBigInteger('branch_group_id')->nullable();
+            $table->string('role_slug')->nullable(); $table->timestamps();
+        });
+        $branch = Branch::create(['name' => 'Local']);
+        $other = Branch::create(['name' => 'Other']);
+        $subjectRole = Role::create(['name' => 'Custom subject', 'slug' => 'custom_risk_subject']);
+        $receiverRole = Role::create(['name' => 'Director', 'slug' => 'branch_director']);
+        $subject = $this->createUser($subjectRole, $branch, 'Subject');
+        $receiver = $this->createUser($receiverRole, $branch, 'Receiver');
+        $this->createUser($receiverRole, $other, 'Foreign receiver');
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        foreach (['2026-10-08', '2026-10-09'] as $date) {
+            DB::table('daily_reports')->insert(['user_id' => $subject->id, 'report_date' => $date]);
+        }
+        $service = app(NotificationService::class);
+        $dispatch = new \ReflectionMethod($service, 'dispatchKpiEarlyRisk');
+        $this->assertSame(0, $dispatch->invoke($service));
+        $subjectRole->forceFill(['permissions' => ['kpi.subject.early_risk']])->save();
+        $this->assertSame(1, $dispatch->invoke($service));
+        $this->assertSame([$receiver->id], Notification::query()->pluck('user_id')->all());
+        $subjectRole->forceFill(['permissions' => []])->save();
+        $this->assertSame(0, $dispatch->invoke($service));
+        $this->assertSame(1, Notification::count());
+        $this->assertSame(2, DB::table('daily_reports')->count());
+        foreach (['agent', 'mop', 'intern'] as $slug) {
+            $role = new Role(['slug' => $slug]);
+            $this->assertSame($slug !== 'intern', $role->hasPermission('kpi.subject.early_risk'));
+        }
+        $this->travelBack();
+    }
+
     private function createUser(Role $role, Branch $branch, string $name): User
     {
         return User::create([

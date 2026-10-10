@@ -10,10 +10,9 @@ final class GroupAccessReviewController extends Controller
     public function index(Request $request)
     {
         $actor = $request->user();
-        $role = $actor?->role?->slug;
-        abort_unless(in_array($role, ['superadmin', 'admin', 'branch_director'], true), 403);
+        abort_unless($actor && !$actor->usesAssignedGroupScope() && ($actor->hasPermission('group_access_review.scope.all') || $actor->hasPermission('group_access_review.scope.branch')), 403);
         $query = DB::table('group_access_review_items')->whereNull('resolved_at');
-        if ($role === 'branch_director') {
+        if (!$actor->hasPermission('group_access_review.scope.all')) {
             abort_unless($actor->branch_id, 403);
             $query->where('branch_id', $actor->branch_id);
         }

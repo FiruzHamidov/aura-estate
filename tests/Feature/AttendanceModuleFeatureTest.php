@@ -1922,6 +1922,130 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->assertSame($c['otherAgent']->id, (int) $existing->fresh()->user_id);
     }
 
+    public function test_custom_role_attendance_scopes_and_group_subjects_are_configurable(): void
+    {
+        $c = $this->context();
+        $role = Role::create(['name' => 'Attendance observer', 'slug' => 'attendance_observer']);
+        $c['hr']->forceFill(['role_id' => $role->id])->save();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $access = app(\App\Services\Attendance\AttendanceAccessService::class);
+        $url = '/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&view=users';
+        foreach ([null => 1, 'attendance.scope.group' => 2, 'attendance.scope.branch' => 5, 'attendance.all_branches.view' => 6] as $scope => $count) {
+            $role->forceFill(['permissions' => ['attendance.table.view', ...($scope ? [$scope] : [])]])->save();
+            $actor = $c['hr']->fresh();
+            Sanctum::actingAs($actor);
+            $this->getJson($url)->assertOk()->assertJsonCount($count, 'data');
+            $this->assertSame($count, $access->visibleUsersQuery($actor)->count());
+            $this->getJson('/api/attendance/users/'.$c['otherAgent']->id.'/days/2026-08-17')
+                ->assertStatus($scope === 'attendance.all_branches.view' ? 200 : 403);
+        }
+        $role->forceFill(['permissions' => ['attendance.table.view', 'attendance.scope.group']])->save();
+        $subjectRole = Role::create(['name' => 'Custom participant', 'slug' => 'attendance_participant']);
+        $c['agent']->forceFill(['role_id' => $subjectRole->id])->save();
+        foreach ([[], ['attendance.subject.group'], []] as $rights) {
+            $subjectRole->forceFill(['permissions' => $rights])->save();
+            Sanctum::actingAs($c['hr']->fresh());
+            $this->getJson($url)->assertOk()->assertJsonCount($rights ? 2 : 1, 'data');
+            $this->getJson('/api/attendance/users/'.$c['agent']->id.'/days/2026-08-17')
+                ->assertStatus($rights ? 200 : 403);
+        }
+        // Losing the group must never expand the selection to other unassigned employees.
+        $c['hr']->forceFill(['branch_group_id' => null])->save();
+        Sanctum::actingAs($c['hr']->fresh());
+        $this->getJson($url)->assertOk()->assertJsonCount(1, 'data');
+        $role->forceFill(['permissions' => ['attendance.scope.branch']])->save();
+        Sanctum::actingAs($c['hr']->fresh());
+        $this->getJson($url)->assertForbidden();
+        // Existing named roles also obey changes in their configured scope.
+        $c['mop']->role->forceFill(['permissions' => ['attendance.table.view']])->save();
+        Sanctum::actingAs($c['mop']->fresh());
+        $this->getJson($url)->assertOk()->assertJsonCount(1, 'data');
+    }
+
+    public function test_assigned_group_attendance_subject_policies_are_independent_and_revocable(): void
+    {
+        $c = $this->context();
+        $role = Role::create(['name' => 'Custom attendance employee', 'slug' => 'custom_attendance_employee']);
+        $c['agent']->forceFill(['role_id' => $role->id])->save();
+        $c['otherAgent']->forceFill(['role_id' => $role->id])->save();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $access = app(\App\Services\Attendance\AttendanceAccessService::class);
+        $viewer = $c['rop']->fresh();
+        $url = '/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&view=users';
+        foreach ([[], ['attendance.subject.mapping_assigned_groups'], ['attendance.subject.assigned_groups'],
+            ['attendance.subject.mapping_assigned_groups', 'attendance.subject.assigned_groups'],
+            ['attendance.subject.assigned_groups', 'attendance.subject.exclude_table'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            $mapping = $access->mappingUsersQuery($viewer)->pluck('users.id')->all();
+            $visible = $access->visibleUsersQuery($viewer)->pluck('users.id')->all();
+            $this->assertSame(in_array('attendance.subject.mapping_assigned_groups', $rights), in_array($c['agent']->id, $mapping));
+            $expected = in_array('attendance.subject.assigned_groups', $rights) && ! in_array('attendance.subject.exclude_table', $rights);
+            $this->assertSame($expected, in_array($c['agent']->id, $visible));
+            $this->assertNotContains($c['otherAgent']->id, $mapping);
+            $this->assertNotContains($c['otherAgent']->id, $visible);
+            Sanctum::actingAs($viewer);
+            $response = $this->getJson($url)->assertOk();
+            $this->assertSame($expected, in_array($c['agent']->id, collect($response->json('data'))->pluck('user.id')->all()));
+        }
+        // An exclusion also applies to an observer with access to every branch.
+        $c['hr']->role->forceFill(['permissions' => ['attendance.all_branches.view']])->save();
+        foreach ([['attendance.subject.exclude_table'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            $this->assertSame($rights === [], $access->visibleUsersQuery($c['hr']->fresh())->whereKey($c['agent']->id)->exists());
+        }
+        $this->assertNotNull($c['agent']->fresh());
+    }
+
+    public function test_custom_attendance_history_uses_saved_role_and_preserves_group_boundaries(): void
+    {
+        $c = $this->context();
+        (require database_path('migrations/2026_09_09_010000_add_attendance_historical_context.php'))->up();
+        $role = Role::create(['name' => 'Historical employee', 'slug' => 'historical_attendance_employee']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $summary = AttendanceDailySummary::create(['user_id' => $c['otherAgent']->id,
+            'branch_group_id' => $c['group']->id, 'role_slug' => $role->slug,
+            'work_date' => '2026-08-17', 'status' => 'present']);
+        $foreign = AttendanceDailySummary::create(['user_id' => $c['agent']->id,
+            'branch_group_id' => $c['otherAgent']->branch_group_id, 'role_slug' => $role->slug,
+            'work_date' => '2026-08-17', 'status' => 'present']);
+        $scope = app(\App\Services\Attendance\AttendanceGroupScope::class);
+        foreach ([[], ['attendance.subject.assigned_groups'],
+            ['attendance.subject.assigned_groups', 'attendance.subject.exclude_table'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            $ids = $scope->apply(AttendanceDailySummary::query(), $c['rop']->fresh())->pluck('id')->all();
+            $this->assertSame($rights === ['attendance.subject.assigned_groups'], in_array($summary->id, $ids));
+            $this->assertNotContains($foreign->id, $ids);
+        }
+        $this->assertSame($role->slug, $summary->fresh()->role_slug);
+        $this->assertSame(2, AttendanceDailySummary::count());
+    }
+
+    public function test_mapping_picker_uses_own_permission_subject_policy_and_search(): void
+    {
+        $c = $this->context();
+        $role = Role::create(['name' => 'Custom participant', 'slug' => 'custom_mapping_picker']);
+        $c['agent']->forceFill(['role_id' => $role->id])->save();
+        $c['otherAgent']->forceFill(['role_id' => $role->id])->save();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        Sanctum::actingAs($c['rop']->fresh());
+        $url = '/api/attendance/mapping-users?search='.$c['agent']->id;
+        $this->getJson($url)->assertOk()->assertJsonCount(0, 'data');
+        $role->forceFill(['permissions' => ['attendance.subject.mapping_assigned_groups']])->save();
+        $this->getJson($url)->assertOk()->assertJsonPath('data.0.id', $c['agent']->id)->assertJsonMissingPath('data.0.email');
+        $this->getJson('/api/attendance/mapping-users?search='.$c['otherAgent']->id)->assertOk()->assertJsonCount(0, 'data');
+        $role->forceFill(['permissions' => ['attendance.subject.mapping_assigned_groups', 'attendance.subject.exclude_mapping_picker']])->save();
+        $this->getJson($url)->assertOk()->assertJsonCount(0, 'data');
+        $c['hr']->role->forceFill(['permissions' => ['attendance.mappings.manage']])->save();
+        Sanctum::actingAs($c['hr']->fresh());
+        $role->forceFill(['permissions' => []])->save();
+        $this->getJson($url)->assertOk()->assertJsonPath('data.0.id', $c['agent']->id);
+        $c['agent']->forceFill(['status' => 'inactive'])->save();
+        $this->getJson($url)->assertOk()->assertJsonCount(0, 'data');
+        $c['hr']->role->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($c['hr']->fresh());
+        $this->getJson($url)->assertForbidden();
+    }
+
     private function context(): array
     {
         $branchA = Branch::firstOrCreate(['name' => 'Branch A']);

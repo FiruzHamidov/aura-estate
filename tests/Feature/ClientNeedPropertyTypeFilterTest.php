@@ -31,6 +31,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             $table->string('name');
             $table->string('slug')->unique();
             $table->string('description')->nullable();
+            $table->json('permissions')->nullable();
             $table->timestamps();
         });
 
@@ -782,6 +783,35 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
                 $this->getJson('/api/client-catalog/counts')->assertOk()->assertJsonPath('total', 1);
             }
         }
+    }
+
+    public function test_catalog_grants_select_lists_independently_of_role(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $client = $this->createClient($branch, $agent, 'High budget');
+        $this->catalogNeed($client, 1000000);
+        $role = $agent->role;
+        foreach (['custom_catalog', 'intern'] as $slug) {
+            $role->forceFill(['slug' => $slug, 'permissions' => ['clients.catalog.view', 'clients.catalog.list.interns', 'clients.catalog.claim']])->save();
+            Sanctum::actingAs($agent->fresh('role'));
+            $this->getJson('/api/client-catalog/counts')->assertExactJson(['total' => 0, 'lists' => ['interns' => 0]]);
+            $this->getJson('/api/client-catalog?list=agents')->assertUnprocessable();
+            $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertConflict();
+            $role->forceFill(['permissions' => ['clients.catalog.view', 'clients.catalog.list.agents']])->save();
+            Sanctum::actingAs($agent->fresh('role'));
+            $this->getJson('/api/client-catalog/counts')->assertExactJson(['total' => 1, 'lists' => ['agents' => 1]]);
+            $this->getJson('/api/client-catalog')->assertOk()->assertJsonPath('data.0.id', $client->id)->assertJsonMissingPath('data.0.phone');
+            $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertForbidden();
+            $role->forceFill(['permissions' => ['clients.catalog.view']])->save();
+            Sanctum::actingAs($agent->fresh('role'));
+            $this->getJson('/api/client-catalog')->assertForbidden();
+        }
+        $this->assertDatabaseCount('client_catalog_claims', 0);
+        $role->forceFill(['slug' => 'custom_claimant', 'permissions' => ['clients.catalog.view', 'clients.catalog.list.agents', 'clients.catalog.claim']])->save();
+        Sanctum::actingAs($agent->fresh('role'));
+        $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertOk()->assertJsonPath('data.id', $client->id)->assertJsonStructure(['data' => ['phone']]);
+        $this->assertDatabaseCount('client_catalog_claims', 1);
+
     }
 
     public function test_catalog_paginates_oldest_clients_and_searches_only_names(): void

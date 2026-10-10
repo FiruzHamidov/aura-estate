@@ -93,7 +93,7 @@ final class AttendanceReportController extends Controller
     public function unmapped(Request $request)
     {
         $this->access->assertCanManageMappings($request->user());
-        if ($request->user()->hasRole('rop')) {
+        if ($request->user()->usesAssignedGroupScope()) {
             return response()->json(['data' => [], 'total' => 0, 'current_page' => 1, 'last_page' => 1]);
         }
         if ($request->has('grouped')) {
@@ -180,7 +180,7 @@ final class AttendanceReportController extends Controller
                 'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             ])->deleteFileAfterSend(true);
             $actor = $request->user();
-            return ($actor->hasRole('rop') || $actor->hasRole('security'))
+            return ($actor->usesAssignedGroupScope() || $actor->hasPermission('attendance.scope.assigned_branches'))
                 ? new \App\Http\Responses\CheckedTemporaryDownload($download, fn () => $this->assertExportScope($actor))
                 : $download;
         }
@@ -207,16 +207,16 @@ final class AttendanceReportController extends Controller
 
     private function assertExportScope(User $actor): void
     {
-        if ($actor->hasRole('security')) {
+        if ($actor->hasPermission('attendance.scope.assigned_branches')) {
             $fresh = User::query()->with('role')->find($actor->id);
-            abort_unless($fresh && $fresh->hasRole('security') && $fresh->status === User::STATUS_ACTIVE
+            abort_unless($fresh && $fresh->hasPermission('attendance.scope.assigned_branches') && $fresh->status === User::STATUS_ACTIVE
                 && $this->access->securityBranchIds($fresh) === $this->access->securityBranchIds($actor),
                 409, 'ACCESS_SCOPE_VERSION_CONFLICT');
             return;
         }
-        if (! $actor->hasRole('rop')) return;
+        if (! $actor->usesAssignedGroupScope()) return;
         $fresh = User::query()->with('role')->find($actor->id);
-        abort_unless($fresh && $fresh->hasRole('rop') && $fresh->status === User::STATUS_ACTIVE
+        abort_unless($fresh && $fresh->usesAssignedGroupScope() && $fresh->status === User::STATUS_ACTIVE
             && (int) $fresh->branch_id === (int) $actor->branch_id
             && (int) $fresh->access_scope_version === (int) $actor->access_scope_version,
             409, 'ACCESS_SCOPE_VERSION_CONFLICT');
@@ -227,11 +227,11 @@ final class AttendanceReportController extends Controller
         $query = $this->groupScope->users($request->user(), $request->input('date_from'), $request->input('date_to'));
         if ($request->has('branch_ids')) $query->whereIn('users.branch_id', $request->input('branch_ids', []));
         foreach (['branch_id', 'branch_group_id'] as $field) {
-            if ($request->filled($field) && ! $request->user()->hasRole('rop')) $query->where('users.'.$field, $request->integer($field));
+            if ($request->filled($field) && ! $request->user()->usesAssignedGroupScope()) $query->where('users.'.$field, $request->integer($field));
         }
         if ($request->filled('user_id')) $query->whereKey($request->integer('user_id'));
         $this->groupScope->filterUsers($query, $request->user(), $request->all(), $request->input('date_from'), $request->input('date_to'));
-        if ($request->filled('role') && ! $request->user()->hasRole('rop')) $query->whereHas('role', fn (Builder $roles) => $roles->where('slug', (string) $request->string('role')));
+        if ($request->filled('role') && ! $request->user()->usesAssignedGroupScope()) $query->whereHas('role', fn (Builder $roles) => $roles->where('slug', (string) $request->string('role')));
         if ($request->filled('search')) {
             $search = trim((string) $request->string('search'));
             $query->where(function (Builder $users) use ($search) {
@@ -278,8 +278,8 @@ final class AttendanceReportController extends Controller
     private function scopeEvents(Builder $query, User $viewer): void
     {
         $this->access->assertCanViewModule($viewer);
-        if ($viewer->hasRole('security')) $this->groupScope->apply($query, $viewer);
-        if ($viewer->hasRole('rop')) {
+        if ($viewer->hasPermission('attendance.scope.assigned_branches')) $this->groupScope->apply($query, $viewer);
+        if ($viewer->usesAssignedGroupScope()) {
             $this->groupScope->apply($query, $viewer);
         } else {
             $query->whereIn('user_id', $this->access->visibleUsersQuery($viewer)->select('users.id'));
@@ -315,17 +315,17 @@ final class AttendanceReportController extends Controller
         if (isset($filters['user_id'])) {
             $query->where('user_id', $filters['user_id']);
         }
-        if (isset($filters['branch_id']) && ! request()->user()->hasRole('rop')) {
+        if (isset($filters['branch_id']) && ! request()->user()->usesAssignedGroupScope()) {
             $query->whereHas('user', fn (Builder $users) => $users->where('branch_id', $filters['branch_id']));
         }
         if (isset($filters['branch_group_id'])) {
-            if (request()->user()->hasRole('rop')) $query->where('branch_group_id', $filters['branch_group_id']);
+            if (request()->user()->usesAssignedGroupScope()) $query->where('branch_group_id', $filters['branch_group_id']);
             else $query->whereHas('user', fn (Builder $users) => $users->where('branch_group_id', $filters['branch_group_id']));
         }
         if (isset($filters['device_id'])) {
             $query->whereJsonContains('device_ids', (int) $filters['device_id']);
         }
-        if (isset($filters['role']) && ! request()->user()->hasRole('rop')) {
+        if (isset($filters['role']) && ! request()->user()->usesAssignedGroupScope()) {
             $query->whereHas('user.role', fn (Builder $roles) => $roles->where('slug', $filters['role']));
         }
         if (! empty($filters['search'])) {

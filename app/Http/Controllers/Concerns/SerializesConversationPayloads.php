@@ -211,11 +211,7 @@ trait SerializesConversationPayloads
             : ($conversation->supportThread?->guest_session_id
                 && (int) $latestMessage?->guest_session_id === (int) $conversation->supportThread->guest_session_id);
         $eligibleResponders = $conversation->participants
-            ->filter(fn (ConversationParticipant $participant) => in_array(
-                $participant->user?->role?->slug,
-                ['manager', 'operator', 'admin', 'superadmin'],
-                true
-            ))
+            ->filter(fn ($participant) => $participant->role === \App\Models\ConversationParticipant::ROLE_ADMIN)
             ->pluck('user_id')
             ->values()
             ->all();

@@ -21,7 +21,8 @@ class SendFirebasePushNotification implements ShouldQueue
             $notification = Notification::query()->find($this->notificationId);
             // Serialize delivery with assignment/role changes on the recipient row.
             $recipient = $notification?->recipient()->lockForUpdate()->first();
-            if ($notification && $recipient && app(\App\Services\GroupAccess\NotificationGroupAccess::class)->allows($notification, $recipient)) {
+            if ($notification && $recipient && app(\App\Services\NotificationDeliveryAccess::class)->allows($notification, $recipient)
+                && app(\App\Services\GroupAccess\NotificationGroupAccess::class)->allows($notification, $recipient)) {
                 $firebase->send($notification);
             }
         });

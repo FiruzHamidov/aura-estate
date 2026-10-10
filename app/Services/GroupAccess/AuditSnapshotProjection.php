@@ -40,7 +40,7 @@ final class AuditSnapshotProjection
 
     public function preparePayloads(Collection $payloads, User $actor): void
     {
-        if (! $actor->hasRole('rop')) return;
+        if (! $actor->usesAssignedGroupScope()) return;
         $references = [];
         foreach ($payloads as $payload) {
             foreach ($this->references((array) $payload) as $class => $ids) {
@@ -65,7 +65,7 @@ final class AuditSnapshotProjection
 
     public function hasHiddenReferences(array $payload, User $actor): bool
     {
-        if (! $actor->hasRole('rop')) return false;
+        if (! $actor->usesAssignedGroupScope()) return false;
         $this->preparePayloads(collect([$payload]), $actor);
         $cache = request()->attributes->get('rop_audit_references.'.$actor->id, []);
         foreach ($this->references($payload) as $class => $ids) {

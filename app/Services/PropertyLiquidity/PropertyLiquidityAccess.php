@@ -17,32 +17,32 @@ class PropertyLiquidityAccess
 
     public function isInternal(?User $user): bool
     {
-        return in_array($this->role($user), self::INTERNAL_ROLES, true);
+        return ($user?->hasPermission('liquidity.view') ?? false);
     }
 
     public function canManagePromotion(?User $user): bool
     {
-        return in_array($this->role($user), self::MARKETING_WRITE_ROLES, true);
+        return ($user?->hasPermission('liquidity.promotion.manage') ?? false);
     }
 
     public function canSetBusinessPriority(?User $user): bool
     {
-        return in_array($this->role($user), ['mop', 'rop', 'branch_director', 'admin', 'superadmin'], true);
+        return ($user?->hasPermission('liquidity.priority.manage') ?? false);
     }
 
     public function scope(Builder $query, User $user): Builder
     {
         $role = $this->role($user);
 
-        if ($role === 'rop') {
-            return app(\App\Support\RopGroupAccess::class)->scope($query, $user, 'properties.branch_group_id', 'properties.branch_id');
+        if ($user->usesAssignedGroupScope()) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $user, 'properties.branch_group_id', 'properties.branch_id');
         }
 
-        if (in_array($role, ['admin', 'superadmin', 'marketing', 'reels_manager'], true)) {
+        if ($user->hasPermission('liquidity.scope.all')) {
             return $query;
         }
 
-        if (in_array($role, ['agent', 'intern'], true)) {
+        if ($user->hasPermission('liquidity.scope.own')) {
             return $query->where(function (Builder $scope) use ($user) {
                 $scope->where('properties.agent_id', $user->id)
                     ->orWhere('properties.created_by', $user->id)
@@ -50,13 +50,13 @@ class PropertyLiquidityAccess
             });
         }
 
-        if ($role === 'mop') {
+        if ($user->hasPermission('liquidity.scope.group')) {
             return $user->branch_group_id
                 ? $query->where('properties.branch_group_id', $user->branch_group_id)
                 : $query->whereRaw('1 = 0');
         }
 
-        if (in_array($role, ['rop', 'branch_director'], true)) {
+        if ($user->hasPermission('liquidity.scope.branch')) {
             if (! $user->branch_id) {
                 return $query->whereRaw('1 = 0');
             }

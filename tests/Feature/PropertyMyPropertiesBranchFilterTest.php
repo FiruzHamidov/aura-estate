@@ -118,6 +118,93 @@ class PropertyMyPropertiesBranchFilterTest extends TestCase
         });
     }
 
+    public function test_internal_list_grant_overrides_role_gate_without_expanding_object_scope(): void
+    {
+        $type = PropertyType::create(['name' => 'Apartment']);
+        $status = PropertyStatus::create(['name' => 'Active']);
+        $actors = [];
+        foreach (['client', 'external_agent', 'custom_reader'] as $index => $slug) {
+            $role = Role::create(['name' => $slug, 'slug' => $slug]);
+            $actor = User::create(['name' => $slug, 'phone' => 'list-reader-'.$index, 'role_id' => $role->id, 'branch_id' => 2, 'branch_group_id' => 20]);
+            $property = Property::create(['title' => 'Own listing '.$index, 'type_id' => $type->id, 'status_id' => $status->id,
+                'price' => 100000, 'currency' => 'TJS', 'offer_type' => 'sale', 'moderation_status' => 'approved',
+                'created_by' => $actor->id, 'agent_id' => $actor->id, 'branch_id' => 2, 'branch_group_id' => 20]);
+            $actors[] = [$role, $actor, $property];
+        }
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        foreach ($actors as [$role, $actor, $property]) {
+            $role->forceFill(['permissions' => ['properties.list.scope.own']])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->getJson('/api/my-properties')->assertForbidden();
+            $this->getJson('/api/properties')->assertOk()->assertJsonCount(1, 'data');
+            $role->forceFill(['permissions' => ['properties.list.internal', 'properties.list.scope.own']])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->getJson('/api/my-properties')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $property->id);
+            $role->forceFill(['permissions' => ['properties.list.internal']])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->getJson('/api/my-properties')->assertOk()->assertJsonCount(0, 'data');
+            $role->forceFill(['permissions' => ['properties.list.scope.own']])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->getJson('/api/my-properties')->assertForbidden();
+        }
+    }
+
+    public function test_custom_list_scopes_are_shared_by_list_count_map_and_my_properties(): void
+    {
+        Schema::table('properties', function (Blueprint $table): void {
+            $table->unsignedBigInteger('co_owner_user_id')->nullable();
+            $table->decimal('latitude', 10, 8)->nullable();
+            $table->decimal('longitude', 11, 8)->nullable();
+            $table->decimal('discount_price', 15, 2)->nullable();
+        });
+        $role = Role::create(['name' => 'Custom list reader', 'slug' => 'custom_list_reader']);
+        $actor = User::create(['name' => 'Actor', 'phone' => 'scope-actor', 'role_id' => $role->id, 'branch_id' => 2, 'branch_group_id' => 20]);
+        $other = User::create(['name' => 'Other', 'phone' => 'scope-other', 'role_id' => $role->id, 'branch_id' => 3, 'branch_group_id' => 30]);
+        $type = PropertyType::create(['name' => 'Apartment']);
+        $status = PropertyStatus::create(['name' => 'Active']);
+        $make = fn (array $extra) => Property::create(array_merge([
+            'title' => 'Scoped object', 'type_id' => $type->id, 'status_id' => $status->id,
+            'price' => 100000, 'currency' => 'TJS', 'offer_type' => 'sale', 'moderation_status' => 'approved',
+            'created_by' => $other->id, 'agent_id' => $other->id, 'branch_id' => 3, 'branch_group_id' => 30,
+            'latitude' => 38.5, 'longitude' => 68.8,
+        ], $extra));
+        $own = $make(['created_by' => $actor->id, 'agent_id' => $actor->id, 'branch_id' => 2, 'branch_group_id' => 20]);
+        $group = $make(['moderation_status' => 'pending', 'branch_id' => 2, 'branch_group_id' => 20]);
+        $foreign = $make([]);
+        $deleted = $make(['created_by' => $actor->id, 'branch_id' => 2, 'branch_group_id' => 20, 'moderation_status' => 'deleted']);
+        $coOwned = $make(['co_owner_user_id' => $actor->id]);
+        $assignedOnly = $make(['agent_id' => $actor->id]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $this->assertContains('properties.list.scope.all', $role->fresh()->permissions);
+        $grant = function (array $permissions) use ($role, $actor): void {
+            $role->forceFill(['permissions' => ['properties.list.internal', ...$permissions]])->save();
+            Sanctum::actingAs($actor->fresh());
+        };
+        foreach ([
+            'own' => [$own->id, $coOwned->id],
+            'group' => [$own->id, $group->id],
+            'public' => [$own->id, $foreign->id, $coOwned->id, $assignedOnly->id],
+            'all' => [$own->id, $group->id, $foreign->id, $deleted->id, $coOwned->id, $assignedOnly->id],
+            'none' => [],
+        ] as $scope => $ids) {
+            $grant($scope === 'none' ? [] : ['properties.list.scope.'.$scope]);
+            foreach (['/api/properties', '/api/my-properties'] as $url) {
+                $response = $this->getJson($url)->assertOk();
+                $this->assertEqualsCanonicalizing($ids, array_column($response->json('data'), 'id'), $scope.' '.$url);
+            }
+            $this->getJson('/api/properties/count')->assertOk()->assertJsonPath('count', count($ids));
+            $map = $this->getJson('/api/properties/map?bbox=38.4,68.6,38.8,69.1&zoom=12')->assertOk();
+            $this->assertEqualsCanonicalizing($ids, array_column(array_column($map->json('features'), 'properties'), 'id'));
+        }
+        $grant(['properties.list.scope.own']);
+        $this->getJson('/api/my-properties?moderation_status=deleted')->assertOk()->assertJsonPath('total', 1)->assertJsonPath('data.0.id', $deleted->id);
+        $own->forceFill(['moderation_status' => 'sold'])->saveQuietly();
+        $foreign->forceFill(['moderation_status' => 'sold'])->saveQuietly();
+        $grant(['properties.list.scope.own', 'properties.list.closed_only']);
+        $report = $this->getJson('/api/my-properties')->assertOk()->assertJsonPath('total', 1)->assertJsonPath('data.0.id', $own->id);
+        $this->assertSame([$actor->id], array_column($report->json('security_summary.agents'), 'id'));
+    }
+
     public function test_security_report_only_returns_control_stages_and_scoped_totals(): void
     {
         $role = Role::create(['name' => 'СБ', 'slug' => 'security']);
@@ -349,7 +436,22 @@ class PropertyMyPropertiesBranchFilterTest extends TestCase
                 ->assertJsonPath('data.0.report_mop.0.name', 'mop')
                 ->assertJsonCount(1, 'data.0.report_mop');
         }
-        Sanctum::actingAs($users['accountant']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $custom = Role::create(['name' => 'Custom accountant', 'slug' => 'custom_accountant']);
+        $custom->forceFill(['permissions' => ['properties.list.internal', 'properties.list.scope.all']])->save();
+        Sanctum::actingAs($users['superadmin']->fresh());
+        $users['accountant']->forceFill(['role_id' => $custom->id])->save();
+        Sanctum::actingAs($users['accountant']->fresh());
+        $this->getJson('/api/my-properties?moderation_status=sold')->assertOk()->assertJsonCount(1, 'data')->assertJsonMissingPath('data.0.report_rop');
+        $custom->forceFill(['permissions' => ['properties.list.internal', 'properties.list.scope.all', 'properties.reports.economics']])->save();
+        Sanctum::actingAs($users['accountant']->fresh());
+        $this->getJson('/api/my-properties?moderation_status=sold')->assertOk()->assertJsonPath('data.0.report_rop.0.amount', 250);
+        $custom->forceFill(['permissions' => ['properties.list.internal', 'properties.list.scope.all']])->save();
+        Sanctum::actingAs($users['accountant']->fresh());
+        $this->getJson('/api/my-properties?moderation_status=sold')->assertOk()->assertJsonCount(1, 'data')->assertJsonMissingPath('data.0.report_rop');
+        Sanctum::actingAs($users['superadmin']->fresh());
+        $users['accountant']->forceFill(['role_id' => Role::where('slug', 'accountant')->value('id')])->save();
+        Sanctum::actingAs($users['accountant']->fresh());
         $this->getJson('/api/user?report_agents=1')->assertOk()->assertJsonMissingPath('data.0.phone');
         $this->postJson('/api/properties', [])->assertForbidden();
         $this->getJson('/api/user')->assertForbidden();

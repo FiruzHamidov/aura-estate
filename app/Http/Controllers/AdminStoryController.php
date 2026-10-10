@@ -4,17 +4,19 @@ namespace App\Http\Controllers;
 
 use App\Models\Story;
 use App\Models\User;
-use Illuminate\Database\Eloquent\Builder;
+use App\Support\StoryAccess;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Validation\Rule;
 
 class AdminStoryController extends Controller
 {
+    public function __construct(private readonly StoryAccess $access) {}
+
     public function index(Request $request): JsonResponse
     {
         $actor = $this->authUser($request);
-        abort_unless($this->canAccessModerationList($actor), 403, 'Forbidden');
+        abort_unless($this->access->canViewModeration($actor), 403, 'Forbidden');
 
         $validated = $request->validate([
             'status' => ['nullable', Rule::in([
@@ -32,7 +34,7 @@ class AdminStoryController extends Controller
             ->with(['user:id,name,role_id,branch_id,branch_group_id', 'user.role:id,name,slug', 'items', 'attachments'])
             ->orderByDesc('id');
 
-        $this->applyActorScope($query, $actor);
+        $this->access->scopeModeration($query, $actor);
 
         if (!empty($validated['status'])) {
             $query->where('status', $validated['status']);
@@ -48,13 +50,13 @@ class AdminStoryController extends Controller
     public function updateStatus(Request $request, Story $story): JsonResponse
     {
         $actor = $this->authUser($request);
-        abort_unless($this->canAccessModerationList($actor), 403, 'Forbidden');
+        abort_unless($this->access->canViewModeration($actor), 403, 'Forbidden');
 
         $validated = $request->validate([
             'action' => ['required', Rule::in(['archive', 'hide', 'republish'])],
         ]);
 
-        $this->assertStoryInScope($actor, $story);
+        abort_unless($actor->hasPermission('stories.moderation.status') && $this->access->inModerationScope($actor, $story), 403, 'Forbidden');
 
         if ($validated['action'] === 'archive') {
             $story->update(['status' => Story::STATUS_ARCHIVED]);
@@ -114,65 +116,5 @@ class AdminStoryController extends Controller
         $user->loadMissing('role');
 
         return $user;
-    }
-
-    private function canAccessModerationList(User $user): bool
-    {
-        return in_array($user->role?->slug, ['admin', 'superadmin', 'mop', 'rop', 'branch_director'], true);
-    }
-
-    private function applyActorScope(Builder $query, User $actor): void
-    {
-        $slug = $actor->role?->slug;
-
-        if (in_array($slug, ['admin', 'superadmin'], true)) {
-            return;
-        }
-
-        if ($slug === 'mop') {
-            $query->whereHas('user', function (Builder $q) use ($actor) {
-                $q->where('branch_group_id', $actor->branch_group_id);
-            });
-
-            return;
-        }
-
-        if (in_array($slug, ['rop', 'branch_director'], true)) {
-            $query->whereHas('user', function (Builder $q) use ($actor) {
-                $q->where('branch_id', $actor->branch_id);
-            });
-        }
-    }
-
-    private function assertStoryInScope(User $actor, Story $story): void
-    {
-        $slug = $actor->role?->slug;
-        $story->loadMissing('user');
-
-        if (in_array($slug, ['admin', 'superadmin'], true)) {
-            return;
-        }
-
-        if ($slug === 'mop') {
-            abort_unless(
-                !empty($actor->branch_group_id)
-                && !empty($story->user?->branch_group_id)
-                && (int) $actor->branch_group_id === (int) $story->user->branch_group_id,
-                403,
-                'Forbidden'
-            );
-
-            return;
-        }
-
-        if (in_array($slug, ['rop', 'branch_director'], true)) {
-            abort_unless(
-                !empty($actor->branch_id)
-                && !empty($story->user?->branch_id)
-                && (int) $actor->branch_id === (int) $story->user->branch_id,
-                403,
-                'Forbidden'
-            );
-        }
     }
 }

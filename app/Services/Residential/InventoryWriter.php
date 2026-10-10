@@ -43,7 +43,7 @@ final class InventoryWriter
             }
             $publication = $values['publication_status'] ?? (isset($values['moderation_status']) ? InventoryStatus::building(['moderation_status' => $values['moderation_status']]) : InventoryStatus::building($old));
             InventoryStatus::validateAliases($values, $publication);
-            $moderator = $this->access->global($actor) || in_array($this->access->role($actor), ResidentialAccess::BRANCH_ROLES, true);
+            $moderator = $actor->hasPermission('new_buildings.publish');
             if (! $moderator && in_array($publication, ['published', 'rejected', 'archived'], true)) {
                 abort_if(isset($values['publication_status']) || isset($values['moderation_status']), 403, 'Отправьте ЖК на модерацию.');
                 $publication = 'pending';
@@ -189,7 +189,7 @@ final class InventoryWriter
         if (! $contact || ! $this->access->canCreate($contact) || (int) $record->branch_id !== (int) $contact->branch_id) {
             throw ValidationException::withMessages(['responsible_agent_id' => 'Выберите действующего сотрудника Aura в филиале ЖК.']);
         }
-        if (! $this->access->global($actor) && ! in_array($this->access->role($actor), ResidentialAccess::BRANCH_ROLES, true) && $record->isDirty('responsible_agent_id') && (int) $record->responsible_agent_id !== (int) $actor->id) {
+        if (! $actor->hasPermission('new_buildings.assign') && $record->isDirty('responsible_agent_id') && (int) $record->responsible_agent_id !== (int) $actor->id) {
             throw ValidationException::withMessages(['responsible_agent_id' => 'Назначение другого сотрудника доступно руководителю.']);
         }
     }

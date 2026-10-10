@@ -51,7 +51,7 @@ class ClientController extends Controller
 
     private function isPrivilegedRole(User $user): bool
     {
-        return $this->clientAccess->isPrivilegedRole($this->clientAccess->roleSlug($user));
+        return $this->clientAccess->canReadAll($user);
     }
 
     private function catalog(string $modelClass, string $table, array $orderColumns = ['sort_order', 'id'], bool $activeOnly = false): array
@@ -62,7 +62,7 @@ class ClientController extends Controller
 
         $query = $modelClass::query();
         $actor = $this->authUser();
-        if ($modelClass === BranchGroup::class && $actor->hasRole('rop')) {
+        if ($modelClass === BranchGroup::class && $actor->usesAssignedGroupScope()) {
             $query->whereIn('id', app(\App\Support\RopGroupAccess::class)->groupsQuery($actor));
         }
 
@@ -278,7 +278,7 @@ class ClientController extends Controller
         }
 
         $actor = $this->authUser();
-        if ($actor->hasRole('rop')) {
+        if ($actor->usesAssignedGroupScope()) {
             $visibleIds = app(\App\Support\RopGroupAccess::class)->employees($actor)
                 ->whereIn('users.id', array_column($payload, 'user_id'))->pluck('users.id')->all();
             $payload = array_map(fn ($row) => in_array($row['user_id'], $visibleIds, true)
@@ -363,6 +363,7 @@ class ClientController extends Controller
 
     public function duplicateCheck(Request $request)
     {
+        abort_unless($request->user()?->hasPermission('clients.duplicates.search'), 403);
         $authUser = $this->authUser();
 
         $validated = $request->validate([
@@ -632,14 +633,14 @@ class ClientController extends Controller
             $agentsQuery = User::query()
                 ->with('role')
                 ->when(Schema::hasColumn('users', 'status'), fn ($query) => $query->where('status', User::STATUS_ACTIVE))
-                ->whereHas('role', fn ($query) => $query->whereIn('slug', ['agent', 'mop', 'rop', 'manager']))
+                ->whereHas('role', fn ($query) => $query->withPermission('clients.subject.mobile_filter'))
                 ->orderBy('name');
 
             if (! $this->isPrivilegedRole($authUser) && Schema::hasColumn('users', 'branch_id') && ! empty($authUser->branch_id)) {
                 $agentsQuery->where('branch_id', $authUser->branch_id);
             }
 
-            if ($authUser->hasRole('rop')) {
+            if ($authUser->usesAssignedGroupScope()) {
                 $agentsQuery->whereIn('users.id', app(\App\Support\RopGroupAccess::class)->employees($authUser)->select('users.id'));
             }
 
@@ -810,6 +811,7 @@ class ClientController extends Controller
     public function matchingProperties(Request $request, Client $client)
     {
         $authUser = $this->authUser();
+        abort_unless($authUser->hasPermission('clients.matching.view'), 403, 'Нет права подбирать объекты для клиента.');
         $this->clientAccess->ensureVisible($authUser, $client, 'clients.view');
 
         $validated = $request->validate([
@@ -1013,7 +1015,7 @@ class ClientController extends Controller
             $this->clientAccess->ensureCanManageCollaborators($authUser, $client);
 
             $collaborator = User::query()->lockForUpdate()->findOrFail($validated['user_id']);
-            if ($authUser->hasRole('rop')) {
+            if ($authUser->usesAssignedGroupScope()) {
                 app(\App\Support\RopGroupAccess::class)->ensureEmployee($authUser, $collaborator->id, $client->branch_group_id, true);
             }
 
@@ -1128,7 +1130,7 @@ class ClientController extends Controller
     public function updateSettings(Request $request)
     {
         $authUser = $this->authUser();
-        abort_unless($this->isPrivilegedRole($authUser), 403, 'Forbidden');
+        abort_unless($authUser->hasPermission('clients.settings.manage'), 403, 'Forbidden');
 
         $validated = $request->validate([
             'agent_visibility_mode' => ['sometimes', Rule::in([

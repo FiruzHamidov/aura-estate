@@ -171,11 +171,6 @@ class PropertyController extends Controller
         return $user;
     }
 
-    private function hasOwnPropertyScope(User $user): bool
-    {
-        return $user->hasRole('agent') || $user->hasRole('intern');
-    }
-
     private function authorizePropertyMutation(Property $property): User
     {
         /** @var User|null $user */
@@ -224,14 +219,15 @@ class PropertyController extends Controller
     private function propertyCapabilities(?User $user, Property $property, ?array $refreshState = null): array
     {
         $workflow = $this->moderationAccess->capabilities($user, $property);
-        $canMutate = $workflow['can_edit'];
         $refreshState ??= $this->listingDateRefreshState($property);
 
         return array_merge($workflow, [
-            'can_refresh_listing_date' => $canMutate && $refreshState['available'],
-            'can_view_history' => $canMutate,
+            'can_manage_listing_date' => $user && $this->moderationAccess->canRefreshListingDate($user, $property),
+            'can_refresh_listing_date' => $user && $this->moderationAccess->canRefreshListingDate($user, $property) && $refreshState['available'],
+            'can_view_contacts' => $user?->hasPermission('properties.contacts.view') ?? false,
+            'can_view_history' => $user && $this->moderationAccess->canViewHistory($user, $property),
             'can_moderate' => $workflow['can_moderate'],
-            'can_manage_co_owner' => $canMutate,
+            'can_manage_co_owner' => $workflow['can_manage_co_owner'],
         ]);
     }
 
@@ -260,7 +256,7 @@ class PropertyController extends Controller
             || in_array($moderationStatus, ['sold', 'sold_by_owner', 'rented'], true);
 
         $canManageColleagueDeal = $isColleagueDealAction
-            && $user->hasRole('agent')
+            && $user->hasPermission('properties.deal.colleague')
             && (
                 $moderationStatus === 'deposit'
                 || $saleUserId === null
@@ -274,15 +270,7 @@ class PropertyController extends Controller
 
     private function canAssignDealUser(User $actor): bool
     {
-        return $actor->hasRole('admin')
-            || $actor->hasRole('superadmin')
-            || $actor->hasRole('agent')
-            || $actor->hasRole('intern')
-            || $actor->hasRole('mop')
-            || $actor->hasRole('rop')
-            || $actor->hasRole('branch_director')
-            || $actor->hasRole('manager')
-            || $actor->hasRole('operator');
+        return $actor->hasPermission('properties.deal.assign_users');
     }
 
     /** Fields that belong exclusively to the deal DTO, not publication. */
@@ -298,45 +286,11 @@ class PropertyController extends Controller
         ];
     }
 
-    private function canAssignSpecificCoOwner(User $actor, User $coOwner): bool
-    {
-        if ($actor->hasRole('admin') || $actor->hasRole('superadmin')) {
-            return true;
-        }
-
-        return ! empty($actor->branch_id)
-            && ! empty($coOwner->branch_id)
-            && (int) $actor->branch_id === (int) $coOwner->branch_id;
-    }
-
     private function ensureDealAssigneeExists(int $assigneeId): void
     {
         $assignee = User::query()->find($assigneeId);
 
         abort_unless($assignee, 422, 'Указанный сотрудник не найден.');
-    }
-
-    private function ensureValidCoOwner(User $actor, ?int $coOwnerUserId, ?int $ownerUserId): void
-    {
-        if (! $coOwnerUserId) {
-            return;
-        }
-
-        abort_if(
-            $ownerUserId && (int) $coOwnerUserId === (int) $ownerUserId,
-            422,
-            'Соучастник не может быть владельцем объявления.'
-        );
-
-        $coOwner = User::query()->find($coOwnerUserId);
-
-        abort_unless($coOwner, 422, 'Соучастник не найден.');
-        abort_unless($coOwner->status === User::STATUS_ACTIVE, 422, 'Соучастник должен быть активным пользователем.');
-        abort_unless(
-            $this->canAssignSpecificCoOwner($actor, $coOwner),
-            403,
-            'Недостаточно прав, чтобы назначить этого соучастника.'
-        );
     }
 
     private function ensureDealAssignmentUsersInScope(User $actor, array $data, ?Property $property = null): void
@@ -362,7 +316,7 @@ class PropertyController extends Controller
             );
 
             $this->ensureDealAssigneeExists((int) $data[$field]);
-            if ($actor->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->ensureEmployee($actor, (int) $data[$field], $property?->branch_group_id, true);
+            if ($actor->usesAssignedGroupScope()) app(\App\Support\RopGroupAccess::class)->ensureEmployee($actor, (int) $data[$field], $property?->branch_group_id, true);
         }
 
         foreach (($data['agents'] ?? []) as $index => $agent) {
@@ -377,16 +331,19 @@ class PropertyController extends Controller
             );
 
             $this->ensureDealAssigneeExists((int) $agent['agent_id']);
-            if ($actor->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->ensureEmployee($actor, (int) $agent['agent_id'], $property?->branch_group_id, true);
+            if ($actor->usesAssignedGroupScope()) app(\App\Support\RopGroupAccess::class)->ensureEmployee($actor, (int) $agent['agent_id'], $property?->branch_group_id, true);
         }
     }
 
     private function serializePropertyShow(Property $property, ?User $authUser): array
     {
-        $includeAuthContacts = $authUser !== null;
+        $includeAuthContacts = $authUser?->hasPermission('properties.contacts.view') ?? false;
+
+        if ($authUser) {
+            $property->loadMissing(['externalAgent', 'externalPropertyRequest']);
+        }
 
         if ($includeAuthContacts) {
-            $property->loadMissing(['externalAgent', 'externalPropertyRequest']);
             $property->makeVisible([
                 'owner_client_id',
                 'owner_name',
@@ -415,6 +372,13 @@ class PropertyController extends Controller
         if ($includeAuthContacts) {
             $payload['ownerClient'] = $payload['owner_client'] ?? null;
             $payload['buyerClient'] = $payload['buyer_client'] ?? null;
+        } else {
+            foreach (['owner_client_id', 'owner_name', 'owner_phone', 'buyer_client_id', 'buyer_full_name', 'buyer_phone', 'owner_client', 'buyer_client', 'ownerClient', 'buyerClient', 'external_property_request'] as $field) {
+                unset($payload[$field]);
+            }
+        }
+
+        if ($authUser) {
             $payload['external_source'] = $property->external_agent_id ? [
                 'source_type' => $property->source_type,
                 'external_agent_id' => $property->external_agent_id,
@@ -584,9 +548,9 @@ class PropertyController extends Controller
         return (int) $branchId;
     }
 
-    private function normalizeMopBranchGroupPayload(User $user, array $data): array
+    private function normalizePropertyWriteGroup(User $user, array $data): array
     {
-        if (! $user->hasRole('mop')) {
+        if (! $user->hasPermission('properties.write.own_group')) {
             return $data;
         }
 
@@ -763,6 +727,7 @@ class PropertyController extends Controller
      */
     public function myProperties(Request $request)
     {
+        abort_unless($request->user()?->hasPermission('properties.list.internal'), 403, 'Нет права получать внутренний список объектов.');
         $this->validateListFilters($request);
 
         $query = $this->baseQueryMyProperties($request);
@@ -771,8 +736,8 @@ class PropertyController extends Controller
         $perPage = (int) $request->input('per_page', 20);
 
         $summary = null;
-        if ($request->user()?->hasRole('security')) {
-            $reportProperties = Property::query()->whereIn('moderation_status', config('security-property-control.trigger_statuses', []));
+        if ($request->user()?->hasPermission('properties.list.closed_only')) {
+            $reportProperties = $this->baseQueryMyProperties($request)->withoutEagerLoads();
             $reportUsers = User::query()->select(['id', 'name', 'status', 'branch_id', 'branch_group_id'])->where(function ($users) use ($reportProperties) {
                 $users->whereIn('id', (clone $reportProperties)->select('created_by'))
                     ->orWhereIn('id', (clone $reportProperties)->select('agent_id'));
@@ -787,7 +752,7 @@ class PropertyController extends Controller
 
         // A deterministic tie-breaker keeps page-by-page report exports stable.
         $result = $query->latest()->orderByDesc('properties.id')->paginate($perPage);
-        if (in_array($request->user()?->role?->slug, ['superadmin', 'accountant'], true)) {
+        if ($request->user()?->hasPermission('properties.reports.economics')) {
             app(\App\Services\PropertyReportStaff::class)->attach($result->getCollection());
         }
 
@@ -809,7 +774,7 @@ class PropertyController extends Controller
             'buyerClient.type',
         ];
 
-        if (auth()->user()?->hasRole('rop')) {
+        if (auth()->user()?->usesAssignedGroupScope()) {
             $relations[] = 'creator.role';
         }
 
@@ -893,82 +858,40 @@ class PropertyController extends Controller
     {
         $user = auth()->user();
         $query = Property::query()->with(array_merge($this->propertyListRelations(), ['saleAgents']));
-        if ($user?->hasRole('security')) {
+        if ($user?->hasPermission('properties.list.closed_only')) {
             $query->whereIn('properties.moderation_status', config('security-property-control.trigger_statuses', []));
         }
-        if ($user?->hasRole('rop')) {
-            app(\App\Support\RopGroupAccess::class)->scope($query, $user, 'properties.branch_group_id', 'properties.branch_id');
-        }
 
-        $hasStatusFilter = $request->filled('moderation_status');
-
-        if ($user && ($user->hasRole('admin') || $user->hasRole('superadmin'))) {
-            // без ограничений
-        } elseif (! $user || $user->hasRole('client')) {
-            $query->publicSearchable();
-        } elseif ($this->hasOwnPropertyScope($user)) {
-            $query->where(function (Builder $ownerQuery) use ($user) {
-                $ownerQuery->where('created_by', $user->id);
-
-                if ($this->supportsPropertyCoOwner()) {
-                    $ownerQuery->orWhere('co_owner_user_id', $user->id);
-                }
-            });
-            if (! $hasStatusFilter) {
-                $query->where('moderation_status', '!=', 'deleted');
-            }
-        } elseif ($user->hasRole('mop')) {
-            if (empty($user->branch_group_id)) {
-                $query->whereRaw('1 = 0');
-            } else {
-                $this->applyBranchGroupFilter($query, [$user->branch_group_id]);
-            }
-
-            if (! $hasStatusFilter) {
-                $query->where('moderation_status', '!=', 'deleted');
-            }
-        }
-
-        return $query;
+        return $this->scopePropertyList($query, $user, $request);
     }
 
-    // ==== Общая база для index/map: роли, связи, базовые статусы ====
     private function baseQuery(Request $request, ?array $relations = null): Builder
     {
-        $user = $this->propertyShowAuthUser($request);
         $query = Property::query()->with($relations ?? $this->propertyListRelations());
-        if ($user?->hasRole('rop')) {
+
+        return $this->scopePropertyList($query, $this->propertyShowAuthUser($request), $request);
+    }
+
+    private function scopePropertyList(Builder $query, ?User $user, Request $request): Builder
+    {
+        if (! $user) return $query->publicSearchable();
+        if ($user->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $user, 'properties.branch_group_id', 'properties.branch_id');
         }
+        if ($user->hasPermission('properties.list.scope.all')) return $query;
+        if ($user->hasPermission('properties.list.scope.public')) return $query->publicSearchable();
 
-        $hasStatusFilter = $request->filled('moderation_status');
-
-        if ($user && ($user->hasRole('admin') || $user->hasRole('superadmin'))) {
-            // без ограничений
-        } elseif (! $user || $user->hasRole('client')) {
-            $query->publicSearchable();
-        } elseif ($this->hasOwnPropertyScope($user)) {
+        if ($user->hasPermission('properties.list.scope.own')) {
             $query->where(function (Builder $ownerQuery) use ($user) {
                 $ownerQuery->where('created_by', $user->id);
-
-                if ($this->supportsPropertyCoOwner()) {
-                    $ownerQuery->orWhere('co_owner_user_id', $user->id);
-                }
+                if ($this->supportsPropertyCoOwner()) $ownerQuery->orWhere('co_owner_user_id', $user->id);
             });
-            if (! $hasStatusFilter) {
-                $query->where('moderation_status', '!=', 'deleted');
-            }
-        } elseif ($user->hasRole('mop')) {
-            if (empty($user->branch_group_id)) {
-                $query->whereRaw('1 = 0');
-            } else {
-                $this->applyBranchGroupFilter($query, [$user->branch_group_id]);
-            }
-
-            if (! $hasStatusFilter) {
-                $query->where('moderation_status', '!=', 'deleted');
-            }
+        } elseif ($user->hasPermission('properties.list.scope.group')) {
+            $this->applyBranchGroupFilter($query, $user->branch_group_id ? [$user->branch_group_id] : []);
+        } else {
+            return $query->whereRaw('1 = 0');
         }
+        if (! $request->filled('moderation_status')) $query->where('moderation_status', '!=', 'deleted');
 
         return $query;
     }
@@ -1064,7 +987,7 @@ class PropertyController extends Controller
 
     private function canSearchPropertyCrmFields(?User $user): bool
     {
-        return $user !== null && ! $user->hasRole('client');
+        return $user?->hasPermission('properties.search.owner') ?? false;
     }
 
     private function applyPropertySearchFilters(Builder $query, array $filters): void
@@ -2196,7 +2119,7 @@ class PropertyController extends Controller
         if (! empty($data['agent_id'])) {
             $responsible = User::query()->lockForUpdate()->findOrFail($data['agent_id']);
             $groupId = $data['branch_group_id'] ?? ($records['property'] ?? null)?->getRawOriginal('branch_group_id') ?? $responsible->branch_group_id;
-            if ($groupId && in_array($responsible->role?->slug, ['agent', 'mop'], true)) {
+            if ($groupId && $responsible->hasPermission('users.subject.assignment_group_required')) {
                 abort_unless((int) $responsible->branch_group_id === (int) $groupId, 422, 'RESPONSIBLE_GROUP_MISMATCH');
                 abort_unless($responsible->status === User::STATUS_ACTIVE && ! $responsible->isDeletedAccount(), 422, 'INVALID_TRANSFER_TARGET');
             }
@@ -2209,7 +2132,7 @@ class PropertyController extends Controller
         $user = $this->crmAuthUser();
         $this->moderation->assertCanCreate($user);
         $this->moderation->assertNoProtectedFields($request,
-            $user->hasRole('rop') ? ['branch_id', 'branch_group_id', 'agent_id'] : ['branch_id', 'branch_group_id'], $user);
+            $user->usesAssignedGroupScope() ? ['branch_id', 'branch_group_id', 'agent_id'] : ['branch_id', 'branch_group_id'], $user);
 
         $promotionInput = $request->validate(['requested_listing_type' => 'nullable|in:regular,vip,urgent']);
         $requestedType = $promotionInput['requested_listing_type'] ?? 'regular';
@@ -2217,7 +2140,7 @@ class PropertyController extends Controller
         $validated = $this->validateProperty($request);
         // The creation wizard has no title field; the database column is non-nullable.
         $validated['title'] ??= '';
-        if ($user->hasRole('rop')) {
+        if ($user->usesAssignedGroupScope()) {
             $validated = array_merge($validated, $request->validate(['agent_id' => 'required|integer|exists:users,id']));
         }
         $featureIds = $validated['features'] ?? [];
@@ -2227,7 +2150,10 @@ class PropertyController extends Controller
         [$property, $dups, $qualityWarnings, $user] = DB::transaction(function () use ($request, $validated, $featureIds, $tagIds, $user, $requiresReview, $requestedType) {
             [$user] = $this->lockPropertyWrite($user, null, $validated);
             $this->moderation->assertCanCreate($user);
-            $validated = $this->normalizeMopBranchGroupPayload($user, $validated);
+            if ($requestedType !== 'regular') {
+                abort_unless($user->hasPermission('properties.promotions.request') && $user->hasPermission('properties.edit'), 403, 'PROMOTION_PERMISSION_DENIED');
+            }
+            $validated = $this->normalizePropertyWriteGroup($user, $validated);
             $this->ensureVisibleClientsForProperty($validated);
             $validated = $this->syncPropertyClientSnapshots($validated);
             $dups = $this->propertyDuplicateService->find($validated);
@@ -2309,7 +2235,7 @@ class PropertyController extends Controller
             $user
         ): void {
             [$user, $property] = $this->lockPropertyWrite($user, $property, $validated);
-            $validated = $this->normalizeMopBranchGroupPayload($user, $validated);
+            $validated = $this->normalizePropertyWriteGroup($user, $validated);
             $this->ensureVisibleClientsForProperty($validated, $property);
             $validated = $this->syncPropertyClientSnapshots($validated);
             $this->moderation->assertMutationVersion($request, $property);
@@ -2514,7 +2440,7 @@ class PropertyController extends Controller
     public function show(Request $request, Property $property)
     {
         $authUser = $this->propertyShowAuthUser($request);
-        if ($authUser?->hasRole('rop') && ! app(\App\Support\RopGroupAccess::class)->allows($authUser, $property)) {
+        if ($authUser?->usesAssignedGroupScope() && ! app(\App\Support\RopGroupAccess::class)->allows($authUser, $property)) {
             // The storefront is public. Group permissions still guard every internal endpoint.
             $this->moderation->publicOrFail($property, null);
 
@@ -2547,7 +2473,7 @@ class PropertyController extends Controller
 
         return DB::transaction(function () use ($property, $actor) {
             [$actor, $lockedProperty] = $this->lockPropertyWrite($actor, $property, []);
-            abort_unless($this->moderationAccess->canEdit($actor, $lockedProperty), 403);
+            abort_unless($this->moderationAccess->canRefreshListingDate($actor, $lockedProperty), 403);
 
             if ($lockedProperty->moderation_status !== Property::PUBLIC_MODERATION_STATUS) {
                 return response()->json([
@@ -2608,6 +2534,7 @@ class PropertyController extends Controller
     public function matchingClients(Request $request, Property $property)
     {
         $authUser = $this->crmAuthUser();
+        abort_unless($authUser->hasPermission('properties.matching.view'), 403, 'Нет права подбирать клиентов к объекту.');
         $validated = $request->validate([
             'limit' => 'nullable|integer|min:1|max:20',
         ]);
@@ -3065,9 +2992,7 @@ class PropertyController extends Controller
     public function logs(Request $request, Property $property)
     {
         $viewer = $this->propertyShowAuthUser($request);
-        if (! $viewer || ! $this->moderationAccess->canViewSecurityReportProperty($viewer, $property)) {
-            $this->authorizePropertyMutation($property);
-        }
+        abort_unless($viewer && $this->moderationAccess->canViewHistory($viewer, $property), 403, 'Доступ к истории объекта запрещён.');
         $perPage = (int) $request->input('per_page', 50);
 
         $logs = $property->logs()->with('user')->paginate($perPage);

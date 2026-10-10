@@ -23,7 +23,7 @@ class FavoriteController extends Controller
             ->where('entity_type', 'property')
             ->whereHas('property', function ($properties) {
                 $properties->publicSearchable();
-                if (auth()->user()?->hasRole('rop')) {
+                if (auth()->user()?->usesAssignedGroupScope()) {
                     app(RopGroupAccess::class)->scope($properties, auth()->user(), 'properties.branch_group_id', 'properties.branch_id');
                 }
             })
@@ -62,7 +62,7 @@ class FavoriteController extends Controller
         return DB::transaction(function () use ($id) {
             $actor = User::query()->lockForUpdate()->findOrFail(auth()->id());
             auth()->setUser($actor);
-            if ($actor->hasRole('rop')) {
+            if ($actor->usesAssignedGroupScope()) {
                 $property = Property::query()->lockForUpdate()->findOrFail($id);
                 app(RopGroupAccess::class)->ensureVisible($actor, $property);
             }

@@ -20,23 +20,23 @@ final class UserOrganizationService
             $actor = $users->get($actor->id);
             abort_unless($subject && $actor, 404, 'NOT_FOUND');
             $before = $subject->only(['role_id', 'branch_id', 'branch_group_id']);
-            $previousRole = $subject->role?->slug;
+            $previousRole = $subject->role;
             $subject->fill($data);
             $nextRole = $subject->isDirty('role_id')
-                ? \App\Models\Role::whereKey($subject->role_id)->value('slug') : $previousRole;
-            if (in_array($previousRole, ['agent', 'mop'], true)
-                && ((! in_array($nextRole, ['agent', 'mop'], true))
-                    || ($subject->isDirty('status') && $subject->status !== User::STATUS_ACTIVE))) {
+                ? \App\Models\Role::find($subject->role_id) : $previousRole;
+            // Existing work still needs a handover even after recipient eligibility is revoked.
+            if (($subject->isDirty('role_id') && ! $nextRole?->hasPermission('users.subject.record_recipient'))
+                || ($subject->isDirty('status') && $subject->status !== User::STATUS_ACTIVE)) {
                 abort_if($this->hasActiveRecords($subject->id, lock: true, classifiedOnly: true),
                     409, 'EMPLOYEE_TRANSFER_REQUIRED');
             }
             $changed = $subject->isDirty(['role_id', 'branch_id', 'branch_group_id']);
             if ($changed) {
-                if ($actor->hasRole('rop')) {
+                if ($actor->usesAssignedGroupScope()) {
                     app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $subject->fresh());
                     abort_unless($actor->id !== $subject->id
-                        && in_array($previousRole, ['intern', 'agent', 'mop'], true)
-                        && in_array($nextRole, ['intern', 'agent', 'mop'], true)
+                        && $previousRole?->hasPermission('users.subject.team')
+                        && $nextRole?->hasPermission('users.subject.team')
                         && ! $subject->isDirty(['branch_id', 'branch_group_id', 'status']), 403, 'FORBIDDEN_ACTION');
                 }
                 if ($subject->branch_group_id) {

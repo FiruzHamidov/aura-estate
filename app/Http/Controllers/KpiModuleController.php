@@ -57,6 +57,7 @@ class KpiModuleController extends Controller
             ]);
         }
 
+        $this->ensureManageAccess($this->authUser(), 'kpi.plans.legacy.view');
         $role = (string) ($validated['role'] ?? 'mop');
 
         return response()->json(['data' => $this->service->plans($role, isset($validated['branch_group_id']) ? (int) $validated['branch_group_id'] : null)]);
@@ -64,7 +65,7 @@ class KpiModuleController extends Controller
 
     public function updateUserPlans(Request $request, int $userId)
     {
-        $this->ensureManageAccess($this->authUser(), ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
+        $this->ensureManageAccess($this->authUser(), 'kpi.plans.manage');
 
         $validated = $request->validate([
             'effective_from' => 'required|date',
@@ -99,7 +100,7 @@ class KpiModuleController extends Controller
     public function bulkUpsertUserPlans(Request $request)
     {
         $actor = $this->authUser();
-        $this->ensureManageAccess($actor, ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
+        $this->ensureManageAccess($actor, 'kpi.plans.manage');
 
         $validated = $request->validate([
             'effective_from' => 'required|date',
@@ -107,11 +108,11 @@ class KpiModuleController extends Controller
             'replace_if_conflict' => 'sometimes|boolean',
             'conflict_strategy' => ['sometimes', Rule::in(['error', 'replace'])],
             'scope' => 'required|array',
-            'scope.role' => ['nullable', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'scope.role' => ['nullable', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'scope.roles' => 'nullable|array|min:1',
-            'scope.roles.*' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'scope.roles.*' => ['required', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'scope.target_roles' => 'nullable|array|min:1',
-            'scope.target_roles.*' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'scope.target_roles.*' => ['required', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'scope.branch_id' => 'nullable|integer|exists:branches,id',
             'scope.branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'rows' => 'required|array|min:1|max:500',
@@ -136,7 +137,7 @@ class KpiModuleController extends Controller
         }
 
         return \DB::transaction(function () use ($actor, $validated, $scope, $scopeRoles) {
-            if ($actor->hasRole('rop')) {
+            if ($actor->usesAssignedGroupScope()) {
                 User::query()->whereIn('id', [$actor->id, ...array_column($validated['rows'], 'user_id')])
                     ->orderBy('id')->lockForUpdate()->get();
             }
@@ -175,7 +176,7 @@ class KpiModuleController extends Controller
 
                     $results[] = ['user_id' => $userId, 'ok' => true];
                 } catch (ValidationException $e) {
-                    if ($actor->hasRole('rop')) throw $e;
+                    if ($actor->usesAssignedGroupScope()) throw $e;
                     $results[] = [
                         'user_id' => $userId,
                         'ok' => false,
@@ -184,7 +185,7 @@ class KpiModuleController extends Controller
                         'details' => ['row' => $index, 'role' => $rowRole, 'errors' => $e->errors()],
                     ];
                 } catch (\DomainException $e) {
-                    if ($actor->hasRole('rop')) throw new HttpResponseException($this->kpiError('KPI_PLAN_PERIOD_CONFLICT', $e->getMessage(), 409));
+                    if ($actor->usesAssignedGroupScope()) throw new HttpResponseException($this->kpiError('KPI_PLAN_PERIOD_CONFLICT', $e->getMessage(), 409));
                     $results[] = [
                         'user_id' => $userId,
                         'ok' => false,
@@ -193,7 +194,7 @@ class KpiModuleController extends Controller
                         'details' => ['row' => $index, 'role' => $rowRole, 'errors' => []],
                     ];
                 } catch (HttpResponseException $e) {
-                    if ($actor->hasRole('rop')) throw $e;
+                    if ($actor->usesAssignedGroupScope()) throw $e;
                     $response = $e->getResponse();
                     $payload = method_exists($response, 'getData')
                         ? (array) $response->getData(true)
@@ -207,7 +208,7 @@ class KpiModuleController extends Controller
                         'details' => array_merge(['row' => $index, 'role' => $rowRole, 'errors' => []], (array) ($payload['details'] ?? [])),
                     ];
                 } catch (\Throwable $e) {
-                    if ($actor->hasRole('rop')) throw $e;
+                    if ($actor->usesAssignedGroupScope()) throw $e;
                     $results[] = [
                         'user_id' => $userId,
                         'ok' => false,
@@ -231,7 +232,7 @@ class KpiModuleController extends Controller
 
     public function updatePlans(Request $request)
     {
-        $this->ensureManageAccess($this->authUser(), ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
+        $this->ensureManageAccess($this->authUser(), 'kpi.plans.manage');
 
         $validated = $request->validate([
             'role' => 'nullable|string|max:64',
@@ -252,11 +253,11 @@ class KpiModuleController extends Controller
     public function commonPlans(Request $request)
     {
         $validated = $request->validate([
-            'role' => ['nullable', Rule::in(['agent', 'intern', 'mop', 'rop']), 'required_without_all:roles,role_in'],
+            'role' => ['nullable', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs()), 'required_without_all:roles,role_in'],
             'roles' => 'nullable|array|min:1',
-            'roles.*' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'roles.*' => ['required', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'role_in' => 'nullable|array|min:1',
-            'role_in.*' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'role_in.*' => ['required', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'date' => 'required|date_format:Y-m-d',
             'branch_id' => 'nullable|integer|exists:branches,id',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
@@ -300,9 +301,9 @@ class KpiModuleController extends Controller
         $validated = $request->validate([
             'type' => ['nullable', Rule::in(['personal', 'common'])],
             'user_id' => 'nullable|integer|exists:users,id',
-            'role' => ['nullable', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'role' => ['nullable', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'roles' => 'nullable|array|min:1',
-            'roles.*' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'roles.*' => ['required', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'branch_id' => 'nullable|integer|exists:branches,id',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'effective_from_from' => 'nullable|date_format:Y-m-d',
@@ -340,7 +341,9 @@ class KpiModuleController extends Controller
         }
 
         // planById scopes persisted plan ownership for ROP, including transferred employees.
-        if (! $this->authUser()->hasRole('rop')) {
+        if ($this->authUser()->usesAssignedGroupScope()) {
+            $this->kpiPlanScopePolicy->ensureCanReadHistoricalUserPlan($this->authUser(), $plan);
+        } else {
             $target = User::query()->findOrFail((int) $plan['user_id']);
             $this->kpiPlanScopePolicy->ensureCanReadUserPlan($this->authUser(), $target);
         }
@@ -382,10 +385,10 @@ class KpiModuleController extends Controller
 
     public function upsertCommonPlans(Request $request)
     {
-        $this->ensureManageAccess($this->authUser(), ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
+        $this->ensureManageAccess($this->authUser(), 'kpi.plans.manage');
 
         $validated = $request->validate([
-            'role' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'role' => ['required', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'effective_from' => 'required|date_format:Y-m-d',
             'effective_to' => 'nullable|date_format:Y-m-d|after_or_equal:effective_from',
             'branch_id' => 'nullable|integer|exists:branches,id',
@@ -419,10 +422,10 @@ class KpiModuleController extends Controller
     public function applyCommonPlansToUsers(Request $request)
     {
         $actor = $this->authUser();
-        $this->ensureManageAccess($actor, ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
+        $this->ensureManageAccess($actor, 'kpi.plans.manage');
 
         $validated = $request->validate([
-            'role' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'role' => ['required', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'effective_from' => 'required|date_format:Y-m-d',
             'effective_to' => 'nullable|date_format:Y-m-d|after_or_equal:effective_from',
             'branch_id' => 'nullable|integer|exists:branches,id',
@@ -447,13 +450,63 @@ class KpiModuleController extends Controller
         return response()->json($result);
     }
 
+    public function reportPresentation()
+    {
+        $actor = $this->authUser();
+        abort_unless($actor->hasPermission('kpi.reports.view'), 403, 'KPI_FORBIDDEN_SCOPE');
+        return response()->json(['data' => app(\App\Services\KpiRoleCatalog::class)->reportPresentation($actor)]);
+    }
+
+    public function reportUsers(Request $request)
+    {
+        $data = $request->validate(['page' => 'nullable|integer|min:1', 'per_page' => 'nullable|integer|min:1|max:200']);
+        return response()->json($this->service->reportUsersQuery($this->authUser())
+            ->orderBy('users.name')->orderBy('users.id')->paginate($data['per_page'] ?? 100));
+    }
+
+    public function planUsers(Request $request)
+    {
+        $actor = $this->authUser();
+        abort_unless($actor->hasPermission('kpi.plans.user.view'), 403, 'KPI_FORBIDDEN_SCOPE');
+        $data = $request->validate(['page' => 'nullable|integer|min:1', 'per_page' => 'nullable|integer|min:1|max:200']);
+        $query = User::query()->select(['id', 'name', 'role_id', 'branch_id', 'branch_group_id', 'status'])
+            ->with(['role', 'branch:id,name', 'branchGroup:id,name,branch_id'])
+            ->where('status', User::STATUS_ACTIVE)
+            ->whereHas('role', fn ($roles) => $roles->withPermission('kpi.subject.plan_templates'));
+        if ($actor->usesAssignedGroupScope()) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'users.branch_group_id', 'users.branch_id');
+            $query->whereHas('role', fn ($roles) => $roles->withPermission('kpi.subject.assigned_groups'));
+        }
+        if ($actor->hasPermission('kpi.plans.scope.all')) {
+            // The assigned-group boundary above still applies.
+        } elseif ($actor->hasPermission('kpi.plans.scope.branch') && $actor->branch_id) {
+            $query->where('branch_id', $actor->branch_id);
+        } elseif ($actor->hasPermission('kpi.plans.scope.group') && $actor->branch_group_id) {
+            $query->where('branch_group_id', $actor->branch_group_id)
+                ->whereHas('role', fn ($roles) => $roles->withPermission('kpi.subject.group_templates'));
+        } elseif ($actor->hasPermission('kpi.plans.scope.own')) {
+            $query->whereKey($actor->id);
+        } else {
+            $query->whereRaw('1 = 0');
+        }
+        return response()->json($query->orderBy('name')->orderBy('id')->paginate($data['per_page'] ?? 100));
+    }
+
+    public function planRoles()
+    {
+        $actor = $this->authUser();
+        abort_unless($actor->hasPermission('kpi.plans.manage') || $actor->hasPermission('kpi.plans.common.view')
+            || $actor->hasPermission('kpi.plans.user.view'), 403, 'KPI_FORBIDDEN_SCOPE');
+        return response()->json(['data' => app(\App\Services\KpiRoleCatalog::class)->templates()]);
+    }
+
     public function eligibleUsers(Request $request)
     {
         $actor = $this->authUser();
-        $this->ensureManageAccess($actor, ['admin', 'superadmin', 'rop', 'branch_director', 'mop']);
+        $this->ensureManageAccess($actor, 'kpi.plans.manage');
 
         $validated = $request->validate([
-            'role' => ['nullable', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'role' => ['nullable', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'q' => 'nullable|string|max:255',
             'branch_id' => 'nullable|integer|exists:branches,id',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
@@ -461,8 +514,8 @@ class KpiModuleController extends Controller
             'per_page' => 'nullable|integer|min:1|max:200',
         ]);
 
-        $this->kpiPlanScopePolicy->ensureCanReadCommonPlan($actor, $validated);
-        if (($actor->role?->slug ?? '') === 'mop' && isset($validated['role']) && (string) $validated['role'] === 'rop') {
+        $this->kpiPlanScopePolicy->ensureCanSelectUsers($actor, $validated);
+        if ($actor->hasPermission('kpi.plans.scope.group') && isset($validated['role']) && ! app(\App\Services\KpiRoleCatalog::class)->allowsGroupTemplates((string) $validated['role'])) {
             $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
         }
 
@@ -649,17 +702,19 @@ class KpiModuleController extends Controller
 
     public function integrationsStatus()
     {
+        $this->ensureManageAccess($this->authUser(), 'kpi.integrations.view');
         return response()->json(['data' => KpiIntegrationStatus::query()->orderBy('id')->get()]);
     }
 
     public function telegramConfig()
     {
+        $this->ensureManageAccess($this->authUser(), 'kpi.telegram.view');
         return response()->json(['data' => $this->service->telegramConfig()]);
     }
 
     public function updateTelegramConfig(Request $request)
     {
-        $this->ensureManageAccess($this->authUser(), ['admin', 'superadmin', 'rop', 'branch_director']);
+        $this->ensureManageAccess($this->authUser(), 'kpi.operations.manage');
 
         $validated = $request->validate([
             'daily_enabled' => 'sometimes|boolean',
@@ -675,6 +730,7 @@ class KpiModuleController extends Controller
 
     public function qualityIssues(Request $request)
     {
+        $this->ensureManageAccess($this->authUser(), 'kpi.quality.view');
         $validated = $request->validate(['date_from' => 'nullable|date', 'date_to' => 'nullable|date']);
         $query = KpiQualityIssue::query()->orderByDesc('detected_at');
         $query->forRop($this->authUser(), $request->filled('branch_group_id') ? $request->integer('branch_group_id') : null);
@@ -701,9 +757,10 @@ class KpiModuleController extends Controller
 
     public function earlyRiskAlerts(Request $request)
     {
+        $this->ensureManageAccess($this->authUser(), 'kpi.alerts.view');
         $validated = $request->validate(['date' => 'nullable|date', 'branch_group_id' => 'nullable|integer|exists:branch_groups,id']);
         $query = KpiEarlyRiskAlert::query()->orderByDesc('id');
-        if ($this->authUser()->hasRole('rop')) {
+        if ($this->authUser()->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $this->authUser(), 'kpi_early_risk_alerts.branch_group_id');
             if (isset($validated['branch_group_id'])) $query->where('branch_group_id', $validated['branch_group_id']);
         }
@@ -735,6 +792,7 @@ class KpiModuleController extends Controller
             [$actor, $alert] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
                 $this->authUser(), $alert, null, null
             );
+            $this->ensureManageAccess($actor, 'kpi.alerts.update');
             app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $alert);
             $alert->update(['status' => $validated['status']]);
         });
@@ -758,9 +816,10 @@ class KpiModuleController extends Controller
 
     public function acceptanceRuns(Request $request)
     {
+        $this->ensureManageAccess($this->authUser(), 'kpi.acceptance.view');
         $validated = $request->validate(['branch_group_id' => 'nullable|integer|exists:branch_groups,id']);
         $query = KpiAcceptanceRun::query()->orderByDesc('id');
-        if ($this->authUser()->hasRole('rop')) {
+        if ($this->authUser()->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $this->authUser(), 'kpi_acceptance_runs.branch_group_id');
             if (isset($validated['branch_group_id'])) $query->where('branch_group_id', $validated['branch_group_id']);
         }
@@ -805,17 +864,40 @@ class KpiModuleController extends Controller
         ]);
     }
 
+    public function adjustmentUsers(Request $request)
+    {
+        $actor = $this->authUser();
+        $this->ensureManageAccess($actor, 'kpi.adjustments.users.view');
+        abort_if($actor->usesAssignedGroupScope(), 403, 'KPI_HISTORICAL_SELECTION_REQUIRED');
+        $data = $request->validate(['page' => 'nullable|integer|min:1', 'per_page' => 'nullable|integer|min:1|max:200']);
+        $query = User::query()->select(['id', 'name'])
+            ->where(fn ($q) => $q->where('status', User::STATUS_ACTIVE)->orWhereNull('status'))
+            ->whereHas('role', fn ($roles) => $roles->withPermission('kpi.subject.adjustment_selection'));
+        if ($actor->hasPermission('kpi.adjustments.users.scope.all')) {
+            // All branches are explicitly allowed for this picker.
+        } elseif ($actor->hasPermission('kpi.adjustments.users.scope.branch') && $actor->branch_id) {
+            $query->where('branch_id', $actor->branch_id);
+        } elseif ($actor->hasPermission('kpi.adjustments.users.scope.group') && $actor->branch_group_id) {
+            $query->where('branch_group_id', $actor->branch_group_id)->where('branch_id', $actor->branch_id);
+        } elseif ($actor->hasPermission('kpi.adjustments.users.scope.own')) {
+            $query->whereKey($actor->id);
+        } else {
+            $query->whereRaw('1 = 0');
+        }
+        return response()->json($query->orderBy('name')->orderBy('id')->paginate($data['per_page'] ?? 100));
+    }
+
     public function adjustmentEntities(Request $request)
     {
-        if ($this->authUser()->hasRole('rop')) return app(KpiPeriodLockController::class)->historicalEntities($request);
-        $this->ensureManageAccess($this->authUser(), ['admin', 'superadmin', 'rop', 'branch_director']);
+        if ($this->authUser()->usesAssignedGroupScope()) return app(KpiPeriodLockController::class)->historicalEntities($request);
+        $this->ensureManageAccess($this->authUser(), 'kpi.operations.manage');
 
         $validated = $request->validate([
             'role' => 'nullable|string|max:128',
             'active' => 'nullable|boolean',
         ]);
 
-        $roles = collect(explode(',', (string) ($validated['role'] ?? 'agent,mop,rop')))
+        $roles = collect(explode(',', (string) ($validated['role'] ?? '')))
             ->map(fn (string $role) => trim($role))
             ->filter()
             ->values()
@@ -824,7 +906,9 @@ class KpiModuleController extends Controller
         $query = User::query()
             ->select(['users.id', 'users.name', 'users.branch_id', 'users.role_id'])
             ->with('role:id,slug')
-            ->whereHas('role', fn ($q) => $q->whereIn('slug', $roles));
+            ->whereHas('role', fn ($q) => isset($validated['role'])
+                ? $q->whereIn('slug', $roles)
+                : $q->withPermission('kpi.subject.adjustment_default_filter'));
 
         if (array_key_exists('active', $validated) && (bool) $validated['active']) {
             $query->where(function ($q) {
@@ -891,7 +975,7 @@ class KpiModuleController extends Controller
             'include_breakdown' => 'nullable|boolean',
             'include_inactive' => 'nullable|boolean',
             'period_type' => ['nullable', Rule::in(['day', 'week', 'month'])],
-            'role' => ['nullable', Rule::in(['admin', 'superadmin', 'owner', 'branch_director', 'rop', 'mop', 'agent', 'intern'])],
+            'role' => ['nullable', 'string', 'max:64'],
             'assignee_id' => 'nullable|integer|exists:users,id',
             'user_id' => 'nullable|integer|exists:users,id',
             'mop_id' => 'nullable|integer|exists:users,id',
@@ -906,10 +990,7 @@ class KpiModuleController extends Controller
         ]));
 
         if ((bool) ($validated['include_inactive'] ?? false)) {
-            $role = (string) ($this->authUser()->role?->slug ?? '');
-            $allowed = ['admin', 'superadmin', 'owner', 'rop', 'branch_director'];
-
-            if (! in_array($role, $allowed, true)) {
+            if (! $this->authUser()->hasPermission('kpi.inactive.view')) {
                 abort(response()->json([
                     'code' => 'KPI_FORBIDDEN_INCLUDE_INACTIVE',
                     'message' => 'Forbidden include_inactive scope.',
@@ -928,9 +1009,9 @@ class KpiModuleController extends Controller
             || (string) $request->header('X-KPI-Version', '') === '2';
     }
 
-    private function ensureManageAccess(User $user, array $allowed): void
+    private function ensureManageAccess(User $user, string $permission): void
     {
-        if (! in_array($user->role?->slug, $allowed, true)) {
+        if (! $user->hasPermission($permission)) {
             abort(response()->json([
                 'code' => 'KPI_FORBIDDEN',
                 'message' => 'Forbidden.',
@@ -1092,78 +1173,6 @@ class KpiModuleController extends Controller
         }
 
         return [(string) $validated['role']];
-    }
-
-    private function ensureCanReadUserPlans(User $actor, int $targetUserId): void
-    {
-        $target = User::query()->findOrFail($targetUserId);
-        $actor->loadMissing('role');
-
-        $allowed = match ($actor->role?->slug) {
-            'admin', 'superadmin', 'owner' => true,
-            'rop', 'branch_director' => (int) $actor->branch_id === (int) $target->branch_id,
-            'mop' => (int) $actor->branch_group_id === (int) $target->branch_group_id,
-            default => (int) $actor->id === (int) $target->id,
-        };
-
-        if (! $allowed) {
-            $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
-        }
-    }
-
-    private function ensureCommonScopeReadable(User $actor, array $scope): void
-    {
-        $actor->loadMissing('role');
-        $role = (string) ($actor->role?->slug ?? '');
-
-        if ($role === 'rop') {
-            $this->ensureSameBranchOrKpiDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
-            $this->ensureBranchGroupInUserBranchOrKpiDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
-            return;
-        }
-
-        if ($role === 'branch_director') {
-            $this->ensureSameBranchOrKpiDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
-            return;
-        }
-
-        if ($role === 'mop') {
-            if (isset($scope['role']) && (string) $scope['role'] === 'rop') {
-                $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
-            }
-            $this->ensureSameBranchOrKpiDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
-            $this->ensureSameBranchGroupOrKpiDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
-            return;
-        }
-    }
-
-    private function ensureCommonScopeManageable(User $actor, array $scope): void
-    {
-        $actor->loadMissing('role');
-
-        if (in_array($actor->role?->slug, ['admin', 'superadmin', 'owner'], true)) {
-            return;
-        }
-
-        if ($actor->role?->slug === 'branch_director' || $actor->role?->slug === 'rop') {
-            $this->ensureSameBranchOrKpiDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
-            $this->ensureBranchGroupInUserBranchOrKpiDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
-            return;
-        }
-
-        if ($actor->role?->slug === 'mop') {
-            $planRole = (string) ($scope['role'] ?? '');
-
-            if ($planRole === 'rop') {
-                $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
-            }
-
-            $this->ensureSameBranchGroupOrKpiDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
-            $this->ensureSameBranchOrKpiDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
-            return;
-        }
-
-        $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
     }
 
     private function ensureSameBranchOrKpiDeny(?int $branchId, User $actor): void

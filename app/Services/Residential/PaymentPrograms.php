@@ -19,16 +19,22 @@ final class PaymentPrograms
 
     public function ensureManage(User $actor, ?NewBuilding $building): void
     {
+        abort_unless($actor->status === User::STATUS_ACTIVE && !$actor->isDeletedAccount(), 403);
         if ($building) {
+            abort_unless($actor->hasPermission('payment_programs.building.manage'), 403);
             $this->access->ensureManage($actor, $building);
         } else {
-            abort_unless($this->access->canCreate($actor) && $this->access->global($actor), 403);
+            abort_unless($actor->hasPermission('payment_programs.global.manage'), 403);
         }
     }
 
     public function canPublish(User $actor, ?NewBuilding $building): bool
     {
-        return $building ? $this->access->canPublish($actor, $building) : $this->access->canCreate($actor) && $this->access->global($actor);
+        return $actor->status === User::STATUS_ACTIVE && !$actor->isDeletedAccount()
+            && $actor->hasPermission('payment_programs.publish')
+            && ($building
+                ? $actor->hasPermission('payment_programs.building.manage') && $this->access->canManage($actor, $building)
+                : $actor->hasPermission('payment_programs.global.manage'));
     }
 
     public function save(User $actor, ?NewBuilding $building, array $input, ?int $id = null): PaymentProgram

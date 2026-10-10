@@ -13,7 +13,7 @@ final class AttendanceGroupScope
 
     public function apply(Builder $query, User $viewer): Builder
     {
-        if ($viewer->hasRole('security')) {
+        if ($viewer->hasPermission('attendance.scope.assigned_branches')) {
             $access = app(AttendanceAccessService::class);
             $table = $query->getModel()->getTable();
             $query->whereIn($table.'.user_id', $access->visibleUsersQuery($viewer)->select('users.id'));
@@ -22,14 +22,16 @@ final class AttendanceGroupScope
             }
             return $query;
         }
-        if (! $viewer->hasRole('rop')) return $query;
+        if (! $viewer->usesAssignedGroupScope()) return $query;
         $table = $query->getModel()->getTable();
         if (in_array($table, ['attendance_events', 'attendance_daily_summaries'], true)) {
             if (\Schema::hasColumn($table, 'role_slug')) {
-                $query->whereIn($table.'.role_slug', ['agent', 'mop']);
+                $query->whereIn($table.'.role_slug', \App\Models\Role::query()
+                    ->withPermission('attendance.subject.assigned_groups')
+                    ->withPermission('attendance.subject.exclude_table', false)->select('slug'));
                 if (request()->filled('role')) $query->where($table.'.role_slug', request()->input('role'));
             } else {
-                $query->whereHas('user.role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop']));
+                $query->whereHas('user.role', fn (Builder $roles) => $roles->withPermission('attendance.subject.assigned_groups')->withPermission('attendance.subject.exclude_table', false));
                 if (request()->filled('role')) $query->whereHas('user.role', fn (Builder $roles) => $roles->where('slug', request()->input('role')));
             }
         }
@@ -47,7 +49,7 @@ final class AttendanceGroupScope
     public function users(User $viewer, ?string $from = null, ?string $to = null): Builder
     {
         $current = app(AttendanceAccessService::class)->visibleUsersQuery($viewer);
-        if (! $viewer->hasRole('rop')) return $current;
+        if (! $viewer->usesAssignedGroupScope()) return $current;
         $summaries = $this->apply(AttendanceDailySummary::query(), $viewer)
             ->when($from, fn ($q) => $q->whereDate('work_date', '>=', $from))
             ->when($to, fn ($q) => $q->whereDate('work_date', '<=', $to));
@@ -58,7 +60,7 @@ final class AttendanceGroupScope
 
     public function assertHistoryUser(User $viewer, User $target): void
     {
-        if (! $viewer->hasRole('rop')) {
+        if (! $viewer->usesAssignedGroupScope()) {
             app(AttendanceAccessService::class)->assertCanViewUser($viewer, $target);
             return;
         }
@@ -69,8 +71,8 @@ final class AttendanceGroupScope
 
     public function filterUsers(Builder $query, User $viewer, array $filters, ?string $from = null, ?string $to = null): void
     {
-        if (! $viewer->hasRole('rop') || (! isset($filters['branch_group_id']) && ! isset($filters['role']))) return;
-        $current = $this->groups->employees($viewer);
+        if (! $viewer->usesAssignedGroupScope() || (! isset($filters['branch_group_id']) && ! isset($filters['role']))) return;
+        $current = app(AttendanceAccessService::class)->visibleUsersQuery($viewer);
         if (isset($filters['branch_group_id'])) $current->where('users.branch_group_id', $filters['branch_group_id']);
         if (isset($filters['role'])) $current->whereHas('role', fn ($roles) => $roles->where('slug', $filters['role']));
         $history = $this->apply(AttendanceDailySummary::query(), $viewer)

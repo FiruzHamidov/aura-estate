@@ -90,10 +90,12 @@ class NewBuildingController extends Controller
         $input = $request->validate(['branch_id' => 'nullable|integer|min:1', 'search' => 'nullable|string|max:100', 'page' => 'integer|min:1', 'per_page' => 'integer|between:1,100']);
         $branch = $request->has('branch_id') ? ($input['branch_id'] ?? null) : $new_building->branch_id;
         abort_if(! $this->access->global($request->user()) && (int) $branch !== (int) $new_building->branch_id, 403);
+        $eligibleRoles = \App\Models\Role::query()->get()->filter(fn ($role) => $role->hasPermission('new_buildings.manage')
+            && ($role->hasPermission('new_buildings.manage_all') || $role->hasPermission('new_buildings.scope.branch') || $role->hasPermission('new_buildings.scope.own')))->modelKeys();
         $query = \App\Models\User::query()->where('status', 'active')->whereNull('deleted_at')->whereNull('deletion_requested_at')
-            ->where('branch_id', $branch)->whereHas('role', fn ($q) => $q->whereIn('slug', [...ResidentialAccess::GLOBAL_ROLES, ...ResidentialAccess::BRANCH_ROLES, ...ResidentialAccess::AUTHOR_ROLES]))
+            ->where('branch_id', $branch)->whereIn('role_id', $eligibleRoles)
             ->when($input['search'] ?? null, fn ($q, $search) => $q->where('name', 'like', '%'.$search.'%'));
-        if (! $this->access->canPublish($request->user(), $new_building)) $query->whereIn('id', array_filter([$request->user()->id, $new_building->responsible_agent_id]));
+        if (! $request->user()->hasPermission('new_buildings.assign')) $query->whereIn('id', array_filter([$request->user()->id, $new_building->responsible_agent_id]));
         return $query->orderBy('name')->orderBy('id')->paginate($input['per_page'] ?? 100, ['id', 'name', 'branch_id']);
     }
 

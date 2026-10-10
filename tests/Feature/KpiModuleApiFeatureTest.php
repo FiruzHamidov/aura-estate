@@ -240,6 +240,17 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->getJson('/api/kpi/plans/'.$plans['a']->id)->assertOk()->assertJsonPath('data.0.id', $plans['a']->id);
         foreach (['c', 'null'] as $key) $this->getJson('/api/kpi/plans/'.$plans[$key]->id)->assertNotFound();
         $this->getJson('/api/kpi/plans/common/'.$branchPlan->id)->assertNotFound();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $defaults = $ropRole->fresh()->permissions;
+        foreach (['kpi.plans.user.view', 'kpi.plans.scope.branch'] as $revoked) {
+            $ropRole->forceFill(['permissions' => array_values(array_diff($defaults, [$revoked]))])->save();
+            Sanctum::actingAs($rop->fresh());
+            $this->getJson('/api/kpi/plans/'.$plans['a']->id)->assertForbidden();
+        }
+        $ropRole->forceFill(['permissions' => $defaults])->save();
+        Sanctum::actingAs($rop->fresh());
+        $this->getJson('/api/kpi/plans/'.$plans['a']->id)->assertOk();
+
         \DB::table('users')->where('id', $agent->id)->update(['branch_group_id' => $a->id]);
         $this->getJson('/api/kpi/plans?user_id='.$agent->id.'&date=2026-05-02')->assertOk()
             ->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $plans['a']->id);
@@ -282,6 +293,16 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->getJson('/api/kpi/rop-plans?month=2001-01&per_page=2&page=2')->assertOk()
             ->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $ids[0])->assertJsonPath('meta.page', 2);
         $this->getJson('/api/kpi/rop-plans?month=2001-01&per_page=101')->assertUnprocessable();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $defaults = $role->fresh()->permissions;
+        foreach (['kpi.rop_plans.view', 'kpi.plans.common.view', 'kpi.plans.scope.branch'] as $revoked) {
+            $role->forceFill(['permissions' => array_values(array_diff($defaults, [$revoked]))])->save();
+            Sanctum::actingAs($rop->fresh());
+            $this->getJson('/api/kpi/rop-plans?month=2001-01')->assertForbidden();
+        }
+        $role->forceFill(['permissions' => $defaults])->save();
+        Sanctum::actingAs($rop->fresh());
+
         $rop->supervisedGroups()->detach();
         $this->getJson('/api/kpi/rop-plans?month=2001-01')->assertOk()->assertJsonCount(0, 'data')->assertJsonPath('meta.total', 0);
     }
@@ -330,6 +351,166 @@ class KpiModuleApiFeatureTest extends TestCase
 
     }
 
+    public function test_legacy_role_plan_access_can_be_granted_and_revoked(): void
+    {
+        $role = Role::create(['name' => 'Planner', 'slug' => 'custom_legacy_planner']);
+        $actor = User::create(['name' => 'Planner', 'phone' => '919904001', 'role_id' => $role->id]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $payload = ['role' => 'agent', 'items' => [['metric_key' => 'calls', 'daily_plan' => 10, 'weight' => 1]]];
+        foreach ([[], ['kpi.plans.manage'], ['kpi.plans.legacy.manage']] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->patchJson('/api/kpi-plans', $payload)->assertForbidden();
+            $this->getJson('/api/kpi/plans?role=agent')->assertForbidden();
+        }
+        $role->forceFill(['permissions' => ['kpi.plans.manage', 'kpi.plans.legacy.manage']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson('/api/kpi-plans', $payload)->assertOk();
+        $this->getJson('/api/kpi/plans?role=agent')->assertForbidden();
+        $role->forceFill(['permissions' => ['kpi.plans.legacy.view']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/plans?role=agent')->assertOk();
+        $this->patchJson('/api/kpi-plans', $payload)->assertForbidden();
+        $this->getJson('/api/kpi/plans?user_id='.$actor->id.'&date=2026-05-05')->assertForbidden();
+        $this->assertEquals(10, KpiPlan::where('role_slug', 'agent')->where('metric_key', 'calls')->firstOrFail()->daily_plan);
+    }
+
+    public function test_operational_kpi_permissions_separate_read_status_and_schedule_changes(): void
+    {
+        $role = Role::create(['name' => 'Observer', 'slug' => 'custom_kpi_observer']);
+        $actor = User::create(['name' => 'Observer', 'phone' => '919903001', 'role_id' => $role->id]);
+        $alert = KpiEarlyRiskAlert::create(['user_id' => $actor->id, 'alert_date' => '2026-05-04', 'status' => 'open', 'message' => 'Risk']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $paths = ['kpi.integrations.view' => '/api/kpi/integrations/status', 'kpi.telegram.view' => '/api/kpi/telegram-reports/config',
+            'kpi.quality.view' => '/api/kpi/quality/issues', 'kpi.alerts.view' => '/api/kpi/early-risk-alerts', 'kpi.acceptance.view' => '/api/kpi/acceptance-runs'];
+        foreach ($paths as $permission => $path) {
+            $role->forceFill(['permissions' => [$permission]])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->getJson($path)->assertOk();
+            foreach ($paths as $other => $deniedPath) if ($other !== $permission) $this->getJson($deniedPath)->assertForbidden();
+            $this->patchJson('/api/kpi/early-risk-alerts/status', ['alert_id' => $alert->id, 'status' => 'closed'])->assertForbidden();
+            $this->patchJson('/api/kpi/telegram-reports/config', ['daily_enabled' => true])->assertForbidden();
+        }
+        $role->forceFill(['permissions' => ['kpi.alerts.update']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson('/api/kpi/ops/early-risk-alerts/status', ['alert_id' => $alert->id, 'status' => 'acknowledged'])->assertOk();
+        $this->getJson('/api/kpi/ops/early-risk-alerts')->assertForbidden();
+        $role->forceFill(['permissions' => ['kpi.operations.manage']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson('/api/kpi/ops/telegram/config', ['daily_enabled' => true])->assertOk();
+        $this->getJson('/api/kpi/ops/telegram/config')->assertForbidden();
+        $this->patchJson('/api/kpi/early-risk-alerts/status', ['alert_id' => $alert->id, 'status' => 'closed'])->assertForbidden();
+        $this->assertSame('acknowledged', $alert->fresh()->status);
+    }
+
+    public function test_custom_role_can_grant_rop_plan_actions_independently(): void
+    {
+        $role = Role::create(['name' => 'Planner', 'slug' => 'custom_rop_planner']);
+        $branch = Branch::create(['name' => 'Local']);
+        $group = BranchGroup::create(['name' => 'Group', 'branch_id' => $branch->id]);
+        $actor = User::create(['name' => 'Planner', 'phone' => '919902001', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $base = ['kpi.plans.scope.branch', 'kpi.plans.common.view', 'kpi.plans.common.manage'];
+        $payload = ['role' => 'agent', 'month' => '2026-05', 'branch_id' => $branch->id, 'branch_group_id' => $group->id,
+            'items' => [['metric_key' => 'calls', 'plan_value' => 30, 'weight' => 1]]];
+        $role->forceFill(['permissions' => $base])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/kpi/rop-plans', $payload)->assertForbidden();
+        $role->forceFill(['permissions' => [...$base, 'kpi.rop_plans.create']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $id = $this->postJson('/api/kpi/rop-plans', $payload)->assertCreated()->json('id');
+        $this->getJson('/api/kpi/rop-plans/'.$id)->assertForbidden();
+        $role->forceFill(['permissions' => [...$base, 'kpi.rop_plans.view']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/rop-plans/'.$id)->assertOk();
+        $this->getJson('/api/kpi/rop-plans?month=2026-05&branch_id='.$branch->id.'&branch_group_id='.$group->id)->assertOk()->assertJsonCount(1, 'data');
+        $this->patchJson('/api/kpi/rop-plans/'.$id, ['month' => '2026-07'])->assertForbidden();
+        $this->postJson('/api/kpi/rop-plans/'.$id.'/copy', ['month' => '2026-06'])->assertForbidden();
+        $role->forceFill(['permissions' => [...$base, 'kpi.rop_plans.view', 'kpi.rop_plans.copy']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/kpi/rop-plans/'.$id.'/copy', ['month' => '2026-06'])->assertCreated();
+        $this->postJson('/api/kpi/rop-plans', [...$payload, 'month' => '2026-08'])->assertForbidden();
+        $role->forceFill(['permissions' => [...$base, 'kpi.rop_plans.update']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson('/api/kpi/rop-plans/'.$id, ['month' => '2026-07'])->assertOk();
+        $this->getJson('/api/kpi/rop-plans/'.$id)->assertForbidden();
+    }
+
+    public function test_period_lock_and_adjustment_permissions_are_separate_for_custom_roles(): void
+    {
+        $role = Role::create(['name' => 'KPI auditor', 'slug' => 'custom_kpi_auditor']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Local']);
+        $other = Branch::create(['name' => 'Other']);
+        $actor = User::create(['name' => 'Auditor', 'phone' => '919901001', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $target = User::create(['name' => 'Agent', 'phone' => '919901002', 'role_id' => $agentRole->id, 'branch_id' => $branch->id]);
+        DailyReport::create(['user_id' => $target->id, 'role_slug' => 'agent', 'report_date' => '2026-05-05', 'calls_count' => 2]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $lock = ['period_type' => 'month', 'period_key' => '2026-05', 'branch_id' => $branch->id];
+        $adjustment = ['period_type' => 'month', 'period_key' => '2026-05', 'entity_id' => $target->id, 'field_name' => 'calls', 'new_value' => 7, 'reason' => 'Verified'];
+        $rights = ['kpi.periods.lock', 'kpi.periods.scope.branch'];
+        $role->forceFill(['permissions' => $rights])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/kpi-period-locks', $lock)->assertCreated();
+        $this->postJson('/api/kpi-period-locks', [...$lock, 'branch_id' => $other->id])->assertForbidden();
+        $this->postJson('/api/kpi-period-locks', array_diff_key($lock, ['branch_id' => true]))->assertForbidden();
+        $this->getJson('/api/kpi/adjustments')->assertForbidden();
+        $this->postJson('/api/kpi/adjustments', $adjustment)->assertForbidden();
+        $role->forceFill(['permissions' => ['kpi.adjustments.view']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/adjustments')->assertOk();
+        $this->postJson('/api/kpi/adjustments', $adjustment)->assertForbidden();
+        $this->postJson('/api/kpi-period-locks', $lock)->assertForbidden();
+        $role->forceFill(['permissions' => ['kpi.adjustments.manage']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/kpi/adjustments', $adjustment)->assertCreated()->assertJsonPath('new_value', 7);
+        $this->getJson('/api/kpi/adjustments')->assertForbidden();
+        $role->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/kpi/adjustments', $adjustment)->assertForbidden();
+        $this->assertEquals(7, DailyReport::where('user_id', $target->id)->firstOrFail()->calls_count);
+    }
+
+    public function test_daily_input_permissions_are_independent_of_plan_management(): void
+    {
+        $role = Role::create(['name' => 'KPI operator', 'slug' => 'custom_kpi_input']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Local']);
+        $other = Branch::create(['name' => 'Other']);
+        $actor = User::create(['name' => 'Operator', 'phone' => '919900001', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $target = User::create(['name' => 'Local', 'phone' => '919900002', 'role_id' => $agentRole->id, 'branch_id' => $branch->id]);
+        $foreign = User::create(['name' => 'Foreign', 'phone' => '919900003', 'role_id' => $agentRole->id, 'branch_id' => $other->id]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $row = ['employee_id' => $target->id, 'date' => '2026-05-05', 'calls' => 7];
+        foreach ([[], ['kpi.plans.user.manage', 'kpi.plans.scope.all'], ['kpi.daily.input.manage']] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->postJson('/api/kpi/daily?v=2', ['rows' => [$row]])->assertForbidden();
+        }
+        $role->forceFill(['permissions' => ['kpi.daily.input.manage', 'kpi.daily.input.scope.branch']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/kpi/daily?v=2', ['rows' => [$row]])->assertCreated();
+        $this->postJson('/api/kpi/daily?v=2', ['rows' => [[...$row, 'calls' => 8], [...$row, 'employee_id' => $foreign->id]]])->assertForbidden();
+        $this->assertEquals(7, DailyReport::where('user_id', $target->id)->firstOrFail()->calls_count);
+        $this->assertDatabaseMissing('daily_reports', ['user_id' => $foreign->id]);
+        $paths = ['/api/kpi/daily?date=2026-05-05&v=2', '/api/kpi/weekly?year=2026&week=19&v=2'];
+        foreach (['branch' => 1, 'all' => 2, 'own' => 0] as $scope => $count) {
+            $role->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.'.$scope]])->save();
+            Sanctum::actingAs($actor->fresh());
+            foreach ($paths as $path) {
+                $response = $this->getJson($path)->assertOk()->assertJsonCount($count, 'data');
+                if ($scope === 'branch') $response->assertJsonPath('data.0.employee_id', $target->id);
+            }
+        }
+        $role->forceFill(['permissions' => ['kpi.reports.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        foreach ($paths as $path) $this->getJson($path)->assertForbidden();
+
+        $role->forceFill(['permissions' => ['kpi.daily.input.scope.branch']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/kpi/daily?v=2', ['rows' => [$row]])->assertForbidden();
+    }
+
     public function test_daily_v2_write_uses_report_group_and_rolls_back_mixed_scope_batch(): void
     {
         $branch = Branch::create(['name' => 'Main']);
@@ -351,6 +532,16 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertEquals(7, $own->fresh()->calls_count);
         $this->assertEquals(9, $own->fresh()->new_properties_count);
         $this->assertSame('2000-01-01 12:00:00', $own->fresh()->submitted_at->format('Y-m-d H:i:s'));
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $defaults = $role->fresh()->permissions;
+        foreach (['kpi.daily.input.manage', 'kpi.daily.input.scope.branch'] as $revoked) {
+            $role->forceFill(['permissions' => array_values(array_diff($defaults, [$revoked]))])->save();
+            Sanctum::actingAs($rop->fresh());
+            $this->postJson('/api/kpi/daily?v=2', ['rows' => [$row]])->assertForbidden();
+        }
+        $role->forceFill(['permissions' => $defaults])->save();
+        Sanctum::actingAs($rop->fresh());
+
         $this->postJson('/api/kpi-period-locks', ['period_type' => 'month', 'period_key' => '2000-01'])->assertCreated();
         $this->postJson('/api/kpi/daily?v=2', ['rows' => [array_replace($row, ['calls' => 11])]])->assertUnprocessable();
         $this->assertEquals(7, $own->fresh()->calls_count);
@@ -378,6 +569,40 @@ class KpiModuleApiFeatureTest extends TestCase
             $this->postJson('/api/kpi-period-locks', ['period_type' => $type, 'period_key' => $key])->assertCreated();
             $this->getJson($url)->assertOk()->assertJsonPath('meta.locked', true);
         }
+    }
+
+    public function test_custom_historical_role_controls_adjustment_picker_and_write_after_revocation(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $branch = Branch::create(['name' => 'Main']);
+        $ownGroup = BranchGroup::create(['name' => 'Own', 'branch_id' => $branch->id]);
+        $otherGroup = BranchGroup::create(['name' => 'Other', 'branch_id' => $branch->id]);
+        $managerRole = Role::create(['name' => 'Custom manager', 'slug' => 'custom_adjustment_manager']);
+        $managerRole->forceFill(['permissions' => ['data.scope.assigned_groups', 'kpi.adjustments.manage', 'kpi.adjustments.entities.view']])->save();
+        $historicalRole = Role::create(['name' => 'Historical employee', 'slug' => 'custom_adjustment_employee']);
+        $historicalRole->forceFill(['permissions' => ['kpi.subject.assigned_groups']])->save();
+        $currentRole = Role::create(['name' => 'Current employee', 'slug' => 'custom_current_employee']);
+        $currentRole->forceFill(['permissions' => []])->save();
+        $manager = User::create(['name' => 'Manager', 'phone' => '900095001', 'role_id' => $managerRole->id, 'branch_id' => $branch->id]);
+        $employee = User::create(['name' => 'Transferred employee', 'phone' => '900095002', 'role_id' => $currentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $otherGroup->id]);
+        $manager->supervisedGroups()->attach($ownGroup->id);
+        $report = DailyReport::create(['user_id' => $employee->id, 'branch_group_id' => $ownGroup->id, 'role_slug' => $historicalRole->slug, 'report_date' => '2000-01-01', 'calls_count' => 3]);
+        $foreign = DailyReport::create(['user_id' => $employee->id, 'branch_group_id' => $otherGroup->id, 'role_slug' => $historicalRole->slug, 'report_date' => '2000-01-02', 'calls_count' => 99]);
+        \App\Models\KpiPeriodLock::create(['period_type' => 'month', 'period_key' => '2000-01', 'branch_id' => $branch->id, 'branch_group_id' => $ownGroup->id, 'locked_by' => $manager->id, 'locked_at' => now()]);
+        Sanctum::actingAs($manager);
+        $url = '/api/kpi/adjustments/entities?period_type=month&period_key=2000-01';
+        $payload = ['period_type' => 'month', 'period_key' => '2000-01', 'entity_id' => $employee->id, 'field_name' => 'calls', 'new_value' => 7, 'reason' => 'Verified correction'];
+        $this->getJson($url)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $employee->id);
+        $this->postJson('/api/kpi/adjustments', $payload)->assertCreated();
+        $this->assertEquals(7, $report->fresh()->calls_count);
+        $this->assertEquals(99, $foreign->fresh()->calls_count);
+        $historicalRole->forceFill(['permissions' => []])->save();
+        $this->getJson($url)->assertOk()->assertJsonCount(0, 'data');
+        $this->postJson('/api/kpi/adjustments', array_replace($payload, ['new_value' => 11]))->assertNotFound();
+        $this->assertEquals(7, $report->fresh()->calls_count);
+        $this->assertDatabaseCount('kpi_adjustment_logs', 1);
+        $historicalRole->forceFill(['permissions' => ['kpi.subject.assigned_groups']])->save();
+        $this->getJson($url)->assertOk()->assertJsonCount(1, 'data');
     }
 
     public function test_adjustment_changes_only_snapshot_group_and_requires_its_period_lock(): void
@@ -517,6 +742,22 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertEquals($leadId, $report['cross_group_links'][0]['id']);
         $this->assertEquals($other->id, $report['cross_group_links'][0]['parent_group_id']);
         $this->assertEquals($group->id, $report['rop_assignments'][0]['branch_group_id']);
+    }
+
+    public function test_custom_kpi_subject_snapshots_only_current_valid_group_without_rewriting_history(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $group = BranchGroup::create(['name' => 'Group', 'branch_id' => $branch->id]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role = Role::forceCreate(['name' => 'Custom KPI', 'slug' => 'custom_kpi_snapshot', 'permissions' => ['kpi.subject.assigned_groups']]);
+        $user = User::create(['name' => 'Employee', 'phone' => '912000088', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $create = fn ($date) => KpiEarlyRiskAlert::create(['user_id' => $user->id, 'alert_date' => $date, 'status' => 'open', 'message' => 'Risk']);
+        $snapshot = $create(now('Asia/Dushanbe')->toDateString());
+        $this->assertSame($group->id, $snapshot->branch_group_id);
+        $this->assertNull($create('2000-01-01')->branch_group_id);
+        $role->forceFill(['permissions' => []])->save();
+        $this->assertNull($create(now('Asia/Dushanbe')->toDateString())->branch_group_id);
+        $this->assertSame($group->id, $snapshot->fresh()->branch_group_id);
     }
 
     public function test_early_risk_alerts_use_snapshot_group_for_reads_and_status_changes(): void
@@ -1078,6 +1319,60 @@ class KpiModuleApiFeatureTest extends TestCase
             ->assertJsonPath('data.0.source', 'common');
     }
 
+    public function test_personal_progress_requires_read_permission_and_scopes_other_employees(): void
+    {
+        $role = Role::create(['name' => 'Progress reader', 'slug' => 'custom_progress_reader']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $other = Branch::create(['name' => 'Other']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $actor = User::create(['name' => 'Reader', 'phone' => '919940001', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $local = User::create(['name' => 'Local', 'phone' => '919940002', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $ungrouped = User::create(['name' => 'Ungrouped', 'phone' => '919940003', 'role_id' => $agentRole->id, 'branch_id' => $branch->id]);
+        $foreign = User::create(['name' => 'Foreign', 'phone' => '919940004', 'role_id' => $agentRole->id, 'branch_id' => $other->id]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $url = '/api/kpi/daily/my-progress?date=2026-05-16';
+        foreach (['own' => [403, 403, 403], 'group' => [200, 403, 403], 'branch' => [200, 200, 403], 'all' => [200, 200, 200]] as $scope => $statuses) {
+            $role->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.'.$scope]])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->getJson($url)->assertOk();
+            foreach ([$local, $ungrouped, $foreign] as $index => $target) {
+                $this->getJson($url.'&user_id='.$target->id)->assertStatus($statuses[$index]);
+            }
+        }
+        $role->forceFill(['permissions' => ['kpi.reports.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson($url)->assertForbidden();
+        $this->getJson($url.'&user_id='.$local->id)->assertForbidden();
+
+        $role->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.branch']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $actor->forceFill(['branch_id' => null, 'branch_group_id' => null])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson($url)->assertOk();
+        $this->getJson($url.'&user_id='.$actor->id)->assertOk();
+        $this->getJson($url.'&user_id='.$local->id)->assertForbidden();
+    }
+
+    public function test_progress_all_scope_does_not_bypass_rop_assigned_groups(): void
+    {
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $a = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'A']);
+        $b = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'B']);
+        $actor = User::create(['name' => 'ROP', 'phone' => '919941001', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $own = User::create(['name' => 'Assigned', 'phone' => '919941002', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $a->id]);
+        $foreign = User::create(['name' => 'Other', 'phone' => '919941003', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $b->id]);
+        $actor->supervisedGroups()->attach($a->id);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role->forceFill(['permissions' => ['data.scope.assigned_groups', 'kpi.reports.view', 'kpi.reports.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $url = '/api/kpi/daily/my-progress?date=2026-05-16';
+        $this->getJson($url.'&user_id='.$own->id)->assertOk();
+        $this->getJson($url.'&user_id='.$foreign->id)->assertForbidden();
+    }
+
     public function test_my_daily_progress_strict_contract_uses_canonical_metrics(): void
     {
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
@@ -1316,6 +1611,229 @@ class KpiModuleApiFeatureTest extends TestCase
         ];
 
         $this->patchJson('/api/kpi/plans/'.$otherMop->id, $payload)->assertOk();
+    }
+
+    public function test_plan_user_picker_uses_plan_permissions_scopes_and_target_eligibility(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $branch = Branch::create(['name' => 'Main']);
+        $foreignBranch = Branch::create(['name' => 'Other']);
+        $group = BranchGroup::create(['name' => 'One', 'branch_id' => $branch->id]);
+        $secondGroup = BranchGroup::create(['name' => 'Two', 'branch_id' => $branch->id]);
+        $otherGroup = BranchGroup::create(['name' => 'Other', 'branch_id' => $foreignBranch->id]);
+        $managerRole = Role::create(['name' => 'Reader', 'slug' => 'custom_picker']);
+        $role = Role::create(['name' => 'Custom employee', 'slug' => 'custom_plan_employee']);
+        $rights = ['kpi.subject.plan_templates', 'kpi.subject.group_templates', 'kpi.subject.assigned_groups'];
+        $role->forceFill(['permissions' => $rights])->save();
+        $actor = User::create(['name' => 'Reader', 'phone' => '900096001', 'role_id' => $managerRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $ids = [];
+        foreach ([$group, $secondGroup, $otherGroup] as $index => $team) {
+            $ids[] = User::create(['name' => 'Employee '.$index, 'phone' => '90009601'.$index, 'role_id' => $role->id, 'branch_id' => $team->branch_id, 'branch_group_id' => $team->id])->id;
+        }
+        User::create(['name' => 'Inactive', 'phone' => '900096020', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'inactive']);
+        foreach (['all' => $ids, 'branch' => array_slice($ids, 0, 2), 'group' => [$ids[0]], 'own' => []] as $scope => $expected) {
+            $managerRole->forceFill(['permissions' => ['kpi.plans.user.view', 'kpi.plans.scope.'.$scope]])->save();
+            Sanctum::actingAs($actor->fresh());
+            $response = $this->getJson('/api/kpi/plans/users')->assertOk();
+            $this->assertEqualsCanonicalizing($expected, array_column($response->json('data'), 'id'));
+            $response->assertJsonMissingPath('data.0.phone')->assertJsonMissingPath('data.0.email');
+        }
+        $managerRole->forceFill(['permissions' => ['kpi.plans.user.view', 'kpi.plans.scope.all', 'data.scope.assigned_groups']])->save();
+        $actor->supervisedGroups()->attach($group->id);
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/plans/users')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $ids[0]);
+        $role->forceFill(['permissions' => ['kpi.subject.plan_templates']])->save();
+        $this->getJson('/api/kpi/plans/users')->assertOk()->assertJsonCount(0, 'data');
+        $managerRole->forceFill(['permissions' => ['kpi.plans.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/plans/users')->assertForbidden();
+    }
+
+    public function test_report_presentation_defaults_and_custom_role_settings(): void
+    {
+        $catalog = app(\App\Services\KpiRoleCatalog::class);
+        foreach (['agent' => 'agent', 'mop' => 'mop', 'rop' => 'rop', 'branch_director' => 'rop', 'admin' => 'rop', 'superadmin' => 'rop', 'owner' => 'rop', 'intern' => null] as $slug => $dashboardRole) {
+            $actor = new User();
+            $actor->setRelation('role', new Role(['slug' => $slug]));
+            $policy = $catalog->reportPresentation($actor);
+            $this->assertSame($dashboardRole, $policy['dashboard_role']);
+            $this->assertSame($slug === 'intern' ? null : ['agent', 'mop'], $policy['visible_roles']);
+        }
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $target = Role::create(['name' => 'Custom report subject', 'slug' => 'custom_report_subject']);
+        $target->forceFill(['permissions' => ['kpi.subject.site_rows']])->save();
+        $reader = Role::create(['name' => 'Reader', 'slug' => 'custom_presentation_reader']);
+        $grants = ['kpi.reports.view', 'kpi.reports.site.restrict_rows', 'kpi.reports.dashboard.role.custom_report_subject'];
+        $reader->forceFill(['permissions' => $grants])->save();
+        $actor = User::create(['name' => 'Reader', 'phone' => '900094001', 'role_id' => $reader->id]);
+        Sanctum::actingAs($actor);
+        $response = $this->getJson('/api/kpi/reports/presentation')->assertOk()
+            ->assertJsonPath('data.dashboard_role', $target->slug);
+        $this->assertContains($target->slug, $response->json('data.visible_roles'));
+        $target->forceFill(['permissions' => []])->save();
+        $this->assertNotContains($target->slug, $this->getJson('/api/kpi/reports/presentation')->assertOk()->json('data.visible_roles'));
+        $reader->forceFill(['permissions' => ['kpi.reports.view']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/reports/presentation')->assertOk()->assertExactJson(['data' => ['dashboard_role' => null, 'visible_roles' => null]]);
+        $reader->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/reports/presentation')->assertForbidden();
+    }
+
+    public function test_report_user_picker_uses_report_permissions_scopes_and_target_eligibility(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $branch = Branch::create(['name' => 'Main']);
+        $foreignBranch = Branch::create(['name' => 'Other']);
+        $group = BranchGroup::create(['name' => 'One', 'branch_id' => $branch->id]);
+        $secondGroup = BranchGroup::create(['name' => 'Two', 'branch_id' => $branch->id]);
+        $otherGroup = BranchGroup::create(['name' => 'Other', 'branch_id' => $foreignBranch->id]);
+        $managerRole = Role::create(['name' => 'Reader', 'slug' => 'custom_report_picker']);
+        $role = Role::create(['name' => 'Custom employee', 'slug' => 'custom_plan_employee']);
+        $rights = ['kpi.subject.report_selection', 'kpi.subject.assigned_groups', 'kpi.subject.period_reports'];
+        $role->forceFill(['permissions' => $rights])->save();
+        $actor = User::create(['name' => 'Reader', 'phone' => '900096001', 'role_id' => $managerRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $ids = [];
+        foreach ([$group, $secondGroup, $otherGroup] as $index => $team) {
+            $ids[] = User::create(['name' => 'Employee '.$index, 'phone' => '90009601'.$index, 'role_id' => $role->id, 'branch_id' => $team->branch_id, 'branch_group_id' => $team->id])->id;
+        }
+        User::create(['name' => 'Inactive', 'phone' => '900096020', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'inactive']);
+        foreach (['all' => $ids, 'branch' => array_slice($ids, 0, 2), 'group' => [$ids[0]], 'own' => []] as $scope => $expected) {
+            $managerRole->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.'.$scope]])->save();
+            Sanctum::actingAs($actor->fresh());
+            $response = $this->getJson('/api/kpi/reports/users')->assertOk();
+            $this->assertEqualsCanonicalizing($expected, array_column($response->json('data'), 'id'));
+            $response->assertJsonMissingPath('data.0.phone')->assertJsonMissingPath('data.0.email');
+        }
+        $managerRole->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.own', 'kpi.subject.report_selection']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/reports/users')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $actor->id);
+        $managerRole->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/weekly?year=2026&week=19&v=2&role=custom_plan_employee')
+            ->assertOk()->assertJsonPath('meta.pagination.total', 3)->assertJsonPath('data.0.role', 'custom_plan_employee');
+        $managerRole->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.all', 'data.scope.assigned_groups']])->save();
+        $actor->supervisedGroups()->attach($group->id);
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/reports/users')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $ids[0]);
+        $role->forceFill(['permissions' => ['kpi.subject.report_selection']])->save();
+        $this->getJson('/api/kpi/reports/users')->assertOk()->assertJsonCount(0, 'data');
+        $managerRole->forceFill(['permissions' => ['kpi.reports.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/reports/users')->assertForbidden();
+    }
+
+    public function test_adjustment_user_picker_scopes_and_legacy_default_filter_are_configurable(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $branch = Branch::create(['name' => 'Main']);
+        $foreignBranch = Branch::create(['name' => 'Other']);
+        $group = BranchGroup::create(['name' => 'One', 'branch_id' => $branch->id]);
+        $secondGroup = BranchGroup::create(['name' => 'Two', 'branch_id' => $branch->id]);
+        $otherGroup = BranchGroup::create(['name' => 'Other', 'branch_id' => $foreignBranch->id]);
+        $managerRole = Role::create(['name' => 'Reader', 'slug' => 'custom_adjustment_picker']);
+        $role = Role::create(['name' => 'Custom employee', 'slug' => 'custom_plan_employee']);
+        $rights = ['kpi.subject.adjustment_selection'];
+        $role->forceFill(['permissions' => $rights])->save();
+        $actor = User::create(['name' => 'Reader', 'phone' => '900096001', 'role_id' => $managerRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $ids = [];
+        foreach ([$group, $secondGroup, $otherGroup] as $index => $team) {
+            $ids[] = User::create(['name' => 'Employee '.$index, 'phone' => '90009601'.$index, 'role_id' => $role->id, 'branch_id' => $team->branch_id, 'branch_group_id' => $team->id])->id;
+        }
+        User::create(['name' => 'Inactive', 'phone' => '900096020', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'inactive']);
+        foreach (['all' => $ids, 'branch' => array_slice($ids, 0, 2), 'group' => [$ids[0]], 'own' => []] as $scope => $expected) {
+            $managerRole->forceFill(['permissions' => ['kpi.adjustments.users.view', 'kpi.adjustments.users.scope.'.$scope]])->save();
+            Sanctum::actingAs($actor->fresh());
+            $response = $this->getJson('/api/kpi/adjustments/users')->assertOk();
+            $this->assertEqualsCanonicalizing($expected, array_column($response->json('data'), 'id'));
+            $response->assertJsonMissingPath('data.0.phone')->assertJsonMissingPath('data.0.email');
+        }
+        $managerRole->forceFill(['permissions' => ['kpi.adjustments.users.view', 'kpi.adjustments.users.scope.all', 'data.scope.assigned_groups']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/adjustments/users')->assertForbidden();
+        $managerRole->forceFill(['permissions' => ['kpi.adjustments.users.view', 'kpi.adjustments.users.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $role->forceFill(['permissions' => []])->save();
+        $this->getJson('/api/kpi/adjustments/users')->assertOk()->assertJsonCount(0, 'data');
+        $managerRole->forceFill(['permissions' => ['kpi.adjustments.users.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/adjustments/users')->assertForbidden();
+        $managerRole->forceFill(['permissions' => ['kpi.operations.manage']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/adjustments/entities?active=1')->assertOk()->assertJsonCount(0, 'data');
+        $role->forceFill(['permissions' => ['kpi.subject.adjustment_default_filter']])->save();
+        $this->getJson('/api/kpi/adjustments/entities?active=1')->assertOk()->assertJsonCount(3, 'data');
+        $role->forceFill(['permissions' => []])->save();
+        $this->getJson('/api/kpi/adjustments/entities?active=1')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/kpi/adjustments/entities?active=1&role=custom_plan_employee')->assertOk()->assertJsonCount(3, 'data');
+    }
+
+    public function test_custom_template_role_catalog_and_group_permission_can_be_revoked(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Особая команда', 'slug' => 'custom_template']);
+        $role->forceFill(['permissions' => ['kpi.subject.plan_templates']])->save();
+        $managerRole = Role::create(['name' => 'Planner', 'slug' => 'custom_template_manager']);
+        $managerRole->forceFill(['permissions' => ['kpi.plans.manage', 'kpi.plans.common.view', 'kpi.plans.common.manage', 'kpi.plans.scope.group']])->save();
+        $branch = Branch::create(['name' => 'Branch']);
+        $group = BranchGroup::create(['name' => 'Group', 'branch_id' => $branch->id]);
+        $actor = User::create(['name' => 'Planner', 'phone' => '900095001', 'role_id' => $managerRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($actor);
+        $this->getJson('/api/kpi/plans/roles')->assertOk()->assertJsonFragment(['slug' => $role->slug, 'name' => $role->name, 'group_templates' => false]);
+        $payload = ['role' => $role->slug, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'effective_from' => '2026-05-01', 'items' => [['metric_key' => 'calls', 'daily_plan' => 10, 'weight' => 1]]];
+        $this->putJson('/api/kpi/plans/common', $payload)->assertForbidden();
+        $role->forceFill(['permissions' => ['kpi.subject.plan_templates', 'kpi.subject.group_templates']])->save();
+        $this->putJson('/api/kpi/plans/common', $payload)->assertOk();
+        $managerRole->forceFill(['permissions' => [...$managerRole->permissions, 'kpi.rop_plans.create', 'kpi.rop_plans.view', 'kpi.rop_plans.update']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $groupPayload = ['role' => $role->slug, 'month' => '2026-05', 'branch_id' => $branch->id, 'branch_group_id' => $group->id,
+            'items' => [['metric_key' => 'calls', 'plan_value' => 30, 'weight' => 1]]];
+        $groupPlan = $this->postJson('/api/kpi/rop-plans', $groupPayload)->assertCreated()->json('id');
+        $this->getJson('/api/kpi/rop-plans/'.$groupPlan)->assertOk()->assertJsonPath('role', $role->slug);
+        $role->forceFill(['permissions' => ['kpi.subject.group_templates']])->save();
+        $this->patchJson('/api/kpi/rop-plans/'.$groupPlan, ['month' => '2026-07'])->assertUnprocessable();
+        $this->assertDatabaseHas('kpi_rop_plans', ['id' => $groupPlan, 'month' => '2026-05']);
+        $role->forceFill(['permissions' => []])->save();
+        $this->postJson('/api/kpi/rop-plans', [...$groupPayload, 'month' => '2026-06'])->assertUnprocessable();
+        $this->getJson('/api/kpi/plans/roles')->assertOk()->assertJsonMissing(['slug' => $role->slug]);
+        $this->putJson('/api/kpi/plans/common', $payload)->assertUnprocessable();
+        $this->assertDatabaseHas('kpi_plans', ['role_slug' => $role->slug, 'branch_group_id' => $group->id, 'daily_plan' => 10]);
+        $managerRole->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/plans/roles')->assertForbidden();
+    }
+
+    public function test_custom_kpi_subject_policy_controls_plans_and_eligible_list_independently_of_record_transfer(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $role = Role::create(['name' => 'Custom KPI employee', 'slug' => 'custom_kpi_employee']);
+        $role->forceFill(['permissions' => ['kpi.subject.assigned_groups']])->save();
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $other = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G2']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '900094001', 'role_id' => $ropRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $employee = User::create(['name' => 'Employee', 'phone' => '900094002', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $foreign = User::create(['name' => 'Foreign', 'phone' => '900094003', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $other->id]);
+        $rop->supervisedGroups()->sync([$group->id]);
+        Sanctum::actingAs($rop);
+        $payload = ['effective_from' => '2026-05-01', 'items' => [['metric_key' => 'calls', 'daily_plan' => 10, 'weight' => 1]]];
+        $url = '/api/kpi/plans/eligible-users?branch_group_id='.$group->id;
+        $this->getJson($url)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $employee->id);
+        $this->patchJson('/api/kpi/plans/'.$employee->id, $payload)->assertOk();
+        $this->patchJson('/api/kpi/plans/'.$foreign->id, $payload)->assertForbidden();
+        $this->getJson('/api/kpi/daily?v=2&date=2026-05-01&user_id='.$employee->id)->assertOk();
+        $report = DailyReport::create(['user_id' => $employee->id, 'branch_group_id' => $group->id, 'role_slug' => $role->slug, 'report_date' => '2026-05-01', 'calls_count' => 5]);
+        $read = '/api/kpi/daily?date=2026-05-01&user_id='.$employee->id;
+        $legacyRead = '/api/kpi-reports?period_type=day&date_from=2026-05-01&date_to=2026-05-01&user_id='.$employee->id;
+        $this->getJson($legacyRead)->assertOk()->assertJsonCount(1, 'data');
+        $this->getJson($read)->assertOk()->assertJsonCount(1, 'data');
+        $role->forceFill(['permissions' => ['users.subject.record_recipient']])->save();
+        $this->getJson($read)->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson($legacyRead)->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson($url)->assertOk()->assertJsonCount(0, 'data');
+        $this->patchJson('/api/kpi/plans/'.$employee->id, $payload)->assertForbidden();
+        $this->assertDatabaseHas('kpi_plans', ['user_id' => $employee->id, 'role_slug' => $role->slug, 'daily_plan' => 10]);
     }
 
     public function test_rop_can_save_agent_and_mop_in_assigned_group_but_not_intern(): void
@@ -2991,6 +3509,65 @@ class KpiModuleApiFeatureTest extends TestCase
         ] as $migration) {
             (require database_path('migrations/'.$migration))->up();
         }
+    }
+
+    public function test_custom_kpi_plan_permissions_separate_read_write_and_branch_scope(): void
+    {
+        $role = Role::create(['name' => 'Custom Planner', 'slug' => 'custom_planner']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Local']);
+        $other = Branch::create(['name' => 'Other']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Local Group']);
+        $foreignGroup = BranchGroup::create(['branch_id' => $other->id, 'name' => 'Other Group']);
+        $actor = User::create(['name' => 'Planner', 'phone' => '900099001', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $target = User::create(['name' => 'Agent', 'phone' => '900099002', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $rights = ['kpi.plans.scope.branch', 'kpi.plans.common.view', 'kpi.plans.user.view'];
+        $role->forceFill(['permissions' => $rights])->save();
+        Sanctum::actingAs($actor->fresh());
+        $readPath = '/api/kpi/plans/common?role=agent&date=2026-05-06&branch_id='.$branch->id.'&branch_group_id='.$group->id;
+        $this->getJson($readPath)->assertOk();
+        $this->getJson('/api/kpi/plans?user_id='.$target->id.'&date=2026-05-06')->assertOk();
+        $payload = ['role' => 'agent', 'branch_id' => $branch->id, 'branch_group_id' => $group->id,
+            'effective_from' => '2026-05-01', 'items' => array_map(fn ($metric) => ['metric' => $metric, 'daily_plan' => 1, 'weight' => 0.2], ['objects', 'shows', 'ads', 'calls', 'sales'])];
+        $this->putJson('/api/kpi/plans/common', $payload)->assertForbidden();
+        $role->forceFill(['permissions' => [...$rights, 'kpi.plans.manage', 'kpi.plans.common.manage']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->putJson('/api/kpi/plans/common', $payload)->assertOk();
+        $this->getJson('/api/kpi/plans/common?role=agent&date=2026-05-06')->assertForbidden();
+        $this->getJson('/api/kpi/plans/list')->assertForbidden();
+        $foreignPlan = KpiPlan::query()->firstOrFail()->replicate();
+        $foreignPlan->branch_id = $other->id;
+        $foreignPlan->branch_group_id = $foreignGroup->id;
+        $foreignPlan->save();
+        $foreignUser = User::create(['name' => 'Foreign Agent', 'phone' => '900099003', 'role_id' => $agentRole->id, 'branch_id' => $other->id, 'branch_group_id' => $foreignGroup->id]);
+        $role->forceFill(['permissions' => [...$rights, 'kpi.plans.manage', 'kpi.plans.common.manage', 'kpi.plans.list.view', 'kpi.plans.list.scope.branch']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/plans/list')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.branch_id', $branch->id);
+        $this->getJson('/api/kpi/plans/eligible-users?role=agent')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $target->id);
+        $role->forceFill(['permissions' => [...$rights, 'kpi.plans.manage', 'kpi.plans.common.manage', 'kpi.plans.list.view', 'kpi.plans.list.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/plans/list')->assertOk()->assertJsonCount(2, 'data');
+        $this->getJson('/api/kpi/plans/eligible-users?role=agent')->assertOk()->assertJsonCount(1, 'data');
+        $role->forceFill(['permissions' => ['kpi.plans.list.view']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/plans/list')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/kpi/plans/eligible-users?role=agent')->assertForbidden();
+        $globalPayload = array_diff_key($payload, array_flip(['branch_id', 'branch_group_id']));
+        $this->putJson('/api/kpi/plans/common', $globalPayload)->assertForbidden();
+        $role->forceFill(['permissions' => [...$rights, 'kpi.plans.manage', 'kpi.plans.common.manage', 'kpi.plans.common.global.view', 'kpi.plans.common.global.manage']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/plans/common?role=agent&date=2026-05-06')->assertOk();
+        $this->putJson('/api/kpi/plans/common', $globalPayload)->assertOk();
+        $this->putJson('/api/kpi/plans/common', [...$payload, 'branch_id' => $other->id, 'branch_group_id' => $foreignGroup->id])->assertForbidden();
+        $role->forceFill(['permissions' => ['kpi.plans.scope.all', 'kpi.plans.common.view']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/plans/common?role=agent&date=2026-05-06&branch_id='.$other->id.'&branch_group_id='.$foreignGroup->id)->assertOk();
+        $this->putJson('/api/kpi/plans/common', $payload)->assertForbidden();
+        $this->getJson('/api/kpi/plans?user_id='.$target->id.'&date=2026-05-06')->assertForbidden();
+        $role->forceFill(['permissions' => ['kpi.plans.common.view']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson($readPath)->assertForbidden();
     }
 
     private function createDailyKpiSystemTables(): void

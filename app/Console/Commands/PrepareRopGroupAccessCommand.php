@@ -133,13 +133,13 @@ final class PrepareRopGroupAccessCommand extends Command
             });
         }
 
-        $report['rops_without_groups'] = User::query()->whereHas('role', fn ($q) => $q->where('slug', 'rop'))
+        $report['rops_without_groups'] = User::query()->whereHas('role', fn ($q) => $q->usingAssignedGroups())
             ->whereDoesntHave('supervisedGroups', fn ($q) => $q->whereColumn('branch_groups.branch_id', 'users.branch_id'))
             ->pluck('id')->all();
         $report['rop_assignments'] = DB::table('users as u')->join('roles as r', 'r.id', '=', 'u.role_id')
             ->leftJoin('rop_branch_groups as a', 'a.rop_id', '=', 'u.id')
             ->leftJoin('branch_groups as g', 'g.id', '=', 'a.branch_group_id')
-            ->where('r.slug', 'rop')->orderBy('u.id')->orderBy('g.id')
+            ->whereIn('r.id', \App\Models\Role::query()->usingAssignedGroups()->select('id'))->orderBy('u.id')->orderBy('g.id')
             ->get(['u.id as rop_id', 'u.branch_id as rop_branch_id', 'g.id as branch_group_id', 'g.branch_id as group_branch_id'])
             ->map(fn ($row) => (array) $row + ['valid' => $row->branch_group_id !== null && (int) $row->rop_branch_id === (int) $row->group_branch_id])
             ->all();

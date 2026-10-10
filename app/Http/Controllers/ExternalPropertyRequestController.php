@@ -63,32 +63,34 @@ class ExternalPropertyRequestController extends Controller
 
     public function myStore(Request $request)
     {
-        $user = $this->externalAgent($request);
-        $draft = $request->boolean('draft', false);
-        $validated = $this->validateRequestPayload($request, $draft);
+        return DB::transaction(function () use ($request) {
+            $user = $this->externalAgent($request, 'external_requests.own.create', true);
+            $draft = $request->boolean('draft', false);
+            $validated = $this->validateRequestPayload($request, $draft);
 
-        $externalRequest = ExternalPropertyRequest::query()->create(
-            $this->service->applyCreateDefaultsForExternalAgent($user, $validated, $draft)
-        );
+            $externalRequest = ExternalPropertyRequest::query()->create(
+                $this->service->applyCreateDefaultsForExternalAgent($user, $validated, $draft)
+            );
 
-        if (!$draft) {
-            $this->service->detectAndMarkDuplicateCandidate($externalRequest, $user);
-            $externalRequest->refresh();
-        }
+            if (!$draft) {
+                $this->service->detectAndMarkDuplicateCandidate($externalRequest, $user);
+                $externalRequest->refresh();
+            }
 
-        $this->service->log(
-            $externalRequest,
-            $user,
-            $draft ? 'created' : 'submitted',
-            null,
-            $externalRequest->status
-        );
+            $this->service->log(
+                $externalRequest,
+                $user,
+                $draft ? 'created' : 'submitted',
+                null,
+                $externalRequest->status
+            );
 
-        if (!$draft) {
-            $this->service->notifyInternalNewRequest($externalRequest, $user);
-        }
+            if (!$draft) {
+                $this->service->notifyInternalNewRequest($externalRequest, $user);
+            }
 
-        return response()->json($this->externalPayload($externalRequest->fresh(['photos', 'property'])), 201);
+            return response()->json($this->externalPayload($externalRequest->fresh(['photos', 'property'])), 201);
+        });
     }
 
     public function myShow(Request $request, ExternalPropertyRequest $externalPropertyRequest)
@@ -103,59 +105,69 @@ class ExternalPropertyRequestController extends Controller
 
     public function myUpdate(Request $request, ExternalPropertyRequest $externalPropertyRequest)
     {
-        $user = $this->externalAgent($request);
-        $this->ensureOwnRequest($externalPropertyRequest, $user);
+        return DB::transaction(function () use ($request, $externalPropertyRequest) {
+            $user = $this->externalAgent($request, 'external_requests.own.edit', true);
+            $externalPropertyRequest = ExternalPropertyRequest::query()->lockForUpdate()->findOrFail($externalPropertyRequest->id);
+            $this->ensureOwnRequest($externalPropertyRequest, $user);
 
-        $validated = $this->validateRequestPayload($request, draft: true, updating: true);
-        $updated = $this->service->updateExternalRequest($externalPropertyRequest, $validated);
-        $this->service->notifyExternalUpdated($updated, $user);
+            abort_if($externalPropertyRequest->status === ExternalPropertyRequest::STATUS_NEEDS_INFO && ! $user->hasPermission('external_requests.own.submit'), 403, 'Нет права повторно отправить заявку.');
+            $validated = $this->validateRequestPayload($request, draft: true, updating: true);
+            $updated = $this->service->updateExternalRequest($externalPropertyRequest, $validated);
+            $this->service->notifyExternalUpdated($updated, $user);
 
-        return response()->json($this->externalPayload($updated));
+            return response()->json($this->externalPayload($updated));
+        });
     }
 
     public function mySubmit(Request $request, ExternalPropertyRequest $externalPropertyRequest)
     {
-        $user = $this->externalAgent($request);
-        $this->ensureOwnRequest($externalPropertyRequest, $user);
-        Validator::make($externalPropertyRequest->toArray(), [
-            'offer_type' => ['required', Rule::in(['rent', 'sale'])],
-            'type_id' => ['required', 'integer', 'exists:property_types,id'],
-            'price' => ['required', 'numeric', 'min:0'],
-            'currency' => ['required', Rule::in(['TJS', 'USD'])],
-            'owner_phone' => [new \App\Rules\InternationalPhoneNumber, 'required', 'string', 'max:40'],
-        ])->validate();
+        return DB::transaction(function () use ($request, $externalPropertyRequest) {
+            $user = $this->externalAgent($request, 'external_requests.own.submit', true);
+            $externalPropertyRequest = ExternalPropertyRequest::query()->lockForUpdate()->findOrFail($externalPropertyRequest->id);
+            $this->ensureOwnRequest($externalPropertyRequest, $user);
+            Validator::make($externalPropertyRequest->toArray(), [
+                'offer_type' => ['required', Rule::in(['rent', 'sale'])],
+                'type_id' => ['required', 'integer', 'exists:property_types,id'],
+                'price' => ['required', 'numeric', 'min:0'],
+                'currency' => ['required', Rule::in(['TJS', 'USD'])],
+                'owner_phone' => [new \App\Rules\InternationalPhoneNumber, 'required', 'string', 'max:40'],
+            ])->validate();
 
-        return response()->json($this->externalPayload($this->service->submitDraft($externalPropertyRequest, $user)));
+            return response()->json($this->externalPayload($this->service->submitDraft($externalPropertyRequest, $user)));
+        });
     }
 
     public function myStorePhoto(Request $request, ExternalPropertyRequest $externalPropertyRequest)
     {
-        $user = $this->externalAgent($request);
-        $this->ensureOwnRequest($externalPropertyRequest, $user);
-        $this->ensurePhotoEditable($externalPropertyRequest);
+        return DB::transaction(function () use ($request, $externalPropertyRequest) {
+            $user = $this->externalAgent($request, 'external_requests.own.photos', true);
+            $externalPropertyRequest = ExternalPropertyRequest::query()->lockForUpdate()->findOrFail($externalPropertyRequest->id);
+            $this->ensureOwnRequest($externalPropertyRequest, $user);
+            $this->ensurePhotoEditable($externalPropertyRequest);
 
-        $validated = $request->validate([
-            'photos' => ['required', 'array', 'max:40'],
-            'photos.*' => ['file', 'mimes:jpg,jpeg,png,webp', 'max:8192'],
-        ]);
-
-        $created = [];
-        $basePosition = (int) ($externalPropertyRequest->photos()->max('position') ?? -1) + 1;
-        foreach ($validated['photos'] as $index => $file) {
-            $path = $file->store('external-property-requests/' . $externalPropertyRequest->id, \App\Services\ExternalRequestMedia::DISK);
-            $created[] = $externalPropertyRequest->photos()->create([
-                'file_path' => $path,
-                'position' => $basePosition + $index,
+            $validated = $request->validate([
+                'photos' => ['required', 'array', 'max:40'],
+                'photos.*' => ['file', 'mimes:jpg,jpeg,png,webp', 'max:8192'],
             ]);
-        }
 
-        $this->service->log($externalPropertyRequest, $user, 'photos_added', null, null, null, [
-            'count' => count($created),
-        ]);
+            $created = [];
+            $basePosition = (int) ($externalPropertyRequest->photos()->max('position') ?? -1) + 1;
+            foreach ($validated['photos'] as $index => $file) {
+                $path = $file->store('external-property-requests/' . $externalPropertyRequest->id, \App\Services\ExternalRequestMedia::DISK);
+                $created[] = $externalPropertyRequest->photos()->create([
+                    'file_path' => $path,
+                    'position' => $basePosition + $index,
+                ]);
+            }
 
-        return response()->json([
-            'data' => $created,
-        ], 201);
+            $this->service->log($externalPropertyRequest, $user, 'photos_added', null, null, null, [
+                'count' => count($created),
+            ]);
+
+            return response()->json([
+                'data' => $created,
+            ], 201);
+        });
     }
 
     public function myDestroyPhoto(
@@ -163,18 +175,21 @@ class ExternalPropertyRequestController extends Controller
         ExternalPropertyRequest $externalPropertyRequest,
         ExternalPropertyRequestPhoto $photo
     ) {
-        $user = $this->externalAgent($request);
-        $this->ensureOwnRequest($externalPropertyRequest, $user);
-        $this->ensurePhotoEditable($externalPropertyRequest);
-        abort_unless((int) $photo->external_property_request_id === (int) $externalPropertyRequest->id, 404);
+        return DB::transaction(function () use ($request, $externalPropertyRequest, $photo) {
+            $user = $this->externalAgent($request, 'external_requests.own.photos', true);
+            $externalPropertyRequest = ExternalPropertyRequest::query()->lockForUpdate()->findOrFail($externalPropertyRequest->id);
+            $this->ensureOwnRequest($externalPropertyRequest, $user);
+            $this->ensurePhotoEditable($externalPropertyRequest);
+            abort_unless((int) $photo->external_property_request_id === (int) $externalPropertyRequest->id, 404);
 
-        Storage::disk('public')->delete($photo->file_path);
-        Storage::disk(\App\Services\ExternalRequestMedia::DISK)->delete($photo->file_path);
-        $photo->delete();
+            Storage::disk('public')->delete($photo->file_path);
+            Storage::disk(\App\Services\ExternalRequestMedia::DISK)->delete($photo->file_path);
+            $photo->delete();
 
-        $this->service->log($externalPropertyRequest, $user, 'photo_deleted');
+            $this->service->log($externalPropertyRequest, $user, 'photo_deleted');
 
-        return response()->json(['message' => 'Фото удалено']);
+            return response()->json(['message' => 'Фото удалено']);
+        });
     }
 
     public function internalIndex(Request $request)
@@ -305,17 +320,17 @@ class ExternalPropertyRequestController extends Controller
 
     public function assign(Request $request, ExternalPropertyRequest $externalPropertyRequest)
     {
-        $user = $this->internalUser($request);
+        $user = $this->internalUser($request, 'external_requests.assign');
         $this->service->ensureInternalCanAccess($user, $externalPropertyRequest);
         $validated = $request->validate([
             'assigned_agent_id' => ['nullable', 'integer', 'exists:users,id'],
         ]);
 
-        if ($user->hasRole('agent') || $user->hasRole('mop')) {
+        if ($user->hasPermission('external_requests.assign.self')) {
             abort_unless(
                 (int) ($validated['assigned_agent_id'] ?? 0) === (int) $user->id,
                 403,
-                'Агент и МОП могут принять заявку только на себя.'
+                'Можно принять заявку только на себя.'
             );
         }
 
@@ -328,7 +343,7 @@ class ExternalPropertyRequestController extends Controller
 
     public function changeStatus(Request $request, ExternalPropertyRequest $externalPropertyRequest)
     {
-        $user = $this->internalUser($request);
+        $user = $this->internalUser($request, 'external_requests.status');
         $this->service->ensureInternalCanAccess($user, $externalPropertyRequest);
         $validated = $request->validate([
             'status' => ['required', Rule::in(array_diff(
@@ -348,7 +363,7 @@ class ExternalPropertyRequestController extends Controller
 
     public function prefill(Request $request, ExternalPropertyRequest $externalPropertyRequest)
     {
-        $user = $this->internalUser($request);
+        $user = $this->internalUser($request, 'external_requests.convert');
         $this->service->ensureInternalCanAccess($user, $externalPropertyRequest);
         $externalPropertyRequest->load(['externalAgent', 'photos', 'type']);
 
@@ -368,7 +383,7 @@ class ExternalPropertyRequestController extends Controller
 
     public function convert(Request $request, ExternalPropertyRequest $externalPropertyRequest)
     {
-        $user = $this->internalUser($request);
+        $user = $this->internalUser($request, 'external_requests.convert');
         $this->service->ensureInternalCanAccess($user, $externalPropertyRequest);
         $this->moderation->assertNoProtectedFields($request, ['branch_id', 'branch_group_id'], $user);
 
@@ -621,24 +636,29 @@ class ExternalPropertyRequestController extends Controller
         return $payload;
     }
 
-    private function externalAgent(Request $request): User
+    private function externalAgent(Request $request, string $permission = 'external_requests.own.view', bool $writing = false): User
     {
         /** @var User|null $user */
         $user = $request->user();
         abort_unless($user, 401, 'Unauthenticated.');
         $user->loadMissing('role');
-        abort_unless($user->hasRole('external_agent'), 403, 'Доступ запрещён');
+        if ($writing) {
+            $user = User::query()->lockForUpdate()->findOrFail($user->id);
+            auth()->setUser($user);
+        }
+        abort_unless($user->hasPermission($permission), 403, 'Доступ запрещён');
 
         return $user;
     }
 
-    private function internalUser(Request $request): User
+    private function internalUser(Request $request, string $permission = 'external_requests.view'): User
     {
         /** @var User|null $user */
         $user = $request->user();
         abort_unless($user, 401, 'Unauthenticated.');
         $user->loadMissing('role');
-        abort_if($user->hasRole('client') || $user->hasRole('external_agent'), 403, 'Доступ запрещён');
+        abort_if($user->usesAssignedGroupScope(), 403, 'FORBIDDEN_ACTION');
+        abort_unless($user->hasPermission($permission), 403, 'Доступ запрещён');
 
         return $user;
     }

@@ -427,6 +427,40 @@ class NewBuildingAgentAccessTest extends TestCase
         }
     }
 
+    public function test_custom_residential_scopes_and_publication_revocation_apply_to_normal_save(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $actor = $this->actingAsRole('custom');
+        $branchA = DB::table('branches')->insertGetId(['name' => 'A']);
+        $branchB = DB::table('branches')->insertGetId(['name' => 'B']);
+        $actor->forceFill(['branch_id' => $branchA])->save();
+        $role = $actor->role;
+        $role->forceFill(['permissions' => ['new_buildings.manage', 'new_buildings.scope.branch']])->save();
+        $own = \App\Models\NewBuilding::create(['title' => 'Own branch', 'branch_id' => $branchA, 'publication_status' => 'draft']);
+        $foreign = \App\Models\NewBuilding::create(['title' => 'Foreign branch', 'branch_id' => $branchB, 'publication_status' => 'draft']);
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/admin/new-buildings')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $own->id);
+        $this->getJson('/api/admin/new-buildings/'.$foreign->id)->assertForbidden();
+        foreach (['client', 'external_agent', 'accountant'] as $slug) {
+            $role->forceFill(['slug' => $slug])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->getJson('/api/admin/new-buildings')->assertOk()->assertJsonCount(1, 'data');
+            $this->getJson('/api/admin/new-buildings/'.$foreign->id)->assertForbidden();
+            $this->putJson('/api/new-buildings/'.$own->id, ['version' => 1, 'publication_status' => 'archived'])->assertForbidden();
+        }
+        $role->forceFill(['slug' => 'admin', 'permissions' => ['new_buildings.manage', 'new_buildings.manage_all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/admin/new-buildings')->assertOk()->assertJsonCount(2, 'data');
+        $this->putJson('/api/new-buildings/'.$own->id, ['version' => 1, 'publication_status' => 'archived'])->assertForbidden();
+        $role->forceFill(['permissions' => ['new_buildings.manage', 'new_buildings.manage_all', 'new_buildings.publish']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->putJson('/api/new-buildings/'.$own->id, ['version' => 1, 'publication_status' => 'archived'])->assertOk();
+        $role->forceFill(['permissions' => ['new_buildings.manage']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/admin/new-buildings')->assertForbidden();
+        $this->postJson('/api/new-buildings', ['title' => 'Forbidden'])->assertForbidden();
+    }
+
     private function actingAsRole(string $slug): User
     {
         $role = Role::query()->firstOrCreate(['slug' => $slug], ['name' => $slug]);

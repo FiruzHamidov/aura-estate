@@ -40,6 +40,29 @@ class PublicRealtorProfileTest extends TestCase
         });
     }
 
+    public function test_custom_role_publication_is_shared_by_team_profile_and_review_access(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Custom public specialist', 'slug' => 'custom_public_specialist']);
+        $role->forceFill(['permissions' => []])->save();
+        $employee = User::create(['name' => 'Public specialist', 'phone' => '900091001', 'role_id' => $role->id, 'status' => 'active']);
+        $this->getJson('/api/public/team')->assertOk()->assertJsonCount(0);
+        $this->getJson('/api/public/realtors/'.$employee->id)->assertNotFound();
+        $this->getJson('/api/agents/'.$employee->id.'/reviews')->assertNotFound();
+        $role->forceFill(['permissions' => ['public_team.subject.profile']])->save();
+        $this->getJson('/api/public/team')->assertOk()->assertJsonCount(1)->assertJsonPath('0.id', $employee->id);
+        $this->getJson('/api/public/realtors/'.$employee->id)->assertOk()->assertJsonPath('phone', '900091001');
+        $this->postJson('/api/agents/'.$employee->id.'/reviews', [])->assertUnprocessable();
+        $employee->forceFill(['status' => 'inactive'])->save();
+        $this->getJson('/api/public/realtors/'.$employee->id)->assertNotFound();
+        $employee->forceFill(['status' => 'active'])->save();
+        $role->forceFill(['permissions' => []])->save();
+        $this->getJson('/api/public/team')->assertOk()->assertJsonCount(0);
+        $this->getJson('/api/public/realtors/'.$employee->id)->assertNotFound();
+        $this->getJson('/api/agents/'.$employee->id.'/reviews')->assertNotFound();
+        $this->assertDatabaseHas('users', ['id' => $employee->id, 'phone' => '900091001', 'status' => 'active']);
+    }
+
     public function test_public_realtor_profile_is_accessible_without_authorization(): void
     {
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
@@ -58,9 +81,7 @@ class PublicRealtorProfileTest extends TestCase
         $response = $this->getJson('/api/public/realtors/' . $agent->id);
 
         $response->assertOk();
-        $this->assertStringContainsString('public', (string) $response->headers->get('Cache-Control'));
-        $this->assertStringContainsString('max-age=300', (string) $response->headers->get('Cache-Control'));
-        $this->assertStringContainsString('s-maxage=900', (string) $response->headers->get('Cache-Control'));
+        $this->assertStringContainsString('no-store', (string) $response->headers->get('Cache-Control'));
         $response->assertJson([
             'id' => $agent->id,
             'name' => 'Искандар',

@@ -15,10 +15,9 @@ final class ExternalRequestMediaController extends Controller
         $actor = $http->user();
         $request = $photo->request;
         abort_unless($request, 404, 'NOT_FOUND');
-        if ($actor->hasRole('external_agent')) {
-            abort_unless((int) $request->external_agent_id === (int) $actor->id, 404, 'NOT_FOUND');
-        } else {
-            abort_unless($requests->scopedInternalQuery($actor)->whereKey($request->id)->exists(), 404, 'NOT_FOUND');
+        abort_if($actor->usesAssignedGroupScope(), 403, 'FORBIDDEN_ACTION');
+        if (! ($actor->hasPermission('external_requests.own.view') && (int) $request->external_agent_id === (int) $actor->id)) {
+            abort_unless($actor->hasPermission('external_requests.view') && $requests->scopedInternalQuery($actor)->whereKey($request->id)->exists(), 404, 'NOT_FOUND');
         }
         $disk = Storage::disk($media->disk($photo));
         abort_unless($disk->exists($photo->file_path), 404, 'NOT_FOUND');

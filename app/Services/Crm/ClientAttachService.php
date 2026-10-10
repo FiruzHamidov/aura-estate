@@ -63,6 +63,7 @@ class ClientAttachService
 
     public function canUseExistingFlow(User $authUser, array $context): bool
     {
+        if (!$authUser->hasPermission('clients.attach')) return false;
         try {
             $this->resolveContext($authUser, $context, false);
 
@@ -78,11 +79,11 @@ class ClientAttachService
 
         if (!empty($resolved['branch_id'])) {
             $query->where('clients.branch_id', $resolved['branch_id']);
-        } elseif ($context['type'] === self::CONTEXT_CLIENT && !$this->clientAccess->isPrivilegedRole($this->clientAccess->roleSlug($authUser))) {
+        } elseif ($context['type'] === self::CONTEXT_CLIENT && !$this->clientAccess->canReadAll($authUser)) {
             $query->where('clients.branch_id', $authUser->branch_id);
         }
 
-        if ($authUser->hasRole('rop')) {
+        if ($authUser->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'clients.branch_group_id', 'clients.branch_id');
         }
 
@@ -91,7 +92,8 @@ class ClientAttachService
 
     public function canAttachClient(User $authUser, Client $client, array $context): bool
     {
-        if ($authUser->hasRole('rop') && ! app(\App\Support\RopGroupAccess::class)->allows($authUser, $client)) {
+        if (!$authUser->hasPermission('clients.attach')) return false;
+        if ($authUser->usesAssignedGroupScope() && ! app(\App\Support\RopGroupAccess::class)->allows($authUser, $client)) {
             return false;
         }
         try {
@@ -106,7 +108,7 @@ class ClientAttachService
 
         if (
             $context['type'] === self::CONTEXT_CLIENT
-            && !$this->clientAccess->isPrivilegedRole($this->clientAccess->roleSlug($authUser))
+            && !$this->clientAccess->canReadAll($authUser)
             && (int) $client->branch_id !== (int) $authUser->branch_id
         ) {
             return false;
@@ -153,6 +155,7 @@ class ClientAttachService
 
     public function attach(User $authUser, Client $client, array $context): array
     {
+        abort_unless($authUser->hasPermission('clients.attach'), 403, 'Нет права использовать существующего клиента.');
         $resolved = $this->resolveContext($authUser, $context, true);
 
         abort_unless(
@@ -324,16 +327,13 @@ class ClientAttachService
 
     private function canAccessProperty(User $authUser, Property $property): bool
     {
-        if ($authUser->hasRole('rop')) {
-            return app(\App\Support\RopGroupAccess::class)->allows($authUser, $property);
-        }
-        $roleSlug = $this->clientAccess->roleSlug($authUser);
+        if ($authUser->usesAssignedGroupScope() && !app(\App\Support\RopGroupAccess::class)->allows($authUser, $property)) return false;
 
-        if ($this->clientAccess->isPrivilegedRole($roleSlug)) {
+        if ($authUser->hasPermission('clients.properties.all')) {
             return true;
         }
 
-        if (!$this->clientAccess->isBranchScopedRole($roleSlug) || empty($authUser->branch_id)) {
+        if (!($authUser->hasPermission('clients.properties.branch') || $authUser->hasPermission('clients.properties.own')) || empty($authUser->branch_id)) {
             return false;
         }
 
@@ -343,7 +343,7 @@ class ClientAttachService
             return false;
         }
 
-        if (in_array($roleSlug, ['branch_director', 'rop', 'manager', 'operator'], true)) {
+        if ($authUser->hasPermission('clients.properties.branch')) {
             return true;
         }
 

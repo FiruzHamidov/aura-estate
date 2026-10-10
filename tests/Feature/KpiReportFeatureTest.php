@@ -28,6 +28,7 @@ class KpiReportFeatureTest extends TestCase
             $table->id();
             $table->string('name');
             $table->string('slug')->unique();
+            $table->json('permissions')->nullable();
             $table->timestamps();
         });
 
@@ -184,6 +185,44 @@ class KpiReportFeatureTest extends TestCase
             ->assertJsonPath('data.ranking.0.branch_group_id', $a->id)->assertJsonMissingPath('data.ranking.0.user.role_slug');
         $rop->supervisedGroups()->detach();
         $this->getJson('/api/kpi-reports?date_from=2026-05-01&date_to=2026-05-31')->assertOk()->assertJsonPath('data', []);
+    }
+
+    public function test_legacy_kpi_report_honors_configured_action_and_scopes(): void
+    {
+        $this->seedContext();
+        $actor = User::where('name', 'Agent A')->firstOrFail();
+        $foreign = User::where('name', 'Agent B')->firstOrFail();
+        $otherGroup = BranchGroup::create(['branch_id' => $actor->branch_id, 'name' => 'A2']);
+        User::where('name', 'Agent A2')->update(['branch_group_id' => $otherGroup->id]);
+        $role = Role::create(['name' => 'Custom KPI', 'slug' => 'custom_kpi']);
+        $actor->forceFill(['role_id' => $role->id])->save();
+        $url = '/api/kpi-reports?period_type=day&date_from=2026-05-01&date_to=2026-05-01';
+        foreach (['own' => 1, 'group' => 1, 'branch' => 2, 'all' => 3, 'none' => 0] as $scope => $count) {
+            $role->forceFill(['permissions' => ['kpi.reports.view', ...($scope === 'none' ? [] : ['kpi.reports.scope.'.$scope])]])->save();
+            Sanctum::actingAs($actor->fresh('role'));
+            $this->getJson($url)->assertOk()->assertJsonCount($count, 'data');
+            if ($scope === 'branch') $this->getJson($url.'&user_id='.$foreign->id)->assertForbidden();
+            if ($scope === 'all') $this->getJson($url.'&user_id='.$foreign->id)->assertOk()->assertJsonCount(1, 'data');
+        }
+        $role->forceFill(['permissions' => ['kpi.reports.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh('role'));
+        $this->getJson($url)->assertForbidden();
+    }
+
+    public function test_legacy_kpi_report_does_not_keep_old_admin_or_director_scope_after_reconfiguration(): void
+    {
+        [$users] = $this->seedContext();
+        $url = '/api/kpi-reports?period_type=day&date_from=2026-05-01&date_to=2026-05-01';
+        $admin = $users['admin'];
+        $admin->role->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.own']])->save();
+        Sanctum::actingAs($admin->fresh('role'));
+        $this->getJson($url)->assertOk()->assertJsonCount(0, 'data');
+        $director = $users['directorA'];
+        $director->role->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.all']])->save();
+        Sanctum::actingAs($director->fresh('role'));
+        $foreign = User::where('name', 'Agent B')->firstOrFail();
+        $this->getJson($url)->assertOk()->assertJsonCount(3, 'data');
+        $this->getJson($url.'&branch_id='.$foreign->branch_id)->assertOk()->assertJsonCount(1, 'data');
     }
 
     private function seedContext(): array

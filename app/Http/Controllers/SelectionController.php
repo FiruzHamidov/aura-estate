@@ -22,6 +22,7 @@ class SelectionController extends Controller
     // Список моих подборок (для личного кабинета агента)
     public function index(Request $request)
     {
+        abort_unless($request->user()?->hasPermission('selections.view'), 403, 'FORBIDDEN_ACTION');
         $validated = $request->validate([
             'per_page' => 'nullable|integer|min:1|max:100',
             'page' => 'nullable|integer|min:1',
@@ -29,21 +30,21 @@ class SelectionController extends Controller
             'deal_id' => 'nullable|integer|min:1',
             'branch_group_id' => 'nullable|integer|min:1',
         ]);
-        abort_if(Auth::user()?->hasRole('rop') && ! empty($validated['deal_id']), 422, 'LEGACY_SELECTION_LINK_NOT_SUPPORTED');
+        abort_if(Auth::user()?->usesAssignedGroupScope() && ! empty($validated['deal_id']), 422, 'LEGACY_SELECTION_LINK_NOT_SUPPORTED');
         $q = Selection::query()
             ->when(! empty($validated['branch_group_id']), fn ($query) => $query->where('branch_group_id', $validated['branch_group_id']))
             ->when($request->filled('deal_id'), fn ($qq) => $qq->where('deal_id', $request->integer('deal_id')))
             ->when($request->filled('status'), fn ($qq) => $qq->where('status', $request->string('status')));
 
         // Если используете Sanctum и роли — можно ограничить по created_by
-        if (Auth::user()?->hasRole('rop')) {
+        if (Auth::user()?->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($q, Auth::user(), 'selections.branch_group_id');
-        } elseif (Auth::check()) {
+        } elseif (! $request->user()->hasPermission('selections.scope.all')) {
             $q->where('created_by', Auth::id());
         }
 
         $page = $q->orderByDesc('id')->paginate((int) ($validated['per_page'] ?? 20))->withQueryString();
-        if (Auth::user()?->hasRole('rop')) {
+        if (Auth::user()?->usesAssignedGroupScope()) {
             app(\App\Services\GroupAccess\GroupDataProjection::class)->prepareSelections($page->getCollection(), Auth::user());
         }
 
@@ -53,6 +54,7 @@ class SelectionController extends Controller
     // Создание подборки во внутренней CRM Aura
     public function store(Request $request)
     {
+        abort_unless($request->user()?->hasPermission('selections.create'), 403, 'FORBIDDEN_ACTION');
         $validated = $request->validate([
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'title' => 'nullable|string|max:255',
@@ -70,6 +72,7 @@ class SelectionController extends Controller
             [$actor, $properties] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquireMany(
                 Auth::user(), $properties->all(), [], [$validated['branch_group_id'] ?? null]
             );
+            abort_unless($actor->hasPermission('selections.create'), 403, 'FORBIDDEN_ACTION');
             $access = app(\App\Support\RopGroupAccess::class);
             if ($access->applies($actor)) {
                 abort_if(! empty($validated['deal_id']) || ! empty($validated['contact_id']), 422, 'LEGACY_SELECTION_LINK_NOT_SUPPORTED');
@@ -106,10 +109,11 @@ class SelectionController extends Controller
     // Детали (для агента в кабинете)
     public function show($id)
     {
+        abort_unless(Auth::user()?->hasPermission('selections.view'), 403, 'FORBIDDEN_ACTION');
         $sel = Selection::findOrFail($id);
-        if (Auth::user()?->hasRole('rop')) {
+        if (Auth::user()?->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->ensureVisible(Auth::user(), $sel);
-        } elseif (Auth::check() && $sel->created_by && $sel->created_by !== Auth::id()) {
+        } elseif (! Auth::user()->hasPermission('selections.scope.all') && $sel->created_by && $sel->created_by !== Auth::id()) {
             abort(403);
         }
 

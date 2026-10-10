@@ -322,6 +322,52 @@ class MotivationModuleFeatureTest extends TestCase
             ->assertJsonPath('code', 'KPI_FORBIDDEN_ROLE_ACTION');
     }
 
+    public function test_configurable_achievement_scope_and_company_visibility(): void
+    {
+        $this->seed(MotivationRulesSeeder::class);
+        $actor = $this->makeUser('custom_motivation', '919950001');
+        $sameGroup = $this->makeUser('agent', '919950002');
+        $sameBranch = $this->makeUser('agent', '919950003');
+        $foreign = $this->makeUser('agent', '919950004');
+        foreach ([[$actor, 1, 10], [$sameGroup, 1, 10], [$sameBranch, 1, 11], [$foreign, 2, 20]] as [$user, $branch, $group]) {
+            $user->forceFill(['branch_id' => $branch, 'branch_group_id' => $group])->save();
+            \App\Models\MotivationAchievement::create(['rule_id' => 1, 'user_id' => $user->id, 'company_scope' => null, 'won_at' => now(), 'period_type' => 'month', 'date_from' => '2026-05-01', 'date_to' => '2026-05-31', 'snapshot_value' => 5]);
+        }
+        \App\Models\MotivationAchievement::create(['rule_id' => 1, 'user_id' => null, 'company_scope' => true, 'won_at' => now(), 'period_type' => 'month', 'date_from' => '2026-05-01', 'date_to' => '2026-05-31', 'snapshot_value' => 100]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role = $actor->role;
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/motivation/rules')->assertOk();
+        $this->getJson('/api/motivation/achievements')->assertOk()->assertJsonCount(2, 'data');
+        foreach (['own' => 1, 'group' => 2, 'branch' => 3, 'all' => 4] as $scope => $count) {
+            foreach ([false, true] as $company) {
+                $rights = ['motivation.achievements.view', 'motivation.achievements.scope.'.$scope];
+                if ($company) $rights[] = 'motivation.achievements.company';
+                $role->forceFill(['permissions' => $rights])->save();
+                Sanctum::actingAs($actor->fresh());
+                $this->getJson('/api/motivation/achievements')->assertOk()->assertJsonCount($count + (int) $company, 'data');
+                $this->getJson('/api/motivation/achievements?company_scope=1')->assertOk()->assertJsonCount((int) $company, 'data');
+                $this->getJson('/api/motivation/rules')->assertForbidden();
+            }
+        }
+        foreach (['branch', 'group'] as $scope) {
+            $role->forceFill(['permissions' => ['motivation.achievements.view', 'motivation.achievements.scope.'.$scope]])->save();
+            Sanctum::actingAs($actor->fresh());
+            $actor->forceFill(['branch_id' => null, 'branch_group_id' => null])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->getJson('/api/motivation/achievements')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.user_id', $actor->id);
+            $this->getJson('/api/motivation/achievements?user_id='.$foreign->id)->assertOk()->assertJsonCount(0, 'data');
+        }
+        $role->forceFill(['permissions' => ['motivation.achievements.view', 'motivation.achievements.company']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/motivation/achievements')->assertOk()->assertJsonCount(1, 'data');
+        $role->forceFill(['permissions' => ['motivation.achievements.scope.all', 'motivation.rules.view']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/motivation/achievements')->assertForbidden();
+        $this->getJson('/api/motivation/rules')->assertOk();
+        $this->postJson('/api/motivation/recalculate')->assertForbidden();
+    }
+
     private function makeUser(string $roleSlug, string $phone): User
     {
         $role = Role::firstOrCreate(['slug' => $roleSlug], ['name' => ucfirst($roleSlug)]);

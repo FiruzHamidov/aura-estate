@@ -13,7 +13,7 @@ final class RopGroupAccess
 {
     public function applies(?User $actor): bool
     {
-        return $actor?->hasRole('rop') ?? false;
+        return $actor?->usesAssignedGroupScope() ?? false;
     }
 
     public function groupsQuery(User $actor): QueryBuilder
@@ -21,10 +21,9 @@ final class RopGroupAccess
         return DB::table('rop_branch_groups as rbg')
             ->join('branch_groups as rg', 'rg.id', '=', 'rbg.branch_group_id')
             ->join('users as ru', 'ru.id', '=', 'rbg.rop_id')
-            ->join('roles as rr', 'rr.id', '=', 'ru.role_id')
             ->where('ru.id', $actor->id)
             ->where('ru.status', User::STATUS_ACTIVE)
-            ->where('rr.slug', 'rop')
+            ->whereIn('ru.role_id', \App\Models\Role::query()->usingAssignedGroups()->select('id'))
             ->whereColumn('rg.branch_id', 'ru.branch_id')
             ->select('rg.id');
     }
@@ -60,10 +59,10 @@ final class RopGroupAccess
         return $query;
     }
 
-    public function employees(User $actor): Builder
+    public function employees(User $actor, string $permission = 'users.subject.record_recipient'): Builder
     {
         return $this->scope(User::query(), $actor, 'users.branch_group_id', 'users.branch_id')
-            ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop']));
+            ->whereHas('role', fn (Builder $roles) => $roles->withPermission($permission));
     }
 
     public function allowsGroup(User $actor, ?int $groupId): bool
@@ -105,9 +104,9 @@ final class RopGroupAccess
             ->where('user_id', $employeeId)->exists();
     }
 
-    public function ensureEmployee(User $actor, int $id, ?int $groupId = null, bool $assignable = false): void
+    public function ensureEmployee(User $actor, int $id, ?int $groupId = null, bool $assignable = false, string $permission = 'users.subject.record_recipient'): void
     {
-        $query = $this->employees($actor)->whereKey($id);
+        $query = $this->employees($actor, $permission)->whereKey($id);
         if ($groupId !== null) {
             $query->where('branch_group_id', $groupId);
         }

@@ -19,29 +19,15 @@ class DealPipelineAccess
         return $user?->role?->slug;
     }
 
-    public function isPrivilegedRole(?string $roleSlug): bool
+    public function scopeType(?User $user): string
     {
-        return in_array($roleSlug, ['superadmin', 'admin', 'marketing'], true);
-    }
+        foreach (['all', 'hr', 'control', 'branch'] as $scope) {
+            if ($user?->hasPermission('pipelines.scope.'.$scope)) {
+                return $scope;
+            }
+        }
 
-    public function isHrRole(?string $roleSlug): bool
-    {
-        return $roleSlug === 'hr';
-    }
-
-    public function isSecurityRole(?string $roleSlug): bool
-    {
-        return $roleSlug === 'security';
-    }
-
-    public function isBranchManager(?string $roleSlug): bool
-    {
-        return $roleSlug === 'branch_director';
-    }
-
-    public function isBranchScopedRole(?string $roleSlug): bool
-    {
-        return in_array($roleSlug, ['branch_director', 'rop', 'agent', 'manager', 'operator'], true);
+        return 'none';
     }
 
     public function isHrPipeline(?DealPipeline $pipeline): bool
@@ -51,17 +37,20 @@ class DealPipelineAccess
 
     public function canManage(?User $user, ?DealPipeline $pipeline = null): bool
     {
-        $roleSlug = $this->roleSlug($user);
+        $scope = $this->scopeType($user);
+        if (! $user?->hasPermission('pipelines.manage')) {
+            return false;
+        }
 
-        if ($this->isPrivilegedRole($roleSlug)) {
+        if ($scope === 'all') {
             return true;
         }
 
-        if ($this->isHrRole($roleSlug)) {
+        if ($scope === 'hr') {
             return $pipeline ? $this->isHrPipeline($pipeline) : false;
         }
 
-        if (! $this->isBranchManager($roleSlug) || empty($user?->branch_id)) {
+        if ($scope !== 'branch' || empty($user?->branch_id)) {
             return false;
         }
 
@@ -74,25 +63,25 @@ class DealPipelineAccess
 
     public function visibleQuery(User $authUser): Builder
     {
-        $roleSlug = $this->roleSlug($authUser);
+        $scope = $this->scopeType($authUser);
 
         $query = DealPipeline::query()->with(['branch', 'stages']);
 
-        if ($this->isPrivilegedRole($roleSlug)) {
+        if ($scope === 'all') {
             return $query;
         }
 
-        if ($this->isHrRole($roleSlug)) {
+        if ($scope === 'hr') {
             return $query->where('code', DealPipeline::CODE_HR_RECRUITMENT);
         }
 
-        if ($this->isSecurityRole($roleSlug)) {
+        if ($scope === 'control') {
             return $query
                 ->where('code', DealPipeline::CODE_PROPERTY_CONTROL)
                 ->where('is_active', true);
         }
 
-        if (! $this->isBranchScopedRole($roleSlug) || empty($authUser->branch_id)) {
+        if ($scope !== 'branch' || empty($authUser->branch_id)) {
             return $query->whereRaw('1 = 0');
         }
 
@@ -129,14 +118,14 @@ class DealPipelineAccess
 
     public function normalizeMutationData(array $data, User $authUser): array
     {
-        $roleSlug = $this->roleSlug($authUser);
+        $scope = $this->scopeType($authUser);
 
-        if ($this->isBranchManager($roleSlug)) {
+        if ($scope === 'branch') {
             abort_if(empty($authUser->branch_id), 422, 'branch_id is required for this user.');
             $data['branch_id'] = $authUser->branch_id;
         }
 
-        if ($this->isHrRole($roleSlug)) {
+        if ($scope === 'hr') {
             $data['branch_id'] = null;
             $data['code'] = DealPipeline::CODE_HR_RECRUITMENT;
         }
@@ -146,13 +135,13 @@ class DealPipelineAccess
 
     public function validateMutationData(User $authUser, array $data): void
     {
-        $roleSlug = $this->roleSlug($authUser);
+        $scope = $this->scopeType($authUser);
 
-        if ($this->isPrivilegedRole($roleSlug)) {
+        if ($scope === 'all') {
             return;
         }
 
-        if ($this->isHrRole($roleSlug)) {
+        if ($scope === 'hr') {
             if (($data['code'] ?? null) !== DealPipeline::CODE_HR_RECRUITMENT) {
                 abort(422, 'HR can manage only the HR recruitment pipeline.');
             }
@@ -164,7 +153,7 @@ class DealPipelineAccess
             return;
         }
 
-        abort_unless($this->isBranchManager($roleSlug), 403, 'Forbidden');
+        abort_unless($scope === 'branch', 403, 'Forbidden');
 
         $branchId = $data['branch_id'] ?? null;
 

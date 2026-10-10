@@ -20,6 +20,7 @@ class MotivationController extends Controller
 
     public function rules(Request $request)
     {
+        abort_unless($this->authUser()->hasPermission('motivation.rules.view'), 403, 'Forbidden');
         $validated = $request->validate([
             'scope' => ['nullable', Rule::in(['agent', 'company'])],
             'period_type' => ['nullable', Rule::in(['week', 'month', 'year'])],
@@ -133,25 +134,25 @@ class MotivationController extends Controller
 
         $query = MotivationAchievement::query()->with(['rule', 'rewardIssue', 'user']);
 
-        $role = (string) ($actor->role?->slug ?? '');
-        if (in_array($role, ['admin', 'superadmin', 'owner'], true)) {
-            // Global access.
-        } elseif (in_array($role, ['rop', 'branch_director'], true) && $actor->branch_id !== null) {
-            $query->where(function ($builder) use ($actor) {
-                $builder->where('company_scope', true)
-                    ->orWhereHas('user', fn ($q) => $q->where('branch_id', (int) $actor->branch_id));
+        abort_unless($actor->hasPermission('motivation.achievements.view'), 403, 'Forbidden');
+        $query->where(function ($visible) use ($actor) {
+            $visible->where(function ($personal) use ($actor) {
+                $personal->where(fn ($q) => $q->whereNull('company_scope')->orWhere('company_scope', false));
+                if ($actor->hasPermission('motivation.achievements.scope.all')) return;
+                if ($actor->hasPermission('motivation.achievements.scope.branch') && $actor->branch_id !== null) {
+                    $personal->whereHas('user', fn ($q) => $q->where('branch_id', (int) $actor->branch_id));
+                } elseif ($actor->hasPermission('motivation.achievements.scope.group') && $actor->branch_group_id !== null) {
+                    $personal->whereHas('user', fn ($q) => $q->where('branch_group_id', (int) $actor->branch_group_id));
+                } elseif ($actor->hasPermission('motivation.achievements.scope.own')
+                    || $actor->hasPermission('motivation.achievements.scope.branch')
+                    || $actor->hasPermission('motivation.achievements.scope.group')) {
+                    $personal->where('user_id', $actor->id);
+                } else {
+                    $personal->whereRaw('1 = 0');
+                }
             });
-        } elseif ($role === 'mop' && $actor->branch_group_id !== null) {
-            $query->where(function ($builder) use ($actor) {
-                $builder->where('company_scope', true)
-                    ->orWhereHas('user', fn ($q) => $q->where('branch_group_id', (int) $actor->branch_group_id));
-            });
-        } else {
-            $query->where(function ($builder) use ($actor) {
-                $builder->where('company_scope', true)
-                    ->orWhere('user_id', $actor->id);
-            });
-        }
+            if ($actor->hasPermission('motivation.achievements.company')) $visible->orWhere('company_scope', true);
+        });
 
         foreach (['user_id', 'status', 'rule_id'] as $key) {
             if (isset($validated[$key])) {
@@ -250,7 +251,7 @@ class MotivationController extends Controller
 
     private function ensureManageAccess(User $user): void
     {
-        if (! in_array($user->role?->slug, ['rop', 'branch_director', 'admin', 'superadmin', 'owner'], true)) {
+        if (! $user->hasPermission('motivation.manage')) {
             abort(response()->json([
                 'code' => 'KPI_FORBIDDEN_ROLE_ACTION',
                 'message' => 'Role is not allowed to perform this action.',
@@ -272,7 +273,7 @@ class MotivationController extends Controller
 
     private function ensureOverviewAccess(User $user): void
     {
-        if (! in_array($user->role?->slug, ['agent', 'mop'], true)) {
+        if (! $user->hasPermission('motivation.own.view')) {
             abort(response()->json([
                 'code' => 'KPI_FORBIDDEN_ROLE_ACTION',
                 'message' => 'Role is not allowed to perform this action.',

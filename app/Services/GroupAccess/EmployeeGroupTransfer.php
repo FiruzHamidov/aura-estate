@@ -16,24 +16,24 @@ final class EmployeeGroupTransfer
 
     private function authorize(User $actor, User $employee): void
     {
-        abort_unless(in_array($actor->role?->slug, ['admin', 'superadmin', 'branch_director', 'rop'], true), 403, 'FORBIDDEN_ACTION');
-        abort_unless(in_array($employee->role?->slug, ['agent', 'mop', 'intern'], true), 422, 'EMPLOYEE_ROLE_REQUIRED');
-        if ($actor->hasRole('rop')) {
+        abort_unless($actor->hasPermission('users.group_transfer'), 403, 'FORBIDDEN_ACTION');
+        abort_unless($employee->hasPermission('users.subject.group_transfer'), 422, 'EMPLOYEE_ROLE_REQUIRED');
+        if ($actor->usesAssignedGroupScope()) {
             abort_unless($actor->id !== $employee->id && $employee->status === User::STATUS_ACTIVE && ! $employee->isDeletedAccount(), 403, 'FORBIDDEN_ACTION');
             app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $employee);
         }
-        if ($actor->hasRole('branch_director')) {
+        if (!$actor->hasPermission('users.group_transfer.all_branches')) {
             abort_unless($actor->branch_id && (int) $employee->branch_id === (int) $actor->branch_id, 404, 'NOT_FOUND');
         }
     }
 
     public function destinationQuery(User $actor): \Illuminate\Database\Eloquent\Builder
     {
-        abort_unless($actor->hasRole('rop'), 403, 'FORBIDDEN_ACTION');
+        abort_unless($actor->usesAssignedGroupScope() && $actor->hasPermission('users.group_transfer'), 403, 'FORBIDDEN_ACTION');
         return BranchGroup::query()->where('branch_id', $actor->branch_id ?? 0)
             ->whereHas('rops', fn ($rops) => $rops->where('users.status', User::STATUS_ACTIVE)
                 ->whereNull('users.deleted_at')->whereColumn('users.branch_id', 'branch_groups.branch_id')
-                ->whereHas('role', fn ($roles) => $roles->where('slug', 'rop')));
+                ->whereHas('role', fn ($roles) => $roles->usingAssignedGroups()));
     }
 
     private function inventory(User $employee, bool $lock = false): array
@@ -84,12 +84,12 @@ final class EmployeeGroupTransfer
             $groups = BranchGroup::query()->whereIn('id', array_filter($groupIds))->orderBy('id')->lockForUpdate()->get()->keyBy('id');
             $destination = $groups->get((int) $data['branch_group_id']);
             abort_unless($destination, 404, 'NOT_FOUND');
-            if ($actor->hasRole('branch_director')) {
+            if (!$actor->hasPermission('users.group_transfer.all_branches')) {
                 abort_unless((int) $destination->branch_id === (int) $actor->branch_id, 403, 'RBAC_GROUP_SCOPE_VIOLATION');
             }
-            if ($actor->hasRole('rop')) {
+            if ($actor->usesAssignedGroupScope()) {
                 abort_unless($this->destinationQuery($actor)->whereKey($destination->id)->exists(), 403, 'RBAC_GROUP_SCOPE_VIOLATION');
-                abort_if($employee->hasRole('mop') && (int) $destination->id !== (int) $employee->branch_group_id, 403, 'Передавать в другую группу можно только агента или стажёра.');
+                abort_if(! $employee->hasPermission('users.subject.group_transfer_across') && (int) $destination->id !== (int) $employee->branch_group_id, 403, 'Роль сотрудника не допускает перевод в другую группу этим руководителем.');
             }
             $sameGroup = (int) $destination->id === (int) $employee->branch_group_id;
             $inventory = $this->inventory($employee, true);

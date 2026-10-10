@@ -5,18 +5,25 @@ namespace App\Services\Crm;
 use App\Models\Deal;
 use App\Models\DealStage;
 use App\Models\User;
-use Illuminate\Validation\ValidationException;
 use Illuminate\Http\Exceptions\HttpResponseException;
+use Illuminate\Validation\ValidationException;
 
 class PropertyControlWorkflow
 {
     public const STAGE_NEW = 'new';
+
     public const STAGE_SECURITY_REVIEW = 'security_review';
+
     public const STAGE_BRANCH_CLARIFICATION = 'branch_clarification';
+
     public const STAGE_BRANCH_CORRECTION = 'branch_correction';
+
     public const STAGE_SECURITY_RECHECK = 'security_recheck';
+
     public const STAGE_SECURITY_VERIFIED = 'security_verified';
+
     public const STAGE_SECURITY_FLAGGED = 'security_flagged';
+
     public const STAGE_CANCELLED = 'cancelled';
 
     private const SECURITY_TRANSITIONS = [
@@ -61,29 +68,26 @@ class PropertyControlWorkflow
             return [];
         }
 
-        $role = $actor->role?->slug;
+        if (! $actor->hasPermission('deals.move')) {
+            return [];
+        }
         $current = $deal->stage->slug;
 
-        if (in_array($role, ['admin', 'superadmin'], true)) {
+        if ($actor->hasPermission('deals.control.manage_all')) {
             return array_values(array_unique(array_merge(
                 self::SECURITY_TRANSITIONS[$current] ?? [],
                 self::BRANCH_TRANSITIONS[$current] ?? []
             )));
         }
 
-        if ($role === 'security') {
-            return self::SECURITY_TRANSITIONS[$current] ?? [];
-        }
-
-        if (
-            in_array($role, ['branch_director', 'rop', 'manager', 'operator', 'agent'], true)
+        $targets = $actor->hasPermission('deals.control.review') ? (self::SECURITY_TRANSITIONS[$current] ?? []) : [];
+        if ($actor->hasPermission('deals.control.correct')
             && ! empty($actor->branch_id)
-            && (int) $actor->branch_id === (int) $deal->branch_id
-        ) {
-            return self::BRANCH_TRANSITIONS[$current] ?? [];
+            && (int) $actor->branch_id === (int) $deal->branch_id) {
+            $targets = array_merge($targets, self::BRANCH_TRANSITIONS[$current] ?? []);
         }
 
-        return [];
+        return array_values(array_unique($targets));
     }
 
     public function ensureCanMove(User $actor, Deal $deal, DealStage $target, ?string $comment): void
@@ -131,9 +135,9 @@ class PropertyControlWorkflow
 
         return [
             'can_view' => true,
-            'can_comment' => true,
-            'can_set_deadline' => in_array($actor->role?->slug, ['security', 'admin', 'superadmin'], true),
-            'can_claim' => $actor->role?->slug === 'security'
+            'can_comment' => $actor->hasPermission('deals.activities.create'),
+            'can_set_deadline' => $actor->hasPermission('deals.control.deadline'),
+            'can_claim' => $actor->hasPermission('deals.control.claim')
                 && $deal->stage?->slug === self::STAGE_NEW
                 && empty($deal->responsible_agent_id),
             'can_edit_business_data' => false,

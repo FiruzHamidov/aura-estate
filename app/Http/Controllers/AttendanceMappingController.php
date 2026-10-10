@@ -22,6 +22,24 @@ final class AttendanceMappingController extends Controller
         private readonly AttendanceParticipantService $participants,
     ) {}
 
+    public function users(Request $request)
+    {
+        $this->access->assertCanManageMappings($request->user());
+        $data = $request->validate(['search' => ['nullable', 'string', 'max:150'],
+            'per_page' => ['nullable', 'integer', 'between:1,100']]);
+        $query = $this->access->mappingUsersQuery($request->user())
+            ->where('status', User::STATUS_ACTIVE)
+            ->whereHas('role', fn ($role) => $role->withPermission('attendance.subject.exclude_mapping_picker', false));
+        if (($search = trim($data['search'] ?? '')) !== '') {
+            $query->where(function ($users) use ($search) {
+                $users->where('name', 'like', '%'.$search.'%')->orWhere('phone', 'like', '%'.$search.'%');
+                if (ctype_digit($search)) $users->orWhere('id', (int) $search);
+            });
+        }
+        return response()->json($query->select(['id', 'name', 'phone'])->orderBy('name')->orderBy('id')
+            ->paginate($data['per_page'] ?? 20));
+    }
+
     public function index(Request $request)
     {
         $this->access->assertCanManageMappings($request->user());
@@ -34,7 +52,7 @@ final class AttendanceMappingController extends Controller
             ->addSelect(['processed_events_count' => AttendanceEvent::query()->selectRaw('COUNT(*)')
                 ->whereColumn('attendance_events.device_id', 'attendance_device_users.device_id')
                 ->whereColumn('attendance_events.device_user_id', 'attendance_device_users.device_user_id')]);
-        if ($request->user()->hasRole('rop')) {
+        if ($request->user()->usesAssignedGroupScope()) {
             $query->whereIn('user_id', $this->access->mappingUsersQuery($request->user())->select('users.id'))
                 ->whereIn('device_id', $this->access->mappingDevicesQuery($request->user())->select('id'));
         }
@@ -60,7 +78,7 @@ final class AttendanceMappingController extends Controller
         return \Illuminate\Support\Facades\DB::transaction(function () use ($request, $data) {
             $actor = User::query()->lockForUpdate()->findOrFail($request->user()->id);
             $this->access->assertCanManageMappings($actor);
-            $target = ($actor->hasRole('rop') ? $this->access->mappingUsersQuery($actor) : User::query())->lockForUpdate()->findOrFail($data['user_id']);
+            $target = ($actor->usesAssignedGroupScope() ? $this->access->mappingUsersQuery($actor) : User::query())->lockForUpdate()->findOrFail($data['user_id']);
             $this->access->mappingDevicesQuery($actor)->lockForUpdate()->findOrFail($data['device_id']);
             $this->participants->assertEligible($target);
 
@@ -68,7 +86,7 @@ final class AttendanceMappingController extends Controller
                 ->where('device_id', $data['device_id'])
                 ->where('device_user_id', $data['device_user_id'])
                 ->lockForUpdate()->first();
-            if ($actor->hasRole('rop')) {
+            if ($actor->usesAssignedGroupScope()) {
                 abort_if($mapping && (int) $mapping->user_id !== (int) $target->id, 403, 'Этот ZKTeco ID уже связан с другим сотрудником. Обратитесь к HR.');
                 abort_if(AttendanceEvent::query()->where('device_id', $data['device_id'])
                     ->where('device_user_id', $data['device_user_id'])->where('user_id', '!=', $target->id)->exists(),
@@ -122,7 +140,7 @@ final class AttendanceMappingController extends Controller
     public function destroy(Request $request, AttendanceDeviceUser $mapping)
     {
         $this->access->assertCanManageMappings($request->user());
-        abort_if($request->user()->hasRole('rop'), 403, 'Удалить связь может HR или администратор.');
+        abort_if($request->user()->usesAssignedGroupScope(), 403, 'Удалить связь может HR или администратор.');
         $old = $mapping->only([
             'device_id',
             'device_user_id',

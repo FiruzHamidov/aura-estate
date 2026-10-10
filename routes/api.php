@@ -148,6 +148,9 @@ Route::get('/agents/{agent}/reviews', [ReviewController::class, 'index'])->where
 Route::post('/agents/{agent}/reviews', [ReviewController::class, 'store'])->middleware('throttle:10,1')->whereNumber('agent');
 
 Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
+    Route::get('/rbac', [\App\Http\Controllers\RolePermissionController::class, 'index']);
+    Route::put('/rbac/roles/{role}', [\App\Http\Controllers\RolePermissionController::class, 'update']);
+    Route::get('/rbac/roles/{role}/history', [\App\Http\Controllers\RolePermissionController::class, 'history']);
     Route::get('/client-catalog/counts', [\App\Http\Controllers\ClientCatalogController::class, 'counts']);
     Route::get('/client-catalog', [\App\Http\Controllers\ClientCatalogController::class, 'index']);
     Route::get('/client-catalog/claim-status', [\App\Http\Controllers\ClientCatalogController::class, 'claimStatus']);
@@ -202,6 +205,7 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         Route::get('/devices', [AttendanceDeviceController::class, 'index']);
         Route::post('/devices', [AttendanceDeviceController::class, 'store']);
         Route::patch('/devices/{device}', [AttendanceDeviceController::class, 'update']);
+        Route::get('/mapping-users', [AttendanceMappingController::class, 'users']);
         Route::get('/device-users', [AttendanceMappingController::class, 'index']);
         Route::put('/device-users', [AttendanceMappingController::class, 'upsert']);
         Route::delete('/device-users/{mapping}', [AttendanceMappingController::class, 'destroy'])->whereNumber('mapping');
@@ -366,6 +370,10 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::patch('/kpi/plans/common', [KpiModuleController::class, 'upsertCommonPlans'])->middleware('rop.branch.scope');
     Route::post('/kpi/plans/common/apply-to-users', [KpiModuleController::class, 'applyCommonPlansToUsers'])->middleware('rop.branch.scope');
     Route::get('/kpi/plans/list', [KpiModuleController::class, 'listPlans'])->middleware('rop.branch.scope');
+    Route::get('/kpi/reports/presentation', [KpiModuleController::class, 'reportPresentation']);
+    Route::get('/kpi/reports/users', [KpiModuleController::class, 'reportUsers']);
+    Route::get('/kpi/plans/users', [KpiModuleController::class, 'planUsers']);
+    Route::get('/kpi/plans/roles', [KpiModuleController::class, 'planRoles']);
     Route::get('/kpi/plans/eligible-users', [KpiModuleController::class, 'eligibleUsers'])->middleware('rop.branch.scope');
     Route::post('/kpi/plans/bulk-upsert', [KpiModuleController::class, 'bulkUpsertUserPlans'])->middleware('rop.branch.scope');
     Route::get('/kpi/rop-plans', [KpiRopPlanController::class, 'index'])->middleware('rop.branch.scope');
@@ -395,6 +403,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::get('/kpi/adjustments', [KpiModuleController::class, 'adjustments'])->middleware('rop.branch.scope');
     Route::post('/kpi/adjustments', [KpiModuleController::class, 'createAdjustment'])->middleware('rop.branch.scope');
     Route::get('/kpi/adjustments/meta', [KpiModuleController::class, 'adjustmentMeta'])->middleware('rop.branch.scope');
+    Route::get('/kpi/adjustments/users', [KpiModuleController::class, 'adjustmentUsers']);
     Route::get('/kpi/adjustments/entities', [KpiModuleController::class, 'adjustmentEntities'])->middleware('rop.branch.scope');
     Route::get('/kpi/integrations/status', [KpiModuleController::class, 'integrationsStatus'])->middleware('rop.branch.scope');
     Route::get('/kpi/ops/integrations/status', [KpiModuleController::class, 'integrationsStatus'])->middleware('rop.branch.scope');

@@ -16,7 +16,7 @@ final class NotificationGroupAccess
 
     public function subjectAllowed(User $recipient, ?Model $subject): bool
     {
-        if (! $recipient->hasRole('rop')) return true;
+        if (! $recipient->usesAssignedGroupScope()) return true;
         if ($subject instanceof Conversation) {
             return $subject->participants()->where('user_id', $recipient->id)->exists();
         }
@@ -26,7 +26,7 @@ final class NotificationGroupAccess
 
     public function selectionEventAllowed(User $recipient, Selection $selection, ?array $payload): bool
     {
-        if (! $recipient->hasRole('rop')) return true;
+        if (! $recipient->usesAssignedGroupScope()) return true;
         if (! $this->subjectAllowed($recipient, $selection)) return false;
         if (! isset($payload['property_id'])) return true;
         $propertyId = (int) $payload['property_id'];
@@ -44,7 +44,7 @@ final class NotificationGroupAccess
     {
         $query->whereIn('notifications.user_id', User::query()->whereKey($recipient->id)
             ->where('status', User::STATUS_ACTIVE)->select('users.id'));
-        if (! $recipient->hasRole('rop')) return $query;
+        if (! $recipient->usesAssignedGroupScope()) return $query;
 
         return $query->where(function (Builder $allowed) use ($recipient) {
             $allowed->whereRaw('1 = 0');

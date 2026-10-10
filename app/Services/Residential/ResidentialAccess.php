@@ -8,26 +8,16 @@ use Illuminate\Database\Eloquent\Builder;
 
 final class ResidentialAccess
 {
-    public const GLOBAL_ROLES = ['superadmin', 'admin', 'owner'];
-
-    public const BRANCH_ROLES = ['branch_director'];
-
-    public const AUTHOR_ROLES = ['agent', 'mop'];
-
-    public function role(?User $user): ?string
-    {
-        return $user?->role?->slug;
-    }
-
     public function global(?User $user): bool
     {
-        return in_array($this->role($user), self::GLOBAL_ROLES, true);
+        return ($user?->hasPermission('new_buildings.manage_all') ?? false);
     }
 
     public function canCreate(?User $user): bool
     {
         return $user && $user->status === User::STATUS_ACTIVE && ! $user->isDeletedAccount()
-            && in_array($this->role($user), [...self::GLOBAL_ROLES, ...self::BRANCH_ROLES, ...self::AUTHOR_ROLES], true);
+            && $user->hasPermission('new_buildings.manage')
+            && ($this->global($user) || $user->hasPermission('new_buildings.scope.branch') || $user->hasPermission('new_buildings.scope.own'));
     }
 
     public function visible(User $user): Builder
@@ -39,7 +29,7 @@ final class ResidentialAccess
         if ($this->global($user)) {
             return $query;
         }
-        if (in_array($this->role($user), self::BRANCH_ROLES, true)) {
+        if ($user->hasPermission('new_buildings.scope.branch')) {
             return $user->branch_id ? $query->where('branch_id', $user->branch_id) : $query->whereRaw('1 = 0');
         }
 
@@ -53,7 +43,7 @@ final class ResidentialAccess
 
     public function canPublish(User $user, NewBuilding $building): bool
     {
-        return $this->canManage($user, $building) && ($this->global($user) || in_array($this->role($user), self::BRANCH_ROLES, true));
+        return $this->canManage($user, $building) && $user->hasPermission('new_buildings.publish');
     }
 
     public function ensureManage(?User $user, NewBuilding $building): void
@@ -71,6 +61,6 @@ final class ResidentialAccess
         $manage = $this->canManage($user, $building);
         $publish = $this->canPublish($user, $building);
 
-        return ['edit' => $manage, 'submit' => $manage, 'publish' => $publish, 'archive' => $publish, 'import' => $publish, 'change_availability' => $manage];
+        return ['edit' => $manage, 'submit' => $manage, 'publish' => $publish, 'archive' => $publish, 'import' => $publish, 'assign_responsible' => $manage && $user->hasPermission('new_buildings.assign'), 'change_availability' => $manage];
     }
 }

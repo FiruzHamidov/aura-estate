@@ -337,7 +337,8 @@ class DailyReportFrontendScenariosTest extends TestCase
         \DB::disableQueryLog();
         $this->assertCount(1, $queries->filter(fn ($entry) => str_contains($entry['query'], 'from "kpi_plans"')));
         $this->assertLessThanOrEqual(2, $queries->filter(fn ($entry) => str_contains($entry['query'], 'from "branch_groups"'))->count());
-        $this->assertLessThanOrEqual(3, $queries->filter(fn ($entry) => str_contains($entry['query'], 'from "roles"'))->count());
+        // Embedded role-policy subqueries are part of the data query, not extra role loads.
+        $this->assertLessThanOrEqual(3, $queries->filter(fn ($entry) => preg_match('/^select\s+[^()]*\s+from\s+"roles"/i', $entry['query']))->count());
 
         $rows = collect($response->json('data'))->keyBy('id');
         foreach ([$reports['agentA'] => 5, $reports['agentA2'] => 9, $reports['mopA1'] => 13, $nextDay->id => 7] as $id => $expected) {
@@ -387,6 +388,123 @@ class DailyReportFrontendScenariosTest extends TestCase
         $this->getJson('/api/daily-reports/status?report_date=2026-05-01')->assertNotFound();
         $this->postJson('/api/daily-reports', ['report_date' => '2026-05-01', 'calls_count' => 99])->assertNotFound();
 
+    }
+
+    public function test_period_and_finalization_exceptions_can_be_granted_and_revoked_independently(): void
+    {
+        [$users, $reports] = $this->seedContext();
+        Schema::table('daily_reports', fn (Blueprint $t) => $t->boolean('is_finalized')->default(false));
+        Schema::create('kpi_period_locks', function (Blueprint $t) {
+            $t->id(); $t->string('period_type'); $t->string('period_key');
+            $t->unsignedBigInteger('branch_id')->nullable(); $t->unsignedBigInteger('branch_group_id')->nullable();
+        });
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $report = DailyReport::findOrFail($reports['agentA']);
+        $report->update(['submitted_at' => null]);
+        \DB::table('kpi_period_locks')->insert(['period_type' => 'day', 'period_key' => '2026-05-01']);
+        $actor = $users['agentA'];
+        $role = $actor->role;
+        $defaults = $role->permissionKeys();
+        $payload = ['report_date' => '2026-05-01', 'ads' => 2, 'calls' => 9];
+        Sanctum::actingAs($actor->fresh());
+        $this->putJson('/api/kpi/daily/my-report/draft', $payload)->assertForbidden()->assertJsonPath('code', 'KPI_FORBIDDEN_LOCKED_PERIOD');
+        $role->forceFill(['permissions' => [...$defaults, 'daily_reports.locked_period.override']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->putJson('/api/kpi/daily/my-report/draft', $payload)->assertOk();
+        \DB::table('daily_reports')->where('id', $report->id)->update(['is_finalized' => true]);
+        $this->putJson('/api/kpi/daily/my-report/draft', $payload)->assertForbidden()->assertJsonPath('code', 'KPI_FINALIZED_EDIT_FORBIDDEN');
+        $role->forceFill(['permissions' => [...$defaults, 'daily_reports.locked_period.override', 'daily_reports.finalized.edit']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->putJson('/api/kpi/daily/my-report/draft', $payload)->assertOk();
+        $this->patchJson('/api/daily-reports/'.$reports['agentB'], ['comment' => 'Not authorized'])->assertForbidden();
+        $role->forceFill(['permissions' => [...$defaults, 'daily_reports.finalized.edit']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->putJson('/api/kpi/daily/my-report/draft', $payload)->assertForbidden()->assertJsonPath('code', 'KPI_FORBIDDEN_LOCKED_PERIOD');
+    }
+
+    public function test_report_list_scopes_and_general_update_permission_are_independent(): void
+    {
+        [$users, $reports] = $this->seedContext();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $actor = $users['agentA'];
+        $role = $actor->role;
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/daily-reports')->assertOk()->assertJsonCount(1, 'data');
+        $role->forceFill(['permissions' => ['daily_reports.list.scope.branch']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/daily-reports')->assertOk()->assertJsonCount(3, 'data');
+        $this->getJson('/api/daily-reports?user_id='.$users['agentB']->id)->assertForbidden();
+        $this->patchJson('/api/daily-reports/'.$reports['agentA2'], ['comment' => 'Denied'])->assertForbidden();
+        $role->forceFill(['permissions' => ['daily_reports.list.scope.branch', 'daily_reports.list.edit']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson('/api/daily-reports/'.$reports['agentA2'], ['comment' => 'Allowed'])->assertOk()->assertJsonPath('comment', 'Allowed');
+        $this->patchJson('/api/daily-reports/'.$reports['agentB'], ['comment' => 'Denied'])->assertForbidden();
+        $role->forceFill(['permissions' => ['daily_reports.list.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/daily-reports')->assertOk()->assertJsonCount(4, 'data');
+        $this->patchJson('/api/daily-reports/'.$reports['agentA2'], ['comment' => 'Revoked'])->assertForbidden();
+        $this->assertDatabaseHas('daily_reports', ['id' => $reports['agentA2'], 'comment' => 'Allowed']);
+        $role->forceFill(['permissions' => ['daily_reports.list.edit']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/daily-reports')->assertForbidden();
+        $this->patchJson('/api/daily-reports/'.$reports['agentA'], ['comment' => 'No scope'])->assertForbidden();
+    }
+
+    public function test_legacy_self_routes_require_explicit_history_submission_and_repeat_edit_grants(): void
+    {
+        [$users, $reports] = $this->seedContext();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $actor = $users['agentA'];
+        $role = $actor->role;
+        DailyReport::findOrFail($reports['agentA'])->update(['submitted_at' => null]);
+        $role->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($actor->fresh());
+        $paths = ['/api/daily-reports/status?report_date=2026-05-01', '/api/daily-reports/my', '/api/daily-reports/my/2026-05-01'];
+        foreach ($paths as $path) $this->getJson($path)->assertForbidden();
+        $payload = ['report_date' => '2026-05-01', 'calls_count' => 12, 'comment' => 'Submitted'];
+        $this->postJson('/api/daily-reports', $payload)->assertForbidden();
+        $role->forceFill(['permissions' => ['daily_reports.self_history.view']])->save();
+        Sanctum::actingAs($actor->fresh());
+        foreach ($paths as $path) $this->getJson($path)->assertOk();
+        $this->postJson('/api/daily-reports', $payload)->assertForbidden();
+        $role->forceFill(['permissions' => ['daily_reports.self_submit.create']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/daily-reports', $payload)->assertCreated();
+        $this->postJson('/api/daily-reports', [...$payload, 'comment' => 'Repeat denied'])->assertForbidden();
+        $role->forceFill(['permissions' => ['daily_reports.self_submit.create', 'daily_reports.submitted.override', 'daily_reports.own.edit']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/daily-reports', [...$payload, 'comment' => 'Repeat allowed'])->assertCreated()->assertJsonPath('comment', 'Repeat allowed');
+        $this->putJson('/api/kpi/daily/my-report/draft', ['report_date' => '2026-05-01', 'ads' => 1, 'calls' => 2])->assertForbidden()->assertJsonPath('code', 'KPI_SUBMITTED_EDIT_FORBIDDEN');
+        $role->forceFill(['permissions' => ['daily_reports.submitted.override']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/daily-reports', $payload)->assertForbidden();
+    }
+
+    public function test_custom_report_subject_policy_respects_history_and_does_not_require_transfer_eligibility(): void
+    {
+        [$users, $reports, $groups] = $this->seedContext();
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Custom reporter', 'slug' => 'custom_employee_report']);
+        $role->forceFill(['permissions' => ['daily_reports.subject.employee']])->save();
+        $employee = $users['agentA'];
+        $employee->forceFill(['role_id' => $role->id])->save();
+        DailyReport::whereKey($reports['agentA'])->update(['role_slug' => $role->slug]);
+        Sanctum::actingAs($users['ropA']);
+        $url = '/api/kpi/daily/report?employee_id='.$employee->id.'&date=2026-05-01';
+        $this->getJson($url)->assertOk();
+        $this->getJson('/api/daily-reports?report_date=2026-05-01&user_id='.$employee->id)->assertOk()->assertJsonPath('data.0.employee_report_eligible', true);
+        // Today's empty report uses the reporting policy, not transfer-recipient eligibility.
+        $this->travelTo(\Carbon\Carbon::parse('2026-05-02 12:00:00', 'Asia/Dushanbe'));
+        $this->getJson('/api/kpi/daily/report?employee_id='.$employee->id.'&date=2026-05-02')->assertOk();
+        $employee->forceFill(['branch_group_id' => $groups['groupA2']->id])->save();
+        $this->getJson($url)->assertOk();
+        $this->getJson('/api/kpi/daily/report?employee_id='.$employee->id.'&date=2026-05-02')->assertForbidden();
+        $role->forceFill(['permissions' => []])->save();
+        $this->getJson($url)->assertForbidden();
+        $this->getJson('/api/daily-reports?report_date=2026-05-01&user_id='.$employee->id)->assertOk()->assertJsonPath('data.0.employee_report_eligible', false);
+        $role->forceFill(['permissions' => ['daily_reports.subject.employee']])->save();
+        $this->getJson($url)->assertOk();
+        $this->travelBack();
     }
 
     private function seedContext(): array

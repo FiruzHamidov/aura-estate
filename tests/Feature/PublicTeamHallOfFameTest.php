@@ -79,6 +79,20 @@ class PublicTeamHallOfFameTest extends TestCase
         });
     }
 
+    public function test_custom_public_role_can_enter_and_leave_public_nominations(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Custom specialist', 'slug' => 'custom_public']);
+        $role->forceFill(['permissions' => ['public_team.subject.profile']])->save();
+        $employee = User::create(['name' => 'Specialist', 'phone' => '900091010', 'role_id' => $role->id, 'status' => 'active']);
+        DB::table('properties')->insert(['created_by' => $employee->id, 'agent_id' => $employee->id, 'moderation_status' => 'approved', 'created_at' => '2026-04-02 10:00:00', 'updated_at' => '2026-04-02 10:00:00']);
+        $path = '/api/public/team/hall-of-fame?date_from=2026-04-01&date_to=2026-04-30';
+        $this->getJson($path)->assertOk()->assertJsonPath('nominations.most_properties_added.winner.agent.id', $employee->id);
+        $role->forceFill(['permissions' => []])->save();
+        $this->getJson($path)->assertOk()->assertJsonCount(0, 'nominations.most_properties_added.leaders');
+        $this->assertDatabaseCount('properties', 1);
+    }
+
     public function test_public_team_hall_of_fame_returns_public_nominations(): void
     {
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
@@ -285,7 +299,7 @@ class PublicTeamHallOfFameTest extends TestCase
         $response = $this->getJson('/api/public/team/hall-of-fame?date_from=2026-04-01&date_to=2026-04-30');
 
         $response->assertOk();
-        $this->assertStringContainsString('public', (string) $response->headers->get('Cache-Control'));
+        $this->assertStringContainsString('no-store', (string) $response->headers->get('Cache-Control'));
         $response->assertJsonPath('nominations.best_sales_by_count.winner.agent.id', $agentOne->id);
         $response->assertJsonPath('nominations.best_sales_by_count.winner.sold_count', 3);
         $response->assertJsonPath('nominations.best_sales_by_count.title', 'Лучший продажник');

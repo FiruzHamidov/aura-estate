@@ -17,10 +17,21 @@ class ReferenceCatalogService
     public function assertCanManage(User $user, ?string $catalog = null): void
     {
         $user->loadMissing('role');
+        if (isset(config('catalog_permissions', [])[$catalog]) && !$user->hasPermission('catalogs.entries.'.$catalog.'.manage')) {
+            $this->deny('REFERENCE_CATALOG_FORBIDDEN', 'Нет права изменять этот справочник.');
+        }
 
-        if (in_array($user->role?->slug, ['admin', 'superadmin'], true)
-            || (in_array($user->role?->slug, ['owner', 'agent', 'mop'], true)
-                && in_array($catalog, self::NEW_BUILDING_CATALOGS, true))) {
+        if ($catalog === 'branches' && $user->usesAssignedGroupScope()) {
+            $this->deny('REFERENCE_CATALOG_FORBIDDEN', 'РОП не меняет структуру филиалов.');
+        }
+        if ($catalog === 'branch-groups' && ($user->usesAssignedGroupScope() || !$user->hasPermission('branch_groups.scope.all') || !$user->hasPermission('branch_groups.manage.all'))) {
+            $this->deny('REFERENCE_CATALOG_FORBIDDEN', 'Для объединения групп требуется просмотр и управление группами всех филиалов.');
+        }
+
+        if ($catalog === 'roles') {
+            if ($user->hasPermission('roles.manage')) return;
+        } elseif ($user->hasPermission('catalogs.manage')
+            || ($user->hasPermission('catalogs.new_buildings.manage') && in_array($catalog, self::NEW_BUILDING_CATALOGS, true))) {
             return;
         }
 

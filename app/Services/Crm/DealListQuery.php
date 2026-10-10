@@ -105,7 +105,7 @@ class DealListQuery
         }
 
         $role = $this->dealAccess->roleSlug($authUser);
-        if (($this->dealAccess->isPrivilegedRole($role) || $this->dealAccess->isSecurityRole($role)) && ! empty($validated['branch_id'])) {
+        if (($this->dealAccess->canReadAll($authUser) || $this->dealAccess->scopeType($authUser) === 'control') && ! empty($validated['branch_id'])) {
             $query->where('branch_id', $validated['branch_id']);
         }
 

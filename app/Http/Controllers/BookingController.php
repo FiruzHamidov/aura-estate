@@ -40,24 +40,12 @@ class BookingController extends Controller
         return $user?->role?->slug;
     }
 
-    private function isPrivilegedRole(?string $roleSlug): bool
+    private function bookingScope(?User $user): string
     {
-        return in_array($roleSlug, ['admin', 'superadmin', 'marketing'], true);
-    }
-
-    private function isClientRole(?string $roleSlug): bool
-    {
-        return $roleSlug === 'client';
-    }
-
-    private function isBranchScopedRole(?string $roleSlug): bool
-    {
-        return in_array($roleSlug, ['rop', 'branch_director'], true);
-    }
-
-    private function isBranchGroupScopedRole(?string $roleSlug): bool
-    {
-        return in_array($roleSlug, ['mop'], true);
+        foreach (['all', 'agent', 'client', 'branch', 'group'] as $scope) {
+            if ($user?->hasPermission('bookings.scope.'.$scope)) return $scope;
+        }
+        return 'none';
     }
 
     private function toArray(mixed $value): array
@@ -75,7 +63,7 @@ class BookingController extends Controller
 
     private function ensureReportsAllowed(Request $request): void
     {
-        abort_if($this->roleSlug($this->authUser($request)) === 'marketing', 403, 'Forbidden');
+        abort_unless($this->authUser($request)?->hasPermission('bookings.reports.view'), 403, 'Forbidden');
     }
 
     private function bookingApiTimezone(): string
@@ -252,22 +240,27 @@ class BookingController extends Controller
     {
         $authUser = $this->authUser($request);
         $roleSlug = $this->roleSlug($authUser);
+        $scope = $this->bookingScope($authUser);
+        if ($scope === 'none') {
+            $query->whereRaw('1 = 0');
+            return;
+        }
 
-        if ($roleSlug === 'rop') {
+        if ($authUser?->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'bookings.branch_group_id');
             if ($request->filled('branch_group_id')) {
                 $query->whereIn('bookings.branch_group_id', $this->toArray($request->input('branch_group_id')));
             }
-            return;
+            if (in_array($scope, ['all', 'branch'], true)) return;
         }
 
-        if ($this->isClientRole($roleSlug)) {
+        if ($scope === 'client') {
             $query->where('client_id', $authUser->id);
 
             return;
         }
 
-        if ($roleSlug === 'agent') {
+        if ($scope === 'agent') {
             $query->where($agentColumn, $authUser?->id);
 
             return;
@@ -294,7 +287,7 @@ class BookingController extends Controller
             }
         }
 
-        if ($this->isBranchScopedRole($roleSlug)) {
+        if ($scope === 'branch') {
             if (empty($authUser->branch_id)) {
                 $query->whereRaw('1 = 0');
                 return;
@@ -303,7 +296,7 @@ class BookingController extends Controller
             $query->whereIn($agentColumn, User::query()->where('branch_id', $authUser->branch_id)->select('id'));
         }
 
-        if ($this->isBranchGroupScopedRole($roleSlug)) {
+        if ($scope === 'group') {
             if (empty($authUser->branch_group_id) || !Schema::hasColumn('users', 'branch_group_id')) {
                 $query->whereRaw('1 = 0');
                 return;
@@ -317,7 +310,7 @@ class BookingController extends Controller
     {
         $authUser = $this->authUser($request);
 
-        if (! $authUser || ! $this->isBranchScopedRole($this->roleSlug($authUser))) {
+        if (! $authUser || $this->bookingScope($authUser) !== 'branch') {
             return;
         }
 
@@ -336,7 +329,7 @@ class BookingController extends Controller
 
     private function ensureBookingIsVisible(Request $request, Booking $booking): void
     {
-        if ($this->authUser($request)?->hasRole('rop')) {
+        if ($this->authUser($request)?->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->ensureVisible($this->authUser($request), $booking);
         }
         $visible = Booking::query()
@@ -487,6 +480,7 @@ class BookingController extends Controller
                 $authUser, [$client, $property], [$validated['agent_id']], [$validated['branch_group_id'] ?? null]
             );
             $client = $records[0];
+            abort_unless($authUser->hasPermission('bookings.create'), 403, 'Нет права создавать показы.');
             $this->ensureBookingAgentClientAccess($client, $validated['agent_id'] ?? null, $authUser);
             $validated = $this->syncBookingSnapshot($validated, $client, $authUser);
             unset($validated['client_id']);
@@ -553,10 +547,8 @@ class BookingController extends Controller
                 $authUser, $booking, $validated['agent_id'] ?? null, null
             );
             app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $booking);
-            $userRole = $authUser->role->slug ?? null;
-
-            // permission: privileged roles or the booking's agent can update
-            if (!($authUser && $this->isPrivilegedRole($userRole)) && $booking->agent_id !== ($authUser->id ?? null)) {
+            if (!$authUser->hasPermission('bookings.update.all')
+                && !($authUser->hasPermission('bookings.update.own') && (int) $booking->agent_id === (int) $authUser->id)) {
                 return response()->json(['error' => 'Forbidden'], 403);
             }
 
@@ -605,7 +597,7 @@ class BookingController extends Controller
             }
 
             if (array_key_exists('note', $validated)) $booking->note = $validated['note'];
-            if (array_key_exists('agent_id', $validated) && $this->isPrivilegedRole($userRole)) {
+            if (array_key_exists('agent_id', $validated) && $authUser->hasPermission('bookings.agent.assign')) {
                 $booking->agent_id = $validated['agent_id'];
             }
 

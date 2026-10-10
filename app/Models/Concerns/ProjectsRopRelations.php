@@ -12,7 +12,7 @@ trait ProjectsRopRelations
     {
         $attributes = parent::attributesToArray();
         $actor = auth()->user();
-        if (! $actor instanceof User || ! $actor->hasRole('rop')) {
+        if (! $actor instanceof User || ! $actor->usesAssignedGroupScope()) {
             return $attributes;
         }
 
@@ -22,7 +22,7 @@ trait ProjectsRopRelations
     public function relationsToArray()
     {
         $actor = auth()->user();
-        if (! $actor instanceof User || ! $actor->hasRole('rop')) {
+        if (! $actor instanceof User || ! $actor->usesAssignedGroupScope()) {
             return parent::relationsToArray();
         }
 

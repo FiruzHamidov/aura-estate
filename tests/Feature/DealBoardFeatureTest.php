@@ -394,6 +394,35 @@ class DealBoardFeatureTest extends TestCase
         );
     }
 
+    public function test_revoked_move_permission_blocks_all_stage_change_endpoints(): void
+    {
+        $branch = Branch::create(['name' => 'Branch A']);
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $agent = $this->createUser($role, $branch, 'Agent');
+        $client = $this->createClient($branch, $agent, 'Buyer', '992960000010');
+        [$pipeline, $first, $second] = $this->createPipelineWithStages($branch);
+        Sanctum::actingAs($agent);
+        $deal = $this->postJson('/api/deals', [
+            'pipeline_id' => $pipeline->id, 'stage_id' => $first->id,
+            'client_id' => $client->id, 'title' => 'Test move permission',
+        ])->assertCreated()->json();
+        $role->refresh();
+        $role->permissions = array_values(array_diff($role->permissionKeys(), ['deals.move']));
+        $role->save();
+        Sanctum::actingAs($agent->fresh());
+        $this->patchJson('/api/deals/'.$deal['id'].'/move', ['stage_id' => $second->id])->assertForbidden();
+        $this->putJson('/api/deals/'.$deal['id'], ['stage_id' => $second->id])->assertForbidden();
+        $this->postJson('/api/crm/deals/'.$deal['id'].'/activities', [
+            'type' => 'status_change', 'stage_id' => $second->id,
+        ])->assertForbidden();
+        $this->assertSame($first->id, Deal::findOrFail($deal['id'])->stage_id);
+        $this->putJson('/api/deals/'.$deal['id'], ['title' => 'Still editable'])->assertOk();
+        $this->postJson('/api/crm/deals/'.$deal['id'].'/activities', [
+            'type' => 'comment', 'comment' => 'Still allowed',
+        ])->assertOk();
+    }
+
     public function test_agent_cannot_move_foreign_branch_deal_but_rop_sees_branch_board_only(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
@@ -694,6 +723,23 @@ class DealBoardFeatureTest extends TestCase
         $this->deleteJson('/api/deals/'.$deal->id)->assertForbidden();
     }
 
+    public function test_property_control_staff_filter_uses_configured_target_policy(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $securityRole = Role::create(['name' => 'Security', 'slug' => 'security']);
+        $security = $this->createUser($securityRole, $branch, 'Security Officer');
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role = Role::forceCreate(['name' => 'Custom filter', 'slug' => 'custom_control_filter', 'permissions' => ['property_control.subject.report_filter']]);
+        $target = $this->createUser($role, $branch, 'Custom Officer');
+        Sanctum::actingAs($security);
+        $ids = $this->getJson('/api/crm/property-control/meta')->assertOk()->json('security_officers.*.id');
+        $this->assertContains($target->id, $ids);
+        $role->forceFill(['permissions' => []])->save();
+        $ids = $this->getJson('/api/crm/property-control/meta')->assertOk()->json('security_officers.*.id');
+        $this->assertNotContains($target->id, $ids);
+        $this->assertContains($security->id, $ids);
+    }
+
     public function test_property_control_report_filters_export_and_meta_are_scoped_to_crm_control(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
@@ -726,6 +772,20 @@ class DealBoardFeatureTest extends TestCase
         $this->get('/api/crm/property-control/export?branch_id='.$branchA->id)
             ->assertOk()
             ->assertHeader('content-type', 'text/csv; charset=UTF-8');
+
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        foreach (['client', 'external_agent', 'accountant', 'custom_control'] as $slug) {
+            $securityRole->forceFill(['slug' => $slug, 'permissions' => ['deals.scope.control', 'properties.control_report.view']])->save();
+            Sanctum::actingAs($security->fresh('role'));
+            $this->getJson('/api/crm/property-control/report')->assertOk()->assertJsonPath('total', 2);
+            $this->getJson('/api/crm/property-control/meta')->assertOk();
+            $this->get('/api/crm/property-control/export')->assertOk();
+            $securityRole->forceFill(['permissions' => ['deals.scope.control']])->save();
+            Sanctum::actingAs($security->fresh('role'));
+            $this->getJson('/api/crm/property-control/report')->assertForbidden();
+            $this->getJson('/api/crm/property-control/meta')->assertForbidden();
+            $this->get('/api/crm/property-control/export')->assertForbidden();
+        }
 
         $this->assertDatabaseHas('crm_audit_logs', [
             'auditable_type' => $security->getMorphClass(),

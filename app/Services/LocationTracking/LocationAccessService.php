@@ -3,6 +3,7 @@
 namespace App\Services\LocationTracking;
 
 use App\Models\User;
+use App\Models\Role;
 use Illuminate\Database\Eloquent\Builder;
 
 class LocationAccessService
@@ -20,14 +21,14 @@ class LocationAccessService
 
     public function assertCanTransmit(User $user): void
     {
-        if (! in_array($this->role($user), config('location_tracking.tracked_roles', []), true)) {
-            $this->deny(self::FORBIDDEN_ROLE, 'Передача местоположения доступна только агентам и МОПам.');
+        if (! $user->hasPermission('locations.transmit')) {
+            $this->deny(self::FORBIDDEN_ROLE, 'Вашей роли не разрешена передача местоположения.');
         }
     }
 
     public function assertCanViewModule(User $user): void
     {
-        if (! in_array($this->role($user), config('location_tracking.viewer_roles', []), true)) {
+        if (! $user->hasPermission('locations.view')) {
             $this->deny(self::FORBIDDEN_ROLE, 'Нет доступа к модулю местоположения.');
         }
     }
@@ -35,7 +36,12 @@ class LocationAccessService
     public function availableUsersQuery(User $viewer): Builder
     {
         $this->assertCanViewModule($viewer);
-        $role = $this->role($viewer);
+        $subjects = ['branch' => [], 'group' => []];
+        foreach (Role::query()->get() as $role) {
+            foreach (array_keys($subjects) as $scope) {
+                if ($role->hasPermission('locations.subject.'.$scope)) $subjects[$scope][] = $role->id;
+            }
+        }
         $query = User::query()
             ->where('status', User::STATUS_ACTIVE)
             ->with([
@@ -43,7 +49,7 @@ class LocationAccessService
                 'branch',
                 'branchGroup',
                 'currentLocation' => function ($current) use ($viewer): void {
-                    if ($viewer->hasRole('rop')) {
+                    if ($viewer->usesAssignedGroupScope()) {
                         $points = app(\App\Support\RopGroupAccess::class)->scope(\App\Models\UserLocationPoint::query(), $viewer, 'branch_group_id', 'branch_id');
                         $current->whereIn('location_point_id', $points->select('id'));
                     }
@@ -52,28 +58,28 @@ class LocationAccessService
                 'latestActiveLocationDevice',
             ]);
 
-        return match ($role) {
-            'agent' => $query->whereKey($viewer->id),
-            'mop' => $query->where(function (Builder $q) use ($viewer) {
+        if ($viewer->usesAssignedGroupScope()) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id');
+            $query->whereIn('users.role_id', $subjects['branch']);
+        }
+
+        return match ($this->scope($viewer)) {
+            'own' => $query->whereKey($viewer->id),
+            'group' => $query->where(function (Builder $q) use ($viewer, $subjects) {
                 $q->whereKey($viewer->id);
                 if ($viewer->branch_group_id !== null) {
-                    $q->orWhere(function (Builder $scope) use ($viewer) {
+                    $q->orWhere(function (Builder $scope) use ($viewer, $subjects) {
                         $scope->where('branch_group_id', $viewer->branch_group_id)
-                            ->whereHas('role', fn (Builder $roles) => $roles->where('slug', 'agent'));
+                            ->whereIn('users.role_id', $subjects['group']);
                     });
                 }
             }),
-            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id')
-                ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop'])),
-            'branch_director' => $viewer->branch_id === null
+            'branch' => $viewer->branch_id === null
                 ? $query->whereKey($viewer->id)
                 : $query->where('branch_id', $viewer->branch_id)
-                    ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop'])),
-            'admin', 'superadmin' => $query->where(function (Builder $scope) {
-                $scope->whereHas(
-                    'role',
-                    fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop'])
-                )->orWhereHas('currentLocation');
+                    ->whereIn('users.role_id', $subjects['branch']),
+            'all' => $query->where(function (Builder $scope) use ($subjects) {
+                $scope->whereIn('users.role_id', $subjects['branch'])->orWhereHas('currentLocation');
             }),
             default => $query->whereRaw('1 = 0'),
         };
@@ -95,50 +101,56 @@ class LocationAccessService
         }
     }
 
-    public function assertCanConfigure(User $actor, User $target): void
+    public function assertCanConfigure(User $actor, User $target, bool $write = true): void
     {
-        $role = $this->role($actor);
-
-        if (in_array($role, ['admin', 'superadmin'], true)) {
-            return;
+        if (! $actor->hasPermission($write ? 'locations.settings.update' : 'locations.settings.view')) {
+            $this->deny(self::FORBIDDEN_SCOPE, 'Нет доступа к настройкам отслеживания пользователя.');
         }
-
-        if ($role === 'branch_director'
+        if ($actor->usesAssignedGroupScope()) {
+            app(\App\Support\RopGroupAccess::class)->ensureEmployee($actor, $target->id);
+        }
+        if ($actor->hasPermission('locations.settings.scope.all')) return;
+        if ($actor->hasPermission('locations.settings.scope.branch')
             && $actor->branch_id !== null
             && (int) $actor->branch_id === (int) $target->branch_id
-            && in_array($this->role($target), ['agent', 'mop'], true)) {
-            return;
-        }
+            && $target->hasPermission('locations.transmit')) return;
 
         $this->deny(self::FORBIDDEN_SCOPE, 'Нет права изменять настройки отслеживания пользователя.');
     }
 
+    public function scope(User $viewer): ?string
+    {
+        foreach (['all', 'branch', 'group', 'own'] as $scope) {
+            if ($viewer->hasPermission('locations.scope.'.$scope)) return $scope;
+        }
+        return null;
+    }
+
     public function applyHistoryScope(Builder $query, User $viewer, User $target): Builder
     {
-        if ($viewer->hasRole('rop')) {
+        if ($viewer->usesAssignedGroupScope()) {
             $this->assertCanViewModule($viewer);
             $groups = app(\App\Support\RopGroupAccess::class);
             $historical = $groups->scope(\App\Models\UserLocationPoint::query()->where('user_id', $target->id), $viewer, 'branch_group_id', 'branch_id');
+            $this->scopeHistoryRows($historical, $viewer, $target);
             abort_unless($this->canView($viewer, $target) || $historical->exists(), 404, 'NOT_FOUND');
-            return $groups->scope($query, $viewer, 'branch_group_id', 'branch_id');
+            $groups->scope($query, $viewer, 'branch_group_id', 'branch_id');
+        } else {
+            $this->assertCanView($viewer, $target);
         }
+        return $this->scopeHistoryRows($query, $viewer, $target);
+    }
 
-        $this->assertCanView($viewer, $target);
-        $role = $this->role($viewer);
-
-        if ($viewer->is($target) || in_array($role, ['admin', 'superadmin'], true)) {
-            return $query;
-        }
-
-        if ($role === 'mop') {
-            return $query->where('branch_group_id', $viewer->branch_group_id);
-        }
-
-        if (in_array($role, ['rop', 'branch_director'], true)) {
-            return $query->where('branch_id', $viewer->branch_id);
-        }
-
-        return $query->whereRaw('1 = 0');
+    private function scopeHistoryRows(Builder $query, User $viewer, User $target): Builder
+    {
+        $scope = $this->scope($viewer);
+        if ($scope === null) return $query->whereRaw('1 = 0');
+        if ($viewer->is($target) || $scope === 'all') return $query;
+        return match ($scope) {
+            'group' => $query->where('branch_group_id', $viewer->branch_group_id),
+            'branch' => $query->where('branch_id', $viewer->branch_id),
+            default => $query->whereRaw('1 = 0'),
+        };
     }
 
     public function deny(string $code, string $message, int $status = 403): never

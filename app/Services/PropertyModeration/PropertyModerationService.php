@@ -539,7 +539,7 @@ final class PropertyModerationService
 
     public function breakGlassApprove(PropertyModerationCase $case, User $actor, string $reason, int $expectedVersion): Property
     {
-        abort_unless($actor->role?->slug === 'superadmin', 403, 'BREAK_GLASS_FORBIDDEN');
+        abort_unless($actor->hasPermission('properties.break_glass'), 403, 'BREAK_GLASS_FORBIDDEN');
 
         return DB::transaction(function () use ($case, $actor, $reason, $expectedVersion): Property {
             [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $case->property_id);
@@ -746,8 +746,8 @@ final class PropertyModerationService
         $changesOnlyCoOwner = array_keys($changes) === ['co_owner_user_id'];
         abort_unless(
             $changesOnlyCoOwner
-                ? $this->access->canEdit($actor, $property)
-                : $this->access->canModerate($actor, $property),
+                ? $this->access->canManageCoOwner($actor, $property)
+                : $this->access->canTransfer($actor, $property),
             403,
             'MODERATION_PERMISSION_DENIED'
         );
@@ -762,8 +762,8 @@ final class PropertyModerationService
             );
             abort_unless(
                 $changesOnlyCoOwner
-                    ? $this->access->canEdit($actor, $locked)
-                    : $this->access->canModerate($actor, $locked),
+                    ? $this->access->canManageCoOwner($actor, $locked)
+                    : $this->access->canTransfer($actor, $locked),
                 403,
                 'MODERATION_PERMISSION_DENIED'
             );
@@ -776,8 +776,7 @@ final class PropertyModerationService
                 $targetId = $changes[$field] !== null ? (int) $changes[$field] : null;
                 if ($targetId !== null) {
                     $target = User::query()->where('status', User::STATUS_ACTIVE)->lockForUpdate()->findOrFail($targetId);
-                    $role = (string) $actor->role?->slug;
-                    if (! in_array($role, config('property-moderation.global_moderator_roles', []), true)) {
+                    if (! $actor->hasPermission('properties.ownership.assign_across_branches')) {
                         abort_unless((int) $target->branch_id === (int) $actor->branch_id, 403, 'MODERATION_PERMISSION_DENIED');
                     }
                     if ($field === 'co_owner_user_id') {
@@ -851,7 +850,7 @@ final class PropertyModerationService
             [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $candidate->moderationCase()->value('property_id'), [], [$candidate->candidate_property_id]);
             $case = PropertyModerationCase::query()->lockForUpdate()->findOrFail($candidate->moderation_case_id);
             $candidate = PropertyDuplicateCandidate::query()->lockForUpdate()->findOrFail($candidate->id);
-            if ($actor->hasRole('rop')) {
+            if ($actor->usesAssignedGroupScope()) {
                 $target = Property::query()->lockForUpdate()->findOrFail($candidate->candidate_property_id);
                 app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $target);
                 app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $property);
@@ -939,7 +938,7 @@ final class PropertyModerationService
             [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $candidate->moderationCase()->value('property_id'), [], [$candidate->candidate_property_id]);
             $case = PropertyModerationCase::query()->lockForUpdate()->findOrFail($candidate->moderation_case_id);
             $candidate = PropertyDuplicateCandidate::query()->lockForUpdate()->findOrFail($candidate->id);
-            if ($actor->hasRole('rop')) {
+            if ($actor->usesAssignedGroupScope()) {
                 $target = Property::query()->lockForUpdate()->findOrFail($candidate->candidate_property_id);
                 app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $target);
                 app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $property);
@@ -997,7 +996,7 @@ final class PropertyModerationService
             [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $candidate->moderationCase()->value('property_id'), [], [$candidate->candidate_property_id]);
             $case = PropertyModerationCase::query()->lockForUpdate()->findOrFail($candidate->moderation_case_id);
             $candidate = PropertyDuplicateCandidate::query()->lockForUpdate()->findOrFail($candidate->id);
-            if ($actor->hasRole('rop')) {
+            if ($actor->usesAssignedGroupScope()) {
                 $target = Property::query()->lockForUpdate()->findOrFail($candidate->candidate_property_id);
                 app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $target);
                 app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $property);
@@ -1034,7 +1033,7 @@ final class PropertyModerationService
         }
 
         if ($viewer && ($this->access->canEdit($viewer, $property)
-            || $this->access->canViewSecurityReportProperty($viewer, $property))) {
+            || $this->access->canViewClosedProperty($viewer, $property))) {
             return;
         }
 

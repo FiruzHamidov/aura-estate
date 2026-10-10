@@ -48,7 +48,7 @@ final class TaskGroupOwnership
         if ($task->exists && ! $reopening && ! $task->isDirty(['related_entity_type', 'related_entity_id'])) return;
         if ($reopening || (! $task->exists && ! $task->completed_at && ! in_array($task->status, ['done', 'canceled'], true))) {
             $assignee = User::query()->lockForUpdate()->findOrFail($task->assignee_id);
-            if ($reopening || in_array($assignee->role?->slug, ['agent', 'mop'], true)) {
+            if ($reopening || $assignee->hasPermission('users.subject.assignment_group_required')) {
                 abort_unless($task->branch_group_id && (int) $assignee->branch_group_id === (int) $task->branch_group_id,
                     422, $reopening ? 'TASK_REOPEN_REQUIRES_GROUP_TRANSFER' : 'RESPONSIBLE_GROUP_MISMATCH');
                 abort_unless($assignee->status === User::STATUS_ACTIVE && ! $assignee->isDeletedAccount(),

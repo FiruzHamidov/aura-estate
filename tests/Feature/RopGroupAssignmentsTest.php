@@ -61,6 +61,48 @@ class RopGroupAssignmentsTest extends TestCase
             'branch_group_id' => $group?->id, 'status' => 'active']);
     }
 
+    public function test_configured_assignment_reader_cannot_write_until_granted_and_revocation_takes_effect(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $actor = $this->user('marketing');
+        $role = $actor->role;
+        $role->forceFill(['permissions' => ['rop_groups.scope.branch']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson($this->url())->assertOk();
+        $payload = ['branch_group_ids' => [$this->a->id], 'version' => 0];
+        $this->putJson($this->url(), $payload)->assertForbidden();
+        $role->forceFill(['permissions' => ['rop_groups.scope.branch', 'rop_groups.manage']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->putJson($this->url(), $payload)->assertOk()->assertJsonPath('version', 1);
+        $this->assertDatabaseCount('group_access_audit_logs', 1);
+        $role->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson($this->url())->assertForbidden();
+        $this->putJson($this->url(), ['branch_group_ids' => [], 'version' => 1])->assertForbidden();
+        $this->assertDatabaseCount('rop_branch_groups', 1);
+    }
+
+    public function test_review_queue_grants_are_branch_scoped_and_revocable(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        (require database_path('migrations/2026_09_09_030000_create_group_access_review_items.php'))->up();
+        $other = Branch::create(['name' => 'Other']);
+        foreach ([$this->branch->id, $other->id] as $id) DB::table('group_access_review_items')->insert([
+            'source_table' => 'clients', 'source_id' => $id, 'branch_id' => $id, 'reason' => 'unclassified', 'detected_at' => now(),
+        ]);
+        $actor = $this->user('marketing');
+        $role = $actor->role;
+        $role->forceFill(['permissions' => ['group_access_review.scope.branch']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/group-access/review')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.branch_id', $this->branch->id);
+        $role->forceFill(['permissions' => ['group_access_review.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/group-access/review')->assertOk()->assertJsonCount(2, 'data');
+        $role->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/group-access/review')->assertForbidden();
+    }
+
     public function test_rop_can_edit_employee_details_only_in_assigned_groups(): void
     {
         Role::create(['name' => 'intern', 'slug' => 'intern']);
@@ -151,6 +193,58 @@ class RopGroupAssignmentsTest extends TestCase
         $this->rop->supervisedGroups()->detach();
         $own = $this->user('agent', $this->a);
         $this->getJson('/api/users/'.$own->id.'/group-transfer')->assertNotFound();
+    }
+
+    public function test_custom_role_can_use_assigned_groups_and_removing_policy_restores_module_scope(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Team reviewer', 'slug' => 'team_reviewer']);
+        $rights = ['data.scope.assigned_groups', 'clients.scope.all', 'users.group_transfer'];
+        $role->forceFill(['permissions' => $rights])->save();
+        $actor = $this->user('team_reviewer');
+        $own = Client::create(['full_name' => 'Own', 'branch_id' => $this->branch->id, 'branch_group_id' => $this->a->id]);
+        $foreign = Client::create(['full_name' => 'Foreign', 'branch_id' => $this->branch->id, 'branch_group_id' => $this->b->id]);
+        $access = app(ClientAccess::class);
+        $this->assertSame(0, $access->visibleQuery($actor->fresh())->count());
+        Sanctum::actingAs($this->admin);
+        $url = '/api/users/'.$actor->id.'/supervised-groups';
+        $this->putJson($url, ['branch_group_ids' => [$this->a->id], 'version' => 0])->assertOk();
+        $this->assertSame([$own->id], $access->visibleQuery($actor->fresh())->pluck('clients.id')->all());
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/employee-transfer-destinations')->assertOk()->assertJsonCount(1, 'data');
+        $this->putJson($url, ['branch_group_ids' => [$this->a->id, $this->b->id], 'version' => 1])->assertForbidden();
+        $role->forceFill(['permissions' => ['clients.scope.all', 'users.group_transfer']])->save();
+        $this->assertEqualsCanonicalizing([$own->id, $foreign->id], $access->visibleQuery($actor->fresh())->pluck('clients.id')->all());
+        $this->assertFalse(Role::query()->usingAssignedGroups()->whereKey($role->id)->exists());
+        $role->forceFill(['permissions' => $rights])->save();
+        $this->assertTrue(Role::query()->usingAssignedGroups()->whereKey($role->id)->exists());
+        $this->assertSame([$own->id], $access->visibleQuery($actor->fresh())->pluck('clients.id')->all());
+        $this->assertDatabaseHas('rop_branch_groups', ['rop_id' => $actor->id, 'branch_group_id' => $this->a->id]);
+    }
+
+    public function test_custom_team_employee_can_be_edited_and_transferred_only_with_target_policies(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Custom employee', 'slug' => 'custom_employee']);
+        $rights = ['users.subject.team', 'users.subject.group_transfer'];
+        $role->forceFill(['permissions' => $rights])->save();
+        $employee = $this->user('custom_employee', $this->a);
+        $this->rop->supervisedGroups()->attach($this->a->id);
+        $receiver = $this->user('rop', $this->b);
+        $receiver->supervisedGroups()->attach($this->b->id);
+        Sanctum::actingAs($this->rop);
+        $this->patchJson('/api/user/'.$employee->id, ['name' => 'Edited custom employee', 'role_id' => $role->id])->assertOk();
+        $url = '/api/users/'.$employee->id.'/group-transfer';
+        $preview = $this->getJson($url)->assertOk()->json();
+        $plan = ['branch_group_id' => $this->b->id, 'revision' => $preview['revision'], 'reason' => 'Reviewed transfer', 'records' => []];
+        $this->postJson($url, $plan)->assertForbidden();
+        $role->forceFill(['permissions' => []])->save();
+        $this->patchJson('/api/user/'.$employee->id, ['name' => 'Denied'])->assertNotFound();
+        $this->postJson($url, $plan)->assertUnprocessable();
+        $this->assertSame($this->a->id, $employee->fresh()->branch_group_id);
+        $role->forceFill(['permissions' => [...$rights, 'users.subject.group_transfer_across']])->save();
+        $this->postJson($url, $plan)->assertOk();
+        $this->assertSame($this->b->id, $employee->fresh()->branch_group_id);
     }
 
     private function url(): string
@@ -776,6 +870,26 @@ class RopGroupAssignmentsTest extends TestCase
         $this->assertSame($this->a->id, (int) $client->fresh()->branch_group_id);
     }
 
+    public function test_custom_group_profile_policy_controls_nested_fields_without_exposing_foreign_users(): void
+    {
+        $role = Role::create(['name' => 'Custom employee', 'slug' => 'custom_group_profile']);
+        $local = $this->user($role->slug, $this->a);
+        $foreign = $this->user($role->slug, $this->c);
+        $this->rop->supervisedGroups()->attach($this->a->id);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $projection = app(\App\Services\GroupAccess\GroupDataProjection::class);
+        foreach ([[], ['users.subject.group_profile'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            $record = new Client();
+            $record->setRelation('responsibleAgent', $local->fresh());
+            $record->setRelation('creator', $foreign->fresh());
+            $result = $projection->relations($record, $this->rop->fresh());
+            $this->assertSame($rights !== [], array_key_exists('phone', $result['responsible_agent']));
+            $this->assertSame($local->id, $result['responsible_agent']['id']);
+            $this->assertSame(['id' => $foreign->id, 'name' => $foreign->name], $result['creator']);
+        }
+    }
+
     public function test_group_projection_removes_foreign_card_and_preserves_only_author_label(): void
     {
         $this->rop->supervisedGroups()->attach($this->a->id);
@@ -1110,6 +1224,59 @@ class RopGroupAssignmentsTest extends TestCase
         $this->assertSame($replacement->id, (int) $retain->fresh()->responsible_agent_id);
         $this->assertSame($this->a->id, (int) $history->fresh()->branch_group_id);
         $this->assertDatabaseHas('group_access_audit_logs', ['subject_id' => $employee->id, 'event' => 'employee_group_transferred']);
+    }
+
+    public function test_custom_assignment_group_policy_is_checked_for_properties_and_new_tasks(): void
+    {
+        $role = Role::create(['name' => 'Custom assignee', 'slug' => 'custom_group_assignee']);
+        $employee = $this->user($role->slug, $this->a);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $controller = app(\App\Http\Controllers\PropertyController::class);
+        $lock = new \ReflectionMethod($controller, 'lockPropertyWrite');
+        foreach ([[], ['users.subject.assignment_group_required'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            foreach ([$this->a, $this->b] as $group) {
+                $checks = [
+                    fn () => app(\App\Observers\GroupOwnedRecordObserver::class)->saving(new Client([
+                        'responsible_agent_id' => $employee->id, 'branch_group_id' => $group->id,
+                        'branch_id' => $this->branch->id, 'full_name' => 'New client'])),
+                    fn () => $lock->invoke($controller, $this->admin, null, ['agent_id' => $employee->id, 'branch_group_id' => $group->id]),
+                    fn () => app(\App\Services\GroupAccess\TaskGroupOwnership::class)->validate(
+                        new \App\Models\CrmTask(['assignee_id' => $employee->id, 'branch_group_id' => $group->id, 'status' => 'pending']), $this->admin),
+                ];
+                foreach ($checks as $check) {
+                    $expected = $rights !== [] && $group->id !== $this->a->id;
+                    try {
+                        \DB::transaction($check);
+                        $this->assertFalse($expected, 'Cross-group assignment must be rejected.');
+                    } catch (\Symfony\Component\HttpKernel\Exception\HttpException $error) {
+                        $this->assertTrue($expected);
+                        $this->assertSame(422, $error->getStatusCode());
+                        $this->assertSame('RESPONSIBLE_GROUP_MISMATCH', $error->getMessage());
+                    }
+                }
+            }
+        }
+    }
+
+    public function test_reopening_task_still_requires_group_transfer_without_role_policy(): void
+    {
+        $role = Role::create(['name' => 'Custom assignee', 'slug' => 'custom_reopening_assignee']);
+        $employee = $this->user($role->slug, $this->a);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role->forceFill(['permissions' => []])->save();
+        $task = new \App\Models\CrmTask(['assignee_id' => $employee->id,
+            'branch_group_id' => $this->b->id, 'status' => 'done', 'completed_at' => '2026-10-01 10:00:00']);
+        $task->exists = true;
+        $task->syncOriginal();
+        $task->forceFill(['status' => 'pending', 'completed_at' => null]);
+        try {
+            \DB::transaction(fn () => app(\App\Services\GroupAccess\TaskGroupOwnership::class)->validate($task, $this->admin));
+            $this->fail('Reopening must retain the mandatory group check.');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $error) {
+            $this->assertSame(422, $error->getStatusCode());
+            $this->assertSame('TASK_REOPEN_REQUIRES_GROUP_TRANSFER', $error->getMessage());
+        }
     }
 
     public function test_task_creation_requires_visible_parent_in_the_selected_group(): void

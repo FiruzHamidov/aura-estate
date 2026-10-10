@@ -47,7 +47,7 @@ class KpiModuleService
     public function plans(string $role, ?int $groupId = null): Collection
     {
         $actor = auth()->user();
-        $rop = $actor?->hasRole('rop') ?? false;
+        $rop = $actor?->usesAssignedGroupScope() ?? false;
         if ($rop) $groupId = app(\App\Support\RopGroupAccess::class)->creationGroup($actor, $groupId);
         $base = collect(config('kpi.metrics', []))->map(function (array $cfg, string $metricKey) use ($role) {
             return [
@@ -94,10 +94,10 @@ class KpiModuleService
             $actor = auth()->user();
             if ($actor) {
                 [$actor] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($actor, null, null, $groupId);
-                abort_unless(in_array($actor->role?->slug, ['admin', 'superadmin', 'rop', 'branch_director', 'mop'], true), 403, 'KPI_FORBIDDEN_ROLE_ACTION');
+                abort_unless($actor->hasPermission('kpi.plans.manage') && $actor->hasPermission('kpi.plans.legacy.manage'), 403, 'KPI_FORBIDDEN_ROLE_ACTION');
             }
             $scope = [];
-            if ($actor?->hasRole('rop')) {
+            if ($actor?->usesAssignedGroupScope()) {
                 $groupId = app(\App\Support\RopGroupAccess::class)->creationGroup($actor, $groupId);
                 \App\Models\BranchGroup::query()->whereKey($groupId)->lockForUpdate()->firstOrFail();
                 $scope = ['branch_id' => $actor->branch_id, 'branch_group_id' => $groupId,
@@ -140,7 +140,7 @@ class KpiModuleService
         }
 
         $personalRows = KpiPlan::query()->tap(fn ($query) => $this->scopePlanQuery($query))
-            ->when(auth()->user()?->hasRole('rop'), fn ($query) => $query->where('branch_group_id', $user->branch_group_id))
+            ->when(auth()->user()?->usesAssignedGroupScope(), fn ($query) => $query->where('branch_group_id', $user->branch_group_id))
             ->where('user_id', $userId)
             ->where(function ($q) use ($date) {
                 $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $date->toDateString());
@@ -346,11 +346,13 @@ class KpiModuleService
             $query->whereDate('kp.effective_to', '<=', (string) $filters['effective_to_to']);
         }
 
-        $actor->loadMissing('role');
-        $role = (string) ($actor->role?->slug ?? '');
-        if ($role === 'rop') {
+        abort_unless($actor->hasPermission('kpi.plans.list.view'), 403);
+        if ($actor->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'kp.branch_group_id', 'kp.branch_id');
-        } elseif ($role === 'branch_director') {
+        }
+        if ($actor->hasPermission('kpi.plans.list.scope.all')) {
+            // No additional restriction; the ROP boundary above still applies.
+        } elseif ($actor->hasPermission('kpi.plans.list.scope.branch')) {
             $query->where(function ($scope) use ($actor) {
                 $scope->where(function ($q) use ($actor) {
                     $q->whereNotNull('kp.user_id')->where('u.branch_id', (int) $actor->branch_id);
@@ -360,7 +362,7 @@ class KpiModuleService
                     });
                 });
             });
-        } elseif ($role === 'mop') {
+        } elseif ($actor->hasPermission('kpi.plans.list.scope.group')) {
             $query->where(function ($scope) use ($actor) {
                 $scope->where(function ($q) use ($actor) {
                     $q->whereNotNull('kp.user_id')->where('u.branch_group_id', (int) $actor->branch_group_id);
@@ -371,6 +373,8 @@ class KpiModuleService
                     });
                 });
             });
+        } else {
+            $query->whereRaw('1 = 0');
         }
 
         $paginator = $query->paginate($perPage, ['*'], 'page', $page);
@@ -455,7 +459,7 @@ class KpiModuleService
             $groupId = isset($payload['branch_group_id']) ? (int) $payload['branch_group_id'] : null;
             [$actor] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($actor, null, null, $groupId);
             $this->kpiPlanScopePolicy->ensureCanManageCommonPlan($actor, $payload);
-            if ($actor->hasRole('rop')) {
+            if ($actor->usesAssignedGroupScope()) {
                 $payload['branch_id'] = (int) $actor->branch_id;
             }
             $role = (string) $payload['role'];
@@ -560,17 +564,17 @@ class KpiModuleService
             ->where('report_date', '<', $to->copy()->startOfDay()->addDay()->toDateString());
         $this->applyScope($query, $authUser, $filters);
 
-        return $query->get()->groupBy(fn ($report) => $authUser->hasRole('rop') ? $report->user_id.'|'.$report->branch_group_id.'|'.$report->role_slug : $report->user_id)->map(function (Collection $rows) use ($periodType, $from, $to, $authUser) {
+        return $query->get()->groupBy(fn ($report) => $authUser->usesAssignedGroupScope() ? $report->user_id.'|'.$report->branch_group_id.'|'.$report->role_slug : $report->user_id)->map(function (Collection $rows) use ($periodType, $from, $to, $authUser) {
             $first = $rows->first();
             return [
                 'period_type' => $periodType,
                 'period_start' => $from->toDateString(),
                 'period_end' => $to->toDateString(),
-                ...($authUser->hasRole('rop') ? ['branch_group_id' => $first->branch_group_id, 'role_slug' => $first->role_slug] : []),
+                ...($authUser->usesAssignedGroupScope() ? ['branch_group_id' => $first->branch_group_id, 'role_slug' => $first->role_slug] : []),
                 'user' => [
                     'id' => $first?->user?->id,
                     'name' => $first?->user?->name,
-                    ...($authUser->hasRole('rop') ? [] : ['role_slug' => $first?->user?->role?->slug]),
+                    ...($authUser->usesAssignedGroupScope() ? [] : ['role_slug' => $first?->user?->role?->slug]),
                 ],
                 'metrics' => [
                     'calls_count' => (int) $rows->sum('calls_count'),
@@ -615,7 +619,7 @@ class KpiModuleService
         $ranking = collect($base['ranking'])->map(function (array $row) use ($date, $authUser, $sourceUsers) {
             $userId = (int) ($row['user']['id'] ?? 0);
             $user = $sourceUsers->get($userId);
-            if ($user && $authUser->hasRole('rop')) {
+            if ($user && $authUser->usesAssignedGroupScope()) {
                 $user = clone $user;
                 $user->branch_group_id = $row['branch_group_id'];
                 $user->branch_id = $authUser->branch_id;
@@ -665,10 +669,14 @@ class KpiModuleService
 
     public function updateTelegramConfig(array $payload): KpiTelegramReportConfig
     {
-        $config = $this->telegramConfig();
-        $config->fill($payload)->save();
+        return DB::transaction(function () use ($payload) {
+            [$actor] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(auth()->user(), null, null, null);
+            abort_unless($actor->hasPermission('kpi.operations.manage'), 403, 'KPI_FORBIDDEN_ROLE_ACTION');
+            $config = $this->telegramConfig();
+            $config->fill($payload)->save();
 
-        return $config->fresh();
+            return $config->fresh();
+        });
     }
 
     public function periodContract(User $authUser, Carbon $from, Carbon $to, array $filters): Collection
@@ -710,6 +718,7 @@ class KpiModuleService
 
     public function myDailyProgress(User $authUser, Carbon $date): array
     {
+        abort_unless($authUser->hasPermission('kpi.reports.view'), 403, 'KPI_FORBIDDEN_SCOPE');
         $report = DailyReport::query()
             ->where('user_id', $authUser->id)
             ->whereDate('report_date', $date->toDateString())
@@ -903,15 +912,20 @@ class KpiModuleService
             $query->where('users.branch_group_id', (int) $filters['branch_group_id']);
         }
 
-        match ($actor->role?->slug) {
-            'admin', 'superadmin', 'owner' => null,
-            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'users.branch_group_id', 'users.branch_id')->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop'])),
-            'branch_director' => $query->where('users.branch_id', (int) $actor->branch_id),
-            'mop' => $query
-                ->where('users.branch_group_id', (int) $actor->branch_group_id)
-                ->whereHas('role', fn (Builder $roleQ) => $roleQ->whereIn('slug', ['agent', 'intern'])),
-            default => $query->where('users.id', (int) $actor->id),
-        };
+        if ($actor->usesAssignedGroupScope()) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'users.branch_group_id', 'users.branch_id')
+                ->whereHas('role', fn (Builder $roles) => $roles->withPermission('kpi.subject.assigned_groups'));
+        }
+        if ($actor->hasPermission('kpi.plans.scope.all')) {
+            // Every branch is available, subject to the ROP boundary above.
+        } elseif ($actor->hasPermission('kpi.plans.scope.branch')) {
+            $query->where('users.branch_id', (int) $actor->branch_id);
+        } elseif ($actor->hasPermission('kpi.plans.scope.group')) {
+            $query->where('users.branch_group_id', (int) $actor->branch_group_id)
+                ->whereHas('role', fn (Builder $roles) => $roles->withPermission('kpi.subject.group_selection'));
+        } else {
+            $query->whereRaw('1 = 0');
+        }
 
         $perPage = max(1, min(200, (int) ($filters['per_page'] ?? 20)));
         $page = max(1, (int) ($filters['page'] ?? 1));
@@ -940,7 +954,7 @@ class KpiModuleService
     {
         $actor = User::query()->with('role')->findOrFail($actor->id);
         $this->kpiPlanScopePolicy->ensureCanManageCommonPlan($actor, $payload);
-        if ($actor->hasRole('rop')) {
+        if ($actor->usesAssignedGroupScope()) {
             $payload['branch_id'] = (int) $actor->branch_id;
         }
         $role = (string) $payload['role'];
@@ -1015,13 +1029,12 @@ class KpiModuleService
                 $date = (string) Arr::get($row, 'date');
                 $targetUser = User::query()->with('role')->findOrFail($employeeId);
                 $report = DailyReport::query()->where('user_id', $employeeId)->whereDate('report_date', $date)->lockForUpdate()->first();
-                if ($authUser->hasRole('rop') && $report) {
+                if ($authUser->usesAssignedGroupScope() && $report) {
                     app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $report);
-                    abort_unless(in_array($report->role_slug, ['agent', 'mop'], true), 404, 'NOT_FOUND');
-                } else {
-                    $this->ensureCanUpsertDailyForUser($authUser, $targetUser);
+                    abort_unless($report->historicalRole?->hasPermission('kpi.subject.assigned_groups'), 404, 'NOT_FOUND');
                 }
-                if ($authUser->hasRole('rop')) {
+                $this->ensureCanUpsertDailyForUser($authUser, $targetUser, $report);
+                if ($authUser->usesAssignedGroupScope()) {
                     abort_if(! $report && $date !== now(self::TZ)->toDateString(), 422, 'HISTORICAL_GROUP_UNCLASSIFIED');
                     $groupId = $report?->branch_group_id ?? $targetUser->branch_group_id;
                     foreach (['day', 'week', 'month'] as $periodType) {
@@ -1030,7 +1043,7 @@ class KpiModuleService
                 }
 
                 $writePayload = [
-                    'role_slug' => (string) ($authUser->hasRole('rop') ? ($report?->role_slug ?? $targetUser->role?->slug) : (Arr::get($row, 'role') ?: $targetUser->role?->slug)),
+                    'role_slug' => (string) ($authUser->usesAssignedGroupScope() ? ($report?->role_slug ?? $targetUser->role?->slug) : (Arr::get($row, 'role') ?: $targetUser->role?->slug)),
                     'ad_count' => (int) Arr::get($row, 'ads', Arr::get($row, 'advertisement', 0)),
                     'calls_count' => (int) Arr::get($row, 'calls', Arr::get($row, 'call', 0)),
                     'new_clients_count' => (int) Arr::get($row, 'kabul', 0),
@@ -1045,7 +1058,7 @@ class KpiModuleService
                     $writePayload['sales_count'] = (float) Arr::get($row, 'sales', Arr::get($row, 'deal', 0));
                 }
 
-                if ($authUser->hasRole('rop') && $report) {
+                if ($authUser->usesAssignedGroupScope() && $report) {
                     $aliases = ['ad_count' => ['ads', 'advertisement'], 'calls_count' => ['calls', 'call'],
                         'new_clients_count' => ['kabul'], 'shows_count' => ['shows', 'show'], 'new_properties_count' => ['objects', 'lead'],
                         'deposits_count' => ['deposit'], 'deals_count' => ['sales', 'deal'], 'sales_count' => ['sales', 'deal'], 'comment' => ['comment']];
@@ -1058,7 +1071,7 @@ class KpiModuleService
                 // Date casts may persist a midnight timestamp (notably on SQLite).
                 // Match the calendar day so a retry updates the same report.
                 $report ??= new DailyReport(['user_id' => $employeeId, 'report_date' => $date]);
-                if (! $report->exists && $authUser->hasRole('rop')) $report->branch_group_id = $targetUser->branch_group_id;
+                if (! $report->exists && $authUser->usesAssignedGroupScope()) $report->branch_group_id = $targetUser->branch_group_id;
                 $report->fill($writePayload)->save();
 
                 $saved[] = [
@@ -1156,11 +1169,11 @@ class KpiModuleService
         $globalSourceError = false;
 
         $data = collect($paginator->items())
-            ->groupBy(fn ($row) => $authUser->hasRole('rop') ? $row->user_id.'|'.$row->branch_group_id.'|'.$row->role_slug : $row->user_id)
+            ->groupBy(fn ($row) => $authUser->usesAssignedGroupScope() ? $row->user_id.'|'.$row->branch_group_id.'|'.$row->role_slug : $row->user_id)
             ->map(function (Collection $rows) use ($authUser, $periodType, $from, $to, $mapping, $targetMap, $weightMap, $withBreakdown, &$globalSourceError) {
                 $first = $rows->first();
                 $user = $first?->user;
-                if ($authUser->hasRole('rop') && $user) {
+                if ($authUser->usesAssignedGroupScope() && $user) {
                     $user = clone $user;
                     $user->branch_group_id = $first->branch_group_id;
                     $user->branch_id = $authUser->branch_id;
@@ -1301,7 +1314,7 @@ class KpiModuleService
         $perPage = (int) ($filters['per_page'] ?? 50);
         $page = max(1, (int) ($filters['page'] ?? 1));
 
-        $usersPaginator = ($authUser->hasRole('rop') ? $this->historicalKpiUsersQuery($authUser, $filters, $from, $to) : $this->weeklyUsersScopeQuery($authUser, $filters))
+        $usersPaginator = ($authUser->usesAssignedGroupScope() ? $this->historicalKpiUsersQuery($authUser, $filters, $from, $to) : $this->weeklyUsersScopeQuery($authUser, $filters))
             ->orderBy('users.name')
             ->paginate($perPage, ['*'], 'page', $page);
         $userIds = collect($usersPaginator->items())->pluck('id')->map(fn ($id) => (int) $id)->values();
@@ -1311,9 +1324,9 @@ class KpiModuleService
             ->whereDate('report_date', '>=', $from->toDateString())
             ->whereDate('report_date', '<=', $to->toDateString())
             ->whereIn('user_id', $userIds->all())
-            ->when($authUser->hasRole('rop'), fn (Builder $q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'daily_reports.branch_group_id'))
+            ->when($authUser->usesAssignedGroupScope(), fn (Builder $q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'daily_reports.branch_group_id'))
             ->get()
-            ->groupBy(fn ($row) => $authUser->hasRole('rop') ? $row->user_id.'|'.$row->branch_group_id : $row->user_id);
+            ->groupBy(fn ($row) => $authUser->usesAssignedGroupScope() ? $row->user_id.'|'.$row->branch_group_id : $row->user_id);
 
         // Do not call DailyReportService::autoMetrics() for every user/day.  That
         // method issues several queries per invocation, which made a 50-user
@@ -1335,9 +1348,9 @@ class KpiModuleService
         $preloadedSalesByUserDate = $this->preloadSalesCreditsByUserDate($userIds->all(), $from, $to, $authUser);
 
         $data = collect($usersPaginator->items())->map(function (User $user) use ($authUser, $reports, $periodType, $from, $to, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, $preloadedSalesByUserDate, $autoMetricsByUserDate, $planResolutions, $lockedScopes, &$globalSourceError, &$planTraceRows) {
-            $contextKey = $authUser->hasRole('rop') ? $user->id.'|'.$user->branch_group_id : $user->id;
+            $contextKey = $authUser->usesAssignedGroupScope() ? $user->id.'|'.$user->branch_group_id : $user->id;
             $rows = collect($reports->get($contextKey, collect()));
-            if ($authUser->hasRole('rop')) $rows = $rows->where('role_slug', $user->role?->slug)->values();
+            if ($authUser->usesAssignedGroupScope()) $rows = $rows->where('role_slug', $user->role?->slug)->values();
             $autoByDate = $autoMetricsByUserDate[$contextKey] ?? [];
             $sourceErrors = [];
             $targetResolution = $planResolutions[$user->id.'|'.$user->branch_group_id.'|'.$user->role?->slug] ?? $this->defaultPeriodTargetMap($defaultTargetMap, $from);
@@ -1542,8 +1555,8 @@ class KpiModuleService
             $select[] = 'sale_agent_id';
         }
 
-        if ($authUser->hasRole('rop')) $select[] = 'branch_group_id';
-        $soldProperties = DB::table('properties')->when($authUser->hasRole('rop'), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id'))
+        if ($authUser->usesAssignedGroupScope()) $select[] = 'branch_group_id';
+        $soldProperties = DB::table('properties')->when($authUser->usesAssignedGroupScope(), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id'))
             ->select($select)
             ->where('moderation_status', 'sold')
             ->whereBetween('sold_at', [
@@ -1572,7 +1585,7 @@ class KpiModuleService
                 if (! isset($targetUsers[(int) $agentId])) {
                     continue;
                 }
-                $key = $authUser->hasRole('rop') ? $agentId.'|'.$property->branch_group_id : (int) $agentId;
+                $key = $authUser->usesAssignedGroupScope() ? $agentId.'|'.$property->branch_group_id : (int) $agentId;
                 $result[$key][$dayKey] = round((float) ($result[$key][$dayKey] ?? 0.0) + (float) $credit, 4);
             }
         }
@@ -1601,35 +1614,35 @@ class KpiModuleService
         $localDate = static fn ($value): string => Carbon::parse((string) $value, 'UTC')->setTimezone(self::TZ)->toDateString();
 
         if (Schema::hasTable('crm_tasks') && Schema::hasTable('crm_task_types')) {
-            $tasks = DB::table('crm_tasks')->when($authUser->hasRole('rop'), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'crm_tasks.branch_group_id'))
+            $tasks = DB::table('crm_tasks')->when($authUser->usesAssignedGroupScope(), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'crm_tasks.branch_group_id'))
                 ->join('crm_task_types', 'crm_task_types.id', '=', 'crm_tasks.task_type_id')
                 ->select(['crm_tasks.assignee_id', 'crm_tasks.completed_at', 'crm_task_types.code'])
                 ->whereIn('crm_tasks.assignee_id', $userIds)
                 ->where('crm_tasks.status', 'done')
                 ->whereIn('crm_task_types.code', ['CALL', 'AD_PUBLICATION', 'AD_CREATE'])
                 ->whereBetween('crm_tasks.completed_at', [$start, $end])
-                ->when($authUser->hasRole('rop'), fn ($q) => $q->addSelect('crm_tasks.branch_group_id'))->get();
+                ->when($authUser->usesAssignedGroupScope(), fn ($q) => $q->addSelect('crm_tasks.branch_group_id'))->get();
             foreach ($tasks as $task) {
                 $metric = $task->code === 'CALL' ? 'calls_count' : 'ad_count';
-                $put($result, $authUser->hasRole('rop') ? (int) $task->assignee_id.'|'.$task->branch_group_id : (int) $task->assignee_id, $localDate($task->completed_at), $metric, 1);
+                $put($result, $authUser->usesAssignedGroupScope() ? (int) $task->assignee_id.'|'.$task->branch_group_id : (int) $task->assignee_id, $localDate($task->completed_at), $metric, 1);
             }
         }
 
         if (Schema::hasTable('bookings')) {
-            foreach (DB::table('bookings')->when($authUser->hasRole('rop'), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'bookings.branch_group_id'))->select(['agent_id', 'start_time'])
-                ->whereIn('agent_id', $userIds)->whereBetween('start_time', [$start, $end])->when($authUser->hasRole('rop'), fn ($q) => $q->addSelect('bookings.branch_group_id'))->get() as $booking) {
+            foreach (DB::table('bookings')->when($authUser->usesAssignedGroupScope(), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'bookings.branch_group_id'))->select(['agent_id', 'start_time'])
+                ->whereIn('agent_id', $userIds)->whereBetween('start_time', [$start, $end])->when($authUser->usesAssignedGroupScope(), fn ($q) => $q->addSelect('bookings.branch_group_id'))->get() as $booking) {
                 $date = $localDate($booking->start_time);
-                $put($result, $authUser->hasRole('rop') ? (int) $booking->agent_id.'|'.$booking->branch_group_id : (int) $booking->agent_id, $date, 'shows_count', 1);
-                $put($result, $authUser->hasRole('rop') ? (int) $booking->agent_id.'|'.$booking->branch_group_id : (int) $booking->agent_id, $date, 'meetings_count', 1);
+                $put($result, $authUser->usesAssignedGroupScope() ? (int) $booking->agent_id.'|'.$booking->branch_group_id : (int) $booking->agent_id, $date, 'shows_count', 1);
+                $put($result, $authUser->usesAssignedGroupScope() ? (int) $booking->agent_id.'|'.$booking->branch_group_id : (int) $booking->agent_id, $date, 'meetings_count', 1);
             }
         }
 
         if (Schema::hasTable('clients')) {
-            foreach (DB::table('clients')->when($authUser->hasRole('rop'), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'clients.branch_group_id'))->select(['created_by', 'responsible_agent_id', 'created_at'])
+            foreach (DB::table('clients')->when($authUser->usesAssignedGroupScope(), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'clients.branch_group_id'))->select(['created_by', 'responsible_agent_id', 'created_at'])
                 ->whereBetween('created_at', [$start, $end])
                 ->where(function ($q) use ($userIds) {
                     $q->whereIn('created_by', $userIds)->orWhereIn('responsible_agent_id', $userIds);
-                })->when($authUser->hasRole('rop'), fn ($q) => $q->addSelect('clients.branch_group_id'))->get() as $client) {
+                })->when($authUser->usesAssignedGroupScope(), fn ($q) => $q->addSelect('clients.branch_group_id'))->get() as $client) {
                 $clientUserIds = array_values(array_unique([
                     (int) $client->created_by,
                     (int) $client->responsible_agent_id,
@@ -1638,13 +1651,13 @@ class KpiModuleService
                     if ($userId <= 0 || ! in_array($userId, $userIds, true)) {
                         continue;
                     }
-                    $put($result, $authUser->hasRole('rop') ? $userId.'|'.$client->branch_group_id : $userId, $localDate($client->created_at), 'new_clients_count', 1);
+                    $put($result, $authUser->usesAssignedGroupScope() ? $userId.'|'.$client->branch_group_id : $userId, $localDate($client->created_at), 'new_clients_count', 1);
                 }
             }
         }
 
         if (Schema::hasTable('properties')) {
-            foreach (DB::table('properties')->when($authUser->hasRole('rop'), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id'))->select(['created_by', 'agent_id', 'created_at'])
+            foreach (DB::table('properties')->when($authUser->usesAssignedGroupScope(), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id'))->select(['created_by', 'agent_id', 'created_at'])
                 ->whereBetween('created_at', [$start, $end])
                 ->where(function ($q) use ($userIds) {
                     $q->whereIn('created_by', $userIds)->orWhere(function ($legacy) use ($userIds) {
@@ -1652,11 +1665,11 @@ class KpiModuleService
                             $creatorMissing->whereNull('created_by')->orWhere('created_by', 0);
                         });
                     });
-                })->when($authUser->hasRole('rop'), fn ($q) => $q->addSelect('properties.branch_group_id'))->get() as $property) {
+                })->when($authUser->usesAssignedGroupScope(), fn ($q) => $q->addSelect('properties.branch_group_id'))->get() as $property) {
                 $creator = (int) $property->created_by;
                 $userId = $creator > 0 ? $creator : (int) $property->agent_id;
                 if ($userId > 0) {
-                    $put($result, $authUser->hasRole('rop') ? $userId.'|'.$property->branch_group_id : $userId, $localDate($property->created_at), 'new_properties_count', 1);
+                    $put($result, $authUser->usesAssignedGroupScope() ? $userId.'|'.$property->branch_group_id : $userId, $localDate($property->created_at), 'new_properties_count', 1);
                 }
             }
         }
@@ -1697,7 +1710,7 @@ class KpiModuleService
                 if ($candidate->isNotEmpty()) { $common = $candidate; break; }
             }
             $effective = $common->concat($plans->filter(fn (KpiPlan $plan) => (int) $plan->user_id === (int) $user->id
-                && (! auth()->user()?->hasRole('rop') || ((int) $plan->branch_group_id === (int) $user->branch_group_id && $plan->role_slug === $user->role?->slug))));
+                && (! auth()->user()?->usesAssignedGroupScope() || ((int) $plan->branch_group_id === (int) $user->branch_group_id && $plan->role_slug === $user->role?->slug))));
             foreach ($effective as $plan) {
                 $key = (string) $plan->metric_key;
                 $resolution['targets'][$key] = (float) $plan->daily_plan;
@@ -1889,16 +1902,25 @@ class KpiModuleService
             ->with(['role:id,slug', 'branch:id,name', 'branchGroup:id,branch_id,name']);
     }
 
+    public function reportUsersQuery(User $actor): Builder
+    {
+        $query = User::query()->select(['users.id', 'users.name', 'users.role_id', 'users.branch_id', 'users.branch_group_id', 'users.status'])
+            ->with(['role:id,name,slug', 'branch:id,name', 'branchGroup:id,branch_id,name'])
+            ->where('users.status', User::STATUS_ACTIVE)
+            ->whereHas('role', fn (Builder $roles) => $roles->withPermission('kpi.subject.report_selection'));
+        $this->applyReadScope($query, $actor, 'users');
+        return $query;
+    }
+
     private function weeklyUsersScopeQuery(User $authUser, array $filters): Builder
     {
         $authUser->loadMissing('role');
-        $includedTargetRoles = ['agent', 'intern', 'mop'];
         $includeInactive = (bool) ($filters['include_inactive'] ?? false);
 
         $query = User::query()
             ->select('users.*')
             ->with(['role:id,slug', 'branch:id,name', 'branchGroup:id,branch_id,name'])
-            ->whereHas('role', fn (Builder $q) => $q->whereIn('slug', $includedTargetRoles));
+            ->whereHas('role', fn (Builder $q) => $q->withPermission('kpi.subject.period_reports'));
 
         if (! $includeInactive) {
             $query->where('users.status', '!=', 'inactive');
@@ -1927,13 +1949,7 @@ class KpiModuleService
             $query->whereHas('role', fn (Builder $q) => $q->where('slug', (string) $filters['role']));
         }
 
-        match ($authUser->role?->slug) {
-            'admin', 'superadmin', 'owner' => null,
-            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'users.branch_group_id', 'users.branch_id')->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop'])),
-            'branch_director' => $query->where('users.branch_id', (int) $authUser->branch_id),
-            'mop' => $query->where('users.branch_group_id', (int) $authUser->branch_group_id),
-            default => $query->where('users.id', (int) $authUser->id),
-        };
+        $this->applyReadScope($query, $authUser, 'users');
 
         return $query;
     }
@@ -2156,7 +2172,7 @@ class KpiModuleService
             ->where('period_type', $periodType)
             ->where('period_key', $periodKey);
         $actor = auth()->user();
-        if ($actor?->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'kpi_period_locks.branch_group_id', 'kpi_period_locks.branch_id');
+        if ($actor?->usesAssignedGroupScope()) app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'kpi_period_locks.branch_group_id', 'kpi_period_locks.branch_id');
 
         if (! empty($filters['branch_id'])) {
             $query->where('branch_id', (int) $filters['branch_id']);
@@ -2174,7 +2190,7 @@ class KpiModuleService
             return false;
         }
 
-        if (auth()->user()?->hasRole('rop')) {
+        if (auth()->user()?->usesAssignedGroupScope()) {
             return $reportGroupId !== null && $this->isPeriodLocked($periodType, $periodStart, ['branch_group_id' => $reportGroupId]);
         }
 
@@ -2205,8 +2221,8 @@ class KpiModuleService
     private function applyScope(Builder $query, User $authUser, array $filters): void
     {
         $authUser->loadMissing('role');
-        $historical = $authUser->hasRole('rop');
-        if ($historical) $query->whereIn('daily_reports.role_slug', ['agent', 'mop']);
+        $historical = $authUser->usesAssignedGroupScope();
+        if ($historical) $query->whereHas('historicalRole', fn (Builder $roles) => $roles->withPermission('kpi.subject.assigned_groups'));
         $includeInactive = (bool) ($filters['include_inactive'] ?? false);
 
         if (! $includeInactive) {
@@ -2243,13 +2259,35 @@ class KpiModuleService
                 : $query->whereHas('user.role', fn (Builder $q) => $q->where('slug', (string) $filters['role']));
         }
 
-        match ($authUser->role?->slug) {
-            'admin', 'superadmin', 'owner' => null,
-            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'daily_reports.branch_group_id'),
-            'branch_director' => $query->whereHas('user', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id)),
-            'mop' => $query->whereHas('user', fn (Builder $q) => $q->where('branch_group_id', $authUser->branch_group_id)),
-            default => $query->where('user_id', $authUser->id),
-        };
+        $this->applyReadScope($query, $authUser, 'reports');
+    }
+
+    private function applyReadScope(Builder $query, User $actor, string $kind): void
+    {
+        abort_unless($actor->hasPermission('kpi.reports.view'), 403, 'KPI_FORBIDDEN_SCOPE');
+        $historical = $actor->usesAssignedGroupScope();
+        $relation = $kind === 'reports' ? 'user' : 'assignee';
+        $userColumn = match ($kind) { 'users' => 'users.id', 'reports' => 'daily_reports.user_id', default => 'crm_tasks.assignee_id' };
+        $groupColumn = match ($kind) { 'users' => 'users.branch_group_id', 'reports' => 'daily_reports.branch_group_id', default => 'crm_tasks.branch_group_id' };
+        if ($historical) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $actor, $groupColumn);
+            if ($kind === 'users') $query->whereHas('role', fn (Builder $roles) => $roles->withPermission('kpi.subject.assigned_groups'));
+        }
+        if ($actor->hasPermission('kpi.reports.scope.all')) return;
+        if ($actor->hasPermission('kpi.reports.scope.branch')) {
+            if (! $actor->branch_id) { $query->whereRaw('1 = 0'); return; }
+            if ($historical) return; // Assigned historical groups already belong to the actor's branch.
+            $kind === 'users' ? $query->where('users.branch_id', $actor->branch_id)
+                : $query->whereHas($relation, fn (Builder $q) => $q->where('branch_id', $actor->branch_id));
+            return;
+        }
+        if ($actor->hasPermission('kpi.reports.scope.group')) {
+            if (! $actor->branch_group_id) { $query->whereRaw('1 = 0'); return; }
+            ($historical || $kind === 'users') ? $query->where($groupColumn, $actor->branch_group_id)
+                : $query->whereHas($relation, fn (Builder $q) => $q->where('branch_group_id', $actor->branch_group_id));
+            return;
+        }
+        $actor->hasPermission('kpi.reports.scope.own') ? $query->where($userColumn, $actor->id) : $query->whereRaw('1 = 0');
     }
 
     private function metricProgress(float $fact, float $target): array
@@ -2343,18 +2381,27 @@ class KpiModuleService
 
         $authUser->loadMissing('role');
 
-        match ($authUser->role?->slug) {
-            'admin', 'superadmin', 'owner' => null,
-            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'crm_tasks.branch_group_id'),
-            'branch_director' => $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id)),
-            'mop' => $query->whereHas('assignee', fn (Builder $q) => $q->where('branch_group_id', $authUser->branch_group_id)),
-            default => $query->where('assignee_id', $authUser->id),
-        };
+        $this->applyReadScope($query, $authUser, 'tasks');
     }
 
-    private function ensureCanUpsertDailyForUser(User $authUser, User $targetUser): void
+    private function ensureCanUpsertDailyForUser(User $authUser, User $targetUser, ?DailyReport $report = null): void
     {
-        $this->ensurePlanScopeAccess($authUser, $targetUser);
+        abort_unless($authUser->hasPermission('kpi.daily.input.manage'), 403, 'KPI_FORBIDDEN_ROLE_ACTION');
+        $branchId = $targetUser->branch_id;
+        $groupId = $targetUser->branch_group_id;
+        if ($authUser->usesAssignedGroupScope()) {
+            if ($report) {
+                $groupId = $report->branch_group_id;
+                $branchId = \App\Models\BranchGroup::query()->whereKey($groupId)->value('branch_id');
+            } else {
+                abort_unless(app(\App\Support\RopGroupAccess::class)->employees($authUser, 'kpi.subject.assigned_groups')->whereKey($targetUser->id)->exists(), 403, 'KPI_FORBIDDEN_SCOPE');
+            }
+        }
+        $allowed = $authUser->hasPermission('kpi.daily.input.scope.all')
+            || ($authUser->hasPermission('kpi.daily.input.scope.branch') && $authUser->branch_id && (int) $authUser->branch_id === (int) $branchId)
+            || ($authUser->hasPermission('kpi.daily.input.scope.group') && $authUser->branch_group_id && (int) $authUser->branch_group_id === (int) $groupId)
+            || ($authUser->hasPermission('kpi.daily.input.scope.own') && (int) $authUser->id === (int) $targetUser->id);
+        abort_unless($allowed, 403, 'KPI_FORBIDDEN_SCOPE');
     }
 
     private function strictPeriodRows(User $authUser, string $periodType, Carbon $from, Carbon $to, array $filters): array
@@ -2368,7 +2415,7 @@ class KpiModuleService
         $reportedUserIds = DailyReport::query()
             ->whereDate('report_date', '>=', $from->toDateString())
             ->whereDate('report_date', '<=', $to->toDateString())
-            ->when($authUser->hasRole('rop'), fn (Builder $q) => $this->applyScope($q, $authUser, $filters))
+            ->when($authUser->usesAssignedGroupScope(), fn (Builder $q) => $this->applyScope($q, $authUser, $filters))
             ->when(! empty($filters['agent_id']), fn (Builder $q) => $q->where('user_id', (int) $filters['agent_id']))
             ->pluck('user_id')
             ->map(fn ($id) => (int) $id)
@@ -2391,7 +2438,7 @@ class KpiModuleService
                 return [
                     $periodType === 'week' ? 'week' : 'month' => $periodType === 'week' ? (int) $from->isoWeek() : (int) $from->month,
                     'year' => $periodType === 'week' ? (int) $from->isoWeekYear() : (int) $from->year,
-                    ...($authUser->hasRole('rop') ? ['branch_group_id' => $row['branch_group_id'] ?? null, 'role' => $row['role'] ?? null] : []),
+                    ...($authUser->usesAssignedGroupScope() ? ['branch_group_id' => $row['branch_group_id'] ?? null, 'role' => $row['role'] ?? null] : []),
                     'employee_id' => (int) ($row['employee_id'] ?? 0),
                     'employee_name' => (string) ($row['employee_name'] ?? ''),
                     'objects' => $this->normalizeNumber((float) ($row['objects'] ?? 0)),
@@ -2412,27 +2459,18 @@ class KpiModuleService
 
     private function resolveTargetUser(User $authUser, ?int $targetUserId): User
     {
+        abort_unless($authUser->hasPermission('kpi.reports.view'), 403, 'KPI_FORBIDDEN_SCOPE');
+        // Personal progress remains available even before a branch/group is assigned.
         if ($targetUserId === null || $targetUserId === (int) $authUser->id) {
             return $authUser;
         }
 
         $target = User::query()->with('role')->findOrFail($targetUserId);
-        $authUser->loadMissing('role');
-        $role = (string) ($authUser->role?->slug ?? '');
+        $visible = User::query()->whereKey($target->id);
+        $this->applyReadScope($visible, $authUser, 'users');
+        abort_unless($visible->exists(), 403, 'KPI_FORBIDDEN_SCOPE');
 
-        if (in_array($role, ['admin', 'superadmin', 'owner'], true)) {
-            return $target;
-        }
-
-        if (in_array($role, ['rop', 'branch_director'], true) && (int) $target->branch_id === (int) $authUser->branch_id) {
-            return $target;
-        }
-
-        if ($role === 'mop' && (int) $target->branch_group_id === (int) $authUser->branch_group_id) {
-            return $target;
-        }
-
-        abort(403, 'Forbidden.');
+        return $target;
     }
 
     private function scopePlanQuery(\Illuminate\Database\Eloquent\Builder $query): void
@@ -2456,15 +2494,7 @@ class KpiModuleService
 
         $scopes = [];
 
-        if (in_array($role, ['agent', 'intern'], true)) {
-            if ($branchGroupId !== null) {
-                $scopes[] = ['branch_group_id' => $branchGroupId, 'branch_id' => $branchId];
-            }
-            if ($branchId !== null) {
-                $scopes[] = ['branch_group_id' => null, 'branch_id' => $branchId];
-            }
-            $scopes[] = ['branch_group_id' => null, 'branch_id' => null];
-        } elseif ($role === 'mop') {
+        if (app(KpiRoleCatalog::class)->allowsGroupTemplates($role)) {
             if ($branchGroupId !== null) {
                 $scopes[] = ['branch_group_id' => $branchGroupId, 'branch_id' => $branchId];
             }

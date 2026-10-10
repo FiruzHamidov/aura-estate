@@ -20,12 +20,6 @@ use Illuminate\Validation\Rule;
 
 class UserController extends Controller
 {
-    private const REPORT_AGENT_ROLE_SLUGS = ['agent', 'intern', 'rop', 'mop'];
-    private const PUBLIC_AGENT_ROLE_SLUGS = ['agent', 'mop'];
-    private const HR_EMPLOYEE_ROLE_SLUGS = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'branch_director'];
-    private const HR_EDITABLE_ROLE_SLUGS = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'external_agent', 'rop', 'branch_director', 'client'];
-    private const HR_CREATABLE_ROLE_SLUGS = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop'];
-    private const ROP_EDITABLE_ROLE_SLUGS = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'external_agent', 'rop', 'client'];
 
     private function authUser(): User
     {
@@ -44,77 +38,24 @@ class UserController extends Controller
         return $user?->role?->slug;
     }
 
-    private function isPrivilegedRole(?string $roleSlug): bool
-    {
-        return in_array($roleSlug, ['superadmin', 'admin', 'marketing', 'hr'], true);
-    }
-
-    private function isBranchScopedManager(?string $roleSlug): bool
-    {
-        return in_array($roleSlug, ['branch_director', 'rop'], true);
-    }
-
-    private function isBranchScopedRole(?string $roleSlug): bool
-    {
-        return in_array($roleSlug, ['branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern'], true);
-    }
-
-    private function isBranchGroupScopedRole(?string $roleSlug): bool
-    {
-        return in_array($roleSlug, ['mop'], true);
-    }
-
     private function visibleUsersQuery(User $authUser, bool $includeUnassigned = false, bool $includeClients = true)
     {
-        $roleSlug = $this->roleSlug($authUser);
-
         $query = User::query()->with(['role', 'branch', 'branchGroup']);
-
-        if ($this->isPrivilegedRole($roleSlug)) {
-            return $query;
+        if ($authUser->usesAssignedGroupScope()) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'users.branch_group_id', 'users.branch_id');
+            $query->whereHas('role', fn (Builder $roles) => $roles->withPermission('users.subject.team'));
         }
-
-        if ($roleSlug === 'rop') {
-            return app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'users.branch_group_id', 'users.branch_id')
-                ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop', 'intern']));
-        }
-
-        // Clients do not belong to branches. This does not expand employee access.
-        if ($this->isBranchScopedManager($roleSlug) && $includeClients) {
-            return $query->where(function (Builder $scope) use ($authUser, $includeUnassigned) {
-                $scope->whereHas('role', fn (Builder $roles) => $roles->where('slug', 'client'));
-                if (! empty($authUser->branch_id)) {
-                    $scope->orWhere('branch_id', $authUser->branch_id);
-                    if ($includeUnassigned) $scope->orWhereNull('branch_id');
-                }
-            });
-        }
-
-        if ($roleSlug === 'mop') {
-            if (empty($authUser->branch_id)) {
-                return $query->whereRaw('1 = 0');
+        if ($authUser->hasPermission('users.scope.all')) return $query;
+        return $query->where(function (Builder $scope) use ($authUser, $includeUnassigned, $includeClients) {
+            $scope->whereRaw('1 = 0');
+            if ($includeClients && $authUser->hasPermission('users.clients.view')) {
+                $scope->orWhereHas('role', fn (Builder $roles) => $roles->where('slug', 'client'));
             }
-
-            return $query->where('branch_id', $authUser->branch_id);
-        }
-
-        if ($roleSlug === 'agent' && ! empty($authUser->branch_id)) {
-            return $query->where('branch_id', $authUser->branch_id);
-        }
-
-        if (! $this->isBranchScopedManager($roleSlug) || empty($authUser->branch_id)) {
-            return $query->whereRaw('1 = 0');
-        }
-
-        $query->where(function (Builder $branchQuery) use ($authUser, $includeUnassigned) {
-            $branchQuery->where('branch_id', $authUser->branch_id);
-
-            if ($includeUnassigned) {
-                $branchQuery->orWhereNull('branch_id');
+            if ($authUser->hasPermission('users.scope.branch') && !empty($authUser->branch_id)) {
+                $scope->orWhere('branch_id', $authUser->branch_id);
+                if ($includeUnassigned && $authUser->hasPermission('users.unassigned.view')) $scope->orWhereNull('branch_id');
             }
         });
-
-        return $query;
     }
 
     private function applyStatusFilter(Builder $query, string $status): Builder
@@ -179,7 +120,7 @@ class UserController extends Controller
             $query->where('email', 'like', '%'.trim($validated['email']).'%');
         }
 
-        if ($this->isPrivilegedRole($this->roleSlug($authUser))) {
+        if ($authUser->hasPermission('users.scope.all')) {
             if (! empty($validated['branch_id'])) {
                 $query->where('branch_id', $validated['branch_id']);
             }
@@ -190,7 +131,7 @@ class UserController extends Controller
 
             // Variant A: when group filter is set for branch-scoped managers,
             // unassigned users (branch_id IS NULL) are always excluded.
-            if ($includeUnassigned && $this->isBranchScopedManager($this->roleSlug($authUser)) && ! empty($authUser->branch_id)) {
+            if ($includeUnassigned && $authUser->hasPermission('users.scope.branch') && ! empty($authUser->branch_id)) {
                 $query->where('branch_id', $authUser->branch_id);
             }
         }
@@ -204,7 +145,7 @@ class UserController extends Controller
         }
 
         if (! empty($validated['report_agents'])) {
-            $query->whereHas('role', fn ($roleQuery) => $roleQuery->whereIn('slug', self::REPORT_AGENT_ROLE_SLUGS));
+            $query->whereHas('role', fn ($roleQuery) => $roleQuery->withPermission('users.subject.report_selection'));
         }
 
         if ($applyStatusFilter && ! empty($validated['status']) && $validated['status'] !== 'all') {
@@ -238,69 +179,59 @@ class UserController extends Controller
             ->whereKey($targetUser->id)
             ->exists();
 
-        abort_unless($allowed, $authUser->hasRole('rop') ? 404 : 403, 'Forbidden');
-    }
-
-    private function allowedRoleSlugsForActor(User $authUser): ?array
-    {
-        return match ($this->roleSlug($authUser)) {
-            'superadmin', 'admin' => null,
-            'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
-            'hr' => [...self::HR_CREATABLE_ROLE_SLUGS, 'client'],
-            'rop' => ['mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
-            'branch_director' => ['mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
-            default => [],
-        };
+        abort_unless($allowed, $authUser->usesAssignedGroupScope() ? 404 : 403, 'Forbidden');
     }
 
     private function authorizeHrCreationRole(User $authUser, ?Role $targetRole): void
     {
-        if ($this->roleSlug($authUser) !== 'hr') {
+        if (!$authUser->hasPermission('users.manage_hr_roles')) {
             return;
         }
 
-        abort_unless($targetRole && in_array($targetRole->slug, self::HR_CREATABLE_ROLE_SLUGS, true), 422, 'HR может создавать сотрудников только до уровня РОП включительно.');
+        abort_unless($targetRole && $targetRole->hasPermission('users.subject.hr_create'), 422, 'Роль сотрудника не разрешает создание через кадровое управление.');
     }
 
     private function authorizeUserMutation(User $authUser, User $targetUser, string $operation): void
     {
+        abort_unless($authUser->hasPermission('users.'.$operation), 403, 'FORBIDDEN_ACTION');
         $actorRole = $this->roleSlug($authUser);
-        if ($actorRole === 'rop') {
+        if ($authUser->usesAssignedGroupScope()) {
             abort_unless(in_array($operation, ['update', 'dismiss'], true) && $authUser->id !== $targetUser->id
                 && ($operation === 'update' || $targetUser->status === User::STATUS_ACTIVE)
                 && ! $targetUser->isDeletedAccount()
-                && in_array($this->roleSlug($targetUser), ['agent', 'mop', 'intern'], true), 403, 'FORBIDDEN_ACTION');
+                && $targetUser->hasPermission('users.subject.team'), 403, 'FORBIDDEN_ACTION');
             app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $targetUser);
 
             return;
         }
 
-        if ($this->isBranchScopedManager($actorRole)) {
+        if ($authUser->hasPermission('users.manage_branch_roles')) {
             $targetUser->loadMissing('role');
             abort_unless(
-                in_array($this->roleSlug($targetUser), self::ROP_EDITABLE_ROLE_SLUGS, true),
+                $targetUser->hasPermission('users.subject.branch_manage'),
                 403,
-                'РОП может изменять пользователей только до уровня РОП включительно.'
+                'Роль сотрудника не разрешает управление через ограниченный набор ролей филиала.'
             );
 
             return;
         }
 
-        if ($actorRole !== 'hr') {
+        if (!$authUser->hasPermission('users.manage_hr_roles')) {
+            abort_unless($authUser->hasPermission('users.manage_all_roles'), 403, 'FORBIDDEN_ACTION');
             return;
         }
 
         $targetUser->loadMissing('role');
-        $allowedRoles = in_array($operation, ['dismiss', 'restore'], true)
-            ? self::HR_EMPLOYEE_ROLE_SLUGS
-            : self::HR_EDITABLE_ROLE_SLUGS;
+        $policy = in_array($operation, ['dismiss', 'restore'], true)
+            ? 'users.subject.hr_employment'
+            : 'users.subject.hr_edit';
 
-        abort_unless(in_array($this->roleSlug($targetUser), $allowedRoles, true), 403, 'HR cannot modify this user.');
+        abort_unless($targetUser->hasPermission($policy), 403, 'HR cannot modify this user.');
     }
 
     private function authorizeHrRoleTransition(User $authUser, User $targetUser, ?Role $targetRole): void
     {
-        if ($this->roleSlug($authUser) !== 'hr' || ! $targetRole) {
+        if (!$authUser->hasPermission('users.manage_hr_roles') || ! $targetRole) {
             return;
         }
 
@@ -312,7 +243,7 @@ class UserController extends Controller
             $this->authorizeHrCreationRole($authUser, $targetRole);
         }
 
-        abort_if(! $currentIsClient && $nextIsClient, 422, 'HR cannot change an employee into a client.');
+        abort_if(! $currentIsClient && $nextIsClient && ! $authUser->hasPermission('users.hr.convert_employee_to_client'), 422, 'HR cannot change an employee into a client.');
     }
 
     private function resolveRequestedRole(Request $request, ?User $targetUser = null): ?Role
@@ -336,28 +267,23 @@ class UserController extends Controller
             return;
         }
 
-        $allowedRoleSlugs = $this->allowedRoleSlugsForActor($authUser);
+        if ($authUser->hasPermission('users.assign_any_role') || $authUser->hasPermission('users.assign_role.'.$targetRole->slug)) return;
 
-        if ($allowedRoleSlugs === null) {
-            return;
-        }
+        if ($targetUser && $authUser->usesAssignedGroupScope()
+            && (int) $targetUser->role_id === (int) $targetRole->id && $targetRole->hasPermission('users.subject.team')) return;
 
-        if (in_array($targetRole->slug, $allowedRoleSlugs, true)) {
-            return;
-        }
-
-        if ($targetUser && $this->isBranchScopedManager($this->roleSlug($authUser))) {
+        if ($targetUser && $authUser->hasPermission('users.manage_branch_roles')) {
             $targetUser->loadMissing('role');
             if ($this->roleSlug($targetUser) === $targetRole->slug
-                && in_array($targetRole->slug, self::ROP_EDITABLE_ROLE_SLUGS, true)) {
+                && $targetRole->hasPermission('users.subject.branch_manage')) {
                 return;
             }
         }
 
-        if ($targetUser && $this->roleSlug($authUser) === 'hr') {
+        if ($targetUser && $authUser->hasPermission('users.manage_hr_roles')) {
             $targetUser->loadMissing('role');
             if ($this->roleSlug($targetUser) === $targetRole->slug
-                && in_array($targetRole->slug, self::HR_EDITABLE_ROLE_SLUGS, true)) {
+                && $targetRole->hasPermission('users.subject.hr_edit')) {
                 return;
             }
         }
@@ -380,11 +306,11 @@ class UserController extends Controller
             return $data;
         }
 
-        if ($this->isBranchScopedRole($roleSlug) && $this->isBranchScopedManager($this->roleSlug($authUser))) {
+        if ($targetRole->hasPermission('users.subject.branch_required') && $authUser->hasPermission('users.scope.branch')) {
             $data['branch_id'] = $authUser->branch_id;
         }
 
-        if ($this->isBranchScopedRole($roleSlug) && empty($data['branch_id'])) {
+        if ($targetRole->hasPermission('users.subject.branch_required') && empty($data['branch_id'])) {
             abort(422, 'branch_id is required for this role.');
         }
 
@@ -399,13 +325,16 @@ class UserController extends Controller
             return $data;
         }
 
-        if (! $this->isBranchScopedRole($roleSlug) && ! $this->isBranchGroupScopedRole($roleSlug)) {
+        $groupWorkflow = $targetRole->hasPermission('users.subject.team')
+            || $targetRole->hasPermission('users.subject.record_recipient')
+            || $targetRole->hasPermission('users.subject.group_transfer');
+        if (! $groupWorkflow && ! $targetRole->hasPermission('users.subject.group_assignment') && ! $targetRole->hasPermission('users.subject.group_required')) {
             $data['branch_group_id'] = null;
 
             return $data;
         }
 
-        if ($this->isBranchGroupScopedRole($roleSlug) && empty($data['branch_group_id'])) {
+        if ($targetRole->hasPermission('users.subject.group_required') && empty($data['branch_group_id'])) {
             abort(422, 'branch_group_id is required for this role.');
         }
 
@@ -510,10 +439,10 @@ class UserController extends Controller
             'per_page' => 'nullable|integer|min:1|max:100',
         ]);
 
-        $includeUnassigned = $this->isBranchScopedManager($this->roleSlug($authUser))
+        $includeUnassigned = $authUser->hasPermission('users.scope.branch')
             && $this->parseBooleanQueryFlag($request, 'include_unassigned');
 
-        $query = $this->roleSlug($authUser) === 'accountant' && ! empty($validated['report_agents'])
+        $query = $authUser->hasPermission('users.report_agents.view_all') && ! empty($validated['report_agents'])
             ? User::query()->select(['id', 'name', 'role_id', 'branch_id', 'branch_group_id', 'status'])->with('role:id,name,slug')
             : $this->visibleUsersQuery($authUser, $includeUnassigned);
         $baseQuery = $this->applyIndexFilters($query, $validated, $authUser, false, $includeUnassigned);
@@ -550,7 +479,8 @@ class UserController extends Controller
 
         return DB::transaction(function () use ($request) {
             $authUser = User::query()->lockForUpdate()->findOrFail($this->authUser()->id);
-            $isRop = $authUser->hasRole('rop');
+            abort_unless($authUser->hasPermission('users.create'), 403, 'FORBIDDEN_ACTION');
+            $isRop = $authUser->usesAssignedGroupScope();
 
             $request->validate([
                 'name' => 'required|string',
@@ -570,7 +500,7 @@ class UserController extends Controller
 
             $targetRole = $this->resolveRequestedRole($request);
             if ($isRop) {
-                abort_unless(in_array($targetRole->slug, ['agent', 'mop', 'intern'], true), 403, 'РОП может создавать только стажёров, агентов и МОП в закреплённых группах.');
+                abort_unless($targetRole->hasPermission('users.subject.team'), 403, 'Роль сотрудника должна разрешать управление в закреплённых группах.');
                 $request->validate(['branch_group_id' => 'required|integer|exists:branch_groups,id'], [
                     'branch_group_id.required' => 'Выберите закреплённую за вами группу для нового сотрудника.',
                 ]);
@@ -583,8 +513,8 @@ class UserController extends Controller
             $data = $this->normalizeBranchIdForMutation($data, $authUser, $targetRole);
             $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
             if ($request->exists('security_attendance_branch_ids')) {
-                abort_unless(in_array($this->roleSlug($authUser), ['admin', 'superadmin'], true), 403, 'Только администратор может назначать филиалы посещаемости СБ.');
-                abort_unless($targetRole->slug === 'security', 422, 'Филиалы посещаемости назначаются только сотрудникам СБ.');
+                abort_unless($authUser->hasPermission('users.security_attendance.assign'), 403, 'Нет права назначать филиалы посещаемости.');
+                abort_unless($targetRole->hasPermission('attendance.scope.assigned_branches'), 422, 'Роли сотрудника нужен доступ к посещаемости назначенных филиалов.');
                 $data['security_attendance_branch_ids'] = array_values(array_map('intval', $request->input('security_attendance_branch_ids')));
             }
 
@@ -653,9 +583,9 @@ class UserController extends Controller
         return response()->json(array_merge($user->toArray(), [
             'daily_report_status' => app(DailyReportService::class)->reportStatusPayload($user),
             'access_scope' => [
-                'scope_type' => $user->hasRole('rop') ? 'groups' : 'role',
+                'scope_type' => $user->usesAssignedGroupScope() ? 'groups' : 'role',
                 'branch_id' => $user->branch_id,
-                'branch_group_ids' => $user->hasRole('rop') ? app(\App\Support\RopGroupAccess::class)->groupIds($user) : [],
+                'branch_group_ids' => $user->usesAssignedGroupScope() ? app(\App\Support\RopGroupAccess::class)->groupIds($user) : [],
                 'version' => (int) $user->access_scope_version,
             ],
         ]));
@@ -663,23 +593,28 @@ class UserController extends Controller
 
     public function updateProfile(Request $request)
     {
-        $user = $this->authUser();
+        return DB::transaction(function () use ($request) {
+            $user = User::query()->lockForUpdate()->findOrFail($this->authUser()->id);
+            auth()->setUser($user);
+            if ($request->exists('name')) abort_unless($user->hasPermission('profile.name.edit'), 403, 'Нет права менять имя профиля.');
+            if ($request->hasAny(['description', 'birthday', 'phone', 'email'])) abort_unless($user->hasPermission('profile.details.edit'), 403, 'Нет права менять контактные данные профиля.');
 
-        if (is_string($request->input('phone')) && $request->input('phone') !== $user->phone) {
-            $request->merge(['phone' => \App\Support\InternationalPhone::accountValue($request->input('phone'))]);
-        }
+            if (is_string($request->input('phone')) && $request->input('phone') !== $user->phone) {
+                $request->merge(['phone' => \App\Support\InternationalPhone::accountValue($request->input('phone'))]);
+            }
 
-        $data = $request->validate([
-            'name' => 'sometimes|string',
-            'description' => 'nullable|string',
-            'birthday' => 'nullable|date',
-            'phone' => ['sometimes', 'string', new \App\Rules\UniqueUserPhone($user->id), new \App\Rules\InternationalPhoneNumber],
-            'email' => 'sometimes|email|unique:users,email,'.$user->id,
-        ]);
+            $data = $request->validate([
+                'name' => 'sometimes|string',
+                'description' => 'nullable|string',
+                'birthday' => 'nullable|date',
+                'phone' => ['sometimes', 'string', new \App\Rules\UniqueUserPhone($user->id), new \App\Rules\InternationalPhoneNumber],
+                'email' => 'sometimes|email|unique:users,email,'.$user->id,
+            ]);
 
-        $user->update($data);
+            $user->update($data);
 
-        return response()->json($user->fresh(['role', 'branch', 'branchGroup']));
+            return response()->json($user->fresh(['role', 'branch', 'branchGroup']));
+        });
     }
 
     // Обновление пользователя
@@ -714,10 +649,10 @@ class UserController extends Controller
                 'security_attendance_branch_ids.*' => 'required|integer|distinct|exists:branches,id',
             ]);
 
-            if ($authUser->hasRole('rop')) {
+            if ($authUser->usesAssignedGroupScope()) {
                 // Group transfers and dismissal use their dedicated, audited workflows.
                 $requestedRole = $this->resolveRequestedRole($request, $user);
-                abort_unless(in_array($requestedRole?->slug, ['intern', 'agent', 'mop'], true), 403, 'FORBIDDEN_ACTION');
+                abort_unless($requestedRole?->hasPermission('users.subject.team'), 403, 'FORBIDDEN_ACTION');
                 foreach (['branch_id', 'branch_group_id', 'status'] as $field) {
                     abort_if($request->exists($field) && (string) $request->input($field) !== (string) $user->{$field},
                         403, 'FORBIDDEN_ACTION');
@@ -731,7 +666,7 @@ class UserController extends Controller
                 $this->authorizeHrRoleTransition($authUser, $user, $targetRole);
             }
 
-            if ($this->roleSlug($authUser) === 'hr' && $request->filled('status') && $request->input('status') !== $user->status) {
+            if ($authUser->hasPermission('users.manage_hr_roles') && $request->filled('status') && $request->input('status') !== $user->status) {
                 abort(422, 'Use the dismissal endpoint to deactivate an employee.');
             }
 
@@ -742,8 +677,8 @@ class UserController extends Controller
             $data = $this->normalizeBranchIdForMutation($data, $authUser, $targetRole);
             $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
             if ($request->exists('security_attendance_branch_ids')) {
-                abort_unless(in_array($this->roleSlug($authUser), ['admin', 'superadmin'], true), 403, 'Только администратор может назначать филиалы посещаемости СБ.');
-                abort_unless($targetRole->slug === 'security', 422, 'Филиалы посещаемости назначаются только сотрудникам СБ.');
+                abort_unless($authUser->hasPermission('users.security_attendance.assign'), 403, 'Нет права назначать филиалы посещаемости.');
+                abort_unless($targetRole->hasPermission('attendance.scope.assigned_branches'), 422, 'Роли сотрудника нужен доступ к посещаемости назначенных филиалов.');
                 $data['security_attendance_branch_ids'] = array_values(array_map('intval', $request->input('security_attendance_branch_ids')));
             }
 
@@ -807,9 +742,9 @@ class UserController extends Controller
 
         $actor = $request->user() ?? $request->user('sanctum');
         $agents = User::with(['role', 'branch', 'branchGroup'])
-            ->when($actor?->hasRole('rop'), fn ($query) => app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'users.branch_group_id', 'users.branch_id'))
+            ->when($actor?->usesAssignedGroupScope(), fn ($query) => app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'users.branch_group_id', 'users.branch_id'))
             ->whereHas('role', function ($q) {
-                $q->whereIn('slug', self::PUBLIC_AGENT_ROLE_SLUGS);
+                $q->withPermission('users.subject.public_agent');
             })
             ->when($status !== 'all', function ($q) use ($status) {
                 $this->applyStatusFilter($q, $status);
@@ -857,7 +792,7 @@ class UserController extends Controller
         $plan = $request->input('transfer_plan');
         // ROP dismissal must always use the reviewed inventory; legacy automatic
         // redistribution can include unclassified or out-of-group records.
-        abort_if($authUser->hasRole('rop') && $plan === null, 422, 'COMPLETE_TRANSFER_PLAN_REQUIRED');
+        abort_if($authUser->usesAssignedGroupScope() && $plan === null, 422, 'COMPLETE_TRANSFER_PLAN_REQUIRED');
         $distribute = (bool) $request->boolean('distribute_to_agents');
         $agentId = $request->input('agent_id');
 
@@ -874,12 +809,12 @@ class UserController extends Controller
             ], 422);
         }
 
-        // Проверка, что целевой получатель — агент (если указан)
+        // Проверка допуска получателя в прежнем сценарии передачи объектов.
         if ($agentId) {
             $target = User::with('role')->find($agentId);
-            if (! $target || ! $target->role || $target->role->slug !== 'agent' || $target->status !== 'active') {
+            if (! $target || ! $target->hasPermission('users.subject.legacy_property_recipient') || $target->status !== 'active') {
                 return response()->json([
-                    'message' => 'agent_id должен указывать на активного пользователя с ролью агент.',
+                    'message' => 'Получатель должен быть активным и иметь допуск к передаче объектов при увольнении.',
                 ], 422);
             }
 
@@ -893,13 +828,19 @@ class UserController extends Controller
         ];
 
         DB::transaction(function () use ($user, $authUser, $distribute, $agentId, $plan, &$transferStats) {
-            $participantIds = [$user->id, $authUser->id, ...array_column($plan['records'] ?? [], 'responsible_user_id')];
+            $participantIds = array_filter([$user->id, $authUser->id, $agentId, ...array_column($plan['records'] ?? [], 'responsible_user_id')]);
             $lockedUsers = User::query()->whereIn('id', $participantIds)->orderBy('id')->lockForUpdate()->get()->keyBy('id');
             $user = $lockedUsers->get($user->id);
             $authUser = $lockedUsers->get($authUser->id);
             abort_unless($user && $authUser, 404, 'NOT_FOUND');
             $this->ensureUserIsVisible($authUser, $user, false);
             $this->authorizeUserMutation($authUser, $user, 'dismiss');
+            if ($agentId) {
+                $target = $lockedUsers->get($agentId);
+                abort_unless($target && $target->status === User::STATUS_ACTIVE
+                    && $target->hasPermission('users.subject.legacy_property_recipient'), 422, 'INVALID_TRANSFER_TARGET');
+                $this->ensureUserIsVisible($authUser, $target);
+            }
             if ($plan !== null) {
                 $counts = app(\App\Services\Users\DismissalTransfer::class)->apply($authUser, $user, $plan, $lockedUsers);
                 $transferStats['transferred_counts'] = $counts;
@@ -954,7 +895,7 @@ class UserController extends Controller
                 if ($props->isNotEmpty()) {
                     if ($distribute) {
                         // Соберём список доступных агентов (кроме удаляемого)
-                        $agentIds = User::whereHas('role', fn ($q) => $q->where('slug', 'agent'))
+                        $agentIds = User::whereHas('role', fn ($q) => $q->withPermission('users.subject.legacy_property_recipient'))
                             ->where(function (Builder $query) {
                                 $query->where('status', 'active')
                                     ->orWhereNull('status');
@@ -1064,21 +1005,22 @@ class UserController extends Controller
             $user = $users->get($user->id);
             abort_unless($authUser && $user, 404, 'NOT_FOUND');
             $authRole = $this->roleSlug($authUser);
-            abort_if($authRole === 'rop', 403, 'FORBIDDEN_ACTION');
+            abort_if($authUser->usesAssignedGroupScope(), 403, 'FORBIDDEN_ACTION');
 
-            $canRestore = in_array($authRole, ['superadmin', 'admin', 'branch_director', 'hr'], true);
+            $canRestore = $authUser->hasPermission('users.restore');
             abort_unless($canRestore, 403, 'Forbidden');
+            $this->ensureUserIsVisible($authUser, $user, false);
 
-            if ($this->isBranchScopedManager($authRole)) {
+            if ($authUser->hasPermission('users.scope.branch') && !$authUser->hasPermission('users.scope.all')) {
                 abort_unless((int) $user->branch_id === (int) $authUser->branch_id, 403, 'Forbidden');
             }
 
-            if ($authRole === 'hr') {
+            if ($authUser->hasPermission('users.manage_hr_roles')) {
                 $this->ensureUserIsVisible($authUser, $user, false);
                 $this->authorizeUserMutation($authUser, $user, 'restore');
             }
 
-        if ($authRole === 'hr') {
+        if ($authUser->hasPermission('users.manage_hr_roles')) {
             $this->ensureUserIsVisible($authUser, $user, false);
             $this->authorizeUserMutation($authUser, $user, 'restore');
         }

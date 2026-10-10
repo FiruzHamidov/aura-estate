@@ -20,8 +20,8 @@ final class PropertyPromotionService
     public function setType(Property $property, User $actor, string $type, int $days, string $comment, int $expectedVersion): Property
     {
         return DB::transaction(function () use ($property, $actor, $type, $days, $comment, $expectedVersion): Property {
-            $locked = Property::query()->lockForUpdate()->findOrFail($property->id);
-            abort_unless($this->access->canModerate($actor, $locked), 403, 'PROMOTION_PERMISSION_DENIED');
+            [$actor, $locked] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, $property);
+            abort_unless($this->access->canManagePromotion($actor, $locked) && $this->access->canRequestPromotion($actor, $locked), 403, 'PROMOTION_PERMISSION_DENIED');
             abort_if((int) $locked->moderation_version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
             abort_unless($this->moderation->isPublic($locked), 409, 'PROMOTION_BLOCKED_BY_MODERATION');
             abort_unless(in_array($type, ['regular', 'vip', 'urgent'], true) && $days >= 1 && $days <= 30, 422);
@@ -42,7 +42,7 @@ final class PropertyPromotionService
         return DB::transaction(function () use ($property, $actor, $type, $comment, $requestedDays, $expectedVersion): PropertyPromotion {
             [$actor, $lockedProperty] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, $property);
             abort_if((int) $lockedProperty->moderation_version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
-            abort_unless($this->access->canEdit($actor, $lockedProperty), 403, 'PROMOTION_PERMISSION_DENIED');
+            abort_unless($this->access->canRequestPromotion($actor, $lockedProperty), 403, 'PROMOTION_PERMISSION_DENIED');
             abort_unless(in_array($lockedProperty->publication_status, ['published', 'pending'], true), 409, 'PROMOTION_BLOCKED_BY_MODERATION');
             abort_if($lockedProperty->promotions()->where('status', PropertyPromotion::STATUS_REQUESTED)->exists(), 409, 'PROMOTION_ALREADY_REQUESTED');
             abort_unless(trim($comment) !== '' && $requestedDays >= 1 && $requestedDays <= (int) config('property-moderation.promotion_max_days', 30), 422);
@@ -61,7 +61,7 @@ final class PropertyPromotionService
             $lockedProperty->forceFill([
                 'moderation_version' => (int) $lockedProperty->moderation_version + 1,
             ])->save();
-            if ($this->access->canModerate($actor, $lockedProperty) && $this->moderation->isPublic($lockedProperty)) {
+            if ($this->access->canManagePromotion($actor, $lockedProperty) && $this->moderation->isPublic($lockedProperty)) {
                 return $this->approve($promotion, $actor, $requestedDays, $comment, 1);
             }
             app(PropertyModerationNotifier::class)->promotionEvent($promotion, 'requested', $actor);
@@ -79,7 +79,7 @@ final class PropertyPromotionService
             $promotion->setRelation('property', $property);
             abort_unless($promotion->status === PropertyPromotion::STATUS_REQUESTED, 409, 'PROMOTION_NOT_REQUESTED');
             abort_if($expectedVersion !== null && $promotion->version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
-            abort_unless($this->access->canModerate($actor, $promotion->property), 403, 'PROMOTION_PERMISSION_DENIED');
+            abort_unless($this->access->canManagePromotion($actor, $promotion->property), 403, 'PROMOTION_PERMISSION_DENIED');
             abort_unless($this->moderation->isPublic($promotion->property), 409, 'PROMOTION_BLOCKED_BY_MODERATION');
 
             $days = min(max(1, $days), (int) config('property-moderation.promotion_max_days', 30));
@@ -114,7 +114,7 @@ final class PropertyPromotionService
             $promotion->setRelation('property', $property);
             abort_unless($promotion->status === PropertyPromotion::STATUS_REQUESTED, 409, 'PROMOTION_NOT_REQUESTED');
             abort_if($expectedVersion !== null && $promotion->version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
-            abort_unless($this->access->canModerate($actor, $property), 403, 'PROMOTION_PERMISSION_DENIED');
+            abort_unless($this->access->canManagePromotion($actor, $property), 403, 'PROMOTION_PERMISSION_DENIED');
             $promotion->update([
                 'status' => PropertyPromotion::STATUS_REJECTED,
                 'decided_by' => $actor->id,
@@ -139,7 +139,7 @@ final class PropertyPromotionService
             abort_unless(in_array($promotion->status, [PropertyPromotion::STATUS_ACTIVE, PropertyPromotion::STATUS_REQUESTED], true), 409, 'PROMOTION_NOT_ACTIVE');
             $wasActive = $promotion->status === PropertyPromotion::STATUS_ACTIVE;
             abort_if($expectedVersion !== null && $promotion->version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
-            abort_unless($wasActive ? $this->access->canModerate($actor, $property) : $this->access->canEdit($actor, $property), 403, 'PROMOTION_PERMISSION_DENIED');
+            abort_unless($wasActive ? $this->access->canManagePromotion($actor, $property) : $this->access->canRequestPromotion($actor, $property), 403, 'PROMOTION_PERMISSION_DENIED');
             $promotion->update([
                 'status' => PropertyPromotion::STATUS_REVOKED,
                 'revoked_by' => $actor->id,

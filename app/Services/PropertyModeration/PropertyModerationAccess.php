@@ -16,27 +16,28 @@ final class PropertyModerationAccess
 {
     public function canCreate(User $user): bool
     {
-        return in_array($this->role($user), config('property-moderation.creator_roles', []), true);
+        return $user->hasPermission('properties.create');
     }
 
-    /** Read-only access to the same closed stages exposed by the SB report. */
-    public function canViewSecurityReportProperty(User $user, Property $property): bool
+    /** Read-only access to the closed stages exposed by the property control report. */
+    public function canViewClosedProperty(User $user, Property $property): bool
     {
-        return $this->role($user) === 'security'
+        if ($user->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->allows($user, $property)) return false;
+
+        return $user->hasPermission('properties.closed.view')
             && in_array($property->moderation_status, config('security-property-control.trigger_statuses', []), true);
     }
 
     public function canEdit(User $user, Property $property): bool
     {
-        if ($user->hasRole('rop') && ! app(RopGroupAccess::class)->allows($user, $property)) {
+        if ($user->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->allows($user, $property)) {
             return false;
         }
-        $role = $this->role($user);
-        if (! in_array($role, config('property-moderation.creator_roles', []), true)) {
+        if (! $user->hasPermission('properties.edit')) {
             return false;
         }
 
-        if (in_array($role, config('property-moderation.global_moderator_roles', []), true)) {
+        if ($user->hasPermission('properties.manage_all')) {
             return true;
         }
 
@@ -48,12 +49,12 @@ final class PropertyModerationAccess
             return true;
         }
 
-        if ($role === 'mop') {
-            return $user->branch_group_id !== null
-                && $this->propertyBranchGroupId($property) === (int) $user->branch_group_id;
+        if ($user->hasPermission('properties.edit.group')) {
+            if ($user->branch_group_id !== null
+                && $this->propertyBranchGroupId($property) === (int) $user->branch_group_id) return true;
         }
 
-        if (in_array($role, ['rop', 'branch_director'], true)) {
+        if ($user->hasPermission('properties.edit.branch')) {
             return $user->branch_id !== null
                 && $this->propertyBranchId($property) === (int) $user->branch_id;
         }
@@ -61,25 +62,57 @@ final class PropertyModerationAccess
         return false;
     }
 
+    public function canViewHistory(User $user, Property $property): bool
+    {
+        if ($user->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->allows($user, $property)) return false;
+
+        return $user->hasPermission('properties.history.view')
+            && ($this->canEdit($user, $property) || $this->canViewClosedProperty($user, $property));
+    }
+
+    public function canRefreshListingDate(User $user, Property $property): bool
+    {
+        return $user->hasPermission('properties.listing_date.refresh') && $this->canEdit($user, $property);
+    }
+
+    public function canManageCoOwner(User $user, Property $property): bool
+    {
+        return $user->hasPermission('properties.co_owner.manage') && $this->canEdit($user, $property);
+    }
+
+    public function canTransfer(User $user, Property $property): bool
+    {
+        return $user->hasPermission('properties.transfer') && $this->canModerate($user, $property);
+    }
+
+    public function canRequestPromotion(User $user, Property $property): bool
+    {
+        return $user->hasPermission('properties.promotions.request') && $this->canEdit($user, $property);
+    }
+
+    public function canManagePromotion(User $user, Property $property): bool
+    {
+        return $user->hasPermission('properties.promotions.manage') && $this->canModerate($user, $property);
+    }
+
     public function canManageDeal(User $user, Property $property): bool
     {
-        $role = $this->role($user);
+        if ($user->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->allows($user, $property)) return false;
 
-        return in_array($role, config('property-moderation.creator_roles', []), true)
-            && ($this->canEdit($user, $property) || $role === 'agent');
+        return $user->hasPermission('properties.deal.manage')
+            && ($this->canEdit($user, $property) || $user->hasPermission('properties.deal.colleague'));
     }
 
     public function canModerate(User $user, Property $property): bool
     {
-        if ($user->hasRole('rop') && ! app(RopGroupAccess::class)->allows($user, $property)) {
+        if ($user->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->allows($user, $property)) {
             return false;
         }
-        $role = $this->role($user);
-        if (! in_array($role, config('property-moderation.moderator_roles', []), true)) {
+        if (! $user->hasPermission('properties.moderate')) {
             return false;
         }
 
-        if (in_array($role, config('property-moderation.global_moderator_roles', []), true)) {
+        if ($user->hasPermission('properties.manage_all')) {
             return true;
         }
 
@@ -89,15 +122,17 @@ final class PropertyModerationAccess
 
     public function scopeModeratable(Builder $query, User $user): Builder
     {
-        if (in_array($this->role($user), config('property-moderation.global_moderator_roles', []), true)) {
-            return $query;
-        }
-        if (! $user->branch_id || ! in_array($this->role($user), config('property-moderation.moderator_roles', []), true)) {
+        if (! $user->hasPermission('properties.moderate')) {
             return $query->whereRaw('1 = 0');
         }
-
-        if ($user->hasRole('rop')) {
+        if ($user->usesAssignedGroupScope()) {
             return app(RopGroupAccess::class)->scope($query, $user, 'properties.branch_group_id', 'properties.branch_id');
+        }
+        if ($user->hasPermission('properties.manage_all')) {
+            return $query;
+        }
+        if (! $user->branch_id) {
+            return $query->whereRaw('1 = 0');
         }
 
         return $query->where(function (Builder $properties) use ($user): void {
@@ -151,8 +186,14 @@ final class PropertyModerationAccess
                 'can_mark_duplicate' => false,
                 'can_appeal' => false,
                 'can_resolve_appeal' => false,
+                'can_manage_co_owner' => false,
+                'can_transfer' => false,
                 'can_manage_deal' => false,
+                'can_assign_deal_users' => false,
                 'can_reopen_listing' => false,
+                'can_withdraw_promotion_request' => false,
+                'can_revoke_promotion' => false,
+                'can_reject_promotion' => false,
                 'can_request_promotion' => false,
                 'can_approve_promotion' => false,
                 'can_manage_promotion_directly' => false,
@@ -201,22 +242,21 @@ final class PropertyModerationAccess
                 ->whereIn('status', [PropertyModerationCase::STATUS_REJECTED, PropertyModerationCase::STATUS_MERGED])
                 ->exists(),
             'can_resolve_appeal' => $decidableCases->contains('type', PropertyModerationCase::TYPE_APPEAL),
+            'can_manage_co_owner' => $this->canManageCoOwner($user, $property),
+            'can_transfer' => $this->canTransfer($user, $property),
             'can_manage_deal' => $this->canManageDeal($user, $property),
+            'can_assign_deal_users' => $this->canManageDeal($user, $property) && $user->hasPermission('properties.deal.assign_users'),
             'can_reopen_listing' => $canModerate && $property->needsReopening(),
-            'can_request_promotion' => $canEdit && in_array($property->publication_status, ['published', 'pending'], true) && $requestedPromotions->isEmpty(),
-            'can_approve_promotion' => $canModerate && $isPublished && $requestedPromotions->isNotEmpty(),
-            'can_manage_promotion_directly' => $canModerate && $isPublished,
+            'can_withdraw_promotion_request' => $this->canRequestPromotion($user, $property),
+            'can_revoke_promotion' => $this->canManagePromotion($user, $property),
+            'can_reject_promotion' => $this->canManagePromotion($user, $property) && $requestedPromotions->isNotEmpty(),
+            'can_request_promotion' => $this->canRequestPromotion($user, $property) && in_array($property->publication_status, ['published', 'pending'], true) && $requestedPromotions->isEmpty(),
+            'can_approve_promotion' => $this->canManagePromotion($user, $property) && $isPublished && $requestedPromotions->isNotEmpty(),
+            'can_manage_promotion_directly' => $this->canManagePromotion($user, $property) && $this->canRequestPromotion($user, $property) && $isPublished,
             'can_withdraw_changes' => $canEdit,
             'can_withdraw_listing' => $canEdit,
             'submit_requires_review' => $canEdit && (array) $property->approved_content_snapshot !== [],
         ];
-    }
-
-    private function role(User $user): string
-    {
-        $user->loadMissing('role');
-
-        return (string) ($user->role?->slug ?? '');
     }
 
     private function propertyBranchId(Property $property): int

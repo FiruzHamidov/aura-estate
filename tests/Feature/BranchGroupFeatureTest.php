@@ -200,6 +200,27 @@ class BranchGroupFeatureTest extends TestCase
             ->assertJsonPath('message', 'Нельзя удалить группу: к ней привязаны пользователи или контакты.');
     }
 
+    public function test_group_count_policy_includes_custom_role_without_cross_branch_users(): void
+    {
+        $branch = Branch::create(['name' => 'Local']);
+        $other = Branch::create(['name' => 'Other']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Team']);
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $role = Role::create(['name' => 'Custom counted employee', 'slug' => 'custom_counted_employee']);
+        $rop = $this->createUser($ropRole, $branch, 'ROP', $group);
+        $this->createUser($role, $branch, 'Local', $group);
+        $this->createUser($role, $other, 'Foreign', $group);
+        $rop->supervisedGroups()->attach($group->id);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        Sanctum::actingAs($rop->fresh());
+        foreach ([[], ['users.subject.group_count'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            $count = $rights ? 1 : 0;
+            $this->getJson('/api/branch-groups')->assertOk()->assertJsonPath('data.0.users_count', $count);
+            $this->getJson('/api/branch-groups/'.$group->id)->assertOk()->assertJsonPath('users_count', $count);
+        }
+    }
+
     public function test_rop_group_counts_include_only_accessible_employees_and_clients(): void
     {
         $branch = Branch::create(['name' => 'Source']);
@@ -281,6 +302,56 @@ class BranchGroupFeatureTest extends TestCase
             'branch_group_id' => $historical->id, 'branch_id' => $branch->id, 'deleted_at' => now()]);
         $this->patchJson('/api/branch-groups/'.$historical->id, ['branch_id' => $other->id])->assertUnprocessable();
         $this->deleteJson('/api/branch-groups/'.$historical->id)->assertConflict();
+    }
+
+    public function test_custom_group_permissions_preserve_scope_and_separate_labels_from_management(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $branchA = Branch::create(['name' => 'A']);
+        $branchB = Branch::create(['name' => 'B']);
+        $role = Role::create(['name' => 'Custom', 'slug' => 'client']);
+        $role->forceFill(['permissions' => ['branch_groups.labels.list', 'branch_groups.labels.show']])->save();
+        $actor = $this->createUser($role, $branchA, 'Reader');
+        $groupA = BranchGroup::create(['name' => 'A', 'branch_id' => $branchA->id]);
+        $groupB = BranchGroup::create(['name' => 'B', 'branch_id' => $branchB->id]);
+        Sanctum::actingAs($actor);
+        $this->getJson('/api/branch-groups')->assertOk()->assertJsonCount(2, 'data')->assertJsonMissingPath('data.0.users_count')->assertJsonMissingPath('data.0.contact_visibility_mode');
+        $this->getJson('/api/branch-groups/'.$groupB->id)->assertOk()->assertJsonMissingPath('contact_visibility_mode');
+        $this->patchJson('/api/branch-groups/'.$groupA->id, ['name' => 'Forbidden'])->assertForbidden();
+        $role->forceFill(['permissions' => ['branch_groups.scope.branch', 'branch_groups.manage.branch']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/branch-groups')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $groupA->id);
+        $this->patchJson('/api/branch-groups/'.$groupA->id, ['name' => 'Allowed'])->assertOk();
+        $this->patchJson('/api/branch-groups/'.$groupB->id, ['name' => 'Forbidden'])->assertForbidden();
+        $role->forceFill(['permissions' => ['branch_groups.scope.all', 'branch_groups.manage.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson('/api/branch-groups/'.$groupB->id, ['name' => 'Allowed globally'])->assertOk();
+        $role->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson('/api/branch-groups/'.$groupA->id, ['name' => 'Revoked'])->assertForbidden();
+    }
+
+    public function test_branch_mutation_grants_work_for_other_roles_and_preserve_deletion_guards(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $branch = Branch::create(['name' => 'Occupied']);
+        $role = Role::create(['name' => 'Client', 'slug' => 'client']);
+        $role->forceFill(['permissions' => ['catalogs.entries.branches.manage']])->save();
+        $actor = $this->createUser($role, $branch, 'Branch editor');
+        Sanctum::actingAs($actor);
+        $id = $this->postJson('/api/branches', ['name' => 'New branch'])->assertCreated()->json('id');
+        $this->patchJson('/api/branches/'.$id, ['name' => 'Edited branch'])->assertOk();
+        $this->deleteJson('/api/branches/'.$branch->id)->assertConflict();
+        $role->forceFill(['slug' => 'admin', 'permissions' => []])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson('/api/branches/'.$id, ['name' => 'Forbidden'])->assertForbidden();
+        $this->deleteJson('/api/branches/'.$id)->assertForbidden();
+        $this->getJson('/api/branches')->assertOk()->assertJsonCount(2);
+        $this->assertDatabaseHas('branches', ['id' => $id, 'name' => 'Edited branch']);
+        $role->forceFill(['permissions' => ['catalogs.entries.branches.manage']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->deleteJson('/api/branches/'.$id)->assertOk();
+        $this->assertDatabaseMissing('branches', ['id' => $id]);
     }
 
     private function createUser(Role $role, Branch $branch, string $name, ?BranchGroup $group = null): User

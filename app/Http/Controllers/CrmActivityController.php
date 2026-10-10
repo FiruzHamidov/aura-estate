@@ -134,6 +134,7 @@ class CrmActivityController extends Controller
             [$authUser, $lead] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
                 $this->authUser(), $lead, $request->integer('responsible_agent_id') ?: null, null
             );
+            $this->leadAccess->ensureAction($authUser, 'update');
             $this->leadAccess->ensureVisible($authUser, $lead);
 
             $data = $this->validateActivity($request);
@@ -190,6 +191,7 @@ class CrmActivityController extends Controller
             [$authUser, $deal] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
                 $this->authUser(), $deal, $request->integer('responsible_agent_id') ?: null, null
             );
+            $this->dealAccess->ensureAction($authUser, 'activities.create');
             $this->dealAccess->ensureVisible($authUser, $deal);
 
             $data = $this->validateActivity($request, true);
@@ -204,7 +206,7 @@ class CrmActivityController extends Controller
 
                 if ($data['type'] === 'follow_up_changed') {
                     abort_unless(
-                        in_array($authUser->role?->slug, ['security', 'admin', 'superadmin'], true),
+                        $authUser->hasPermission('deals.control.deadline'),
                         403,
                         'CRM_DEAL_FORBIDDEN'
                     );
@@ -441,6 +443,7 @@ class CrmActivityController extends Controller
 
     private function dealStatusChange(Deal $deal, User $actor, array $data): void
     {
+        $this->dealAccess->ensureAction($actor, 'move');
         abort_if(empty($data['stage_id']), 422, 'stage_id is required.');
 
         $deal->loadMissing('stage');
@@ -481,6 +484,7 @@ class CrmActivityController extends Controller
 
     private function dealAssignment(Deal $deal, User $actor, array $data): void
     {
+        $this->dealAccess->ensureCanUpdate($actor, $deal);
         abort_if(empty($data['responsible_agent_id']), 422, 'responsible_agent_id is required.');
 
         $this->dealAccess->validateMutationTargets($actor, [

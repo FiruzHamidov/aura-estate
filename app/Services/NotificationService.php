@@ -41,7 +41,7 @@ class NotificationService
             return $notification;
         }
 
-        if ($user->hasRole('rop')) {
+        if ($user->usesAssignedGroupScope()) {
             abort_unless(app(NotificationGroupAccess::class)->allows($notification, $user), 404, 'NOT_FOUND');
         } else {
             abort_unless((int) $notification->user_id === (int) $user->id, 403, 'Forbidden');
@@ -88,13 +88,7 @@ class NotificationService
 
     public function notifyAttendanceDeviceOffline(AttendanceDevice $device): void
     {
-        $administrators = User::query()
-            ->where('status', User::STATUS_ACTIVE)
-            ->whereHas('role', fn (Builder $roles) => $roles->whereIn(
-                'slug',
-                config('attendance.administrator_roles', [])
-            ))
-            ->get();
+        $administrators = $this->recipients->usersByPermission('notifications.receive.attendance_offline');
 
         $this->notifyUsers(
             $administrators,
@@ -130,7 +124,7 @@ class NotificationService
                 'action_url' => '/profile/crm/leads?leadId='.$lead->id.'&mode=view',
                 'action_type' => 'open_lead',
                 'dedupe_key' => 'lead:new:'.$lead->id,
-                'data' => ['lead_id' => $lead->id],
+                'data' => ['lead_id' => $lead->id, 'delivery_audience' => 'public_lead'],
             ]
         );
     }
@@ -150,6 +144,7 @@ class NotificationService
                 'dedupe_key' => 'lead:new:'.$lead->id,
                 'data' => [
                     'lead_id' => $lead->id,
+                    'delivery_audience' => 'lead_managers',
                     'status' => $lead->status,
                     'source' => $lead->source,
                 ],
@@ -735,7 +730,7 @@ class NotificationService
                 continue;
             }
 
-            if (! in_array($user->role?->slug, ['agent', 'mop'], true)) {
+            if (! $user->hasPermission('notifications.receive.daily_report')) {
                 continue;
             }
 
@@ -821,7 +816,7 @@ class NotificationService
             $latest = $userReports->sortByDesc('report_date')->first();
             $agent = $latest?->user;
 
-            if (! $agent instanceof User || ! in_array($agent->role?->slug, ['agent', 'mop'], true)) {
+            if (! $agent instanceof User || ! $agent->hasPermission('kpi.subject.early_risk')) {
                 continue;
             }
 
@@ -848,11 +843,7 @@ class NotificationService
                 ->with('role')
                 ->where('status', User::STATUS_ACTIVE)
                 ->where('branch_id', $agent->branch_id)
-                ->where(function ($q) {
-                    $q->whereIn('role_id', function ($sub) {
-                        $sub->select('id')->from('roles')->whereIn('slug', ['rop', 'branch_director']);
-                    });
-                })
+                ->whereIn('role_id', $this->recipients->roleIdsWithPermission('notifications.receive.kpi_risk.branch'))
                 ->get();
 
             if ($receivers->isEmpty()) {
@@ -862,7 +853,7 @@ class NotificationService
             $latestReport = $workingReports->first();
             $previousReport = $workingReports->get(1);
             $receivers = $receivers->filter(function (User $receiver) use ($latestReport, $previousReport): bool {
-                if (! $receiver->hasRole('rop')) return true;
+                if (! $receiver->usesAssignedGroupScope()) return true;
                 $access = app(NotificationGroupAccess::class);
                 return $previousReport && $access->subjectAllowed($receiver, $latestReport)
                     && $access->subjectAllowed($receiver, $previousReport)
@@ -1139,7 +1130,7 @@ class NotificationService
             'data' => $options['data'] ?? [],
         ];
 
-        if ($recipient->hasRole('rop') && $subject instanceof Selection) {
+        if ($recipient->usesAssignedGroupScope() && $subject instanceof Selection) {
             // Public tracking accepts only property_id; never copy arbitrary event data or public access hashes.
             $eventPropertyId = $options['data']['payload']['property_id'] ?? null;
             $payload['data'] = ['selection_id' => $subject->id, 'payload' => $eventPropertyId !== null ? ['property_id' => (int) $eventPropertyId] : null];
@@ -1199,7 +1190,8 @@ class NotificationService
     {
         \Illuminate\Support\Facades\DB::transaction(function () use ($notification, $recipient): void {
             $current = User::query()->whereKey($recipient->id)->lockForUpdate()->first();
-            if ($current && app(NotificationGroupAccess::class)->allows($notification, $current)) {
+            if ($current && app(NotificationDeliveryAccess::class)->allows($notification, $current)
+                && app(NotificationGroupAccess::class)->allows($notification, $current)) {
                 $this->deliverTelegramNotificationNow($notification, $current);
             }
         });
@@ -1519,7 +1511,7 @@ class NotificationService
                                 ->from('users')
                                 ->join('roles', 'roles.id', '=', 'users.role_id')
                                 ->where('users.status', User::STATUS_ACTIVE)
-                                ->where('roles.slug', 'manager');
+                                ->whereIn('roles.id', $this->recipients->roleIdsWithPermission('notifications.receive.leads'));
                         });
                 });
         });
@@ -1529,7 +1521,7 @@ class NotificationService
     {
         $query
             ->where('status', User::STATUS_ACTIVE)
-            ->whereHas('role', fn (Builder $roleQuery) => $roleQuery->where('slug', 'manager'));
+            ->whereIn('role_id', $this->recipients->roleIdsWithPermission('notifications.receive.leads'));
     }
 
     private function dispatchDealDeadlineSoon(): int
@@ -1652,7 +1644,7 @@ class NotificationService
         }
 
         $count = 0;
-        $managers = $this->recipients->usersByRole(['manager']);
+        $managers = $this->recipients->usersByPermission('notifications.receive.digest.leads.morning');
 
         foreach ($managers as $manager) {
             $leadStats = Lead::query()
@@ -1694,7 +1686,7 @@ class NotificationService
         }
 
         $count = 0;
-        $agents = $this->recipients->usersByRole(['agent']);
+        $agents = $this->recipients->usersByPermission('notifications.receive.digest.deals.morning');
 
         foreach ($agents as $agent) {
             $showsCount = Booking::query()
@@ -1735,7 +1727,7 @@ class NotificationService
         }
 
         $count = 0;
-        $managers = $this->recipients->usersByRole(['manager']);
+        $managers = $this->recipients->usersByPermission('notifications.receive.digest.leads.evening');
 
         foreach ($managers as $manager) {
             $processed = Lead::query()
@@ -1776,7 +1768,7 @@ class NotificationService
         }
 
         $count = 0;
-        $agents = $this->recipients->usersByRole(['agent']);
+        $agents = $this->recipients->usersByPermission('notifications.receive.digest.deals.evening');
 
         foreach ($agents as $agent) {
             $shows = Booking::query()

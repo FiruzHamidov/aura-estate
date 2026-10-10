@@ -6,7 +6,6 @@ use App\Models\DailyReport;
 use App\Models\KpiAdjustmentLog;
 use App\Models\KpiPeriodLock;
 use App\Models\User;
-use App\Support\RbacBranchScope;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -14,14 +13,10 @@ use Illuminate\Validation\Rule;
 
 class KpiPeriodLockController extends Controller
 {
-    public function __construct(private readonly RbacBranchScope $branchScope)
-    {
-    }
-
     public function lock(Request $request)
     {
         $user = $this->authUser();
-        $this->ensureCanManage($user);
+        $this->ensureCanManage($user, 'kpi.periods.lock');
 
         $validated = $request->validate([
             'period_type' => ['required', Rule::in(['day', 'week', 'month'])],
@@ -33,9 +28,9 @@ class KpiPeriodLockController extends Controller
 
         return \Illuminate\Support\Facades\DB::transaction(function () use ($user, $validated) {
             [$user] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($user, null, null, $validated['branch_group_id'] ?? null);
-            $this->ensureCanManage($user);
+            $this->ensureCanManage($user, 'kpi.periods.lock');
             $this->validateScopedValues($validated, $user);
-            if ($user->hasRole('rop')) {
+            if ($user->usesAssignedGroupScope()) {
                 $validated['branch_group_id'] = app(\App\Support\RopGroupAccess::class)->creationGroup($user, $validated['branch_group_id'] ?? null);
                 $validated['branch_id'] = $user->branch_id;
             }
@@ -57,7 +52,7 @@ class KpiPeriodLockController extends Controller
     public function adjustments(Request $request)
     {
         $user = $this->authUser();
-        $this->ensureCanManage($user);
+        $this->ensureCanManage($user, 'kpi.adjustments.manage');
 
         $validated = $request->validate([
             'period_type' => ['required', Rule::in(['day', 'week', 'month'])],
@@ -74,15 +69,15 @@ class KpiPeriodLockController extends Controller
         return \Illuminate\Support\Facades\DB::transaction(function () use ($user, $validated) {
             $groupId = $validated['branch_group_id'] ?? null;
             [$user] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquireMany($user, [], [$validated['entity_id']], [$groupId]);
-            $this->ensureCanManage($user);
-            if ($user->hasRole('rop')) {
+            $this->ensureCanManage($user, 'kpi.adjustments.manage');
+            if ($user->usesAssignedGroupScope()) {
                 $groupId = app(\App\Support\RopGroupAccess::class)->creationGroup($user, $groupId);
                 \App\Models\BranchGroup::whereKey($groupId)->lockForUpdate()->firstOrFail();
             }
             $isLocked = KpiPeriodLock::query()
                 ->where('period_type', $validated['period_type'])
                 ->where('period_key', $validated['period_key'])
-                ->when($user->hasRole('rop'), fn ($q) => $q->where('branch_group_id', $groupId)->where('branch_id', $user->branch_id))
+                ->when($user->usesAssignedGroupScope(), fn ($q) => $q->where('branch_group_id', $groupId)->where('branch_id', $user->branch_id))
                 ->lockForUpdate()->get(['id'])->isNotEmpty();
 
             abort_unless($isLocked, 422, 'Period is not locked.');
@@ -92,7 +87,7 @@ class KpiPeriodLockController extends Controller
             $reportsQuery = DailyReport::query()
                 ->where('user_id', $validated['entity_id'])
                 ->whereBetween('report_date', [$dateFrom, $dateTo])
-                ->when($user->hasRole('rop'), fn ($q) => $q->where('branch_group_id', $groupId)->whereIn('role_slug', ['agent', 'mop']));
+                ->when($user->usesAssignedGroupScope(), fn ($q) => $q->where('branch_group_id', $groupId)->whereHas('historicalRole', fn ($roles) => $roles->withPermission('kpi.subject.assigned_groups')));
             $reports = (clone $reportsQuery)->orderBy('report_date')->orderBy('id')->lockForUpdate()->get();
 
             abort_unless($reports->isNotEmpty(), 404, 'Daily report row not found for selected period and user.');
@@ -147,7 +142,7 @@ class KpiPeriodLockController extends Controller
     public function adjustmentHistory(Request $request)
     {
         $user = $this->authUser();
-        $this->ensureCanManage($user);
+        $this->ensureCanManage($user, 'kpi.adjustments.view');
 
         $validated = $request->validate([
             'period_type' => ['nullable', Rule::in(['day', 'week', 'month'])],
@@ -159,8 +154,8 @@ class KpiPeriodLockController extends Controller
         ]);
 
         $query = KpiAdjustmentLog::query()->orderByDesc('id');
-        if ($user->hasRole('rop')) app(\App\Support\RopGroupAccess::class)->scope($query, $user, 'kpi_adjustment_logs.branch_group_id');
-        if ($user->hasRole('rop') && isset($validated['branch_group_id'])) $query->where('branch_group_id', $validated['branch_group_id']);
+        if ($user->usesAssignedGroupScope()) app(\App\Support\RopGroupAccess::class)->scope($query, $user, 'kpi_adjustment_logs.branch_group_id');
+        if ($user->usesAssignedGroupScope() && isset($validated['branch_group_id'])) $query->where('branch_group_id', $validated['branch_group_id']);
 
         if (! empty($validated['period_type'])) {
             $query->where('period_type', $validated['period_type']);
@@ -171,7 +166,7 @@ class KpiPeriodLockController extends Controller
         }
 
         $entities = [];
-        if ($user->hasRole('rop')) {
+        if ($user->usesAssignedGroupScope()) {
             $entities = \Illuminate\Support\Facades\DB::table('users')->select(['id', 'name'])
                 ->whereIn('id', (clone $query)->reorder()->select('entity_id'))
                 ->orderBy('name')->orderBy('id')->get()->all();
@@ -182,14 +177,14 @@ class KpiPeriodLockController extends Controller
         }
 
         $result = $query->paginate((int) ($validated['per_page'] ?? 20))->withQueryString()->toArray();
-        if ($user->hasRole('rop')) $result['entities'] = $entities;
+        if ($user->usesAssignedGroupScope()) $result['entities'] = $entities;
         return response()->json($result);
     }
 
     public function historicalEntities(Request $request)
     {
         $actor = $this->authUser();
-        $this->ensureCanManage($actor);
+        $this->ensureCanManage($actor, 'kpi.adjustments.entities.view');
         $validated = $request->validate([
             'period_type' => ['required', Rule::in(['day', 'week', 'month'])],
             'period_key' => 'required|string|max:32',
@@ -200,7 +195,7 @@ class KpiPeriodLockController extends Controller
         [$from, $to] = $this->resolveDateRange($validated['period_type'], $validated['period_key']);
         $rows = \Illuminate\Support\Facades\DB::table('users')->select(['users.id', 'users.name'])->whereExists(function ($query) use ($groupId, $from, $to) {
             $query->selectRaw('1')->from('daily_reports')->whereColumn('daily_reports.user_id', 'users.id')
-                ->where('daily_reports.branch_group_id', $groupId)->whereIn('daily_reports.role_slug', ['agent', 'mop'])
+                ->where('daily_reports.branch_group_id', $groupId)->whereIn('daily_reports.role_slug', \App\Models\Role::query()->withPermission('kpi.subject.assigned_groups')->select('slug'))
                 ->whereBetween('daily_reports.report_date', [$from, $to]);
         })->orderBy('users.name')->orderBy('users.id')->get();
         return response()->json(['data' => $rows]);
@@ -239,22 +234,22 @@ class KpiPeriodLockController extends Controller
 
     private function validateScopedValues(array $validated, User $user): void
     {
-        if (! $this->branchScope->isBranchScopedManager($user)) {
-            return;
+        if ($user->hasPermission('kpi.periods.scope.all')) return;
+        abort_unless($user->hasPermission('kpi.periods.scope.branch') && $user->branch_id, 403, 'Forbidden');
+        if (isset($validated['branch_id'])) {
+            abort_unless((int) $validated['branch_id'] === (int) $user->branch_id, 403, 'Forbidden');
         }
-
-        if (! empty($validated['branch_id'])) {
-            $this->branchScope->ensureSameBranchOrDeny((int) $validated['branch_id'], $user);
+        if (isset($validated['branch_group_id'])) {
+            abort_unless(\App\Models\BranchGroup::query()->whereKey($validated['branch_group_id'])->where('branch_id', $user->branch_id)->exists(), 403, 'Forbidden');
         }
-
-        if (! empty($validated['branch_group_id'])) {
-            $this->branchScope->ensureBranchGroupInUserBranchOrDeny((int) $validated['branch_group_id'], $user);
+        if (! isset($validated['branch_id']) && ! isset($validated['branch_group_id'])) {
+            abort_unless($user->usesAssignedGroupScope() || $user->hasPermission('kpi.periods.global.lock'), 403, 'Forbidden');
         }
     }
 
-    private function ensureCanManage(User $user): void
+    private function ensureCanManage(User $user, string $permission): void
     {
-        abort_unless(in_array($user->role?->slug, ['admin', 'superadmin', 'rop', 'branch_director'], true), 403, 'Forbidden');
+        abort_unless($user->hasPermission($permission), 403, 'Forbidden');
     }
 
     private function validatePeriodKeyFormat(string $periodType, string $periodKey): void

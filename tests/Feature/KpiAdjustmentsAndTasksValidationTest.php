@@ -336,6 +336,39 @@ class KpiAdjustmentsAndTasksValidationTest extends TestCase
         ]);
     }
 
+    public function test_task_permissions_control_custom_role_scope_and_mutations(): void
+    {
+        [$admin, $agent, $type] = $this->seedUsersAndTypes();
+        $type->update(['code' => 'OTHER']);
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Task reader', 'slug' => 'task_reader']);
+        $role->forceFill(['permissions' => ['tasks.scope.own']])->save();
+        $admin->role_id = $role->id;
+        $admin->save();
+        $admin->unsetRelation('role');
+        $own = \App\Models\CrmTask::withoutEvents(fn () => \App\Models\CrmTask::create([
+            'task_type_id' => $type->id, 'assignee_id' => $admin->id, 'title' => 'Own', 'status' => 'new',
+        ]));
+        $other = \App\Models\CrmTask::withoutEvents(fn () => \App\Models\CrmTask::create([
+            'task_type_id' => $type->id, 'assignee_id' => $agent->id, 'title' => 'Other', 'status' => 'new',
+        ]));
+        Sanctum::actingAs($admin);
+        $this->getJson('/api/crm/tasks')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $own->id);
+        $this->patchJson('/api/crm/tasks/'.$own->id, ['title' => 'Changed'])->assertForbidden();
+        $role->forceFill(['permissions' => ['tasks.scope.own', 'tasks.update']])->save();
+        Sanctum::actingAs($admin->fresh());
+        $this->patchJson('/api/crm/tasks/'.$own->id, ['title' => 'Changed'])->assertOk();
+        $this->patchJson('/api/crm/tasks/'.$other->id, ['title' => 'Forbidden'])->assertForbidden();
+        $role->forceFill(['permissions' => ['tasks.scope.all', 'tasks.update']])->save();
+        Sanctum::actingAs($admin->fresh());
+        $this->getJson('/api/crm/tasks')->assertOk()->assertJsonCount(2, 'data');
+        $this->patchJson('/api/crm/tasks/'.$other->id, ['title' => 'Allowed'])->assertOk();
+        $this->postJson('/api/crm/tasks', ['task_type_id' => $type->id, 'assignee_id' => $admin->id, 'title' => 'No create grant'])->assertForbidden();
+        $role->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($admin->fresh());
+        $this->getJson('/api/crm/tasks')->assertOk()->assertJsonCount(0, 'data');
+    }
+
     private function seedUsersAndTypes(): array
     {
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);

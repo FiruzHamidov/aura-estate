@@ -71,6 +71,28 @@ class AccountDeletionTest extends TestCase
         });
     }
 
+    public function test_custom_role_requires_work_transfer_before_self_deletion_when_configured(): void
+    {
+        Schema::create('clients', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('responsible_agent_id');
+            $table->unsignedBigInteger('branch_group_id')->nullable(); $table->string('status');
+        });
+        $role = Role::create(['name' => 'Custom employee', 'slug' => 'custom_delete_employee']);
+        $user = User::create(['name' => 'Employee', 'phone' => '992900003111', 'role_id' => $role->id, 'status' => 'active']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role->forceFill(['permissions' => ['users.subject.deletion_requires_transfer']])->save();
+        \DB::table('clients')->insert(['responsible_agent_id' => $user->id, 'branch_group_id' => 1, 'status' => 'active']);
+        $token = $user->createToken('test')->plainTextToken;
+        $this->withToken($token)->postJson('/api/user/account-deletion')->assertConflict();
+        $this->assertNull($user->fresh()->deleted_at);
+        $this->assertSame(1, $user->tokens()->count());
+        $role->forceFill(['permissions' => []])->save();
+        $this->withToken($token)->postJson('/api/user/account-deletion')->assertOk();
+        $this->assertNotNull($user->fresh()->deleted_at);
+        $this->assertSame(0, $user->tokens()->count());
+        $this->assertSame(1, \DB::table('clients')->count());
+    }
+
     public function test_account_deletion_requires_authentication(): void
     {
         $this->postJson('/api/user/account-deletion', [

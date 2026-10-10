@@ -38,6 +38,7 @@ class LeadConversionService
             foreach ($snapshots as $key => $snapshot) {
                 abort_unless($snapshot->getRawOriginal() == $locked[$key]->getRawOriginal(), 409, 'CONVERSION_SOURCE_CHANGED');
             }
+            app(\App\Support\LeadAccess::class)->ensureAction($actor, 'convert');
             $lead = $locked['lead'];
             $client = $locked['client'] ?? null;
             $existingDeal = $locked['deal'] ?? null;

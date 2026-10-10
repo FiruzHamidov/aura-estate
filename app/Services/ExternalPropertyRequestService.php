@@ -10,6 +10,7 @@ use App\Models\Property;
 use App\Models\PropertyPhoto;
 use App\Models\PropertyStatus;
 use App\Models\PropertyType;
+use App\Models\Role;
 use App\Models\User;
 use App\Services\PropertyModeration\PropertyModerationService;
 use App\Support\ClientPhone;
@@ -31,7 +32,7 @@ class ExternalPropertyRequestService
     {
         $user->loadMissing('role');
         // External-agent management has no defined ROP employee scope in this release.
-        abort_if($user->hasRole('rop'), 403, 'FORBIDDEN_ACTION');
+        abort_if($user->usesAssignedGroupScope(), 403, 'FORBIDDEN_ACTION');
 
         $query = ExternalPropertyRequest::query()
             ->with([
@@ -43,11 +44,11 @@ class ExternalPropertyRequestService
                 'photos',
             ]);
 
-        if ($user->hasRole('admin') || $user->hasRole('superadmin')) {
+        if ($user->hasPermission('external_requests.scope.all')) {
             return $query;
         }
 
-        if ($user->hasRole('mop')) {
+        if ($user->hasPermission('external_requests.scope.group')) {
             if (empty($user->branch_group_id)) {
                 return $query->whereRaw('1 = 0');
             }
@@ -55,7 +56,7 @@ class ExternalPropertyRequestService
             return $query->where('branch_group_id', $user->branch_group_id);
         }
 
-        if ($user->hasRole('branch_director')) {
+        if ($user->hasPermission('external_requests.scope.branch')) {
             if (empty($user->branch_id)) {
                 return $query->whereRaw('1 = 0');
             }
@@ -63,7 +64,7 @@ class ExternalPropertyRequestService
             return $query->where('branch_id', $user->branch_id);
         }
 
-        if ($user->hasRole('agent') || $user->hasRole('manager') || $user->hasRole('operator')) {
+        if ($user->hasPermission('external_requests.scope.assigned_or_org')) {
             return $query->where(function (Builder $scope) use ($user) {
                 $scope->where('assigned_agent_id', $user->id);
 
@@ -93,7 +94,8 @@ class ExternalPropertyRequestService
     {
         $externalAgent->loadMissing('role');
 
-        abort_unless($externalAgent->hasRole('external_agent'), 403, 'Доступ запрещён');
+        abort_unless($externalAgent->hasPermission('external_requests.own.create'), 403, 'Доступ запрещён');
+        abort_unless($draft || $externalAgent->hasPermission('external_requests.own.submit'), 403, 'Нет права отправить заявку.');
 
         $data['external_agent_id'] = $externalAgent->id;
         $data['status'] = $draft ? ExternalPropertyRequest::STATUS_DRAFT : ExternalPropertyRequest::STATUS_SUBMITTED;
@@ -157,81 +159,88 @@ class ExternalPropertyRequestService
 
     public function assign(ExternalPropertyRequest $request, User $actor, ?int $assignedAgentId): ExternalPropertyRequest
     {
-        if ($assignedAgentId) {
-            $this->ensureAssignableAgent($actor, $assignedAgentId, $request);
-        }
+        return DB::transaction(function () use ($request, $actor, $assignedAgentId) {
+            [$actor, $request] = $this->lockInternalRequest($actor, $request, 'external_requests.assign', $assignedAgentId);
+            abort_if($actor->hasPermission('external_requests.assign.self') && (int) $assignedAgentId !== (int) $actor->id, 403, 'Можно принять заявку только на себя.');
+            if ($assignedAgentId) {
+                $this->ensureAssignableAgent($actor, $assignedAgentId, $request);
+            }
 
-        $oldStatus = $request->status;
-        $request->update([
-            'assigned_agent_id' => $assignedAgentId,
-            'status' => $assignedAgentId ? ExternalPropertyRequest::STATUS_ASSIGNED : ExternalPropertyRequest::STATUS_SUBMITTED,
-            'assigned_at' => $assignedAgentId ? now() : null,
-        ]);
+            $oldStatus = $request->status;
+            $request->update([
+                'assigned_agent_id' => $assignedAgentId,
+                'status' => $assignedAgentId ? ExternalPropertyRequest::STATUS_ASSIGNED : ExternalPropertyRequest::STATUS_SUBMITTED,
+                'assigned_at' => $assignedAgentId ? now() : null,
+            ]);
 
-        $this->log($request, $actor, 'assigned', $oldStatus, $request->status, null, [
-            'assigned_agent_id' => $assignedAgentId,
-        ]);
+            $this->log($request, $actor, 'assigned', $oldStatus, $request->status, null, [
+                'assigned_agent_id' => $assignedAgentId,
+            ]);
 
-        if ($assignedAgentId) {
-            $this->notifyUserId(
-                $assignedAgentId,
-                $request,
-                $actor,
-                'external_property_request_assigned',
-                'Назначена заявка внешнего агента',
-                'Вам назначена заявка внешнего агента #'.$request->id.'.',
-                '/profile/crm/external-agent-requests/'.$request->id
-            );
-        }
+            if ($assignedAgentId) {
+                $this->notifyUserId(
+                    $assignedAgentId,
+                    $request,
+                    $actor,
+                    'external_property_request_assigned',
+                    'Назначена заявка внешнего агента',
+                    'Вам назначена заявка внешнего агента #'.$request->id.'.',
+                    '/profile/crm/external-agent-requests/'.$request->id
+                );
+            }
 
-        return $request->fresh(['externalAgent', 'assignedAgent', 'property', 'photos']);
+            return $request->fresh(['externalAgent', 'assignedAgent', 'property', 'photos']);
+        });
     }
 
     public function changeStatus(ExternalPropertyRequest $request, User $actor, string $status, ?string $comment = null): ExternalPropertyRequest
     {
-        abort_if($request->status === ExternalPropertyRequest::STATUS_CONVERTED, 422, 'Сконвертированную заявку нельзя менять.');
+        return DB::transaction(function () use ($request, $actor, $status, $comment) {
+            [$actor, $request] = $this->lockInternalRequest($actor, $request, 'external_requests.status');
+            abort_if($request->status === ExternalPropertyRequest::STATUS_CONVERTED, 422, 'Сконвертированную заявку нельзя менять.');
 
-        $oldStatus = $request->status;
-        $payload = ['status' => $status];
+            $oldStatus = $request->status;
+            $payload = ['status' => $status];
 
-        if ($status === ExternalPropertyRequest::STATUS_NEEDS_INFO) {
-            $payload['needs_info_comment'] = $comment;
-        }
+            if ($status === ExternalPropertyRequest::STATUS_NEEDS_INFO) {
+                $payload['needs_info_comment'] = $comment;
+            }
 
-        if ($status === ExternalPropertyRequest::STATUS_REJECTED) {
-            $payload['rejection_reason'] = $comment;
-            $payload['rejected_at'] = now();
-        }
+            if ($status === ExternalPropertyRequest::STATUS_REJECTED) {
+                $payload['rejection_reason'] = $comment;
+                $payload['rejected_at'] = now();
+            }
 
-        $request->update($payload);
+            $request->update($payload);
 
-        $this->log($request, $actor, 'status_changed', $oldStatus, $status, $comment);
+            $this->log($request, $actor, 'status_changed', $oldStatus, $status, $comment);
 
-        if ($status === ExternalPropertyRequest::STATUS_NEEDS_INFO) {
-            $this->notifyUserId(
-                $request->external_agent_id,
-                $request,
-                $actor,
-                'external_property_request_needs_info',
-                'Нужно уточнить заявку',
-                $comment ?: 'По вашей заявке #'.$request->id.' нужны уточнения.',
-                '/external/property-requests/'.$request->id
-            );
-        }
+            if ($status === ExternalPropertyRequest::STATUS_NEEDS_INFO) {
+                $this->notifyUserId(
+                    $request->external_agent_id,
+                    $request,
+                    $actor,
+                    'external_property_request_needs_info',
+                    'Нужно уточнить заявку',
+                    $comment ?: 'По вашей заявке #'.$request->id.' нужны уточнения.',
+                    '/external/property-requests/'.$request->id
+                );
+            }
 
-        if ($status === ExternalPropertyRequest::STATUS_REJECTED) {
-            $this->notifyUserId(
-                $request->external_agent_id,
-                $request,
-                $actor,
-                'external_property_request_rejected',
-                'Заявка отклонена',
-                $comment ?: 'Ваша заявка #'.$request->id.' отклонена.',
-                '/external/property-requests/'.$request->id
-            );
-        }
+            if ($status === ExternalPropertyRequest::STATUS_REJECTED) {
+                $this->notifyUserId(
+                    $request->external_agent_id,
+                    $request,
+                    $actor,
+                    'external_property_request_rejected',
+                    'Заявка отклонена',
+                    $comment ?: 'Ваша заявка #'.$request->id.' отклонена.',
+                    '/external/property-requests/'.$request->id
+                );
+            }
 
-        return $request->fresh(['externalAgent', 'assignedAgent', 'property', 'photos']);
+            return $request->fresh(['externalAgent', 'assignedAgent', 'property', 'photos']);
+        });
     }
 
     public function prefillPayload(ExternalPropertyRequest $request, User $actor): array
@@ -272,12 +281,14 @@ class ExternalPropertyRequestService
     ): Property {
         abort_if($request->property_id || $request->status === ExternalPropertyRequest::STATUS_CONVERTED, 422, 'Заявка уже сконвертирована.');
         abort_if(in_array($request->status, [ExternalPropertyRequest::STATUS_REJECTED, ExternalPropertyRequest::STATUS_ARCHIVED], true), 422, 'Закрытую заявку нельзя конвертировать.');
-        abort_if($actor->hasRole('intern') || $actor->hasRole('external_agent') || $actor->hasRole('client'), 403, 'Доступ запрещён');
+        abort_unless($actor->hasPermission('external_requests.convert'), 403, 'Доступ запрещён');
         $this->moderation->assertCanCreate($actor);
 
         return DB::transaction(function () use ($request, $actor, $payload, $copyPhotos) {
-            $request->refresh();
-            abort_if($request->property_id, 422, 'Заявка уже сконвертирована.');
+            [$actor, $request] = $this->lockInternalRequest($actor, $request, 'external_requests.convert');
+            $this->moderation->assertCanCreate($actor);
+            abort_if($request->property_id || $request->status === ExternalPropertyRequest::STATUS_CONVERTED, 422, 'Заявка уже сконвертирована.');
+            abort_if(in_array($request->status, [ExternalPropertyRequest::STATUS_REJECTED, ExternalPropertyRequest::STATUS_ARCHIVED], true), 422, 'Закрытую заявку нельзя конвертировать.');
 
             $propertyPayload = array_merge($this->prefillPayload($request, $actor), $payload);
             $propertyPayload['created_by'] = $actor->id;
@@ -443,22 +454,30 @@ class ExternalPropertyRequestService
         }
     }
 
+    /** Call inside a transaction so role, organization and request changes are rechecked before writing. */
+    private function lockInternalRequest(User $actor, ExternalPropertyRequest $request, string $permission, ?int $assigneeId = null): array
+    {
+        $users = User::query()->whereIn('id', array_filter([$actor->id, $assigneeId]))->orderBy('id')->lockForUpdate()->get()->keyBy('id');
+        $actor = $users->get($actor->id);
+        abort_unless($actor, 404, 'NOT_FOUND');
+        if ((int) auth()->id() === (int) $actor->id) auth()->setUser($actor);
+        abort_unless($actor->hasPermission($permission), 403, 'Доступ запрещён');
+        $request = ExternalPropertyRequest::query()->lockForUpdate()->findOrFail($request->id);
+        $this->ensureInternalCanAccess($actor, $request);
+        return [$actor, $request];
+    }
+
     private function ensureAssignableAgent(User $actor, int $assignedAgentId, ExternalPropertyRequest $request): void
     {
         $assignee = User::query()->with('role')->findOrFail($assignedAgentId);
 
         abort_unless(
-            $assignee->hasRole('agent')
-                || $assignee->hasRole('manager')
-                || $assignee->hasRole('operator')
-                || $assignee->hasRole('mop')
-                || $assignee->hasRole('rop')
-                || $assignee->hasRole('branch_director'),
+            $assignee->hasPermission('external_requests.receive'),
             422,
-            'Назначить можно только внутреннего сотрудника.'
+            'У сотрудника нет права быть ответственным за внешнюю заявку.'
         );
 
-        if ($actor->hasRole('admin') || $actor->hasRole('superadmin')) {
+        if ($actor->hasPermission('external_requests.assign.across_zones')) {
             return;
         }
 
@@ -640,47 +659,25 @@ class ExternalPropertyRequestService
 
     private function internalNotificationRecipients(ExternalPropertyRequest $request)
     {
+        $roles = Role::query()->get();
+        $roleIds = fn (string $scope) => $roles
+            ->filter(fn (Role $role) => $role->hasPermission('external_requests.notifications.'.$scope))
+            ->pluck('id')->all();
+
         return User::query()
             ->with('role')
             ->where('status', User::STATUS_ACTIVE)
-            ->whereHas('role', fn (Builder $query) => $query->whereIn('slug', [
-                'admin',
-                'superadmin',
-                'rop',
-                'branch_director',
-                'mop',
-                'agent',
-                'manager',
-                'operator',
-            ]))
-            ->where(function (Builder $query) use ($request) {
-                $query->whereHas('role', fn (Builder $roleQuery) => $roleQuery->whereIn('slug', ['admin', 'superadmin']));
-
+            ->where(function (Builder $query) use ($request, $roleIds) {
+                $query->whereIn('role_id', $roleIds('all'));
                 if ($request->branch_id) {
-                    $query->orWhere(function (Builder $branchQuery) use ($request) {
-                        $branchQuery
-                            ->where('branch_id', $request->branch_id)
-                            ->whereHas('role', fn (Builder $roleQuery) => $roleQuery->whereIn('slug', [
-                                'rop',
-                                'branch_director',
-                                'agent',
-                                'manager',
-                                'operator',
-                            ]));
-                    });
+                    $query->orWhere(fn (Builder $branch) => $branch
+                        ->where('branch_id', $request->branch_id)
+                        ->whereIn('role_id', $roleIds('branch')));
                 }
-
                 if ($request->branch_group_id) {
-                    $query->orWhere(function (Builder $groupQuery) use ($request) {
-                        $groupQuery
-                            ->where('branch_group_id', $request->branch_group_id)
-                            ->whereHas('role', fn (Builder $roleQuery) => $roleQuery->whereIn('slug', [
-                                'mop',
-                                'agent',
-                                'manager',
-                                'operator',
-                            ]));
-                    });
+                    $query->orWhere(fn (Builder $group) => $group
+                        ->where('branch_group_id', $request->branch_group_id)
+                        ->whereIn('role_id', $roleIds('group')));
                 }
             })
             ->limit(50)

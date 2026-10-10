@@ -43,6 +43,6 @@ class CrmTaskTypeController extends Controller
 
     private function ensureInternalRole(User $user): void
     {
-        abort_unless(in_array($user->role?->slug, ['admin', 'superadmin', 'rop', 'branch_director', 'mop', 'agent'], true), 403, 'Forbidden');
+        abort_unless($user->hasPermission('crm.task_types.view'), 403, 'Forbidden');
     }
 }

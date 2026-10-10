@@ -336,6 +336,31 @@ class PropertySearchFeatureTest extends TestCase
             ->assertJsonPath('data.0.id', $property->id);
     }
 
+    public function test_owner_search_grant_can_be_assigned_and_revoked_without_expanding_the_list_scope(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $own = $this->createProperty(['title' => 'Quiet apartment', 'owner_name' => 'Privateowner', 'owner_phone' => '992987654321']);
+        $this->createProperty(['title' => 'Foreign apartment', 'created_by' => 999, 'owner_name' => 'Privateowner', 'owner_phone' => '992987654321']);
+        $this->agentRole->forceFill(['slug' => 'custom_search', 'permissions' => ['properties.list.scope.own']])->save();
+
+        foreach ([false, true, false] as $grant) {
+            $this->agentRole->forceFill(['permissions' => ['properties.list.scope.own', ...($grant ? ['properties.search.owner'] : [])]])->save();
+            \Laravel\Sanctum\Sanctum::actingAs($this->agent->fresh());
+            foreach (['Privateowner', '992987654321'] as $term) {
+                $response = $this->getJson('/api/properties/search?q='.$term)->assertOk()->assertJsonPath('total', $grant ? 1 : 0);
+                if ($grant) {
+                    $response->assertJsonPath('data.0.id', $own->id);
+                    $response->assertJsonMissingPath('data.0.owner_name')->assertJsonMissingPath('data.0.owner_phone');
+                }
+            }
+            $this->getJson('/api/properties/search?q=Quiet')->assertOk()->assertJsonPath('total', 1);
+        }
+
+        $this->agentRole->forceFill(['permissions' => ['properties.search.owner']])->save();
+        \Laravel\Sanctum\Sanctum::actingAs($this->agent->fresh());
+        $this->getJson('/api/properties/search?q=Privateowner')->assertOk()->assertJsonPath('total', 0);
+    }
+
     public function test_public_search_price_sort_returns_only_open_active_properties(): void
     {
         $closedStatus = PropertyStatus::create(['name' => 'Sold', 'slug' => 'sold']);

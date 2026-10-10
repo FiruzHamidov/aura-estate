@@ -14,7 +14,7 @@ class KpiReportService
 {
     public function build(User $authUser, array $filters): array
     {
-        $historical = $authUser->hasRole('rop');
+        $historical = $authUser->usesAssignedGroupScope();
         $periodType = $filters['period_type'];
         $dateFrom = Carbon::parse($filters['date_from'])->startOfDay();
         $dateTo = Carbon::parse($filters['date_to'])->endOfDay();
@@ -25,7 +25,7 @@ class KpiReportService
             ->whereDate('report_date', '<=', $dateTo->toDateString());
 
         $this->applyVisibilityScope($query, $authUser);
-        if ($historical) $query->with('branchGroup')->whereIn('role_slug', ['agent', 'mop']);
+        if ($historical) $query->with('branchGroup')->whereHas('historicalRole', fn (Builder $roles) => $roles->withPermission('kpi.subject.assigned_groups'));
 
         if (! empty($filters['user_id'])) {
             $query->where('user_id', (int) $filters['user_id']);
@@ -135,13 +135,22 @@ class KpiReportService
     {
         $authUser->loadMissing('role');
 
-        match ($authUser->role?->slug) {
-            'admin', 'superadmin', 'owner' => null,
-            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'daily_reports.branch_group_id'),
-            'branch_director' => $query->whereHas('user', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id)),
-            'mop' => $query->whereHas('user', fn (Builder $q) => $q->where('branch_group_id', $authUser->branch_group_id)),
-            default => $query->where('user_id', $authUser->id),
-        };
+        abort_unless($authUser->hasPermission('kpi.reports.view'), 403, 'KPI_FORBIDDEN_SCOPE');
+        $historical = $authUser->usesAssignedGroupScope();
+        if ($historical) app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'daily_reports.branch_group_id');
+        if ($authUser->hasPermission('kpi.reports.scope.all')) return;
+        if ($authUser->hasPermission('kpi.reports.scope.branch')) {
+            if (! $authUser->branch_id) { $query->whereRaw('1 = 0'); return; }
+            if (! $historical) $query->whereHas('user', fn (Builder $q) => $q->where('branch_id', $authUser->branch_id));
+            return;
+        }
+        if ($authUser->hasPermission('kpi.reports.scope.group')) {
+            if (! $authUser->branch_group_id) { $query->whereRaw('1 = 0'); return; }
+            $historical ? $query->where('daily_reports.branch_group_id', $authUser->branch_group_id)
+                : $query->whereHas('user', fn (Builder $q) => $q->where('branch_group_id', $authUser->branch_group_id));
+            return;
+        }
+        $authUser->hasPermission('kpi.reports.scope.own') ? $query->where('user_id', $authUser->id) : $query->whereRaw('1 = 0');
     }
 
     private function groupReports(Collection $reports, string $periodType, bool $historical = false): Collection

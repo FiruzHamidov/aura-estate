@@ -73,7 +73,7 @@ class KpiReportController extends Controller
 
     private function validateScopeFilters(array $validated, User $authUser): void
     {
-        if (! $this->branchScope->isBranchScopedManager($authUser)) {
+        if (! $authUser->usesAssignedGroupScope() && ! $authUser->hasPermission('kpi.reports.scope.branch')) {
             return;
         }
 
@@ -86,7 +86,7 @@ class KpiReportController extends Controller
         }
 
         if (array_key_exists('user_id', $validated) && $validated['user_id'] !== null) {
-            if (! $authUser->hasRole('rop') || ! app(\App\Support\RopGroupAccess::class)->hasVisibleDailyReportHistory($authUser, (int) $validated['user_id'])) {
+            if (! $authUser->usesAssignedGroupScope() || ! app(\App\Support\RopGroupAccess::class)->hasVisibleDailyReportHistory($authUser, (int) $validated['user_id'])) {
                 $this->branchScope->ensureUserInUserBranchOrDeny((int) $validated['user_id'], $authUser);
             }
         }
@@ -99,6 +99,7 @@ class KpiReportController extends Controller
 
         abort_unless($user, 401, 'Unauthenticated.');
         $user->loadMissing('role');
+        abort_unless($user->hasPermission('kpi.reports.view'), 403, 'KPI_FORBIDDEN_SCOPE');
 
         return $user;
     }
