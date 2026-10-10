@@ -66,6 +66,27 @@ class RolePermissionsTest extends TestCase
         $this->assertNotContains('properties.search.owner', $catalog->defaults('new_custom'));
     }
 
+    public function test_learning_defaults_preserve_role_materials(): void
+    {
+        foreach (Role::all() as $role) {
+            $this->assertTrue($role->hasPermission('learning.site.view'));
+            $this->assertSame($role->slug !== 'client', $role->hasPermission('learning.site.videos'), $role->slug);
+            $this->assertSame(in_array($role->slug, ['admin', 'superadmin', 'agent', 'intern', 'manager', 'operator', 'mop', 'rop', 'branch_director', 'external_agent'], true), $role->hasPermission('learning.guides.crm-sales'), $role->slug);
+            $this->assertSame(in_array($role->slug, ['admin', 'superadmin', 'marketing', 'reels_manager', 'hr', 'accountant'], true), $role->hasPermission('learning.guides.admin-content'), $role->slug);
+            $this->assertSame(in_array($role->slug, ['admin', 'superadmin', 'client'], true), $role->hasPermission('learning.guides.client'), $role->slug);
+        }
+        $catalog = app(PermissionCatalog::class);
+        foreach (['legacy_custom'] as $slug) {
+            $this->assertContains('learning.site.view', $catalog->migrationDefaults($slug));
+            $this->assertContains('learning.guides.client', $catalog->migrationDefaults($slug));
+            $this->assertNotContains('learning.site.videos', $catalog->migrationDefaults($slug));
+        }
+        $this->assertNotContains('learning.site.view', $catalog->defaults('new_custom'));
+        foreach (['learning.site.view', 'learning.site.videos', 'learning.guides.crm-sales', 'learning.guides.admin-content', 'learning.guides.client', 'profile.details.site', 'profile.security.site'] as $permission) {
+            $this->assertContains($permission, $catalog->defaults('owner'));
+        }
+    }
+
     public function test_control_mode_is_enabled_only_for_existing_security_role(): void
     {
         foreach (Role::all() as $role) {
