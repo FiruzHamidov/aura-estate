@@ -66,6 +66,20 @@ class RolePermissionsTest extends TestCase
         $this->assertNotContains('properties.search.owner', $catalog->defaults('new_custom'));
     }
 
+    public function test_client_matching_defaults_preserve_existing_access(): void
+    {
+        $catalog = app(PermissionCatalog::class);
+        foreach ([...array_column(Role::systemRoles(), 'slug'), 'owner'] as $slug) {
+            $defaults = $catalog->defaults($slug);
+            $this->assertSame(!in_array($slug, ['client', 'external_agent', 'accountant'], true), in_array('clients.matching.view', $defaults, true), $slug);
+            $this->assertSame($slug !== 'client', in_array('clients.matching.site', $defaults, true), $slug);
+        }
+        foreach (['clients.matching.view', 'clients.matching.site'] as $permission) {
+            $this->assertContains($permission, $catalog->migrationDefaults('legacy_custom'));
+            $this->assertNotContains($permission, $catalog->defaults('new_custom'));
+        }
+    }
+
     public function test_property_contact_defaults_preserve_separate_payload_and_website_access(): void
     {
         foreach (Role::all() as $role) {

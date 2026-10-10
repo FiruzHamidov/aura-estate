@@ -811,6 +811,7 @@ class ClientController extends Controller
     public function matchingProperties(Request $request, Client $client)
     {
         $authUser = $this->authUser();
+        abort_unless($authUser->hasPermission('clients.matching.view'), 403, 'Нет права подбирать объекты для клиента.');
         $this->clientAccess->ensureVisible($authUser, $client, 'clients.view');
 
         $validated = $request->validate([
