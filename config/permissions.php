@@ -664,6 +664,8 @@ foreach (['integrations.view' => ['Состояние интеграций KPI',
     $permissions['kpi.'.$action] = ['group' => 'KPI', 'name' => $name, 'description' => $description, 'roles' => $kpiPlanAllRoles];
 }
 
+$permissions['kpi.operations.site.view'] = ['group' => 'KPI', 'name' => 'Операционный контроль KPI на сайте', 'description' => 'Открывает страницу операционного контроля и пункт меню. Каждый блок диагностики, показатели, планы, расписание и действия требуют отдельных прав. Глобальные блоки расписания и интеграций остаются недоступными РОП.', 'roles' => ['admin', 'superadmin', 'rop', 'branch_director']];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],
