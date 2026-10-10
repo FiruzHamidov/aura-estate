@@ -751,6 +751,31 @@ class UserAccessTest extends TestCase
             ->assertJsonPath('branch_group_id', $groupA->id);
     }
 
+    public function test_profile_field_permissions_are_independent_and_rechecked_before_saving(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Profile editor', 'slug' => 'profile_editor']);
+        $user = User::create(['name' => 'Original', 'phone' => '939555551', 'role_id' => $role->id, 'status' => 'active']);
+        $grant = function (array $permissions) use ($role, $user) {
+            $role->forceFill(['permissions' => $permissions])->save();
+            Sanctum::actingAs($user->fresh());
+        };
+        $grant([]);
+        $this->patchJson('/api/user/profile', ['name' => 'Denied'])->assertForbidden();
+        $grant(['profile.name.edit']);
+        $this->patchJson('/api/user/profile', ['name' => 'Renamed'])->assertOk()->assertJsonPath('name', 'Renamed');
+        $this->patchJson('/api/user/profile', ['name' => 'Atomic', 'description' => 'Denied'])->assertForbidden();
+        $this->assertSame('Renamed', $user->fresh()->name);
+        $grant(['profile.details.edit']);
+        $this->patchJson('/api/user/profile', ['description' => 'Allowed'])->assertOk()->assertJsonPath('description', 'Allowed');
+        $this->patchJson('/api/user/profile', ['name' => 'Denied'])->assertForbidden();
+        $grant(['profile.name.edit']);
+        auth()->user()->load('role');
+        $role->forceFill(['permissions' => []])->save();
+        $this->patchJson('/api/user/profile', ['name' => 'Stale'])->assertForbidden();
+        $this->assertSame('Renamed', $user->fresh()->name);
+    }
+
     public function test_authenticated_user_can_fetch_own_profile(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);

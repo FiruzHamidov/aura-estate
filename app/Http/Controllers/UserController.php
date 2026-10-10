@@ -613,23 +613,28 @@ class UserController extends Controller
 
     public function updateProfile(Request $request)
     {
-        $user = $this->authUser();
+        return DB::transaction(function () use ($request) {
+            $user = User::query()->lockForUpdate()->findOrFail($this->authUser()->id);
+            auth()->setUser($user);
+            if ($request->exists('name')) abort_unless($user->hasPermission('profile.name.edit'), 403, 'Нет права менять имя профиля.');
+            if ($request->hasAny(['description', 'birthday', 'phone', 'email'])) abort_unless($user->hasPermission('profile.details.edit'), 403, 'Нет права менять контактные данные профиля.');
 
-        if (is_string($request->input('phone')) && $request->input('phone') !== $user->phone) {
-            $request->merge(['phone' => \App\Support\InternationalPhone::accountValue($request->input('phone'))]);
-        }
+            if (is_string($request->input('phone')) && $request->input('phone') !== $user->phone) {
+                $request->merge(['phone' => \App\Support\InternationalPhone::accountValue($request->input('phone'))]);
+            }
 
-        $data = $request->validate([
-            'name' => 'sometimes|string',
-            'description' => 'nullable|string',
-            'birthday' => 'nullable|date',
-            'phone' => ['sometimes', 'string', new \App\Rules\UniqueUserPhone($user->id), new \App\Rules\InternationalPhoneNumber],
-            'email' => 'sometimes|email|unique:users,email,'.$user->id,
-        ]);
+            $data = $request->validate([
+                'name' => 'sometimes|string',
+                'description' => 'nullable|string',
+                'birthday' => 'nullable|date',
+                'phone' => ['sometimes', 'string', new \App\Rules\UniqueUserPhone($user->id), new \App\Rules\InternationalPhoneNumber],
+                'email' => 'sometimes|email|unique:users,email,'.$user->id,
+            ]);
 
-        $user->update($data);
+            $user->update($data);
 
-        return response()->json($user->fresh(['role', 'branch', 'branchGroup']));
+            return response()->json($user->fresh(['role', 'branch', 'branchGroup']));
+        });
     }
 
     // Обновление пользователя
