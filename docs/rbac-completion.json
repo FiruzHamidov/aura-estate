@@ -1,0 +1,191 @@
+{
+  "purpose": "Закрытый список направлений завершения RBAC; упоминание роли в файле само по себе не означает дефект.",
+  "backend_head": "e7e376eb3962478fc665c5f21f01fb88ec24fb40",
+  "frontend_head": "78b6644da0b654425040c098606e67780c6e9e8a",
+  "completed_verification": {
+    "production_build": "passed",
+    "browser_tests": {
+      "passed": 249,
+      "failed": 0
+    },
+    "backend_tests": {
+      "total": 1247,
+      "assertions": 18021,
+      "baseline_errors": 2,
+      "baseline_failures": 5,
+      "new_failure_names": 0
+    },
+    "frontend_unit_tests": {
+      "total": 622,
+      "passed": 611,
+      "baseline_failures": 11,
+      "new_failure_names": 0
+    }
+  },
+  "remaining": [
+    {
+      "id": "organization_boundaries",
+      "title": "Границы групп РОП и филиалов охраны",
+      "status": "open",
+      "source_files": [
+        "app/Support/RopGroupAccess.php",
+        "app/Services/GroupAccess/RopGroupAssignments.php",
+        "app/Services/GroupAccess/UserOrganizationService.php",
+        "app/Services/Attendance/AttendanceGroupScope.php",
+        "app/Services/LocationTracking/LocationAccessService.php"
+      ],
+      "done_when": "Разделить обязательную целостность данных и настраиваемые права. Одинаковая политика должна применяться к API, истории, экспорту, очередям и интерфейсу. Исходные назначения и исторические границы сохраняются после миграции."
+    },
+    {
+      "id": "target_eligibility",
+      "title": "Ограничения по роли целевого сотрудника",
+      "status": "open",
+      "source_files": [
+        "app/Services/GroupAccess/EmployeeGroupTransfer.php",
+        "app/Services/GroupAccess/GroupRecordTransfer.php",
+        "app/Services/Users/DismissalTransfer.php",
+        "app/Http/Controllers/DailyReportController.php",
+        "app/Services/KpiModuleService.php"
+      ],
+      "done_when": "Для каждого оставшегося списка должностей определить: бизнес-формула или ограничение доступа. Перенести ограничения доступа; не менять формулы KPI и типы отчётов без необходимости."
+    },
+    {
+      "id": "legacy_admission",
+      "title": "Остаточные входные ограничения",
+      "status": "open",
+      "source_files": [
+        "app/Http/Middleware/EnsureUserIsNotClient.php",
+        "app/Services/ReferenceCatalogService.php",
+        "app/Http/Controllers/SelectionController.php"
+      ],
+      "done_when": "Выданное разрешение работает у пользовательской роли и у изменённой системной роли. Неперенесённые действия не получают доступ через обход старого middleware."
+    },
+    {
+      "id": "notification_recipients",
+      "title": "Получатели уведомлений",
+      "status": "open",
+      "source_files": [
+        "app/Services/NotificationRecipientResolver.php",
+        "app/Services/NotificationService.php",
+        "app/Services/GroupAccess/NotificationGroupAccess.php"
+      ],
+      "done_when": "Отделить бизнес-адресата от привилегии получать закрытые сведения. Получатель соответствует актуальным правам и области; старые настройки доставки сохраняются."
+    },
+    {
+      "id": "frontend_remaining",
+      "title": "Оставшиеся клиентские ограничения и состояние",
+      "status": "open",
+      "source_files": [
+        "../aura-front-rbac/utils/rbac.ts",
+        "../aura-front-rbac/services/attendance/access-context.ts"
+      ],
+      "done_when": "Закончить классификацию прямых проверок роли: fallback старого API, подпись/фильтр или действующий запрет. Действующие запреты управляются правами. Проверить ещё не покрытые кэши CRM-карточек и действий."
+    },
+    {
+      "id": "migration_editor_release",
+      "title": "Миграция, редактор и подготовка выпуска",
+      "status": "open",
+      "source_files": [
+        "database/migrations/2026_10_10_000000_add_role_permissions.php",
+        "app/Services/Rbac/PermissionCatalog.php",
+        "app/Http/Controllers/RolePermissionController.php",
+        "../aura-front-rbac/app/admin/roles"
+      ],
+      "done_when": "Проверить полный актуальный каталог в редакторе, сохранение прежних настроек включая owner и пользовательские роли, порядок обновления двух репозиториев и откат. Подготовить описание изменений. Push, merge и deployment отдельно не разрешены."
+    }
+  ],
+  "role_reference_inventory": {
+    "status": "classification_incomplete",
+    "files": [
+      "app/Http/Middleware/EnsurePropertyModerationIdempotency.php",
+      "app/Support/ChatSessionAccess.php",
+      "app/Http/Controllers/BookingController.php",
+      "app/Support/StoryAccess.php",
+      "app/Http/Middleware/EnforceRopGroupScope.php",
+      "app/Support/RbacBranchScope.php",
+      "app/Support/KpiPlanScopePolicy.php",
+      "app/Http/Middleware/LogApiRequest.php",
+      "app/Support/DealPipelineAccess.php",
+      "app/Services/PropertyReportStaff.php",
+      "app/Services/GroupAccess/GroupRecordTransfer.php",
+      "app/Http/Controllers/Concerns/SerializesConversationPayloads.php",
+      "app/Services/PropertyModeration/PropertyModerationAccess.php",
+      "app/Http/Middleware/EnsureUserIsNotClient.php",
+      "app/Support/ClientAccess.php",
+      "app/Services/Crm/ClientDeduplicator.php",
+      "app/Services/GroupAccess/AuditSnapshotProjection.php",
+      "app/Services/PropertyModeration/PropertyModerationService.php",
+      "app/Services/KpiRopPlanService.php",
+      "app/Http/Controllers/FavoriteController.php",
+      "app/Support/RopGroupAccess.php",
+      "app/Services/LocationTracking/LocationAccessService.php",
+      "app/Services/ReferenceCatalogService.php",
+      "app/Services/GroupAccess/UserOrganizationService.php",
+      "app/Support/LeadAccess.php",
+      "app/Services/GroupAccess/RopGroupAssignments.php",
+      "app/Services/ExternalPropertyRequestService.php",
+      "app/Services/GroupAccess/NotificationGroupAccess.php",
+      "app/Services/Crm/ClientAttachService.php",
+      "app/Services/GroupAccess/GroupDataProjection.php",
+      "app/Services/Users/DismissalTransfer.php",
+      "app/Services/GroupAccess/EmployeeGroupTransfer.php",
+      "app/Services/Users/UserRecordCounts.php",
+      "app/Services/PropertyLiquidity/RopLiquidityResults.php",
+      "app/Services/GroupAccess/BookingReportCounts.php",
+      "app/Services/GroupAccess/TaskGroupOwnership.php",
+      "app/Http/Controllers/SupportConversationController.php",
+      "app/Services/Rbac/RoleAssignmentGuard.php",
+      "app/Services/PropertyLiquidity/PropertyLiquidityAccess.php",
+      "app/Services/NotificationService.php",
+      "app/Services/Rbac/PermissionCatalog.php",
+      "app/Http/Controllers/AttendanceMappingController.php",
+      "app/Http/Controllers/StoryController.php",
+      "app/Services/Crm/Matching/ClientPropertyMatcher.php",
+      "app/Http/Controllers/RoleController.php",
+      "app/Services/KpiReportService.php",
+      "app/Services/Attendance/AttendanceAccessService.php",
+      "app/Http/Controllers/RolePermissionController.php",
+      "app/Services/NotificationRecipientResolver.php",
+      "app/Http/Controllers/NotificationController.php",
+      "app/Http/Controllers/LocationTrackingController.php",
+      "app/Http/Controllers/DealPipelineController.php",
+      "app/Services/PropertyLiquidity/PropertyLiquidityCalculator.php",
+      "app/Http/Controllers/GroupAccessReviewController.php",
+      "app/Http/Controllers/PropertyReportController.php",
+      "app/Http/Controllers/KpiPeriodLockController.php",
+      "app/Services/Attendance/AttendanceGroupScope.php",
+      "app/Http/Controllers/ReelController.php",
+      "app/Http/Controllers/AccountDeletionController.php",
+      "app/Http/Controllers/AttendanceReportController.php",
+      "app/Http/Controllers/UserController.php",
+      "app/Http/Controllers/KpiModuleController.php",
+      "app/Services/DailyReportService.php",
+      "app/Http/Controllers/ExternalAgentController.php",
+      "app/Http/Controllers/KpiReportController.php",
+      "app/Http/Controllers/PublicTeamController.php",
+      "app/Services/KpiModuleService.php",
+      "app/Http/Controllers/SelectionController.php",
+      "app/Http/Controllers/PublicRealtorController.php",
+      "app/Http/Controllers/ExternalRequestMediaController.php",
+      "app/Http/Controllers/CrmReportController.php",
+      "app/Http/Controllers/CrmTaskController.php",
+      "app/Http/Controllers/PropertyModerationController.php",
+      "app/Services/Attendance/AttendanceTimesheetExporter.php",
+      "app/Http/Controllers/ApiRequestLogController.php",
+      "app/Http/Controllers/ExternalPropertyRequestController.php",
+      "app/Http/Controllers/ClientController.php",
+      "app/Http/Controllers/PropertyLiquidityController.php",
+      "app/Http/Controllers/BranchGroupController.php",
+      "app/Http/Controllers/PropertyController.php",
+      "app/Http/Controllers/DailyReportController.php",
+      "app/Http/Controllers/AttendanceWebController.php"
+    ]
+  },
+  "execution_rules": [
+    "Работать по одному открытому пункту, указывать конкретные завершённые подпункты и доказательства.",
+    "Не запускать полный набор повторно без новых изменений или выявленной регрессии.",
+    "Не считать все найденные упоминания роли дефектами и не расширять задачу на устранение прежних несвязанных падений тестов.",
+    "Новый обнаруженный дефект доступа относить к существующему направлению, с конкретным воспроизводимым сценарием.",
+    "Не объявлять полную готовность до проверки всех шести направлений."
+  ]
+}
