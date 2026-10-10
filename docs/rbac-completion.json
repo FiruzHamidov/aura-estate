@@ -335,6 +335,15 @@
             "/tmp/aura-rbac-group-cache-browser.log",
             "/tmp/aura-rbac-group-cache-tsc.log"
           ]
+        },
+        {
+          "change": "Кнопка создания клиента в админке использует право создания, назначения client и политику hr_create/team вместо запрета по названию HR/РОП. Контекстная подсказка использует существующие learning.site.view/videos; пользовательские роли больше не считаются клиентами для этого допуска. Подписи формы кадрового создания описывают настраиваемые права.",
+          "verification": "TypeScript и пять браузерных сценариев прошли: открытие HR формы клиента с явными допусками, отзыв назначения скрывает кнопку; пользовательская роль видит подсказку до отзыва; обе формы РОП и поля филиала/группы сохраняют поведение. Первое падение нового теста исправлено корректным массивом в заглушке /user/agents.",
+          "logs": [
+            "/tmp/aura-rbac-user-help-policy-browser.log",
+            "/tmp/aura-rbac-user-help-policy-browser-focused.log",
+            "/tmp/aura-rbac-user-help-policy-tsc.log"
+          ]
         }
       ],
       "remaining_checks": [
@@ -529,6 +538,14 @@
       {
         "file": "app/_components/daily-report/DailyReportGate.tsx",
         "classification": "migrated mandatory report permission with browser coverage"
+      },
+      {
+        "file": "app/profile/reports/daily/page.tsx",
+        "classification": "hardcoded row/edit role branches execute only without explicit permissions; configured roles use employee rights and server eligibility"
+      },
+      {
+        "file": "app/profile/_components/profile-menu.tsx::getSectionOrder",
+        "classification": "presentation order only: operator/manager place CRM first; permission-based menu items unchanged"
       }
     ]
   }
