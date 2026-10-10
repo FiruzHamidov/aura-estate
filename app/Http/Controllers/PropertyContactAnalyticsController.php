@@ -43,7 +43,11 @@ class PropertyContactAnalyticsController extends Controller
             default => null,
         };
         $to = $period === 'custom' ? $data['date_to'] : $today->toDateString();
+        $actor = $request->user();
+        $ropAccess = app(\App\Support\RopGroupAccess::class);
+        $isRop = $ropAccess->applies($actor);
         $query = DB::table('properties as p')->select(['p.id', 'p.title', 'p.address', 'p.moderation_status']);
+        if ($isRop) $ropAccess->scope($query, $actor, 'p.branch_group_id', 'p.branch_id');
         $columns = ['views_count', 'phone_clicks', 'chat_clicks', 'whatsapp_clicks'];
         if ($from) {
             $daily = DB::table('property_analytics_daily')->select('property_id')->whereBetween('day', [$from, $to])->groupBy('property_id');
@@ -65,12 +69,13 @@ class PropertyContactAnalyticsController extends Controller
         $result = $query->orderByDesc($data['sort'] ?? 'views_count')->orderByDesc('p.id')->paginate(25)->toArray();
         $result['filters'] = ['period' => $period, 'date_from' => $from, 'date_to' => $from ? $to : null, 'timezone' => 'Asia/Dushanbe'];
         $result['tracking_started_at'] = DB::table('property_analytics_coverage')->where('id', 1)->value('started_at');
-        $result['branches'] = DB::table('branches')->select('id', 'name')->orderBy('name')->get();
-        $result['groups'] = DB::table('branch_groups')->select('id', 'name', 'branch_id')->orderBy('name')->get();
+        $result['branches'] = DB::table('branches')->select('id', 'name')->when($isRop, fn ($q) => $q->whereIn('id', DB::table('branch_groups')->whereIn('id', $ropAccess->groupsQuery($actor))->select('branch_id')))->orderBy('name')->get();
+        $result['groups'] = DB::table('branch_groups')->select('id', 'name', 'branch_id')->when($isRop, fn ($q) => $q->whereIn('id', $ropAccess->groupsQuery($actor)))->orderBy('name')->get();
         // Options follow the same property ownership and organization scope as the rows.
         $result['agents'] = DB::table('users as u')->select('u.id', 'u.name')
-            ->whereExists(function ($q) use ($data) {
+            ->whereExists(function ($q) use ($data, $isRop, $ropAccess, $actor) {
                 $q->selectRaw('1')->from('properties as owned')->whereRaw('COALESCE(owned.agent_id, owned.created_by) = u.id');
+                if ($isRop) $ropAccess->scope($q, $actor, 'owned.branch_group_id', 'owned.branch_id');
                 if (! empty($data['branch_id'])) $q->where('owned.branch_id', $data['branch_id']);
                 if (! empty($data['group_id'])) $q->where('owned.branch_group_id', $data['group_id']);
             })->orderBy('u.name')->orderBy('u.id')->get();

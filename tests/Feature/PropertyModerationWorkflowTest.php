@@ -1480,6 +1480,35 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertEquals(2, $property->fresh()->phone_clicks);
     }
 
+    public function test_analytics_explicit_grants_work_for_any_role_and_rop_keeps_group_boundaries(): void
+    {
+        (require database_path('migrations/2026_10_10_080000_add_property_contact_counters.php'))->up();
+        (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedInteger('views_count')->default(0));
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        [$agent, $rop, $director] = $this->users();
+        $own = $this->publishedProperty($agent, ['branch_id' => 1, 'branch_group_id' => 1]);
+        $foreign = $this->publishedProperty($director, ['branch_id' => 2, 'branch_group_id' => 2]);
+        $url = '/api/marketing/property-contact-analytics';
+        foreach (['client', 'external_agent', 'accountant', 'custom_analytics'] as $slug) {
+            DB::table('roles')->where('id', $agent->role_id)->update(['slug' => $slug, 'permissions' => json_encode([])]);
+            $this->actingAs($agent->fresh())->getJson($url)->assertForbidden();
+            DB::table('roles')->where('id', $agent->role_id)->update(['permissions' => json_encode(['properties.analytics.view'])]);
+            $this->actingAs($agent->fresh())->getJson($url)->assertOk()->assertJsonCount(2, 'data');
+            DB::table('roles')->where('id', $agent->role_id)->update(['permissions' => json_encode([])]);
+            $this->actingAs($agent->fresh())->getJson($url)->assertForbidden();
+        }
+        DB::table('roles')->where('id', $rop->role_id)->update(['permissions' => json_encode(['properties.analytics.view'])]);
+        $this->actingAs($rop->fresh())->getJson($url)->assertOk()
+            ->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $own->id)
+            ->assertJsonCount(1, 'branches')->assertJsonPath('branches.0.id', 1)
+            ->assertJsonCount(1, 'groups')->assertJsonPath('groups.0.id', 1)
+            ->assertJsonCount(1, 'agents')->assertJsonPath('agents.0.id', $agent->id);
+        $rop->supervisedGroups()->detach();
+        $this->actingAs($rop->fresh())->getJson($url)->assertOk()
+            ->assertJsonCount(0, 'data')->assertJsonCount(0, 'branches')->assertJsonCount(0, 'groups')->assertJsonCount(0, 'agents');
+    }
+
     public function test_contact_analytics_is_limited_to_marketing_and_admins_and_sorts_globally(): void
     {
         (require database_path('migrations/2026_10_10_080000_add_property_contact_counters.php'))->up();

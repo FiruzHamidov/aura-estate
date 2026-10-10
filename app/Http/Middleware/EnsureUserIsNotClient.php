@@ -141,6 +141,9 @@ class EnsureUserIsNotClient
                 default => [],
             };
         }
+        if ($controller === \App\Http\Controllers\PropertyContactAnalyticsController::class && $method === 'index') {
+            return ['properties.analytics.view'];
+        }
         if ($controller === \App\Http\Controllers\PropertyLiquidityController::class) {
             return match ($method) {
                 'feed', 'report', 'history' => ['liquidity.view'],
