@@ -73,7 +73,7 @@ class KpiReportController extends Controller
 
     private function validateScopeFilters(array $validated, User $authUser): void
     {
-        if (! $this->branchScope->isBranchScopedManager($authUser)) {
+        if (! $authUser->hasRole('rop') && ! $authUser->hasPermission('kpi.reports.scope.branch')) {
             return;
         }
 
@@ -99,6 +99,7 @@ class KpiReportController extends Controller
 
         abort_unless($user, 401, 'Unauthenticated.');
         $user->loadMissing('role');
+        abort_unless($user->hasPermission('kpi.reports.view'), 403, 'KPI_FORBIDDEN_SCOPE');
 
         return $user;
     }
