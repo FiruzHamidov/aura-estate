@@ -718,6 +718,7 @@ class KpiModuleService
 
     public function myDailyProgress(User $authUser, Carbon $date): array
     {
+        abort_unless($authUser->hasPermission('kpi.reports.view'), 403, 'KPI_FORBIDDEN_SCOPE');
         $report = DailyReport::query()
             ->where('user_id', $authUser->id)
             ->whereDate('report_date', $date->toDateString())
@@ -2449,27 +2450,18 @@ class KpiModuleService
 
     private function resolveTargetUser(User $authUser, ?int $targetUserId): User
     {
+        abort_unless($authUser->hasPermission('kpi.reports.view'), 403, 'KPI_FORBIDDEN_SCOPE');
+        // Personal progress remains available even before a branch/group is assigned.
         if ($targetUserId === null || $targetUserId === (int) $authUser->id) {
             return $authUser;
         }
 
         $target = User::query()->with('role')->findOrFail($targetUserId);
-        $authUser->loadMissing('role');
-        $role = (string) ($authUser->role?->slug ?? '');
+        $visible = User::query()->whereKey($target->id);
+        $this->applyReadScope($visible, $authUser, 'users');
+        abort_unless($visible->exists(), 403, 'KPI_FORBIDDEN_SCOPE');
 
-        if (in_array($role, ['admin', 'superadmin', 'owner'], true)) {
-            return $target;
-        }
-
-        if (in_array($role, ['rop', 'branch_director'], true) && (int) $target->branch_id === (int) $authUser->branch_id) {
-            return $target;
-        }
-
-        if ($role === 'mop' && (int) $target->branch_group_id === (int) $authUser->branch_group_id) {
-            return $target;
-        }
-
-        abort(403, 'Forbidden.');
+        return $target;
     }
 
     private function scopePlanQuery(\Illuminate\Database\Eloquent\Builder $query): void

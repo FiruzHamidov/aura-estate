@@ -1269,6 +1269,60 @@ class KpiModuleApiFeatureTest extends TestCase
             ->assertJsonPath('data.0.source', 'common');
     }
 
+    public function test_personal_progress_requires_read_permission_and_scopes_other_employees(): void
+    {
+        $role = Role::create(['name' => 'Progress reader', 'slug' => 'custom_progress_reader']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $other = Branch::create(['name' => 'Other']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $actor = User::create(['name' => 'Reader', 'phone' => '919940001', 'role_id' => $role->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $local = User::create(['name' => 'Local', 'phone' => '919940002', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $ungrouped = User::create(['name' => 'Ungrouped', 'phone' => '919940003', 'role_id' => $agentRole->id, 'branch_id' => $branch->id]);
+        $foreign = User::create(['name' => 'Foreign', 'phone' => '919940004', 'role_id' => $agentRole->id, 'branch_id' => $other->id]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $url = '/api/kpi/daily/my-progress?date=2026-05-16';
+        foreach (['own' => [403, 403, 403], 'group' => [200, 403, 403], 'branch' => [200, 200, 403], 'all' => [200, 200, 200]] as $scope => $statuses) {
+            $role->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.'.$scope]])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->getJson($url)->assertOk();
+            foreach ([$local, $ungrouped, $foreign] as $index => $target) {
+                $this->getJson($url.'&user_id='.$target->id)->assertStatus($statuses[$index]);
+            }
+        }
+        $role->forceFill(['permissions' => ['kpi.reports.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson($url)->assertForbidden();
+        $this->getJson($url.'&user_id='.$local->id)->assertForbidden();
+
+        $role->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.branch']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $actor->forceFill(['branch_id' => null, 'branch_group_id' => null])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson($url)->assertOk();
+        $this->getJson($url.'&user_id='.$actor->id)->assertOk();
+        $this->getJson($url.'&user_id='.$local->id)->assertForbidden();
+    }
+
+    public function test_progress_all_scope_does_not_bypass_rop_assigned_groups(): void
+    {
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $a = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'A']);
+        $b = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'B']);
+        $actor = User::create(['name' => 'ROP', 'phone' => '919941001', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $own = User::create(['name' => 'Assigned', 'phone' => '919941002', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $a->id]);
+        $foreign = User::create(['name' => 'Other', 'phone' => '919941003', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $b->id]);
+        $actor->supervisedGroups()->attach($a->id);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $url = '/api/kpi/daily/my-progress?date=2026-05-16';
+        $this->getJson($url.'&user_id='.$own->id)->assertOk();
+        $this->getJson($url.'&user_id='.$foreign->id)->assertForbidden();
+    }
+
     public function test_my_daily_progress_strict_contract_uses_canonical_metrics(): void
     {
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
