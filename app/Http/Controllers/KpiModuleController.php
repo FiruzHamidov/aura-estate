@@ -462,7 +462,7 @@ class KpiModuleController extends Controller
         ]);
 
         $this->kpiPlanScopePolicy->ensureCanReadCommonPlan($actor, $validated);
-        if (($actor->role?->slug ?? '') === 'mop' && isset($validated['role']) && (string) $validated['role'] === 'rop') {
+        if ($actor->hasPermission('kpi.plans.scope.group') && isset($validated['role']) && (string) $validated['role'] === 'rop') {
             $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
         }
 
@@ -1092,78 +1092,6 @@ class KpiModuleController extends Controller
         }
 
         return [(string) $validated['role']];
-    }
-
-    private function ensureCanReadUserPlans(User $actor, int $targetUserId): void
-    {
-        $target = User::query()->findOrFail($targetUserId);
-        $actor->loadMissing('role');
-
-        $allowed = match ($actor->role?->slug) {
-            'admin', 'superadmin', 'owner' => true,
-            'rop', 'branch_director' => (int) $actor->branch_id === (int) $target->branch_id,
-            'mop' => (int) $actor->branch_group_id === (int) $target->branch_group_id,
-            default => (int) $actor->id === (int) $target->id,
-        };
-
-        if (! $allowed) {
-            $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
-        }
-    }
-
-    private function ensureCommonScopeReadable(User $actor, array $scope): void
-    {
-        $actor->loadMissing('role');
-        $role = (string) ($actor->role?->slug ?? '');
-
-        if ($role === 'rop') {
-            $this->ensureSameBranchOrKpiDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
-            $this->ensureBranchGroupInUserBranchOrKpiDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
-            return;
-        }
-
-        if ($role === 'branch_director') {
-            $this->ensureSameBranchOrKpiDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
-            return;
-        }
-
-        if ($role === 'mop') {
-            if (isset($scope['role']) && (string) $scope['role'] === 'rop') {
-                $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
-            }
-            $this->ensureSameBranchOrKpiDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
-            $this->ensureSameBranchGroupOrKpiDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
-            return;
-        }
-    }
-
-    private function ensureCommonScopeManageable(User $actor, array $scope): void
-    {
-        $actor->loadMissing('role');
-
-        if (in_array($actor->role?->slug, ['admin', 'superadmin', 'owner'], true)) {
-            return;
-        }
-
-        if ($actor->role?->slug === 'branch_director' || $actor->role?->slug === 'rop') {
-            $this->ensureSameBranchOrKpiDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
-            $this->ensureBranchGroupInUserBranchOrKpiDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
-            return;
-        }
-
-        if ($actor->role?->slug === 'mop') {
-            $planRole = (string) ($scope['role'] ?? '');
-
-            if ($planRole === 'rop') {
-                $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
-            }
-
-            $this->ensureSameBranchGroupOrKpiDeny(isset($scope['branch_group_id']) ? (int) $scope['branch_group_id'] : null, $actor);
-            $this->ensureSameBranchOrKpiDeny(isset($scope['branch_id']) ? (int) $scope['branch_id'] : null, $actor);
-            return;
-        }
-
-        $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
     }
 
     private function ensureSameBranchOrKpiDeny(?int $branchId, User $actor): void
