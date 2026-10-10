@@ -2,6 +2,7 @@
 
 // Shared registry for permission definitions and legacy catalog mutation routes.
 return [
+    'branches' => ['controller' => 'BranchController', 'name' => 'Филиалы'],
     'property-types' => ['controller' => 'PropertyTypeController', 'name' => 'Типы недвижимости'],
     'property-statuses' => ['controller' => 'PropertyStatusController', 'name' => 'Статусы недвижимости'],
     'building-types' => ['controller' => 'BuildingTypeController', 'name' => 'Типы зданий'],

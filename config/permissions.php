@@ -527,6 +527,10 @@ $permissions['branch_groups.manage.all'] = ['group' => 'Группы сотру�
 $permissions['branch_groups.manage.branch'] = ['group' => 'Группы сотрудников', 'name' => 'Изменение групп своего филиала', 'description' => 'Создание, изменение и удаление пустых групп своего филиала. Для существующих групп требуется область просмотра. Защита связанных записей сохраняется; РОП не меняет структуру групп.', 'roles' => ['branch_director'], 'exclusive_group' => 'branch_groups.manage'];
 $permissions['branch_groups.module.view'] = ['group' => 'Группы сотрудников', 'name' => 'Раздел управления группами на сайте', 'description' => 'Открывает страницу групп. Область просмотра и изменение структуры назначаются отдельно.', 'roles' => ['admin', 'superadmin', 'marketing', 'rop', 'branch_director']];
 
+$permissions['catalogs.entries.branches.manage']['roles'] = array_values(array_diff($catalogWriters, ['rop']));
+$permissions['catalogs.entries.branches.manage']['description'] = 'Создание филиалов, изменение названия, координат и фотографии, удаление пустых филиалов. Связанные сотрудники и групповые данные защищены от удаления. РОП не меняет структуру филиалов.';
+$permissions['branches.module.view'] = ['group' => 'Структура компании', 'name' => 'Раздел филиалов на сайте', 'description' => 'Открывает страницу управления филиалами. Для изменения данных нужно отдельное право изменения справочника филиалов. Публичный список филиалов доступен без этого права.', 'roles' => ['admin', 'superadmin', 'marketing']];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],
