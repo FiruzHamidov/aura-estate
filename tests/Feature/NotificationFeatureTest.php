@@ -484,6 +484,67 @@ class NotificationFeatureTest extends TestCase
         Queue::assertPushed(SendFirebasePushNotification::class);
     }
 
+    public function test_custom_notification_subscriptions_obey_branch_status_and_revocation(): void
+    {
+        Queue::fake();
+        $branch = Branch::create(['name' => 'Central']);
+        $otherBranch = Branch::create(['name' => 'Other']);
+        $role = Role::create(['name' => 'Custom subscriber', 'slug' => 'custom_subscriber']);
+        $local = $this->createUser($role, $branch, 'Local');
+        $foreign = $this->createUser($role, $otherBranch, 'Foreign');
+        $inactive = $this->createUser($role, $branch, 'Inactive');
+        $inactive->update(['status' => 'inactive']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $resolver = app(\App\Services\NotificationRecipientResolver::class);
+        $lead = Lead::create(['full_name' => 'New lead', 'branch_id' => $branch->id,
+            'status' => Lead::STATUS_NEW, 'first_contact_due_at' => now()->subMinute()]);
+        foreach (['notifications.receive.leads', 'notifications.receive.public_leads.branch',
+            'notifications.receive.public_leads.all', 'notifications.receive.property_control.security'] as $permission) {
+            $role->forceFill(['permissions' => [$permission]])->save();
+            $users = match ($permission) {
+                'notifications.receive.leads' => $resolver->leadManagers($lead->fresh()),
+                'notifications.receive.property_control.security' => $resolver->securityOfficers(),
+                default => $resolver->publicLeadSubscribers($lead->fresh()),
+            };
+            $this->assertContains($local->id, $users->pluck('id')->all());
+            $this->assertNotContains($inactive->id, $users->pluck('id')->all());
+            $this->assertSame(in_array($permission, ['notifications.receive.public_leads.all', 'notifications.receive.property_control.security']), $users->contains('id', $foreign->id));
+        }
+        $deal = (new Deal)->forceFill(['branch_id' => $branch->id]);
+        $deal->setRelation('primaryProperty', null)->setRelation('responsibleAgent', null);
+        $property = (new \App\Models\Property)->forceFill(['branch_id' => $branch->id]);
+        $property->setRelation('agent', null)->setRelation('creator', null);
+        foreach (['notifications.receive.property_control.branch', 'notifications.receive.property_control.escalation',
+            'notifications.receive.properties.escalation', 'notifications.receive.attendance_offline'] as $permission) {
+            $role->forceFill(['permissions' => [$permission]])->save();
+            $recipients = fn () => match ($permission) {
+                'notifications.receive.property_control.branch' => $resolver->propertyControlBranchRecipients($deal),
+                'notifications.receive.property_control.escalation' => $resolver->propertyControlEscalationRecipients($deal),
+                'notifications.receive.properties.escalation' => $resolver->propertyEscalationRecipients($property),
+                default => $resolver->usersByPermission($permission),
+            };
+            $users = $recipients();
+            $this->assertTrue($users->contains('id', $local->id));
+            $this->assertFalse($users->contains('id', $inactive->id));
+            $this->assertSame(in_array($permission, ['notifications.receive.property_control.escalation', 'notifications.receive.attendance_offline']), $users->contains('id', $foreign->id));
+            $role->forceFill(['permissions' => []])->save();
+            $this->assertCount(0, $recipients());
+        }
+        $role->forceFill(['permissions' => ['notifications.receive.leads']])->save();
+        $method = new \ReflectionMethod(NotificationService::class, 'dispatchLeadSlaOverdue');
+        $method->invoke(app(NotificationService::class));
+        $this->assertDatabaseHas('notifications', ['user_id' => $local->id, 'type' => NotificationType::LEAD_SLA_OVERDUE, 'subject_id' => $lead->id]);
+        $this->assertDatabaseMissing('notifications', ['user_id' => $foreign->id, 'type' => NotificationType::LEAD_SLA_OVERDUE, 'subject_id' => $lead->id]);
+        $role->forceFill(['permissions' => []])->save();
+        $this->assertCount(0, $resolver->leadManagers($lead->fresh()));
+        $this->assertCount(0, $resolver->securityOfficers());
+        $this->assertCount(0, $resolver->publicLeadSubscribers($lead->fresh()));
+        $second = Lead::create(['full_name' => 'After revoke', 'branch_id' => $branch->id,
+            'status' => Lead::STATUS_NEW, 'first_contact_due_at' => now()->subMinute()]);
+        $method->invoke(app(NotificationService::class));
+        $this->assertDatabaseMissing('notifications', ['user_id' => $local->id, 'subject_id' => $second->id]);
+    }
+
     private function createUser(Role $role, Branch $branch, string $name): User
     {
         return User::create([

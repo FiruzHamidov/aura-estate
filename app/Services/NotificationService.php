@@ -88,13 +88,7 @@ class NotificationService
 
     public function notifyAttendanceDeviceOffline(AttendanceDevice $device): void
     {
-        $administrators = User::query()
-            ->where('status', User::STATUS_ACTIVE)
-            ->whereHas('role', fn (Builder $roles) => $roles->whereIn(
-                'slug',
-                config('attendance.administrator_roles', [])
-            ))
-            ->get();
+        $administrators = $this->recipients->usersByPermission('notifications.receive.attendance_offline');
 
         $this->notifyUsers(
             $administrators,
@@ -1519,7 +1513,7 @@ class NotificationService
                                 ->from('users')
                                 ->join('roles', 'roles.id', '=', 'users.role_id')
                                 ->where('users.status', User::STATUS_ACTIVE)
-                                ->where('roles.slug', 'manager');
+                                ->whereIn('roles.id', $this->recipients->roleIdsWithPermission('notifications.receive.leads'));
                         });
                 });
         });
@@ -1529,7 +1523,7 @@ class NotificationService
     {
         $query
             ->where('status', User::STATUS_ACTIVE)
-            ->whereHas('role', fn (Builder $roleQuery) => $roleQuery->where('slug', 'manager'));
+            ->whereIn('role_id', $this->recipients->roleIdsWithPermission('notifications.receive.leads'));
     }
 
     private function dispatchDealDeadlineSoon(): int
