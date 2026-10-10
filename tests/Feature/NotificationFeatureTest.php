@@ -576,6 +576,33 @@ class NotificationFeatureTest extends TestCase
         $this->travelBack();
     }
 
+    public function test_queued_digest_rechecks_subscription_without_removing_saved_history(): void
+    {
+        $branch = Branch::create(['name' => 'Central']);
+        $role = Role::create(['name' => 'Subscriber', 'slug' => 'custom_delivery']);
+        $user = $this->createUser($role, $branch, 'Subscriber');
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $permission = 'notifications.receive.digest.leads.morning';
+        $role->forceFill(['permissions' => [$permission]])->save();
+        $notification = Notification::create(['user_id' => $user->id,
+            'type' => NotificationType::MOTIVATION_MANAGER_MORNING_DIGEST,
+            'category' => NotificationCategory::MOTIVATION, 'status' => NotificationStatus::UNREAD,
+            'priority' => 1, 'channels' => ['push'], 'title' => 'Digest', 'body' => 'Private digest',
+            'dedupe_key' => 'queued-rbac', 'occurrences_count' => 1, 'data' => []]);
+        $job = new SendFirebasePushNotification($notification->id);
+        $firebase = \Mockery::mock(\App\Services\FirebasePushService::class);
+        $firebase->shouldReceive('send')->once()->with(\Mockery::on(fn ($item) => $item->id === $notification->id));
+        $role->forceFill(['permissions' => []])->save();
+        $job->handle($firebase);
+        $firebase->shouldNotHaveReceived('send');
+        $this->assertTrue(app(\App\Services\GroupAccess\NotificationGroupAccess::class)->allows($notification, $user->fresh()));
+        $this->assertDatabaseHas('notifications', ['id' => $notification->id]);
+        $role->forceFill(['permissions' => [$permission]])->save();
+        $job->handle($firebase);
+        $user->update(['status' => 'inactive']);
+        $job->handle($firebase);
+    }
+
     private function createUser(Role $role, Branch $branch, string $name): User
     {
         return User::create([

@@ -1189,7 +1189,8 @@ class NotificationService
     {
         \Illuminate\Support\Facades\DB::transaction(function () use ($notification, $recipient): void {
             $current = User::query()->whereKey($recipient->id)->lockForUpdate()->first();
-            if ($current && app(NotificationGroupAccess::class)->allows($notification, $current)) {
+            if ($current && app(NotificationDeliveryAccess::class)->allows($notification, $current)
+                && app(NotificationGroupAccess::class)->allows($notification, $current)) {
                 $this->deliverTelegramNotificationNow($notification, $current);
             }
         });
