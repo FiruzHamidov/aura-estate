@@ -450,6 +450,13 @@ class KpiModuleController extends Controller
         return response()->json($result);
     }
 
+    public function reportPresentation()
+    {
+        $actor = $this->authUser();
+        abort_unless($actor->hasPermission('kpi.reports.view'), 403, 'KPI_FORBIDDEN_SCOPE');
+        return response()->json(['data' => app(\App\Services\KpiRoleCatalog::class)->reportPresentation($actor)]);
+    }
+
     public function reportUsers(Request $request)
     {
         $data = $request->validate(['page' => 'nullable|integer|min:1', 'per_page' => 'nullable|integer|min:1|max:200']);

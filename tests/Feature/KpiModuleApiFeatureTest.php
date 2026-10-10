@@ -1633,6 +1633,37 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->getJson('/api/kpi/plans/users')->assertForbidden();
     }
 
+    public function test_report_presentation_defaults_and_custom_role_settings(): void
+    {
+        $catalog = app(\App\Services\KpiRoleCatalog::class);
+        foreach (['agent' => 'agent', 'mop' => 'mop', 'rop' => 'rop', 'branch_director' => 'rop', 'admin' => 'rop', 'superadmin' => 'rop', 'owner' => 'rop', 'intern' => null] as $slug => $dashboardRole) {
+            $actor = new User();
+            $actor->setRelation('role', new Role(['slug' => $slug]));
+            $policy = $catalog->reportPresentation($actor);
+            $this->assertSame($dashboardRole, $policy['dashboard_role']);
+            $this->assertSame($slug === 'intern' ? null : ['agent', 'mop'], $policy['visible_roles']);
+        }
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $target = Role::create(['name' => 'Custom report subject', 'slug' => 'custom_report_subject']);
+        $target->forceFill(['permissions' => ['kpi.subject.site_rows']])->save();
+        $reader = Role::create(['name' => 'Reader', 'slug' => 'custom_presentation_reader']);
+        $grants = ['kpi.reports.view', 'kpi.reports.site.restrict_rows', 'kpi.reports.dashboard.role.custom_report_subject'];
+        $reader->forceFill(['permissions' => $grants])->save();
+        $actor = User::create(['name' => 'Reader', 'phone' => '900094001', 'role_id' => $reader->id]);
+        Sanctum::actingAs($actor);
+        $response = $this->getJson('/api/kpi/reports/presentation')->assertOk()
+            ->assertJsonPath('data.dashboard_role', $target->slug);
+        $this->assertContains($target->slug, $response->json('data.visible_roles'));
+        $target->forceFill(['permissions' => []])->save();
+        $this->assertNotContains($target->slug, $this->getJson('/api/kpi/reports/presentation')->assertOk()->json('data.visible_roles'));
+        $reader->forceFill(['permissions' => ['kpi.reports.view']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/reports/presentation')->assertOk()->assertExactJson(['data' => ['dashboard_role' => null, 'visible_roles' => null]]);
+        $reader->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/reports/presentation')->assertForbidden();
+    }
+
     public function test_report_user_picker_uses_report_permissions_scopes_and_target_eligibility(): void
     {
         Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());

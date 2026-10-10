@@ -82,11 +82,11 @@ class RoleController extends Controller
             $locked = $roles->firstWhere('id', $role->id);
             abort_unless($locked, 404);
             abort_if($locked->users()->exists(), 409, 'Нельзя удалить роль: к ней привязаны пользователи');
-            $assignmentKey = 'users.assign_role.'.$locked->slug;
+            $dependentKeys = array_map(fn ($prefix) => $prefix.$locked->slug, ['users.assign_role.', 'kpi.reports.dashboard.role.']);
             foreach ($roles as $affected) {
-                if ($affected->id === $locked->id || !in_array($assignmentKey, $affected->permissions ?? [], true)) continue;
+                if ($affected->id === $locked->id || array_intersect($dependentKeys, $affected->permissions ?? []) === []) continue;
                 $before = $affected->permissions;
-                $after = array_values(array_diff($before, [$assignmentKey]));
+                $after = array_values(array_diff($before, $dependentKeys));
                 $affected->permissions = $after;
                 $affected->permissions_version++;
                 $affected->save();

@@ -20,6 +20,26 @@ final class KpiRoleCatalog
                 'group_templates' => $role->hasPermission('kpi.subject.group_templates')])->values()->all();
     }
 
+    public function reportPresentation(\App\Models\User $actor): array
+    {
+        $selected = function (string $view) use ($actor): ?string {
+            $prefix = 'kpi.reports.'.$view.'.role.';
+            foreach ($actor->role?->permissionKeys() ?? [] as $key) {
+                if (str_starts_with($key, $prefix) && $actor->hasPermission($key)) return substr($key, strlen($prefix));
+            }
+            return null;
+        };
+        $visibleRoles = null;
+        if ($actor->hasPermission('kpi.reports.site.restrict_rows')) {
+            $roles = Role::query()->get()->keyBy('slug');
+            foreach ((config('permissions', [])['kpi.subject.site_rows']['roles'] ?? []) as $slug) {
+                if (! $roles->has($slug)) $roles->put($slug, new Role(['slug' => $slug]));
+            }
+            $visibleRoles = $roles->filter(fn (Role $role) => $role->hasPermission('kpi.subject.site_rows'))->keys()->values()->all();
+        }
+        return ['dashboard_role' => $selected('dashboard'), 'visible_roles' => $visibleRoles];
+    }
+
     public function templateSlugs(): array
     {
         return array_column($this->templates(), 'slug');

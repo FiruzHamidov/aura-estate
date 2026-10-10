@@ -55,8 +55,10 @@ class Role extends Model
     {
         if (!in_array($permission, $this->permissionKeys(), true)) return false;
         if (array_key_exists($permission, config('permissions', []))) return true;
-        return str_starts_with($permission, 'users.assign_role.')
-            && self::query()->where('slug', substr($permission, strlen('users.assign_role.')))->exists();
+        foreach (['users.assign_role.', 'kpi.reports.dashboard.role.'] as $prefix) {
+            if (str_starts_with($permission, $prefix)) return self::query()->where('slug', substr($permission, strlen($prefix)))->exists();
+        }
+        return false;
     }
 
     public static function systemRoles(): array

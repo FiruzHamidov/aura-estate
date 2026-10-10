@@ -534,9 +534,11 @@ class RolePermissionsTest extends TestCase
         $custom = Role::create(['name' => 'Coordinator', 'slug' => 'coordinator']);
         $agent = Role::where('slug', 'agent')->firstOrFail();
         $key = 'users.assign_role.coordinator';
+        $keys = [$key, 'kpi.reports.dashboard.role.coordinator'];
         $this->assertContains($key, array_column($this->getJson('/api/rbac')->assertOk()->json('permissions'), 'key'));
-        $this->putJson('/api/rbac/roles/'.$agent->id, ['version' => 1, 'permissions' => [$key]])->assertOk();
-        $this->assertTrue($agent->fresh()->hasPermission($key));
+        $this->putJson('/api/rbac/roles/'.$agent->id, ['version' => 1, 'permissions' => $keys])->assertOk();
+        foreach ($keys as $permission) $this->assertTrue($agent->fresh()->hasPermission($permission));
+        $this->putJson('/api/rbac/roles/'.$agent->id, ['version' => 2, 'permissions' => [...$keys, 'kpi.reports.dashboard.role.agent']])->assertUnprocessable();
         $this->assertFalse($agent->fresh()->hasPermission('users.assign_any_role'));
         $this->deleteJson('/api/roles/'.$custom->id)->assertOk();
         $this->assertFalse($agent->fresh()->hasPermission($key));
