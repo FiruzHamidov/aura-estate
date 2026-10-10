@@ -2889,14 +2889,18 @@ class PropertyController extends Controller
         $fingerprint = sha1(
             ($request->ip() ?? '0.0.0.0').'|'.
             (string) $request->userAgent().'|'.
-            now()->format('Y-m-d')
+            now('Asia/Dushanbe')->format('Y-m-d')
         );
         $cacheKey = "prop:{$property->id}:viewed:{$fingerprint}";
 
         // Инкрементим только если ещё не считали сегодня
-        if (! Cache::has($cacheKey)) {
-            $property->increment('views_count'); // атомарно
-            Cache::put($cacheKey, 1, now()->addDay());
+        if (Cache::add($cacheKey, 1, now('Asia/Dushanbe')->endOfDay())) {
+            try {
+                app(\App\Services\PropertyAnalyticsRecorder::class)->record($property->id, 'views_count');
+            } catch (\Throwable $error) {
+                Cache::forget($cacheKey);
+                throw $error;
+            }
         }
 
         return response()->noContent();

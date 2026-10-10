@@ -1318,6 +1318,7 @@ class PropertyModerationWorkflowTest extends TestCase
     public function test_contact_clicks_are_atomic_validated_and_do_not_change_listing_date(): void
     {
         (require database_path('migrations/2026_10_10_080000_add_property_contact_counters.php'))->up();
+        (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
         Schema::table('properties', fn (Blueprint $table) => $table->unsignedInteger('views_count')->default(0));
         [$agent] = $this->users();
         $property = $this->publishedProperty($agent);
@@ -1339,6 +1340,7 @@ class PropertyModerationWorkflowTest extends TestCase
     public function test_contact_analytics_is_limited_to_marketing_and_admins_and_sorts_globally(): void
     {
         (require database_path('migrations/2026_10_10_080000_add_property_contact_counters.php'))->up();
+        (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
         Schema::table('properties', fn (Blueprint $table) => $table->unsignedInteger('views_count')->default(0));
         [$agent, $rop] = $this->users();
         $first = $this->publishedProperty($agent);
@@ -1361,6 +1363,44 @@ class PropertyModerationWorkflowTest extends TestCase
         }
         $this->getJson($url.'?search=Unique')->assertOk()->assertJsonPath('total', 1);
         $this->getJson($url.'?sort=owner_phone')->assertUnprocessable();
+    }
+
+    public function test_analytics_periods_and_branch_group_filters_preserve_lifetime_totals(): void
+    {
+        (require database_path('migrations/2026_10_10_080000_add_property_contact_counters.php'))->up();
+        (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedInteger('views_count')->default(0));
+        [$agent, $admin] = $this->users();
+        $role = Role::firstOrCreate(['slug' => 'admin'], ['name' => 'Admin']);
+        $admin->forceFill(['role_id' => $role->id])->save();
+        $admin->unsetRelation('role');
+        DB::table('branch_groups')->insert(['id' => 2, 'branch_id' => 2, 'name' => 'Other']);
+        $first = $this->publishedProperty($agent);
+        $second = $this->publishedProperty($agent, ['branch_id' => 2, 'branch_group_id' => 2]);
+        DB::table('properties')->where('id', $first->id)->update(['phone_clicks' => 100]);
+        foreach (['2026-09-30' => 8, '2026-10-04' => 4, '2026-10-05' => 2, '2026-10-10' => 1] as $day => $count) {
+            DB::table('property_analytics_daily')->insert(['property_id' => $first->id, 'day' => $day, 'phone_clicks' => $count, 'views_count' => $count]);
+        }
+        DB::table('property_analytics_daily')->insert(['property_id' => $second->id, 'day' => '2026-10-10', 'phone_clicks' => 9]);
+        $this->travelTo(\Carbon\Carbon::parse('2026-10-09 20:00:00', 'UTC'));
+        try {
+            $this->actingAs($admin);
+            $url = '/api/marketing/property-contact-analytics?sort=phone_clicks&branch_id=1&group_id=1';
+            foreach (['today' => 1, 'week' => 3, 'month' => 7, 'all' => 100] as $period => $expected) {
+                $this->getJson($url.'&period='.$period)->assertOk()->assertJsonPath('total', 1)
+                    ->assertJsonPath('data.0.phone_clicks', $expected);
+            }
+            $this->getJson($url.'&period=custom&date_from=2026-10-04&date_to=2026-10-05')->assertOk()->assertJsonPath('data.0.phone_clicks', 6);
+            $this->getJson('/api/marketing/property-contact-analytics?period=today&sort=phone_clicks&branch_id=2&group_id=2')->assertOk()->assertJsonPath('data.0.id', $second->id);
+            $this->getJson($url.'&period=custom&date_from=2026-10-11&date_to=2026-10-01')->assertUnprocessable();
+            $this->getJson($url.'&period=custom')->assertUnprocessable();
+            $this->getJson('/api/marketing/property-contact-analytics?branch_id=1&group_id=2')->assertUnprocessable();
+            $this->postJson("/api/properties/{$first->id}/view")->assertNoContent();
+            $this->postJson("/api/properties/{$first->id}/view")->assertNoContent();
+            $this->postJson("/api/properties/{$first->id}/contact-click", ['action' => 'whatsapp'])->assertNoContent();
+            $this->assertDatabaseHas('property_analytics_daily', ['property_id' => $first->id, 'day' => '2026-10-10', 'views_count' => 2, 'whatsapp_clicks' => 1]);
+            $this->assertEquals(1, $first->fresh()->views_count);
+        } finally { $this->travelBack(); }
     }
 
     private function detectedDuplicateFixture(): array
