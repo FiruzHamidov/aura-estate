@@ -293,6 +293,16 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->getJson('/api/kpi/rop-plans?month=2001-01&per_page=2&page=2')->assertOk()
             ->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $ids[0])->assertJsonPath('meta.page', 2);
         $this->getJson('/api/kpi/rop-plans?month=2001-01&per_page=101')->assertUnprocessable();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $defaults = $role->fresh()->permissions;
+        foreach (['kpi.rop_plans.view', 'kpi.plans.common.view', 'kpi.plans.scope.branch'] as $revoked) {
+            $role->forceFill(['permissions' => array_values(array_diff($defaults, [$revoked]))])->save();
+            Sanctum::actingAs($rop->fresh());
+            $this->getJson('/api/kpi/rop-plans?month=2001-01')->assertForbidden();
+        }
+        $role->forceFill(['permissions' => $defaults])->save();
+        Sanctum::actingAs($rop->fresh());
+
         $rop->supervisedGroups()->detach();
         $this->getJson('/api/kpi/rop-plans?month=2001-01')->assertOk()->assertJsonCount(0, 'data')->assertJsonPath('meta.total', 0);
     }
@@ -339,6 +349,39 @@ class KpiModuleApiFeatureTest extends TestCase
             $this->assertSame('2000-03', \App\Models\KpiRopPlan::findOrFail($id)->month);
         } finally { $failAudit = false; }
 
+    }
+
+    public function test_custom_role_can_grant_rop_plan_actions_independently(): void
+    {
+        $role = Role::create(['name' => 'Planner', 'slug' => 'custom_rop_planner']);
+        $branch = Branch::create(['name' => 'Local']);
+        $group = BranchGroup::create(['name' => 'Group', 'branch_id' => $branch->id]);
+        $actor = User::create(['name' => 'Planner', 'phone' => '919902001', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $base = ['kpi.plans.scope.branch', 'kpi.plans.common.view', 'kpi.plans.common.manage'];
+        $payload = ['role' => 'agent', 'month' => '2026-05', 'branch_id' => $branch->id, 'branch_group_id' => $group->id,
+            'items' => [['metric_key' => 'calls', 'plan_value' => 30, 'weight' => 1]]];
+        $role->forceFill(['permissions' => $base])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/kpi/rop-plans', $payload)->assertForbidden();
+        $role->forceFill(['permissions' => [...$base, 'kpi.rop_plans.create']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $id = $this->postJson('/api/kpi/rop-plans', $payload)->assertCreated()->json('id');
+        $this->getJson('/api/kpi/rop-plans/'.$id)->assertForbidden();
+        $role->forceFill(['permissions' => [...$base, 'kpi.rop_plans.view']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/rop-plans/'.$id)->assertOk();
+        $this->getJson('/api/kpi/rop-plans?month=2026-05&branch_id='.$branch->id.'&branch_group_id='.$group->id)->assertOk()->assertJsonCount(1, 'data');
+        $this->patchJson('/api/kpi/rop-plans/'.$id, ['month' => '2026-07'])->assertForbidden();
+        $this->postJson('/api/kpi/rop-plans/'.$id.'/copy', ['month' => '2026-06'])->assertForbidden();
+        $role->forceFill(['permissions' => [...$base, 'kpi.rop_plans.view', 'kpi.rop_plans.copy']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/kpi/rop-plans/'.$id.'/copy', ['month' => '2026-06'])->assertCreated();
+        $this->postJson('/api/kpi/rop-plans', [...$payload, 'month' => '2026-08'])->assertForbidden();
+        $role->forceFill(['permissions' => [...$base, 'kpi.rop_plans.update']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson('/api/kpi/rop-plans/'.$id, ['month' => '2026-07'])->assertOk();
+        $this->getJson('/api/kpi/rop-plans/'.$id)->assertForbidden();
     }
 
     public function test_period_lock_and_adjustment_permissions_are_separate_for_custom_roles(): void

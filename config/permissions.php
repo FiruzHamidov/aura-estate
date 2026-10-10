@@ -652,6 +652,10 @@ $permissions['kpi.periods.global.lock'] = ['group' => 'KPI', 'name' => 'Общи
 
 $permissions['kpi.adjustments.site.view'] = ['group' => 'KPI', 'name' => 'Страница корректировок KPI', 'description' => 'Открывает страницу корректировок и её пункт меню. История отображается только при праве просмотра корректировок; форма добавления — только при праве внесения корректировки. Закрытые периоды, причина и группы РОП проверяются на сервере.', 'roles' => ['admin', 'superadmin', 'rop', 'branch_director']];
 
+foreach (['view' => ['Просмотр планов РОП', 'Открывает список и карточку месячных планов РОП. Требуются просмотр общих планов и их область доступа.', $kpiPlanManagers], 'create' => ['Создание плана РОП', 'Создаёт месячный план РОП. Требуются изменение общих планов и их область доступа.', array_values(array_diff($kpiPlanManagers, ['mop']))], 'update' => ['Изменение плана РОП', 'Изменяет существующий месячный план РОП. Проверяется доступ к исходной и новой области; требуется изменение общих планов.', array_values(array_diff($kpiPlanManagers, ['mop']))], 'copy' => ['Копирование плана РОП', 'Копирует доступный месячный план в новый период или область. Требуются просмотр плана РОП, просмотр исходного общего плана и изменение общего плана в целевой области.', array_values(array_diff($kpiPlanManagers, ['mop']))]] as $action => [$name, $description, $roles]) {
+    $permissions['kpi.rop_plans.'.$action] = ['group' => 'KPI', 'name' => $name, 'description' => $description.' Закреплённые группы РОП, конфликты периодов, состав показателей и журнал изменений сохраняются.', 'roles' => $roles];
+}
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],
