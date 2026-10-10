@@ -656,6 +656,8 @@ foreach (['view' => ['Просмотр планов РОП', 'Открывает
     $permissions['kpi.rop_plans.'.$action] = ['group' => 'KPI', 'name' => $name, 'description' => $description.' Закреплённые группы РОП, конфликты периодов, состав показателей и журнал изменений сохраняются.', 'roles' => $roles];
 }
 
+$permissions['kpi.rop_plans.site.view'] = ['group' => 'KPI', 'name' => 'Страница «План от РОП»', 'description' => 'Открывает страницу месячных планов РОП и её вкладку в навигации KPI. Просмотр, создание, изменение, копирование и назначение персональных планов включаются отдельными правами.', 'roles' => ['admin', 'superadmin', 'rop', 'branch_director', 'mop']];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],
