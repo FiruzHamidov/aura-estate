@@ -658,6 +658,8 @@ foreach (['view' => ['Просмотр планов РОП', 'Открывает
 
 $permissions['kpi.rop_plans.site.view'] = ['group' => 'KPI', 'name' => 'Страница «План от РОП»', 'description' => 'Открывает страницу месячных планов РОП и её вкладку в навигации KPI. Просмотр, создание, изменение, копирование и назначение персональных планов включаются отдельными правами.', 'roles' => ['admin', 'superadmin', 'rop', 'branch_director', 'mop']];
 
+$permissions['kpi.rop_plans.site.apply'] = ['group' => 'KPI', 'name' => 'Назначение группе на странице плана РОП', 'description' => 'Включает кнопку назначения персональных планов группе на странице «План от РОП». Требуются просмотр персональных планов, управление планами, изменение персональных планов и массовое назначение. Сохраняет прежнее отсутствие этой кнопки у МОП.', 'roles' => ['admin', 'superadmin', 'rop', 'branch_director']];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],
