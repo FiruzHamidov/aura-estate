@@ -25,10 +25,7 @@ class EnsureDailyReportSubmitted
         }
 
         $user->loadMissing('role');
-        $roleSlug = (string) ($user->role?->slug ?? '');
-        $enforcedRoles = config('kpi.daily_report.enforced_roles', ['agent', 'mop', 'intern']);
-
-        if (! in_array($roleSlug, $enforcedRoles, true)) {
+        if (! $user->hasPermission('daily_reports.submission.required')) {
             return $next($request);
         }
 

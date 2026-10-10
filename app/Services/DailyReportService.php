@@ -21,7 +21,7 @@ class DailyReportService
         $user->loadMissing('role');
 
         $roleSlug = $user->role?->slug;
-        $required = in_array($roleSlug, $this->requiredRoleSlugs(), true);
+        $required = $user->hasPermission('daily_reports.submission.required');
         $missingReportDate = $this->missingReportDate($user);
 
         return [
@@ -36,7 +36,7 @@ class DailyReportService
     {
         $user->loadMissing('role');
 
-        if (! in_array($user->role?->slug, $this->requiredRoleSlugs(), true)) {
+        if (! $user->hasPermission('daily_reports.submission.required')) {
             return null;
         }
 
@@ -60,27 +60,6 @@ class DailyReportService
             ->exists();
 
         return $submitted ? null : $reportDate;
-    }
-
-    /**
-     * Single source of truth for roles required to submit daily report.
-     *
-     * @return list<string>
-     */
-    private function requiredRoleSlugs(): array
-    {
-        $roles = config('kpi.daily_report.enforced_roles', ['agent', 'mop', 'intern']);
-
-        if (! is_array($roles)) {
-            return ['agent', 'mop', 'intern'];
-        }
-
-        $normalized = array_values(array_filter(array_map(
-            static fn ($role) => is_string($role) ? trim($role) : '',
-            $roles
-        )));
-
-        return $normalized !== [] ? $normalized : ['agent', 'mop', 'intern'];
     }
 
     /**
