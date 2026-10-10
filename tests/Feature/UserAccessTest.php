@@ -990,6 +990,33 @@ class UserAccessTest extends TestCase
         ])->assertStatus(422);
     }
 
+    public function test_custom_role_organization_requirements_preserve_group_branch_integrity(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $branch = Branch::create(['name' => 'Own']);
+        $other = Branch::create(['name' => 'Other']);
+        $group = BranchGroup::create(['name' => 'Own group', 'branch_id' => $branch->id]);
+        $foreign = BranchGroup::create(['name' => 'Other group', 'branch_id' => $other->id]);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900093001', 'role_id' => $adminRole->id, 'branch_id' => $branch->id]);
+        $role = Role::create(['name' => 'Custom organization', 'slug' => 'custom_organization']);
+        $role->forceFill(['permissions' => ['users.subject.branch_required', 'users.subject.group_assignment', 'users.subject.group_required']])->save();
+        Sanctum::actingAs($admin);
+        $payload = ['name' => 'Custom employee', 'phone' => '900093002', 'role_id' => $role->id];
+        $this->postJson('/api/user', $payload)->assertUnprocessable();
+        $this->postJson('/api/user', [...$payload, 'branch_id' => $branch->id])->assertUnprocessable();
+        $this->postJson('/api/user', [...$payload, 'branch_id' => $branch->id, 'branch_group_id' => $foreign->id])->assertUnprocessable();
+        $id = $this->postJson('/api/user', [...$payload, 'branch_id' => $branch->id, 'branch_group_id' => $group->id])->assertCreated()->json('id');
+        $this->assertDatabaseHas('users', ['id' => $id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $role->forceFill(['permissions' => ['users.subject.branch_required', 'users.subject.group_assignment']])->save();
+        $this->patchJson('/api/user/'.$id, ['branch_group_id' => null])->assertOk();
+        $this->assertDatabaseHas('users', ['id' => $id, 'branch_group_id' => null]);
+        $role->forceFill(['permissions' => []])->save();
+        $this->postJson('/api/user', [...$payload, 'phone' => '900093003'])->assertCreated();
+        $this->patchJson('/api/user/'.$id, ['branch_group_id' => $group->id])->assertOk();
+        $this->assertDatabaseHas('users', ['id' => $id, 'branch_group_id' => null]);
+    }
+
     public function test_custom_role_hr_eligibility_is_independent_for_creation_editing_and_employment(): void
     {
         Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());

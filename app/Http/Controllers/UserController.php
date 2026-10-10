@@ -50,16 +50,6 @@ class UserController extends Controller
         return in_array($roleSlug, ['branch_director', 'rop'], true);
     }
 
-    private function isBranchScopedRole(?string $roleSlug): bool
-    {
-        return in_array($roleSlug, ['branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern'], true);
-    }
-
-    private function isBranchGroupScopedRole(?string $roleSlug): bool
-    {
-        return in_array($roleSlug, ['mop'], true);
-    }
-
     private function visibleUsersQuery(User $authUser, bool $includeUnassigned = false, bool $includeClients = true)
     {
         $query = User::query()->with(['role', 'branch', 'branchGroup']);
@@ -328,11 +318,11 @@ class UserController extends Controller
             return $data;
         }
 
-        if ($this->isBranchScopedRole($roleSlug) && $authUser->hasPermission('users.scope.branch')) {
+        if ($targetRole->hasPermission('users.subject.branch_required') && $authUser->hasPermission('users.scope.branch')) {
             $data['branch_id'] = $authUser->branch_id;
         }
 
-        if ($this->isBranchScopedRole($roleSlug) && empty($data['branch_id'])) {
+        if ($targetRole->hasPermission('users.subject.branch_required') && empty($data['branch_id'])) {
             abort(422, 'branch_id is required for this role.');
         }
 
@@ -350,13 +340,13 @@ class UserController extends Controller
         $groupWorkflow = $targetRole->hasPermission('users.subject.team')
             || $targetRole->hasPermission('users.subject.record_recipient')
             || $targetRole->hasPermission('users.subject.group_transfer');
-        if (! $groupWorkflow && ! $this->isBranchScopedRole($roleSlug) && ! $this->isBranchGroupScopedRole($roleSlug)) {
+        if (! $groupWorkflow && ! $targetRole->hasPermission('users.subject.group_assignment') && ! $targetRole->hasPermission('users.subject.group_required')) {
             $data['branch_group_id'] = null;
 
             return $data;
         }
 
-        if ($this->isBranchGroupScopedRole($roleSlug) && empty($data['branch_group_id'])) {
+        if ($targetRole->hasPermission('users.subject.group_required') && empty($data['branch_group_id'])) {
             abort(422, 'branch_group_id is required for this role.');
         }
 
