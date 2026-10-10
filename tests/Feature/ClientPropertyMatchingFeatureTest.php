@@ -397,6 +397,19 @@ class ClientPropertyMatchingFeatureTest extends TestCase
             ->assertJsonPath('matches.0.need_id', $ownNeed->id);
 
         $this->assertSame([$ownClient->id], collect($response->json('matches'))->pluck('client_id')->all());
+
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $role = $agentA->role;
+        $role->forceFill(['slug' => 'custom_matcher', 'permissions' => ['clients.scope.all', 'properties.matching.view']])->save();
+        Sanctum::actingAs($agentA->fresh());
+        $this->getJson('/api/properties/'.$property->id.'/matching-clients')->assertOk()->assertJsonCount(2, 'matches');
+        $role->forceFill(['permissions' => ['clients.scope.all', 'properties.matching.view', 'properties.matching.own_clients']])->save();
+        Sanctum::actingAs($agentA->fresh());
+        $this->getJson('/api/properties/'.$property->id.'/matching-clients')->assertOk()->assertJsonCount(1, 'matches')->assertJsonPath('matches.0.client_id', $ownClient->id);
+        $role->forceFill(['permissions' => ['clients.scope.all']])->save();
+        Sanctum::actingAs($agentA->fresh());
+        $this->getJson('/api/properties/'.$property->id.'/matching-clients')->assertForbidden();
+
     }
 
     public function test_client_matching_properties_groups_results_by_open_need_and_skips_irrelevant_objects(): void

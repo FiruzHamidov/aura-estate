@@ -21,7 +21,6 @@ class ClientPropertyMatcher
     public function forProperty(User $authUser, Property $property, int $limit = 10): array
     {
         app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $property);
-        $roleSlug = $this->clientAccess->roleSlug($authUser);
 
         $clients = $this->clientAccess->visibleQuery($authUser)
             ->where('clients.status', 'active')
@@ -40,7 +39,7 @@ class ClientPropertyMatcher
             ->orderByDesc('clients.id')
             ->limit(max($limit * 5, 50));
 
-        if ($roleSlug === 'agent') {
+        if ($authUser->hasPermission('properties.matching.own_clients')) {
             $clients->where(function (Builder $query) use ($authUser) {
                 $query->where('clients.responsible_agent_id', $authUser->id)
                     ->orWhere('clients.created_by', $authUser->id);

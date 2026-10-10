@@ -78,6 +78,20 @@ class RolePermissionsTest extends TestCase
         $this->assertNotContains('properties.contacts.view', $catalog->defaults('new_custom'));
     }
 
+    public function test_property_card_action_defaults_preserve_existing_website_roles(): void
+    {
+        foreach (Role::all() as $role) {
+            $this->assertSame(in_array($role->slug, ['admin', 'superadmin', 'marketing', 'agent', 'mop'], true), $role->hasPermission('bookings.property.site.create'), $role->slug);
+            $this->assertSame(in_array($role->slug, ['admin', 'superadmin', 'marketing', 'security'], true), $role->hasPermission('properties.internal_fields.site'), $role->slug);
+            $this->assertSame(!in_array($role->slug, ['client', 'owner'], true), $role->hasPermission('properties.media.download.site'), $role->slug);
+            $this->assertSame($role->slug !== 'client', $role->hasPermission('properties.matching.view'), $role->slug);
+            $this->assertSame($role->slug === 'agent', $role->hasPermission('properties.matching.own_clients'), $role->slug);
+            $this->assertSame(in_array($role->slug, ['manager', 'admin', 'superadmin', 'marketing', 'rop', 'branch_director'], true), $role->hasPermission('properties.matching.site.all'), $role->slug);
+            $this->assertSame(in_array($role->slug, ['agent', 'mop'], true), $role->hasPermission('properties.matching.site.own'), $role->slug);
+        }
+        $this->assertContains('properties.matching.view', app(PermissionCatalog::class)->migrationDefaults('legacy_custom'));
+    }
+
     public function test_object_report_filter_defaults_preserve_existing_role_scopes(): void
     {
         foreach (Role::all() as $role) {

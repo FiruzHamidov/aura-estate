@@ -2533,6 +2533,7 @@ class PropertyController extends Controller
     public function matchingClients(Request $request, Property $property)
     {
         $authUser = $this->crmAuthUser();
+        abort_unless($authUser->hasPermission('properties.matching.view'), 403, 'Нет права подбирать клиентов к объекту.');
         $validated = $request->validate([
             'limit' => 'nullable|integer|min:1|max:20',
         ]);
