@@ -564,6 +564,46 @@ class LocationTrackingFeatureTest extends TestCase
         $this->assertFalse(app(LocationAccessService::class)->canView($context['ropA']->fresh(), $context['agentOtherGroup']));
     }
 
+    public function test_custom_subject_visibility_updates_map_history_and_queued_audience(): void
+    {
+        $context = $this->context();
+        $role = Role::create(['name' => 'Custom tracked employee', 'slug' => 'custom_location_subject']);
+        $target = $this->user($role, $context['branchA'], $context['groupA1'], 'Tracked');
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role->forceFill(['permissions' => ['locations.transmit']])->save();
+        Sanctum::actingAs($target->fresh());
+        $device = $this->devicePayload();
+        $this->putJson('/api/location-tracking/me/device', $device)->assertOk();
+        $this->postJson('/api/location-tracking/me/points', ['device_uuid' => $device['device_uuid'],
+            'points' => [$this->pointPayload(now()->subMinute()->toISOString(), 38.56, 68.788)]])->assertOk();
+        $event = null;
+        Event::assertDispatched(UserLocationUpdated::class, function ($captured) use (&$event) { $event = $captured; return true; });
+        $access = app(LocationAccessService::class);
+        foreach ([[], ['branch'], ['group'], ['branch', 'group'], []] as $subjects) {
+            $role->forceFill(['permissions' => ['locations.transmit', ...array_map(fn ($scope) => 'locations.subject.'.$scope, $subjects)]])->save();
+            $channels = array_map(fn ($entry) => $entry->name, $event->broadcastOn());
+            foreach (['branch' => 'directorA', 'group' => 'mopA'] as $scope => $key) {
+                $viewer = $context[$key]->fresh();
+                $expected = in_array($scope, $subjects, true);
+                $this->assertSame($expected, $access->canView($viewer, $target->fresh()));
+                $this->assertSame($expected, in_array('private-location.viewer.'.$viewer->id.'.scope.0', $channels, true));
+                Sanctum::actingAs($viewer);
+                $response = $this->getJson('/api/location-tracking/map')->assertOk();
+                $this->assertSame($expected, collect($response->json('data'))->contains(fn ($row) => (int) $row['user']['id'] === $target->id));
+                $this->getJson('/api/location-tracking/users/'.$target->id.'/history?'.http_build_query([
+                    'from' => now()->subHour()->toISOString(), 'to' => now()->addMinute()->toISOString(),
+                ]))->assertStatus($expected ? 200 : 403);
+                if ($expected) {
+                    $this->assertSame(1, $access->applyHistoryScope(UserLocationPoint::query()->where('user_id', $target->id), $viewer, $target->fresh())->count());
+                }
+            }
+            // Existing all-branch viewers continue seeing any employee with a current point.
+            $this->assertTrue($access->canView($context['admin']->fresh(), $target->fresh()));
+            $this->assertContains('private-location.viewer.'.$context['admin']->id.'.scope.0', $channels);
+            $this->assertFalse($access->canView($context['agentB']->fresh(), $target->fresh()));
+        }
+    }
+
     private function context(): array
     {
         $roles = collect(['agent', 'mop', 'rop', 'branch_director', 'admin'])

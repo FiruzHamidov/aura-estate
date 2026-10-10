@@ -3,6 +3,7 @@
 namespace App\Services\LocationTracking;
 
 use App\Models\User;
+use App\Models\Role;
 use Illuminate\Database\Eloquent\Builder;
 
 class LocationAccessService
@@ -35,6 +36,12 @@ class LocationAccessService
     public function availableUsersQuery(User $viewer): Builder
     {
         $this->assertCanViewModule($viewer);
+        $subjects = ['branch' => [], 'group' => []];
+        foreach (Role::query()->get() as $role) {
+            foreach (array_keys($subjects) as $scope) {
+                if ($role->hasPermission('locations.subject.'.$scope)) $subjects[$scope][] = $role->id;
+            }
+        }
         $query = User::query()
             ->where('status', User::STATUS_ACTIVE)
             ->with([
@@ -53,29 +60,26 @@ class LocationAccessService
 
         if ($viewer->hasRole('rop')) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id');
-            $query->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop']));
+            $query->whereIn('users.role_id', $subjects['branch']);
         }
 
         return match ($this->scope($viewer)) {
             'own' => $query->whereKey($viewer->id),
-            'group' => $query->where(function (Builder $q) use ($viewer) {
+            'group' => $query->where(function (Builder $q) use ($viewer, $subjects) {
                 $q->whereKey($viewer->id);
                 if ($viewer->branch_group_id !== null) {
-                    $q->orWhere(function (Builder $scope) use ($viewer) {
+                    $q->orWhere(function (Builder $scope) use ($viewer, $subjects) {
                         $scope->where('branch_group_id', $viewer->branch_group_id)
-                            ->whereHas('role', fn (Builder $roles) => $roles->where('slug', 'agent'));
+                            ->whereIn('users.role_id', $subjects['group']);
                     });
                 }
             }),
             'branch' => $viewer->branch_id === null
                 ? $query->whereKey($viewer->id)
                 : $query->where('branch_id', $viewer->branch_id)
-                    ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop'])),
-            'all' => $query->where(function (Builder $scope) {
-                $scope->whereHas(
-                    'role',
-                    fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop'])
-                )->orWhereHas('currentLocation');
+                    ->whereIn('users.role_id', $subjects['branch']),
+            'all' => $query->where(function (Builder $scope) use ($subjects) {
+                $scope->whereIn('users.role_id', $subjects['branch'])->orWhereHas('currentLocation');
             }),
             default => $query->whereRaw('1 = 0'),
         };

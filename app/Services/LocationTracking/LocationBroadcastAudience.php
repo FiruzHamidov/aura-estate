@@ -20,7 +20,7 @@ final class LocationBroadcastAudience
         $point = UserLocationPoint::query()->find($payload['point_id'] ?? 0);
         $target = User::query()->with('role')->find($payload['user_id'] ?? 0);
         if (! $point || ! $target || (int) $point->user_id !== (int) $target->id || $target->status !== User::STATUS_ACTIVE) return [];
-        $tracked = in_array($target->role?->slug, ['agent', 'mop'], true);
+        $tracked = $target->hasPermission('locations.subject.branch');
         $hasCurrent = $tracked || $target->currentLocation()->exists();
 
         $roleIds = ['all' => [], 'branch' => [], 'group' => [], 'own' => []];
@@ -39,7 +39,7 @@ final class LocationBroadcastAudience
                 if ($hasCurrent) $audience->orWhereIn('role_id', $roleIds['all']);
                 $audience->orWhere(fn (Builder $self) => $self->whereKey($target->id)
                     ->whereIn('role_id', [...$roleIds['own'], ...$roleIds['group']]));
-                if ($target->role?->slug === 'agent' && $target->branch_group_id && (int) $point->branch_group_id === (int) $target->branch_group_id) {
+                if ($target->hasPermission('locations.subject.group') && $target->branch_group_id && (int) $point->branch_group_id === (int) $target->branch_group_id) {
                     $audience->orWhere(fn (Builder $group) => $group->where('branch_group_id', $target->branch_group_id)
                         ->whereIn('role_id', $roleIds['group']));
                 }
