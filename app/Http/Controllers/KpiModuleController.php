@@ -450,6 +450,34 @@ class KpiModuleController extends Controller
         return response()->json($result);
     }
 
+    public function planUsers(Request $request)
+    {
+        $actor = $this->authUser();
+        abort_unless($actor->hasPermission('kpi.plans.user.view'), 403, 'KPI_FORBIDDEN_SCOPE');
+        $data = $request->validate(['page' => 'nullable|integer|min:1', 'per_page' => 'nullable|integer|min:1|max:200']);
+        $query = User::query()->select(['id', 'name', 'role_id', 'branch_id', 'branch_group_id', 'status'])
+            ->with(['role', 'branch:id,name', 'branchGroup:id,name,branch_id'])
+            ->where('status', User::STATUS_ACTIVE)
+            ->whereHas('role', fn ($roles) => $roles->withPermission('kpi.subject.plan_templates'));
+        if ($actor->usesAssignedGroupScope()) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'users.branch_group_id', 'users.branch_id');
+            $query->whereHas('role', fn ($roles) => $roles->withPermission('kpi.subject.assigned_groups'));
+        }
+        if ($actor->hasPermission('kpi.plans.scope.all')) {
+            // The assigned-group boundary above still applies.
+        } elseif ($actor->hasPermission('kpi.plans.scope.branch') && $actor->branch_id) {
+            $query->where('branch_id', $actor->branch_id);
+        } elseif ($actor->hasPermission('kpi.plans.scope.group') && $actor->branch_group_id) {
+            $query->where('branch_group_id', $actor->branch_group_id)
+                ->whereHas('role', fn ($roles) => $roles->withPermission('kpi.subject.group_templates'));
+        } elseif ($actor->hasPermission('kpi.plans.scope.own')) {
+            $query->whereKey($actor->id);
+        } else {
+            $query->whereRaw('1 = 0');
+        }
+        return response()->json($query->orderBy('name')->orderBy('id')->paginate($data['per_page'] ?? 100));
+    }
+
     public function planRoles()
     {
         $actor = $this->authUser();
