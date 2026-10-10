@@ -87,7 +87,7 @@ class KpiPeriodLockController extends Controller
             $reportsQuery = DailyReport::query()
                 ->where('user_id', $validated['entity_id'])
                 ->whereBetween('report_date', [$dateFrom, $dateTo])
-                ->when($user->usesAssignedGroupScope(), fn ($q) => $q->where('branch_group_id', $groupId)->whereIn('role_slug', ['agent', 'mop']));
+                ->when($user->usesAssignedGroupScope(), fn ($q) => $q->where('branch_group_id', $groupId)->whereHas('historicalRole', fn ($roles) => $roles->withPermission('kpi.subject.assigned_groups')));
             $reports = (clone $reportsQuery)->orderBy('report_date')->orderBy('id')->lockForUpdate()->get();
 
             abort_unless($reports->isNotEmpty(), 404, 'Daily report row not found for selected period and user.');
@@ -195,7 +195,7 @@ class KpiPeriodLockController extends Controller
         [$from, $to] = $this->resolveDateRange($validated['period_type'], $validated['period_key']);
         $rows = \Illuminate\Support\Facades\DB::table('users')->select(['users.id', 'users.name'])->whereExists(function ($query) use ($groupId, $from, $to) {
             $query->selectRaw('1')->from('daily_reports')->whereColumn('daily_reports.user_id', 'users.id')
-                ->where('daily_reports.branch_group_id', $groupId)->whereIn('daily_reports.role_slug', ['agent', 'mop'])
+                ->where('daily_reports.branch_group_id', $groupId)->whereIn('daily_reports.role_slug', \App\Models\Role::query()->withPermission('kpi.subject.assigned_groups')->select('slug'))
                 ->whereBetween('daily_reports.report_date', [$from, $to]);
         })->orderBy('users.name')->orderBy('users.id')->get();
         return response()->json(['data' => $rows]);

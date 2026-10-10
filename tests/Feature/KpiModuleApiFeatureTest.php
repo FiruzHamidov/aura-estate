@@ -571,6 +571,40 @@ class KpiModuleApiFeatureTest extends TestCase
         }
     }
 
+    public function test_custom_historical_role_controls_adjustment_picker_and_write_after_revocation(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $branch = Branch::create(['name' => 'Main']);
+        $ownGroup = BranchGroup::create(['name' => 'Own', 'branch_id' => $branch->id]);
+        $otherGroup = BranchGroup::create(['name' => 'Other', 'branch_id' => $branch->id]);
+        $managerRole = Role::create(['name' => 'Custom manager', 'slug' => 'custom_adjustment_manager']);
+        $managerRole->forceFill(['permissions' => ['data.scope.assigned_groups', 'kpi.adjustments.manage', 'kpi.adjustments.entities.view']])->save();
+        $historicalRole = Role::create(['name' => 'Historical employee', 'slug' => 'custom_adjustment_employee']);
+        $historicalRole->forceFill(['permissions' => ['kpi.subject.assigned_groups']])->save();
+        $currentRole = Role::create(['name' => 'Current employee', 'slug' => 'custom_current_employee']);
+        $currentRole->forceFill(['permissions' => []])->save();
+        $manager = User::create(['name' => 'Manager', 'phone' => '900095001', 'role_id' => $managerRole->id, 'branch_id' => $branch->id]);
+        $employee = User::create(['name' => 'Transferred employee', 'phone' => '900095002', 'role_id' => $currentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $otherGroup->id]);
+        $manager->supervisedGroups()->attach($ownGroup->id);
+        $report = DailyReport::create(['user_id' => $employee->id, 'branch_group_id' => $ownGroup->id, 'role_slug' => $historicalRole->slug, 'report_date' => '2000-01-01', 'calls_count' => 3]);
+        $foreign = DailyReport::create(['user_id' => $employee->id, 'branch_group_id' => $otherGroup->id, 'role_slug' => $historicalRole->slug, 'report_date' => '2000-01-02', 'calls_count' => 99]);
+        \App\Models\KpiPeriodLock::create(['period_type' => 'month', 'period_key' => '2000-01', 'branch_id' => $branch->id, 'branch_group_id' => $ownGroup->id, 'locked_by' => $manager->id, 'locked_at' => now()]);
+        Sanctum::actingAs($manager);
+        $url = '/api/kpi/adjustments/entities?period_type=month&period_key=2000-01';
+        $payload = ['period_type' => 'month', 'period_key' => '2000-01', 'entity_id' => $employee->id, 'field_name' => 'calls', 'new_value' => 7, 'reason' => 'Verified correction'];
+        $this->getJson($url)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $employee->id);
+        $this->postJson('/api/kpi/adjustments', $payload)->assertCreated();
+        $this->assertEquals(7, $report->fresh()->calls_count);
+        $this->assertEquals(99, $foreign->fresh()->calls_count);
+        $historicalRole->forceFill(['permissions' => []])->save();
+        $this->getJson($url)->assertOk()->assertJsonCount(0, 'data');
+        $this->postJson('/api/kpi/adjustments', array_replace($payload, ['new_value' => 11]))->assertNotFound();
+        $this->assertEquals(7, $report->fresh()->calls_count);
+        $this->assertDatabaseCount('kpi_adjustment_logs', 1);
+        $historicalRole->forceFill(['permissions' => ['kpi.subject.assigned_groups']])->save();
+        $this->getJson($url)->assertOk()->assertJsonCount(1, 'data');
+    }
+
     public function test_adjustment_changes_only_snapshot_group_and_requires_its_period_lock(): void
     {
         $branch = Branch::create(['name' => 'Main']);
