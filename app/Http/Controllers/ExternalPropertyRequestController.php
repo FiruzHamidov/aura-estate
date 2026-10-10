@@ -311,11 +311,11 @@ class ExternalPropertyRequestController extends Controller
             'assigned_agent_id' => ['nullable', 'integer', 'exists:users,id'],
         ]);
 
-        if ($user->hasRole('agent') || $user->hasRole('mop')) {
+        if ($user->hasPermission('external_requests.assign.self')) {
             abort_unless(
                 (int) ($validated['assigned_agent_id'] ?? 0) === (int) $user->id,
                 403,
-                'Агент и МОП могут принять заявку только на себя.'
+                'Можно принять заявку только на себя.'
             );
         }
 

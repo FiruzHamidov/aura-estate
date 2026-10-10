@@ -314,6 +314,77 @@ class ExternalPropertyRequestFeatureTest extends TestCase
         $this->getJson('/api/external-agent-requests/'.$own->id)->assertForbidden();
     }
 
+    public function test_assignment_restrictions_and_recipient_eligibility_are_configurable(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Dispatcher', 'slug' => 'dispatcher']);
+        $recipientRole = Role::create(['name' => 'Recipient', 'slug' => 'recipient']);
+        $actor = $this->user($role, '939222221', branchId: 1, branchGroupId: 1);
+        $recipient = $this->user($recipientRole, '939222222', branchId: 2, branchGroupId: 2);
+        $owner = $this->user($this->externalRole, '939222223');
+        $request = ExternalPropertyRequest::create(['external_agent_id' => $owner->id, 'status' => 'submitted', 'branch_id' => 1, 'branch_group_id' => 1]);
+        $base = ['external_requests.assign', 'external_requests.scope.all', 'external_requests.receive'];
+        $grant = function (array $permissions) use ($actor, $role) {
+            $role->forceFill(['permissions' => $permissions])->save();
+            Sanctum::actingAs($actor->fresh());
+        };
+        $url = '/api/external-agent-requests/'.$request->id.'/assign';
+        $grant([...$base, 'external_requests.assign.self']);
+        $this->patchJson($url, ['assigned_agent_id' => $recipient->id])->assertForbidden();
+        $this->patchJson($url, ['assigned_agent_id' => null])->assertForbidden();
+        $this->patchJson($url, ['assigned_agent_id' => $actor->id])->assertOk();
+        $grant($base);
+        $this->patchJson($url, ['assigned_agent_id' => $recipient->id])->assertUnprocessable();
+        $recipientRole->forceFill(['permissions' => ['external_requests.receive']])->save();
+        $this->patchJson($url, ['assigned_agent_id' => $recipient->id])->assertForbidden();
+        $grant([...$base, 'external_requests.assign.across_zones']);
+        $this->patchJson($url, ['assigned_agent_id' => $recipient->id])->assertOk();
+        $recipientRole->forceFill(['permissions' => []])->save();
+        $this->patchJson($url, ['assigned_agent_id' => $recipient->id])->assertUnprocessable();
+        $this->assertSame($recipient->id, $request->fresh()->assigned_agent_id);
+    }
+
+    public function test_request_writes_recheck_revoked_permissions_on_cached_actor(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Writer', 'slug' => 'request_writer']);
+        $role->forceFill(['permissions' => ['external_requests.assign', 'external_requests.status', 'external_requests.scope.all']])->save();
+        $actor = $this->user($role, '939222224');
+        $owner = $this->user($this->externalRole, '939222225');
+        $request = ExternalPropertyRequest::create(['external_agent_id' => $owner->id, 'status' => 'submitted']);
+        $actor->load('role');
+        $role->forceFill(['permissions' => []])->save();
+        $service = app(\App\Services\ExternalPropertyRequestService::class);
+        foreach (['assign', 'status'] as $action) {
+            try {
+                $action === 'assign' ? $service->assign($request, $actor, null) : $service->changeStatus($request, $actor, 'rejected');
+                $this->fail('Revoked permission allowed a write');
+            } catch (\Symfony\Component\HttpKernel\Exception\HttpException $exception) {
+                $this->assertSame(403, $exception->getStatusCode());
+            }
+            $this->assertSame('submitted', $request->fresh()->status);
+        }
+    }
+
+    public function test_request_status_write_rechecks_current_organization(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Scoped writer', 'slug' => 'scoped_writer']);
+        $role->forceFill(['permissions' => ['external_requests.status', 'external_requests.scope.group']])->save();
+        $actor = $this->user($role, '939222226', branchId: 1, branchGroupId: 1);
+        $owner = $this->user($this->externalRole, '939222227');
+        $request = ExternalPropertyRequest::create(['external_agent_id' => $owner->id, 'status' => 'submitted', 'branch_id' => 1, 'branch_group_id' => 1]);
+        $actor->load('role');
+        User::query()->whereKey($actor->id)->update(['branch_group_id' => 2]);
+        try {
+            app(\App\Services\ExternalPropertyRequestService::class)->changeStatus($request, $actor, 'rejected');
+            $this->fail('Former group allowed a write');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $exception) {
+            $this->assertSame(403, $exception->getStatusCode());
+        }
+        $this->assertSame('submitted', $request->fresh()->status);
+    }
+
     public function test_request_photos_are_private_and_require_current_parent_access(): void
     {
         \Illuminate\Support\Facades\Storage::fake('public');

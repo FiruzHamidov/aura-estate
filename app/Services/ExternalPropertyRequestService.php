@@ -157,81 +157,88 @@ class ExternalPropertyRequestService
 
     public function assign(ExternalPropertyRequest $request, User $actor, ?int $assignedAgentId): ExternalPropertyRequest
     {
-        if ($assignedAgentId) {
-            $this->ensureAssignableAgent($actor, $assignedAgentId, $request);
-        }
+        return DB::transaction(function () use ($request, $actor, $assignedAgentId) {
+            [$actor, $request] = $this->lockInternalRequest($actor, $request, 'external_requests.assign', $assignedAgentId);
+            abort_if($actor->hasPermission('external_requests.assign.self') && (int) $assignedAgentId !== (int) $actor->id, 403, 'Можно принять заявку только на себя.');
+            if ($assignedAgentId) {
+                $this->ensureAssignableAgent($actor, $assignedAgentId, $request);
+            }
 
-        $oldStatus = $request->status;
-        $request->update([
-            'assigned_agent_id' => $assignedAgentId,
-            'status' => $assignedAgentId ? ExternalPropertyRequest::STATUS_ASSIGNED : ExternalPropertyRequest::STATUS_SUBMITTED,
-            'assigned_at' => $assignedAgentId ? now() : null,
-        ]);
+            $oldStatus = $request->status;
+            $request->update([
+                'assigned_agent_id' => $assignedAgentId,
+                'status' => $assignedAgentId ? ExternalPropertyRequest::STATUS_ASSIGNED : ExternalPropertyRequest::STATUS_SUBMITTED,
+                'assigned_at' => $assignedAgentId ? now() : null,
+            ]);
 
-        $this->log($request, $actor, 'assigned', $oldStatus, $request->status, null, [
-            'assigned_agent_id' => $assignedAgentId,
-        ]);
+            $this->log($request, $actor, 'assigned', $oldStatus, $request->status, null, [
+                'assigned_agent_id' => $assignedAgentId,
+            ]);
 
-        if ($assignedAgentId) {
-            $this->notifyUserId(
-                $assignedAgentId,
-                $request,
-                $actor,
-                'external_property_request_assigned',
-                'Назначена заявка внешнего агента',
-                'Вам назначена заявка внешнего агента #'.$request->id.'.',
-                '/profile/crm/external-agent-requests/'.$request->id
-            );
-        }
+            if ($assignedAgentId) {
+                $this->notifyUserId(
+                    $assignedAgentId,
+                    $request,
+                    $actor,
+                    'external_property_request_assigned',
+                    'Назначена заявка внешнего агента',
+                    'Вам назначена заявка внешнего агента #'.$request->id.'.',
+                    '/profile/crm/external-agent-requests/'.$request->id
+                );
+            }
 
-        return $request->fresh(['externalAgent', 'assignedAgent', 'property', 'photos']);
+            return $request->fresh(['externalAgent', 'assignedAgent', 'property', 'photos']);
+        });
     }
 
     public function changeStatus(ExternalPropertyRequest $request, User $actor, string $status, ?string $comment = null): ExternalPropertyRequest
     {
-        abort_if($request->status === ExternalPropertyRequest::STATUS_CONVERTED, 422, 'Сконвертированную заявку нельзя менять.');
+        return DB::transaction(function () use ($request, $actor, $status, $comment) {
+            [$actor, $request] = $this->lockInternalRequest($actor, $request, 'external_requests.status');
+            abort_if($request->status === ExternalPropertyRequest::STATUS_CONVERTED, 422, 'Сконвертированную заявку нельзя менять.');
 
-        $oldStatus = $request->status;
-        $payload = ['status' => $status];
+            $oldStatus = $request->status;
+            $payload = ['status' => $status];
 
-        if ($status === ExternalPropertyRequest::STATUS_NEEDS_INFO) {
-            $payload['needs_info_comment'] = $comment;
-        }
+            if ($status === ExternalPropertyRequest::STATUS_NEEDS_INFO) {
+                $payload['needs_info_comment'] = $comment;
+            }
 
-        if ($status === ExternalPropertyRequest::STATUS_REJECTED) {
-            $payload['rejection_reason'] = $comment;
-            $payload['rejected_at'] = now();
-        }
+            if ($status === ExternalPropertyRequest::STATUS_REJECTED) {
+                $payload['rejection_reason'] = $comment;
+                $payload['rejected_at'] = now();
+            }
 
-        $request->update($payload);
+            $request->update($payload);
 
-        $this->log($request, $actor, 'status_changed', $oldStatus, $status, $comment);
+            $this->log($request, $actor, 'status_changed', $oldStatus, $status, $comment);
 
-        if ($status === ExternalPropertyRequest::STATUS_NEEDS_INFO) {
-            $this->notifyUserId(
-                $request->external_agent_id,
-                $request,
-                $actor,
-                'external_property_request_needs_info',
-                'Нужно уточнить заявку',
-                $comment ?: 'По вашей заявке #'.$request->id.' нужны уточнения.',
-                '/external/property-requests/'.$request->id
-            );
-        }
+            if ($status === ExternalPropertyRequest::STATUS_NEEDS_INFO) {
+                $this->notifyUserId(
+                    $request->external_agent_id,
+                    $request,
+                    $actor,
+                    'external_property_request_needs_info',
+                    'Нужно уточнить заявку',
+                    $comment ?: 'По вашей заявке #'.$request->id.' нужны уточнения.',
+                    '/external/property-requests/'.$request->id
+                );
+            }
 
-        if ($status === ExternalPropertyRequest::STATUS_REJECTED) {
-            $this->notifyUserId(
-                $request->external_agent_id,
-                $request,
-                $actor,
-                'external_property_request_rejected',
-                'Заявка отклонена',
-                $comment ?: 'Ваша заявка #'.$request->id.' отклонена.',
-                '/external/property-requests/'.$request->id
-            );
-        }
+            if ($status === ExternalPropertyRequest::STATUS_REJECTED) {
+                $this->notifyUserId(
+                    $request->external_agent_id,
+                    $request,
+                    $actor,
+                    'external_property_request_rejected',
+                    'Заявка отклонена',
+                    $comment ?: 'Ваша заявка #'.$request->id.' отклонена.',
+                    '/external/property-requests/'.$request->id
+                );
+            }
 
-        return $request->fresh(['externalAgent', 'assignedAgent', 'property', 'photos']);
+            return $request->fresh(['externalAgent', 'assignedAgent', 'property', 'photos']);
+        });
     }
 
     public function prefillPayload(ExternalPropertyRequest $request, User $actor): array
@@ -276,8 +283,10 @@ class ExternalPropertyRequestService
         $this->moderation->assertCanCreate($actor);
 
         return DB::transaction(function () use ($request, $actor, $payload, $copyPhotos) {
-            $request->refresh();
-            abort_if($request->property_id, 422, 'Заявка уже сконвертирована.');
+            [$actor, $request] = $this->lockInternalRequest($actor, $request, 'external_requests.convert');
+            $this->moderation->assertCanCreate($actor);
+            abort_if($request->property_id || $request->status === ExternalPropertyRequest::STATUS_CONVERTED, 422, 'Заявка уже сконвертирована.');
+            abort_if(in_array($request->status, [ExternalPropertyRequest::STATUS_REJECTED, ExternalPropertyRequest::STATUS_ARCHIVED], true), 422, 'Закрытую заявку нельзя конвертировать.');
 
             $propertyPayload = array_merge($this->prefillPayload($request, $actor), $payload);
             $propertyPayload['created_by'] = $actor->id;
@@ -443,22 +452,30 @@ class ExternalPropertyRequestService
         }
     }
 
+    /** Call inside a transaction so role, organization and request changes are rechecked before writing. */
+    private function lockInternalRequest(User $actor, ExternalPropertyRequest $request, string $permission, ?int $assigneeId = null): array
+    {
+        $users = User::query()->whereIn('id', array_filter([$actor->id, $assigneeId]))->orderBy('id')->lockForUpdate()->get()->keyBy('id');
+        $actor = $users->get($actor->id);
+        abort_unless($actor, 404, 'NOT_FOUND');
+        if ((int) auth()->id() === (int) $actor->id) auth()->setUser($actor);
+        abort_unless($actor->hasPermission($permission), 403, 'Доступ запрещён');
+        $request = ExternalPropertyRequest::query()->lockForUpdate()->findOrFail($request->id);
+        $this->ensureInternalCanAccess($actor, $request);
+        return [$actor, $request];
+    }
+
     private function ensureAssignableAgent(User $actor, int $assignedAgentId, ExternalPropertyRequest $request): void
     {
         $assignee = User::query()->with('role')->findOrFail($assignedAgentId);
 
         abort_unless(
-            $assignee->hasRole('agent')
-                || $assignee->hasRole('manager')
-                || $assignee->hasRole('operator')
-                || $assignee->hasRole('mop')
-                || $assignee->hasRole('rop')
-                || $assignee->hasRole('branch_director'),
+            $assignee->hasPermission('external_requests.receive'),
             422,
-            'Назначить можно только внутреннего сотрудника.'
+            'У сотрудника нет права быть ответственным за внешнюю заявку.'
         );
 
-        if ($actor->hasRole('admin') || $actor->hasRole('superadmin')) {
+        if ($actor->hasPermission('external_requests.assign.across_zones')) {
             return;
         }
 
