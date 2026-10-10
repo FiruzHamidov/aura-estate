@@ -110,6 +110,7 @@ Route::get('/properties/search', [PropertyController::class, 'search']);
 Route::get('/properties/{property}', [PropertyController::class, 'show'])->whereNumber('property');
 Route::get('/properties/{property}/similar', [PropertyController::class, 'similar'])->whereNumber('property');
 Route::get('/properties/{property}/liquidity', [PropertyLiquidityController::class, 'show'])->whereNumber('property');
+Route::post('/properties/{property}/contact-click', [\App\Http\Controllers\PropertyContactAnalyticsController::class, 'track'])->whereNumber('property')->middleware('throttle:60,1');
 Route::post('/properties/{property}/view', [PropertyController::class, 'trackView'])->whereNumber('property')->middleware('throttle:30,1');
 Route::get('/properties/{property}/reels', [ReelController::class, 'propertyIndex'])->middleware('rop.branch.scope');
 Route::get('/reels', [ReelController::class, 'index'])->middleware('rop.branch.scope');
@@ -490,6 +491,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::get('/bookings', [BookingController::class, 'index']);
     Route::get('/bookings/{id}', [BookingController::class, 'show'])->whereNumber('id');
     Route::middleware('non.client')->group(function () {
+        Route::get('/marketing/property-contact-analytics', [\App\Http\Controllers\PropertyContactAnalyticsController::class, 'index']);
         Route::get('/my-properties', [PropertyController::class, 'myProperties']);
         Route::get('/properties/liquidity-feed', [PropertyLiquidityController::class, 'feed']);
         Route::get('/reports/properties/liquidity', [PropertyLiquidityController::class, 'report']);

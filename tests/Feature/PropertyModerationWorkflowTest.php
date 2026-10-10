@@ -1315,6 +1315,54 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertSame($matches->all(), $projected->all());
     }
 
+    public function test_contact_clicks_are_atomic_validated_and_do_not_change_listing_date(): void
+    {
+        (require database_path('migrations/2026_10_10_080000_add_property_contact_counters.php'))->up();
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedInteger('views_count')->default(0));
+        [$agent] = $this->users();
+        $property = $this->publishedProperty($agent);
+        $before = $property->getRawOriginal('updated_at');
+        foreach (['phone', 'phone', 'chat', 'whatsapp'] as $action) {
+            $this->postJson("/api/properties/{$property->id}/contact-click", compact('action'))->assertNoContent();
+        }
+        $this->postJson("/api/properties/{$property->id}/contact-click", ['action' => 'views_count'])->assertUnprocessable();
+        $property->refresh();
+        $this->assertEquals(2, $property->phone_clicks);
+        $this->assertEquals(1, $property->chat_clicks);
+        $this->assertEquals(1, $property->whatsapp_clicks);
+        $this->assertSame($before, $property->getRawOriginal('updated_at'));
+        $property->forceFill(['publication_status' => 'draft', 'moderation_status' => 'draft'])->saveQuietly();
+        $this->postJson("/api/properties/{$property->id}/contact-click", ['action' => 'phone'])->assertNotFound();
+        $this->assertEquals(2, $property->fresh()->phone_clicks);
+    }
+
+    public function test_contact_analytics_is_limited_to_marketing_and_admins_and_sorts_globally(): void
+    {
+        (require database_path('migrations/2026_10_10_080000_add_property_contact_counters.php'))->up();
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedInteger('views_count')->default(0));
+        [$agent, $rop] = $this->users();
+        $first = $this->publishedProperty($agent);
+        $second = $this->publishedProperty($agent, ['branch_id' => 2, 'title' => 'Unique listing']);
+        DB::table('properties')->where('id', $second->id)->update(['phone_clicks' => 3, 'whatsapp_clicks' => 2]);
+        $url = '/api/marketing/property-contact-analytics';
+        $this->getJson($url)->assertUnauthorized();
+        foreach (['agent', 'rop', 'intern', 'mop', 'branch_director', 'hr'] as $slug) {
+            $role = Role::firstOrCreate(['slug' => $slug], ['name' => $slug]);
+            $rop->forceFill(['role_id' => $role->id])->save();
+            $rop->unsetRelation('role');
+            $this->actingAs($rop)->getJson($url)->assertForbidden();
+        }
+        foreach (['marketing', 'admin', 'superadmin'] as $slug) {
+            $role = Role::firstOrCreate(['slug' => $slug], ['name' => $slug]);
+            $rop->forceFill(['role_id' => $role->id])->save();
+            $rop->unsetRelation('role');
+            $this->actingAs($rop)->getJson($url.'?sort=total_clicks')->assertOk()
+                ->assertJsonPath('data.0.id', $second->id)->assertJsonPath('data.0.total_clicks', 5);
+        }
+        $this->getJson($url.'?search=Unique')->assertOk()->assertJsonPath('total', 1);
+        $this->getJson($url.'?sort=owner_phone')->assertUnprocessable();
+    }
+
     private function detectedDuplicateFixture(): array
     {
         Schema::table('properties', fn (Blueprint $table) => $table->string('landmark')->nullable());
