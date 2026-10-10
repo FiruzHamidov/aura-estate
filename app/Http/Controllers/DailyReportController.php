@@ -603,20 +603,26 @@ class DailyReportController extends Controller
 
     private function applyVisibilityScope(Builder $query, User $authUser): void
     {
-        $authUser->loadMissing('role');
-
-        match ($authUser->role?->slug) {
-            'admin', 'superadmin', 'owner' => null,
-            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'daily_reports.branch_group_id'),
-            'branch_director' => $query->whereHas('user', fn (Builder $userQuery) => $userQuery->where('branch_id', $authUser->branch_id)),
-            'mop', 'intern' => $query->where('user_id', $authUser->id),
-            default => $query->where('user_id', $authUser->id),
-        };
+        $all = $authUser->hasPermission('daily_reports.list.scope.all');
+        $branch = $authUser->hasPermission('daily_reports.list.scope.branch');
+        $own = $authUser->hasPermission('daily_reports.list.scope.own') || $authUser->hasPermission('daily_reports.list.scope.own_group');
+        abort_unless($all || $branch || $own, 403, 'Forbidden');
+        if ($authUser->hasRole('rop')) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'daily_reports.branch_group_id');
+            if ($all || $branch) return;
+        }
+        if ($all) return;
+        if ($branch) {
+            if (! $authUser->branch_id) { $query->whereRaw('1 = 0'); return; }
+            $query->whereHas('user', fn (Builder $users) => $users->where('branch_id', $authUser->branch_id));
+            return;
+        }
+        $query->where('user_id', $authUser->id);
     }
 
     private function validateScopeFilters(array $validated, User $authUser): void
     {
-        if ($this->branchScope->isBranchScopedManager($authUser)) {
+        if ($authUser->hasRole('rop') || $authUser->hasPermission('daily_reports.list.scope.branch')) {
             if (array_key_exists('branch_id', $validated) && $validated['branch_id'] !== null) {
                 $this->branchScope->ensureSameBranchOrDeny((int) $validated['branch_id'], $authUser);
             }
@@ -635,7 +641,7 @@ class DailyReportController extends Controller
             return;
         }
 
-        if ($this->branchScope->isMop($authUser)) {
+        if ($authUser->hasPermission('daily_reports.list.scope.own_group')) {
             if (array_key_exists('branch_group_id', $validated) && $validated['branch_group_id'] !== null) {
                 $this->branchScope->ensureSameBranchGroupOrDeny((int) $validated['branch_group_id'], $authUser);
             }
@@ -652,22 +658,14 @@ class DailyReportController extends Controller
 
     private function authorizeUpdateOrDeny(User $authUser, User $targetUser, DailyReport $report): void
     {
-        $role = $authUser->role?->slug;
-
-        if (in_array($role, ['admin', 'superadmin', 'owner'], true)) {
-            return;
+        if (! $authUser->hasPermission('daily_reports.list.edit')) {
+            $this->branchScope->denyWithCode(RbacBranchScope::DAILY_REPORT_EDIT_FORBIDDEN);
         }
-
-        if ($role === 'rop') {
-            app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $report);
-            return;
+        $query = DailyReport::query()->whereKey($report->id);
+        $this->applyVisibilityScope($query, $authUser);
+        if (! $query->exists()) {
+            $this->branchScope->denyWithCode(RbacBranchScope::DAILY_REPORT_EDIT_FORBIDDEN);
         }
-
-        if ($role === 'branch_director' && (int) $authUser->branch_id === (int) $targetUser->branch_id) {
-            return;
-        }
-
-        $this->branchScope->denyWithCode(RbacBranchScope::DAILY_REPORT_EDIT_FORBIDDEN);
     }
 
     private function authUser(): User

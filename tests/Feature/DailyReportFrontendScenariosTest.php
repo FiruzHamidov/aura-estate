@@ -421,6 +421,34 @@ class DailyReportFrontendScenariosTest extends TestCase
         $this->putJson('/api/kpi/daily/my-report/draft', $payload)->assertForbidden()->assertJsonPath('code', 'KPI_FORBIDDEN_LOCKED_PERIOD');
     }
 
+    public function test_report_list_scopes_and_general_update_permission_are_independent(): void
+    {
+        [$users, $reports] = $this->seedContext();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $actor = $users['agentA'];
+        $role = $actor->role;
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/daily-reports')->assertOk()->assertJsonCount(1, 'data');
+        $role->forceFill(['permissions' => ['daily_reports.list.scope.branch']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/daily-reports')->assertOk()->assertJsonCount(3, 'data');
+        $this->getJson('/api/daily-reports?user_id='.$users['agentB']->id)->assertForbidden();
+        $this->patchJson('/api/daily-reports/'.$reports['agentA2'], ['comment' => 'Denied'])->assertForbidden();
+        $role->forceFill(['permissions' => ['daily_reports.list.scope.branch', 'daily_reports.list.edit']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson('/api/daily-reports/'.$reports['agentA2'], ['comment' => 'Allowed'])->assertOk()->assertJsonPath('comment', 'Allowed');
+        $this->patchJson('/api/daily-reports/'.$reports['agentB'], ['comment' => 'Denied'])->assertForbidden();
+        $role->forceFill(['permissions' => ['daily_reports.list.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/daily-reports')->assertOk()->assertJsonCount(4, 'data');
+        $this->patchJson('/api/daily-reports/'.$reports['agentA2'], ['comment' => 'Revoked'])->assertForbidden();
+        $this->assertDatabaseHas('daily_reports', ['id' => $reports['agentA2'], 'comment' => 'Allowed']);
+        $role->forceFill(['permissions' => ['daily_reports.list.edit']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/daily-reports')->assertForbidden();
+        $this->patchJson('/api/daily-reports/'.$reports['agentA'], ['comment' => 'No scope'])->assertForbidden();
+    }
+
     private function seedContext(): array
     {
         $roles = [

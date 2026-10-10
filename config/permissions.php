@@ -596,6 +596,12 @@ foreach (['all' => ['Карточки отчётов всех филиалов',
 }
 $permissions['daily_reports.employee.edit'] = ['group' => 'Ежедневные отчёты', 'name' => 'Изменение карточки отчёта сотрудника', 'description' => 'Изменение ручных показателей в доступной карточке отчёта сотрудника. Нужна область доступа к карточкам. Блокировки, дедлайн, финализация и ограничения повторной отправки проверяются отдельно.', 'roles' => ['admin', 'superadmin', 'owner', 'rop', 'branch_director', 'agent', 'mop', 'intern']];
 
+$dailyOwnListRoles = array_values(array_diff(array_column((require __DIR__.'/roles.php')['system'], 'slug'), ['admin', 'superadmin', 'rop', 'branch_director', 'mop']));
+foreach (['all' => ['Список отчётов всех филиалов', 'Просмотр всех ежедневных отчётов.', ['admin', 'superadmin', 'owner']], 'branch' => ['Список отчётов своего филиала', 'Просмотр отчётов сотрудников своего филиала. Требуется назначенный филиал.', ['rop', 'branch_director']], 'own' => ['Список своих отчётов', 'Просмотр списка только собственных ежедневных отчётов.', $dailyOwnListRoles], 'own_group' => ['Свои отчёты с фильтрами своей группы', 'Просмотр только своих отчётов; фильтры сотрудников, группы и филиала ограничены своей группой. Сохраняет прежние ограничения МОП.', ['mop']]] as $scope => [$name, $description, $roles]) {
+    $permissions['daily_reports.list.scope.'.$scope] = ['group' => 'Ежедневные отчёты', 'name' => $name, 'description' => $description.' Для РОП остаётся проверка закреплённых групп и исторической принадлежности. Доступ к карточке сотрудника задаётся отдельно.', 'roles' => $roles, 'exclusive_group' => 'daily_reports.list.scope'];
+}
+$permissions['daily_reports.list.edit'] = ['group' => 'Ежедневные отчёты', 'name' => 'Правка отчёта через общий API', 'description' => 'Изменение доступного отчёта через общий API ежедневных отчётов. Требуется область списка отчётов. Ограничения финализации, отправки и периода сохраняются; карточка отчёта сотрудника имеет отдельное право редактирования.', 'roles' => ['admin', 'superadmin', 'owner', 'rop', 'branch_director']];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],
