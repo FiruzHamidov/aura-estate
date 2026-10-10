@@ -59,7 +59,7 @@ class KpiPlanScopePolicy
             return;
         }
         if ($actor->hasPermission('kpi.plans.scope.group')) {
-            if (((string) ($scope['role'] ?? '')) === 'rop') $this->denyScope();
+            if (isset($scope['role']) && ! app(\App\Services\KpiRoleCatalog::class)->allowsGroupTemplates((string) $scope['role'])) $this->denyScope();
             $this->assertMopScope($actor, $scope);
             return;
         }

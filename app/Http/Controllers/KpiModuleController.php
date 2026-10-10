@@ -108,11 +108,11 @@ class KpiModuleController extends Controller
             'replace_if_conflict' => 'sometimes|boolean',
             'conflict_strategy' => ['sometimes', Rule::in(['error', 'replace'])],
             'scope' => 'required|array',
-            'scope.role' => ['nullable', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'scope.role' => ['nullable', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'scope.roles' => 'nullable|array|min:1',
-            'scope.roles.*' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'scope.roles.*' => ['required', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'scope.target_roles' => 'nullable|array|min:1',
-            'scope.target_roles.*' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'scope.target_roles.*' => ['required', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'scope.branch_id' => 'nullable|integer|exists:branches,id',
             'scope.branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'rows' => 'required|array|min:1|max:500',
@@ -253,11 +253,11 @@ class KpiModuleController extends Controller
     public function commonPlans(Request $request)
     {
         $validated = $request->validate([
-            'role' => ['nullable', Rule::in(['agent', 'intern', 'mop', 'rop']), 'required_without_all:roles,role_in'],
+            'role' => ['nullable', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs()), 'required_without_all:roles,role_in'],
             'roles' => 'nullable|array|min:1',
-            'roles.*' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'roles.*' => ['required', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'role_in' => 'nullable|array|min:1',
-            'role_in.*' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'role_in.*' => ['required', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'date' => 'required|date_format:Y-m-d',
             'branch_id' => 'nullable|integer|exists:branches,id',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
@@ -301,9 +301,9 @@ class KpiModuleController extends Controller
         $validated = $request->validate([
             'type' => ['nullable', Rule::in(['personal', 'common'])],
             'user_id' => 'nullable|integer|exists:users,id',
-            'role' => ['nullable', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'role' => ['nullable', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'roles' => 'nullable|array|min:1',
-            'roles.*' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'roles.*' => ['required', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'branch_id' => 'nullable|integer|exists:branches,id',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'effective_from_from' => 'nullable|date_format:Y-m-d',
@@ -388,7 +388,7 @@ class KpiModuleController extends Controller
         $this->ensureManageAccess($this->authUser(), 'kpi.plans.manage');
 
         $validated = $request->validate([
-            'role' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'role' => ['required', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'effective_from' => 'required|date_format:Y-m-d',
             'effective_to' => 'nullable|date_format:Y-m-d|after_or_equal:effective_from',
             'branch_id' => 'nullable|integer|exists:branches,id',
@@ -425,7 +425,7 @@ class KpiModuleController extends Controller
         $this->ensureManageAccess($actor, 'kpi.plans.manage');
 
         $validated = $request->validate([
-            'role' => ['required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'role' => ['required', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'effective_from' => 'required|date_format:Y-m-d',
             'effective_to' => 'nullable|date_format:Y-m-d|after_or_equal:effective_from',
             'branch_id' => 'nullable|integer|exists:branches,id',
@@ -450,13 +450,21 @@ class KpiModuleController extends Controller
         return response()->json($result);
     }
 
+    public function planRoles()
+    {
+        $actor = $this->authUser();
+        abort_unless($actor->hasPermission('kpi.plans.manage') || $actor->hasPermission('kpi.plans.common.view')
+            || $actor->hasPermission('kpi.plans.user.view'), 403, 'KPI_FORBIDDEN_SCOPE');
+        return response()->json(['data' => app(\App\Services\KpiRoleCatalog::class)->templates()]);
+    }
+
     public function eligibleUsers(Request $request)
     {
         $actor = $this->authUser();
         $this->ensureManageAccess($actor, 'kpi.plans.manage');
 
         $validated = $request->validate([
-            'role' => ['nullable', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'role' => ['nullable', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'q' => 'nullable|string|max:255',
             'branch_id' => 'nullable|integer|exists:branches,id',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
@@ -465,7 +473,7 @@ class KpiModuleController extends Controller
         ]);
 
         $this->kpiPlanScopePolicy->ensureCanSelectUsers($actor, $validated);
-        if ($actor->hasPermission('kpi.plans.scope.group') && isset($validated['role']) && (string) $validated['role'] === 'rop') {
+        if ($actor->hasPermission('kpi.plans.scope.group') && isset($validated['role']) && ! app(\App\Services\KpiRoleCatalog::class)->allowsGroupTemplates((string) $validated['role'])) {
             $this->branchScope->denyWithCode('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
         }
 

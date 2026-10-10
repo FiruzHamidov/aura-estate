@@ -2484,15 +2484,7 @@ class KpiModuleService
 
         $scopes = [];
 
-        if (in_array($role, ['agent', 'intern'], true)) {
-            if ($branchGroupId !== null) {
-                $scopes[] = ['branch_group_id' => $branchGroupId, 'branch_id' => $branchId];
-            }
-            if ($branchId !== null) {
-                $scopes[] = ['branch_group_id' => null, 'branch_id' => $branchId];
-            }
-            $scopes[] = ['branch_group_id' => null, 'branch_id' => null];
-        } elseif ($role === 'mop') {
+        if (app(KpiRoleCatalog::class)->allowsGroupTemplates($role)) {
             if ($branchGroupId !== null) {
                 $scopes[] = ['branch_group_id' => $branchGroupId, 'branch_id' => $branchId];
             }

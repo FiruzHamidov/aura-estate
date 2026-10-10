@@ -1563,6 +1563,31 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->patchJson('/api/kpi/plans/'.$otherMop->id, $payload)->assertOk();
     }
 
+    public function test_custom_template_role_catalog_and_group_permission_can_be_revoked(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Особая команда', 'slug' => 'custom_template']);
+        $role->forceFill(['permissions' => ['kpi.subject.plan_templates']])->save();
+        $managerRole = Role::create(['name' => 'Planner', 'slug' => 'custom_template_manager']);
+        $managerRole->forceFill(['permissions' => ['kpi.plans.manage', 'kpi.plans.common.view', 'kpi.plans.common.manage', 'kpi.plans.scope.group']])->save();
+        $branch = Branch::create(['name' => 'Branch']);
+        $group = BranchGroup::create(['name' => 'Group', 'branch_id' => $branch->id]);
+        $actor = User::create(['name' => 'Planner', 'phone' => '900095001', 'role_id' => $managerRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($actor);
+        $this->getJson('/api/kpi/plans/roles')->assertOk()->assertJsonFragment(['slug' => $role->slug, 'name' => $role->name, 'group_templates' => false]);
+        $payload = ['role' => $role->slug, 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'effective_from' => '2026-05-01', 'items' => [['metric_key' => 'calls', 'daily_plan' => 10, 'weight' => 1]]];
+        $this->putJson('/api/kpi/plans/common', $payload)->assertForbidden();
+        $role->forceFill(['permissions' => ['kpi.subject.plan_templates', 'kpi.subject.group_templates']])->save();
+        $this->putJson('/api/kpi/plans/common', $payload)->assertOk();
+        $role->forceFill(['permissions' => []])->save();
+        $this->getJson('/api/kpi/plans/roles')->assertOk()->assertJsonMissing(['slug' => $role->slug]);
+        $this->putJson('/api/kpi/plans/common', $payload)->assertUnprocessable();
+        $this->assertDatabaseHas('kpi_plans', ['role_slug' => $role->slug, 'branch_group_id' => $group->id, 'daily_plan' => 10]);
+        $managerRole->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/kpi/plans/roles')->assertForbidden();
+    }
+
     public function test_custom_kpi_subject_policy_controls_plans_and_eligible_list_independently_of_record_transfer(): void
     {
         Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
