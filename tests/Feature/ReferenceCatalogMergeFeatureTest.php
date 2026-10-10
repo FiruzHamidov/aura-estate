@@ -46,6 +46,36 @@ class ReferenceCatalogMergeFeatureTest extends TestCase
         );
     }
 
+    public function test_catalog_write_grants_allow_client_role_and_revoke_direct_and_merge_routes(): void
+    {
+        $context = $this->context();
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        Schema::table('property_types', fn (Blueprint $table) => $table->timestamps());
+        $actor = $context['admin'];
+        $role = $actor->role;
+        $role->forceFill(['slug' => 'client', 'permissions' => ['catalogs.entries.property-types.manage']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $created = $this->postJson('/api/property-types', ['name' => 'Granted type', 'slug' => 'granted-type'])->assertCreated()->json('id');
+        $this->patchJson('/api/property-types/'.$created, ['name' => 'Updated type'])->assertOk();
+        $this->postJson('/api/document-types', ['name' => 'Denied', 'slug' => 'denied'])->assertForbidden();
+        $role->forceFill(['slug' => 'admin', 'permissions' => ['catalogs.manage']])->save();
+        Sanctum::actingAs($actor->fresh());
+        foreach (array_keys(config('catalog_permissions')) as $catalog) {
+            $this->postJson('/api/'.$catalog, [])->assertForbidden();
+        }
+        $this->patchJson('/api/property-types/'.$created, ['name' => 'Forbidden'])->assertForbidden();
+        $this->deleteJson('/api/property-types/'.$created)->assertForbidden();
+        $this->postJson('/api/admin/catalogs/property-types/'.$context['source']->id.'/merge', [
+            'replacement_id' => $context['replacement']->id, 'expected_usage_count' => 4,
+        ])->assertForbidden();
+        $this->assertDatabaseHas('property_types', ['id' => $created, 'name' => 'Updated type']);
+        $this->assertDatabaseHas('property_types', ['id' => $context['source']->id]);
+        $role->forceFill(['permissions' => ['catalogs.entries.property-types.manage']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->deleteJson('/api/property-types/'.$created)->assertOk();
+        $this->assertDatabaseMissing('property_types', ['id' => $created]);
+    }
+
     public function test_registry_contains_all_admin_reference_catalogs(): void
     {
         $this->assertSame([

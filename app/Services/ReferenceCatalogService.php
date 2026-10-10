@@ -17,6 +17,9 @@ class ReferenceCatalogService
     public function assertCanManage(User $user, ?string $catalog = null): void
     {
         $user->loadMissing('role');
+        if (isset(config('catalog_permissions', [])[$catalog]) && !$user->hasPermission('catalogs.entries.'.$catalog.'.manage')) {
+            $this->deny('REFERENCE_CATALOG_FORBIDDEN', 'Нет права изменять этот справочник.');
+        }
 
         if ($catalog === 'roles') {
             if ($user->hasPermission('roles.manage')) return;

@@ -13,6 +13,17 @@ class EnsureUserIsNotClient
         $user = $request->user();
         $user?->loadMissing('role');
 
+        // Catalog mutation grants replace the old internal-role blanket access.
+        $action = $request->route()?->getActionName();
+        foreach (config('catalog_permissions', []) as $catalog => $definition) {
+            $controller = 'App\\Http\\Controllers\\'.$definition['controller'].'@';
+            if (!$action || !str_starts_with($action, $controller)) continue;
+            $allowed = $user?->hasPermission('catalogs.entries.'.$catalog.'.manage');
+            if (!$request->isMethodSafe()) abort_unless($allowed, 403, 'FORBIDDEN_ACTION');
+            if ($allowed) return $next($request);
+            break;
+        }
+
         if ($request->is('api/roles', 'api/roles/*') && $user?->hasPermission('roles.manage')) {
             return $next($request);
         }

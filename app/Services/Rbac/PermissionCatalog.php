@@ -39,6 +39,7 @@ class PermissionCatalog
         // New roles still start without grants; this exception applies only to the migration.
         if ($roleSlug !== null && ! in_array($roleSlug, [...array_column(\App\Models\Role::systemRoles(), 'slug'), 'owner'], true)) {
             $defaults = [...$defaults, 'clients.shared.view', 'clients.attach', 'clients.duplicates.search', 'bookings.scope.all', 'bookings.create', 'bookings.update.own', 'bookings.reports.view', 'tasks.scope.own', 'tasks.create', 'tasks.update', 'tasks.assign.all'];
+            foreach (array_keys(config('catalog_permissions', [])) as $catalog) $defaults[] = 'catalogs.entries.'.$catalog.'.manage';
         }
 
         return array_values(array_unique($defaults));

@@ -510,6 +510,15 @@ $permissions['crm_reports.scope.branch'] = ['group' => 'CRM · Отчёты', 'n
 $permissions['crm_reports.scope.own_operator'] = ['group' => 'CRM · Отчёты', 'name' => 'Личные показатели оператора', 'description' => 'Только собственные показатели обработки заявок. Строка отчёта формируется для сотрудника с ролью оператора.', 'roles' => ['operator'], 'exclusive_group' => 'crm_reports.scope'];
 $permissions['crm_reports.scope.own_manager'] = ['group' => 'CRM · Отчёты', 'name' => 'Личные показатели менеджера', 'description' => 'Только собственные показатели контроля объектов. Строка отчёта формируется для сотрудника с ролью менеджера.', 'roles' => ['manager'], 'exclusive_group' => 'crm_reports.scope'];
 
+$catalogWriters = array_values(array_diff([...array_column((require __DIR__.'/roles.php')['system'], 'slug'), 'owner'], ['client', 'external_agent', 'accountant']));
+foreach (require __DIR__.'/catalog_permissions.php' as $catalog => $definition) {
+    $permissions['catalogs.entries.'.$catalog.'.manage'] = [
+        'group' => 'Изменение справочников', 'name' => $definition['name'],
+        'description' => 'Создание, изменение и удаление записей справочника «'.$definition['name'].'». Доступ к странице управления и объединение используемых записей требуют отдельных прав управления справочниками.',
+        'roles' => $catalogWriters,
+    ];
+}
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],
