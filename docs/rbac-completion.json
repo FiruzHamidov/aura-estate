@@ -404,6 +404,10 @@
         {
           "change": "Миграция RBAC проверена отдельно на MySQL 8.0.41 с 18 исходными ролями, включая owner и пользовательскую роль.",
           "verification": "Сохранены id/name/description и системные defaults; legacy custom получил совместимые права; down сохраняет роли и удаляет только поля RBAC/аудит; повторный up воспроизводит исходные права. Лог: /tmp/aura-rbac-mysql-migration-check.log. Проверка не доказывает перенос всех ранее не классифицированных ограничений."
+        },
+        {
+          "change": "Проверены актуальные backend 1e2f83b0 и frontend 99f8f88: отдельная production-сборка и повторная MySQL-миграция на новой тестовой базе без изменения пользовательской preview-базы.",
+          "verification": "Сборка успешна, 121 страница; 287 браузерных тестов, 1295 серверных и 641 Node-тест. Новых имён падений нет; 7 серверных и 11 Node-падений совпадают с baseline. Миграция 18 ролей сохранила identity/defaults, rollback/up воспроизводимы. Актуальный полный редактор и завершение классификации остаются открыты."
         }
       ]
     }
@@ -629,27 +633,45 @@
     "pending_followups": []
   },
   "latest_full_verification": {
+    "backend_head": "1e2f83b0",
+    "frontend_head": "99f8f88",
     "backend": {
-      "tests": 1288,
-      "assertions": 18992,
+      "tests": 1295,
+      "assertions": 19151,
       "baseline_errors": 2,
       "baseline_failures": 5,
       "new_failure_names": 0,
-      "baseline_reason_check": "Same absent fixture column crm_deals.branch_group_id, absent table client_need_repair_type, same validation-label and public-intake language differences. Compared test names and causes with verified baseline.",
-      "log": "/tmp/aura-rbac-full-current.log"
+      "baseline_reason_check": "All seven test names match verified baseline; same missing crm_deals.branch_group_id column, missing client_need_repair_type table and validation/intake language differences.",
+      "log": "/tmp/aura-rbac-final-pass-backend.log"
     },
     "browser": {
-      "passed": 282,
+      "passed": 287,
       "failed": 0,
-      "log": "/tmp/aura-rbac-full-current-browser.log"
+      "log": "/tmp/aura-rbac-final-pass-browser.log"
     },
     "frontend_node": {
-      "tests": 637,
-      "passed": 626,
+      "tests": 641,
+      "passed": 630,
       "baseline_failures": 11,
       "new_failure_names": 0,
-      "log": "/tmp/aura-rbac-full-current-node.log",
-      "repair": "Updated expected HR hint text in UserForm test after intentional rights-based wording; six UserForm tests rechecked and full Node suite rerun."
+      "log": "/tmp/aura-rbac-final-pass-node.log"
+    },
+    "production_build": {
+      "status": "passed",
+      "log": "/tmp/aura-rbac-final-pass-build.log",
+      "isolation": "git archive frontend HEAD into dedicated temporary directory with cloned node_modules; live preview untouched",
+      "static_pages": 121
+    },
+    "mysql_migration": {
+      "status": "passed",
+      "roles": 18,
+      "identity_preserved": true,
+      "system_defaults_preserved": true,
+      "legacy_custom_compatibility": true,
+      "rollback": true,
+      "reapply": true,
+      "database": "aura_rbac_migration_final_1e2f83b0",
+      "log": "/tmp/aura-rbac-final-pass-migration.log"
     },
     "completion_claim": false
   }
