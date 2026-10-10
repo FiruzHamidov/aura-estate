@@ -965,6 +965,56 @@ class UserAccessTest extends TestCase
         ])->assertStatus(422);
     }
 
+    public function test_custom_role_hr_eligibility_is_independent_for_creation_editing_and_employment(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $branch = Branch::create(['name' => 'HR branch']);
+        $role = Role::create(['name' => 'Custom employee', 'slug' => 'custom_hr_employee']);
+        $role->forceFill(['permissions' => []])->save();
+        $hrRole = Role::create(['name' => 'HR', 'slug' => 'hr']);
+        $hrRole->forceFill(['permissions' => [...app(\App\Services\Rbac\PermissionCatalog::class)->defaults('hr'), 'users.assign_role.custom_hr_employee']])->save();
+        $hr = User::create(['name' => 'HR', 'phone' => '900090001', 'role_id' => $hrRole->id, 'branch_id' => $branch->id, 'status' => 'active']);
+        Sanctum::actingAs($hr);
+        $payload = ['name' => 'Custom employee', 'phone' => '900090002', 'role_id' => $role->id, 'branch_id' => $branch->id];
+        $this->postJson('/api/user', $payload)->assertUnprocessable();
+        $role->forceFill(['permissions' => ['users.subject.hr_create']])->save();
+        $id = $this->postJson('/api/user', $payload)->assertCreated()->json('id');
+        $this->patchJson('/api/user/'.$id, ['name' => 'Edited'])->assertForbidden();
+        $role->forceFill(['permissions' => ['users.subject.hr_edit']])->save();
+        // Retaining the current role needs no new assignment grant.
+        $hrRole->forceFill(['permissions' => app(\App\Services\Rbac\PermissionCatalog::class)->defaults('hr')])->save();
+        $this->patchJson('/api/user/'.$id, ['name' => 'Edited', 'role_id' => $role->id])->assertOk();
+        $this->deleteJson('/api/user/'.$id)->assertForbidden();
+        $role->forceFill(['permissions' => ['users.subject.hr_employment']])->save();
+        $this->deleteJson('/api/user/'.$id, ['distribute_to_agents' => true])->assertOk();
+        $role->forceFill(['permissions' => []])->save();
+        $this->postJson('/api/user/'.$id.'/restore')->assertForbidden();
+        $this->assertDatabaseHas('users', ['id' => $id, 'status' => 'inactive']);
+        $role->forceFill(['permissions' => ['users.subject.hr_employment']])->save();
+        $this->postJson('/api/user/'.$id.'/restore')->assertOk();
+        $this->assertDatabaseHas('users', ['id' => $id, 'status' => 'active']);
+    }
+
+    public function test_branch_manager_custom_target_policy_preserves_branch_scope(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $branch = Branch::create(['name' => 'Branch']);
+        $other = Branch::create(['name' => 'Other']);
+        $managerRole = Role::create(['name' => 'Manager', 'slug' => 'custom_branch_manager']);
+        $managerRole->forceFill(['permissions' => ['users.view', 'users.update', 'users.scope.branch', 'users.manage_branch_roles']])->save();
+        $targetRole = Role::create(['name' => 'Employee', 'slug' => 'custom_branch_employee']);
+        $targetRole->forceFill(['permissions' => ['users.subject.branch_manage']])->save();
+        $actor = User::create(['name' => 'Manager', 'phone' => '900091001', 'role_id' => $managerRole->id, 'branch_id' => $branch->id, 'status' => 'active']);
+        $employee = User::create(['name' => 'Employee', 'phone' => '900091002', 'role_id' => $targetRole->id, 'branch_id' => $branch->id, 'status' => 'active']);
+        $foreign = User::create(['name' => 'Foreign', 'phone' => '900091003', 'role_id' => $targetRole->id, 'branch_id' => $other->id, 'status' => 'active']);
+        Sanctum::actingAs($actor);
+        $this->patchJson('/api/user/'.$employee->id, ['name' => 'Updated', 'role_id' => $targetRole->id])->assertOk();
+        $this->patchJson('/api/user/'.$foreign->id, ['name' => 'Forbidden'])->assertForbidden();
+        $targetRole->forceFill(['permissions' => []])->save();
+        $this->patchJson('/api/user/'.$employee->id, ['name' => 'Revoked'])->assertForbidden();
+        $this->assertDatabaseHas('users', ['id' => $employee->id, 'name' => 'Updated']);
+    }
+
     public function test_hr_can_create_and_manage_only_approved_employee_roles_and_edit_clients(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);

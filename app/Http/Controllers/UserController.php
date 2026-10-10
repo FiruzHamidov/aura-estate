@@ -22,10 +22,6 @@ class UserController extends Controller
 {
     private const REPORT_AGENT_ROLE_SLUGS = ['agent', 'intern', 'rop', 'mop'];
     private const PUBLIC_AGENT_ROLE_SLUGS = ['agent', 'mop'];
-    private const HR_EMPLOYEE_ROLE_SLUGS = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'branch_director'];
-    private const HR_EDITABLE_ROLE_SLUGS = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'external_agent', 'rop', 'branch_director', 'client'];
-    private const HR_CREATABLE_ROLE_SLUGS = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop'];
-    private const ROP_EDITABLE_ROLE_SLUGS = ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'external_agent', 'rop', 'client'];
 
     private function authUser(): User
     {
@@ -214,7 +210,7 @@ class UserController extends Controller
             return;
         }
 
-        abort_unless($targetRole && in_array($targetRole->slug, self::HR_CREATABLE_ROLE_SLUGS, true), 422, 'HR может создавать сотрудников только до уровня РОП включительно.');
+        abort_unless($targetRole && $targetRole->hasPermission('users.subject.hr_create'), 422, 'Роль сотрудника не разрешает создание через кадровое управление.');
     }
 
     private function authorizeUserMutation(User $authUser, User $targetUser, string $operation): void
@@ -234,9 +230,9 @@ class UserController extends Controller
         if ($authUser->hasPermission('users.manage_branch_roles')) {
             $targetUser->loadMissing('role');
             abort_unless(
-                in_array($this->roleSlug($targetUser), self::ROP_EDITABLE_ROLE_SLUGS, true),
+                $targetUser->hasPermission('users.subject.branch_manage'),
                 403,
-                'РОП может изменять пользователей только до уровня РОП включительно.'
+                'Роль сотрудника не разрешает управление через ограниченный набор ролей филиала.'
             );
 
             return;
@@ -248,11 +244,11 @@ class UserController extends Controller
         }
 
         $targetUser->loadMissing('role');
-        $allowedRoles = in_array($operation, ['dismiss', 'restore'], true)
-            ? self::HR_EMPLOYEE_ROLE_SLUGS
-            : self::HR_EDITABLE_ROLE_SLUGS;
+        $policy = in_array($operation, ['dismiss', 'restore'], true)
+            ? 'users.subject.hr_employment'
+            : 'users.subject.hr_edit';
 
-        abort_unless(in_array($this->roleSlug($targetUser), $allowedRoles, true), 403, 'HR cannot modify this user.');
+        abort_unless($targetUser->hasPermission($policy), 403, 'HR cannot modify this user.');
     }
 
     private function authorizeHrRoleTransition(User $authUser, User $targetUser, ?Role $targetRole): void
@@ -301,7 +297,7 @@ class UserController extends Controller
         if ($targetUser && $authUser->hasPermission('users.manage_branch_roles')) {
             $targetUser->loadMissing('role');
             if ($this->roleSlug($targetUser) === $targetRole->slug
-                && in_array($targetRole->slug, self::ROP_EDITABLE_ROLE_SLUGS, true)) {
+                && $targetRole->hasPermission('users.subject.branch_manage')) {
                 return;
             }
         }
@@ -309,7 +305,7 @@ class UserController extends Controller
         if ($targetUser && $authUser->hasPermission('users.manage_hr_roles')) {
             $targetUser->loadMissing('role');
             if ($this->roleSlug($targetUser) === $targetRole->slug
-                && in_array($targetRole->slug, self::HR_EDITABLE_ROLE_SLUGS, true)) {
+                && $targetRole->hasPermission('users.subject.hr_edit')) {
                 return;
             }
         }
