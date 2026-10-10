@@ -746,8 +746,8 @@ final class PropertyModerationService
         $changesOnlyCoOwner = array_keys($changes) === ['co_owner_user_id'];
         abort_unless(
             $changesOnlyCoOwner
-                ? $this->access->canEdit($actor, $property)
-                : $this->access->canModerate($actor, $property),
+                ? $this->access->canManageCoOwner($actor, $property)
+                : $this->access->canTransfer($actor, $property),
             403,
             'MODERATION_PERMISSION_DENIED'
         );
@@ -762,8 +762,8 @@ final class PropertyModerationService
             );
             abort_unless(
                 $changesOnlyCoOwner
-                    ? $this->access->canEdit($actor, $locked)
-                    : $this->access->canModerate($actor, $locked),
+                    ? $this->access->canManageCoOwner($actor, $locked)
+                    : $this->access->canTransfer($actor, $locked),
                 403,
                 'MODERATION_PERMISSION_DENIED'
             );
@@ -776,8 +776,7 @@ final class PropertyModerationService
                 $targetId = $changes[$field] !== null ? (int) $changes[$field] : null;
                 if ($targetId !== null) {
                     $target = User::query()->where('status', User::STATUS_ACTIVE)->lockForUpdate()->findOrFail($targetId);
-                    $role = (string) $actor->role?->slug;
-                    if (! $actor->hasPermission('properties.manage_all')) {
+                    if (! $actor->hasPermission('properties.ownership.assign_across_branches')) {
                         abort_unless((int) $target->branch_id === (int) $actor->branch_id, 403, 'MODERATION_PERMISSION_DENIED');
                     }
                     if ($field === 'co_owner_user_id') {

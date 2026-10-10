@@ -556,6 +556,50 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertSame(PropertyModerationCase::STATUS_WITHDRAWN, $case->fresh()->status);
     }
 
+    public function test_ownership_actions_and_cross_branch_assignment_are_independent_permissions(): void
+    {
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedBigInteger('co_owner_user_id')->nullable());
+        [$actor, , $target] = $this->users();
+        $foreign = User::forceCreate(['name' => 'Other branch', 'phone' => '900000099', 'role_id' => $target->role_id, 'branch_id' => 2, 'status' => 'active']);
+        $property = Property::create($this->propertyPayload($actor, ['moderation_version' => 1]));
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role = Role::create(['name' => 'Ownership operator', 'slug' => 'ownership_operator', 'permissions' => ['properties.edit', 'properties.moderate']]);
+        $actor->forceFill(['role_id' => $role->id])->save();
+        $grant = function (array $permissions) use ($role, $actor): void {
+            $role->forceFill(['permissions' => ['properties.edit', 'properties.moderate', ...$permissions]])->save();
+            $this->actingAs($actor->fresh());
+        };
+        $patch = fn (?int $id) => $this->patchJson('/api/properties/'.$property->id.'/co-owner', [
+            'co_owner_user_id' => $id, 'reason' => 'Проверка назначения', 'version' => $property->fresh()->moderation_version,
+        ]);
+        $transfer = fn (int $id) => $this->postJson('/api/properties/'.$property->id.'/transfer', [
+            'agent_id' => $id, 'reason' => 'Проверка передачи', 'version' => $property->fresh()->moderation_version,
+        ]);
+        $grant([]);
+        $access = app(PropertyModerationAccess::class);
+        $this->assertFalse($access->capabilities($actor->fresh(), $property)['can_manage_co_owner']);
+        $this->assertFalse($access->capabilities($actor->fresh(), $property)['can_transfer']);
+        $patch($target->id)->assertForbidden();
+        $transfer($target->id)->assertForbidden();
+        $grant(['properties.co_owner.manage']);
+        $this->assertTrue($access->capabilities($actor->fresh(), $property)['can_manage_co_owner']);
+        $patch($target->id)->assertOk();
+        $this->assertSame($target->id, $property->fresh()->co_owner_user_id);
+        $patch($foreign->id)->assertForbidden();
+        $grant(['properties.co_owner.manage', 'properties.ownership.assign_across_branches']);
+        $patch($foreign->id)->assertOk();
+        $transfer($target->id)->assertForbidden();
+        $grant(['properties.transfer']);
+        $this->assertTrue($access->capabilities($actor->fresh(), $property)['can_transfer']);
+        $this->assertFalse($access->capabilities($actor->fresh(), $property)['can_manage_co_owner']);
+        $patch(null)->assertForbidden();
+        $transfer($target->id)->assertOk();
+        $this->assertSame($target->id, $property->fresh()->agent_id);
+        $grant([]);
+        $transfer($actor->id)->assertForbidden();
+        $this->assertSame($foreign->id, $property->fresh()->co_owner_user_id);
+    }
+
     public function test_transfer_requires_independent_moderator_and_preserves_moderation_history(): void
     {
         [$agent, $rop, $director] = $this->users();

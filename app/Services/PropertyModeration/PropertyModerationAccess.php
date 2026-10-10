@@ -60,6 +60,16 @@ final class PropertyModerationAccess
         return false;
     }
 
+    public function canManageCoOwner(User $user, Property $property): bool
+    {
+        return $user->hasPermission('properties.co_owner.manage') && $this->canEdit($user, $property);
+    }
+
+    public function canTransfer(User $user, Property $property): bool
+    {
+        return $user->hasPermission('properties.transfer') && $this->canModerate($user, $property);
+    }
+
     public function canManageDeal(User $user, Property $property): bool
     {
         if ($user->hasRole('rop') && ! app(RopGroupAccess::class)->allows($user, $property)) return false;
@@ -151,6 +161,8 @@ final class PropertyModerationAccess
                 'can_mark_duplicate' => false,
                 'can_appeal' => false,
                 'can_resolve_appeal' => false,
+                'can_manage_co_owner' => false,
+                'can_transfer' => false,
                 'can_manage_deal' => false,
                 'can_assign_deal_users' => false,
                 'can_reopen_listing' => false,
@@ -202,6 +214,8 @@ final class PropertyModerationAccess
                 ->whereIn('status', [PropertyModerationCase::STATUS_REJECTED, PropertyModerationCase::STATUS_MERGED])
                 ->exists(),
             'can_resolve_appeal' => $decidableCases->contains('type', PropertyModerationCase::TYPE_APPEAL),
+            'can_manage_co_owner' => $this->canManageCoOwner($user, $property),
+            'can_transfer' => $this->canTransfer($user, $property),
             'can_manage_deal' => $this->canManageDeal($user, $property),
             'can_assign_deal_users' => $this->canManageDeal($user, $property) && $user->hasPermission('properties.deal.assign_users'),
             'can_reopen_listing' => $canModerate && $property->needsReopening(),

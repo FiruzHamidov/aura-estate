@@ -231,7 +231,7 @@ class PropertyController extends Controller
             'can_refresh_listing_date' => $canMutate && $refreshState['available'],
             'can_view_history' => $canMutate,
             'can_moderate' => $workflow['can_moderate'],
-            'can_manage_co_owner' => $canMutate,
+            'can_manage_co_owner' => $workflow['can_manage_co_owner'],
         ]);
     }
 
@@ -290,45 +290,11 @@ class PropertyController extends Controller
         ];
     }
 
-    private function canAssignSpecificCoOwner(User $actor, User $coOwner): bool
-    {
-        if ($actor->hasRole('admin') || $actor->hasRole('superadmin')) {
-            return true;
-        }
-
-        return ! empty($actor->branch_id)
-            && ! empty($coOwner->branch_id)
-            && (int) $actor->branch_id === (int) $coOwner->branch_id;
-    }
-
     private function ensureDealAssigneeExists(int $assigneeId): void
     {
         $assignee = User::query()->find($assigneeId);
 
         abort_unless($assignee, 422, 'Указанный сотрудник не найден.');
-    }
-
-    private function ensureValidCoOwner(User $actor, ?int $coOwnerUserId, ?int $ownerUserId): void
-    {
-        if (! $coOwnerUserId) {
-            return;
-        }
-
-        abort_if(
-            $ownerUserId && (int) $coOwnerUserId === (int) $ownerUserId,
-            422,
-            'Соучастник не может быть владельцем объявления.'
-        );
-
-        $coOwner = User::query()->find($coOwnerUserId);
-
-        abort_unless($coOwner, 422, 'Соучастник не найден.');
-        abort_unless($coOwner->status === User::STATUS_ACTIVE, 422, 'Соучастник должен быть активным пользователем.');
-        abort_unless(
-            $this->canAssignSpecificCoOwner($actor, $coOwner),
-            403,
-            'Недостаточно прав, чтобы назначить этого соучастника.'
-        );
     }
 
     private function ensureDealAssignmentUsersInScope(User $actor, array $data, ?Property $property = null): void
