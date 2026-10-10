@@ -32,7 +32,7 @@ class KpiRopPlanService
         if ($actor->usesAssignedGroupScope()) {
             app(RopGroupAccess::class)->scope($query, $actor, 'kpi_rop_plans.branch_group_id', 'kpi_rop_plans.branch_id');
             if ($actor->hasPermission('kpi.plans.scope.group') && ! $actor->hasPermission('kpi.plans.scope.all')) {
-                $query->where('branch_group_id', (int) $actor->branch_group_id)->where('role_slug', '!=', 'rop');
+                $query->where('branch_group_id', (int) $actor->branch_group_id)->whereIn('role_slug', \App\Models\Role::withPermission('kpi.subject.group_templates')->select('slug'));
             }
         }
         if (! empty($filters['month'])) {
@@ -85,6 +85,7 @@ class KpiRopPlanService
                 \App\Models\BranchGroup::whereKey($payload['branch_group_id'])->lockForUpdate()->firstOrFail();
             }
             abort_unless($actor->hasPermission($sourceId === null ? 'kpi.rop_plans.create' : 'kpi.rop_plans.copy'), 403, 'KPI_FORBIDDEN_ROLE_ACTION');
+            abort_unless(in_array((string) $payload['role'], app(KpiRoleCatalog::class)->templateSlugs(), true), 422, 'KPI_TEMPLATE_ROLE_NOT_ALLOWED');
             $this->scopePolicy->ensureCanManageCommonPlan($actor, $payload);
             $this->assertNoPeriodConflict((string) $payload['month'], (string) $payload['role'], $payload['branch_id'] ?? null, $payload['branch_group_id'] ?? null, null);
 
@@ -130,6 +131,7 @@ class KpiRopPlanService
             ];
 
             $this->scopePolicy->ensureCanManageCommonPlan($actor, $next);
+            abort_unless(in_array($next['role'], app(KpiRoleCatalog::class)->templateSlugs(), true), 422, 'KPI_TEMPLATE_ROLE_NOT_ALLOWED');
             $this->assertNoPeriodConflict($next['month'], $next['role'], $next['branch_id'], $next['branch_group_id'], $plan->id);
 
             $before = $plan->attributesToArray();

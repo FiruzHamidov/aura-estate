@@ -25,7 +25,7 @@ class KpiRopPlanController extends Controller
             'page' => 'sometimes|integer|min:1',
             'per_page' => 'sometimes|integer|min:1|max:100',
             'month' => ['required', 'regex:/^\d{4}-(0[1-9]|1[0-2])$/'],
-            'role' => ['nullable', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'role' => ['nullable', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'branch_id' => 'nullable|integer|exists:branches,id',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
         ]);
@@ -109,7 +109,7 @@ class KpiRopPlanController extends Controller
     private function validatePlanPayload(Request $request, bool $partial = false, bool $copyMode = false): array
     {
         $rules = [
-            'role' => [$partial ? 'sometimes' : 'required', Rule::in(['agent', 'intern', 'mop', 'rop'])],
+            'role' => [$partial ? 'sometimes' : 'required', Rule::in(app(\App\Services\KpiRoleCatalog::class)->templateSlugs())],
             'month' => [$partial ? 'sometimes' : 'required', 'regex:/^\d{4}-(0[1-9]|1[0-2])$/'],
             'branch_id' => 'nullable|integer|exists:branches,id',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',

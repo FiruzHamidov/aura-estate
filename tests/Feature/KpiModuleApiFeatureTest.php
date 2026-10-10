@@ -1579,7 +1579,17 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->putJson('/api/kpi/plans/common', $payload)->assertForbidden();
         $role->forceFill(['permissions' => ['kpi.subject.plan_templates', 'kpi.subject.group_templates']])->save();
         $this->putJson('/api/kpi/plans/common', $payload)->assertOk();
+        $managerRole->forceFill(['permissions' => [...$managerRole->permissions, 'kpi.rop_plans.create', 'kpi.rop_plans.view', 'kpi.rop_plans.update']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $groupPayload = ['role' => $role->slug, 'month' => '2026-05', 'branch_id' => $branch->id, 'branch_group_id' => $group->id,
+            'items' => [['metric_key' => 'calls', 'plan_value' => 30, 'weight' => 1]]];
+        $groupPlan = $this->postJson('/api/kpi/rop-plans', $groupPayload)->assertCreated()->json('id');
+        $this->getJson('/api/kpi/rop-plans/'.$groupPlan)->assertOk()->assertJsonPath('role', $role->slug);
+        $role->forceFill(['permissions' => ['kpi.subject.group_templates']])->save();
+        $this->patchJson('/api/kpi/rop-plans/'.$groupPlan, ['month' => '2026-07'])->assertUnprocessable();
+        $this->assertDatabaseHas('kpi_rop_plans', ['id' => $groupPlan, 'month' => '2026-05']);
         $role->forceFill(['permissions' => []])->save();
+        $this->postJson('/api/kpi/rop-plans', [...$groupPayload, 'month' => '2026-06'])->assertUnprocessable();
         $this->getJson('/api/kpi/plans/roles')->assertOk()->assertJsonMissing(['slug' => $role->slug]);
         $this->putJson('/api/kpi/plans/common', $payload)->assertUnprocessable();
         $this->assertDatabaseHas('kpi_plans', ['role_slug' => $role->slug, 'branch_group_id' => $group->id, 'daily_plan' => 10]);
