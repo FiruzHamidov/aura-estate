@@ -699,6 +699,10 @@ foreach (['view' => ['Просмотр настроек отслеживания
 $permissions['locations.settings.scope.all'] = ['group' => 'Местоположение', 'name' => 'Настройка отслеживания всех филиалов', 'description' => 'Доступ к настройкам отслеживания сотрудников всех филиалов. Просмотр и изменение разрешаются отдельно.', 'roles' => ['admin', 'superadmin'], 'exclusive_group' => 'locations.settings.scope'];
 $permissions['locations.settings.scope.branch'] = ['group' => 'Местоположение', 'name' => 'Настройка отслеживания своего филиала', 'description' => 'Доступ к настройкам сотрудников своего назначенного филиала, которым разрешена передача местоположения. Просмотр и изменение разрешаются отдельно.', 'roles' => ['branch_director'], 'exclusive_group' => 'locations.settings.scope'];
 
+foreach (['all' => ['Карта всех филиалов', 'Агенты, МОП и сотрудники с сохранённой текущей геопозицией во всех филиалах.', ['admin', 'superadmin']], 'branch' => ['Карта своего филиала', 'Агенты и МОП своего филиала. Без назначенного филиала доступна только собственная позиция.', ['rop', 'branch_director']], 'group' => ['Карта своей группы', 'Своя позиция и позиции агентов своей группы; история чужих позиций ограничивается этой группой.', ['mop']], 'own' => ['Только своё местоположение', 'Только собственная позиция и история координат.', ['agent']]] as $scope => [$name, $description, $roles]) {
+    $permissions['locations.scope.'.$scope] = ['group' => 'Местоположение', 'name' => $name, 'description' => $description.' Требуется просмотр местоположения. РОП дополнительно ограничен закреплёнными группами; для истории используется группа записи.', 'roles' => $roles, 'exclusive_group' => 'locations.scope'];
+}
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],

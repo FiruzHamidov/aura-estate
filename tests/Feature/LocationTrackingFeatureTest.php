@@ -523,6 +523,47 @@ class LocationTrackingFeatureTest extends TestCase
         $this->patchJson($local, $data)->assertForbidden();
     }
 
+    public function test_custom_location_scopes_apply_to_map_history_and_queued_broadcasts(): void
+    {
+        $context = $this->context();
+        $role = Role::create(['name' => 'Custom viewer', 'slug' => 'custom_location_viewer']);
+        $actor = $this->user($role, $context['branchA'], $context['groupA1'], 'Viewer');
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        Sanctum::actingAs($context['agentA']->fresh());
+        $device = $this->devicePayload();
+        $this->putJson('/api/location-tracking/me/device', $device)->assertOk();
+        $this->postJson('/api/location-tracking/me/points', ['device_uuid' => $device['device_uuid'],
+            'points' => [$this->pointPayload(now()->subMinute()->toISOString(), 38.56, 68.788)]])->assertOk();
+        $event = null;
+        Event::assertDispatched(UserLocationUpdated::class, function ($captured) use (&$event) { $event = $captured; return true; });
+        $channel = 'private-location.viewer.'.$actor->id.'.scope.0';
+        foreach (['own' => 1, 'group' => 2, 'branch' => 3, 'all' => 4] as $scope => $count) {
+            $role->forceFill(['permissions' => ['locations.view', 'locations.scope.'.$scope]])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->getJson('/api/location-tracking/available-users')->assertOk()->assertJsonCount($count, 'data');
+            $this->getJson('/api/location-tracking/map')->assertOk()->assertJsonCount($count, 'data');
+            $this->postJson('/api/broadcasting/auth', ['socket_id' => '1234.5678', 'channel_name' => $channel])->assertOk();
+            $names = array_map(fn ($entry) => $entry->name, $event->broadcastOn());
+            $this->assertSame($scope !== 'own', in_array($channel, $names, true));
+            $query = app(LocationAccessService::class)->availableUsersQuery($actor->fresh());
+            if ($scope !== 'all') $this->assertFalse($query->whereKey($context['agentB']->id)->exists());
+            if ($scope !== 'own') {
+                $history = app(LocationAccessService::class)->applyHistoryScope(UserLocationPoint::query()->where('user_id', $context['agentA']->id), $actor->fresh(), $context['agentA']);
+                $this->assertSame(1, $history->count());
+            }
+        }
+        foreach ([['locations.scope.all'], ['locations.view'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->postJson('/api/broadcasting/auth', ['socket_id' => '1234.5678', 'channel_name' => $channel])->assertForbidden();
+            $this->assertNotContains($channel, array_map(fn ($entry) => $entry->name, $event->broadcastOn()));
+        }
+        $context['roles']['rop']->forceFill(['permissions' => ['locations.view', 'locations.scope.all']])->save();
+        Sanctum::actingAs($context['ropA']->fresh());
+        $this->getJson('/api/location-tracking/available-users')->assertOk()->assertJsonCount(2, 'data');
+        $this->assertFalse(app(LocationAccessService::class)->canView($context['ropA']->fresh(), $context['agentOtherGroup']));
+    }
+
     private function context(): array
     {
         $roles = collect(['agent', 'mop', 'rop', 'branch_director', 'admin'])

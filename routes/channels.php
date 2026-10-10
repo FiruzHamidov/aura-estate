@@ -19,7 +19,7 @@ Broadcast::channel('location.viewer.{viewerId}.scope.{version}', function (User 
     $current = User::query()->find($viewer->id);
     return $current && $current->status === User::STATUS_ACTIVE && (int) $current->id === $viewerId
         && (int) $current->access_scope_version === $version
-        && in_array(app(LocationAccessService::class)->role($current), config('location_tracking.viewer_roles', []), true);
+        && $current->hasPermission('locations.view') && app(LocationAccessService::class)->scope($current) !== null;
 });
 
 Broadcast::channel('messaging.user.{userId}', function ($viewer, int $userId) {

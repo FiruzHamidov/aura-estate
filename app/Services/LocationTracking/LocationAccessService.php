@@ -35,7 +35,6 @@ class LocationAccessService
     public function availableUsersQuery(User $viewer): Builder
     {
         $this->assertCanViewModule($viewer);
-        $role = $this->role($viewer);
         $query = User::query()
             ->where('status', User::STATUS_ACTIVE)
             ->with([
@@ -52,9 +51,14 @@ class LocationAccessService
                 'latestActiveLocationDevice',
             ]);
 
-        return match ($role) {
-            'agent' => $query->whereKey($viewer->id),
-            'mop' => $query->where(function (Builder $q) use ($viewer) {
+        if ($viewer->hasRole('rop')) {
+            app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id');
+            $query->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop']));
+        }
+
+        return match ($this->scope($viewer)) {
+            'own' => $query->whereKey($viewer->id),
+            'group' => $query->where(function (Builder $q) use ($viewer) {
                 $q->whereKey($viewer->id);
                 if ($viewer->branch_group_id !== null) {
                     $q->orWhere(function (Builder $scope) use ($viewer) {
@@ -63,13 +67,11 @@ class LocationAccessService
                     });
                 }
             }),
-            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id')
-                ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop'])),
-            'branch_director' => $viewer->branch_id === null
+            'branch' => $viewer->branch_id === null
                 ? $query->whereKey($viewer->id)
                 : $query->where('branch_id', $viewer->branch_id)
                     ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop'])),
-            'admin', 'superadmin' => $query->where(function (Builder $scope) {
+            'all' => $query->where(function (Builder $scope) {
                 $scope->whereHas(
                     'role',
                     fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop'])
@@ -112,32 +114,39 @@ class LocationAccessService
         $this->deny(self::FORBIDDEN_SCOPE, 'Нет права изменять настройки отслеживания пользователя.');
     }
 
+    public function scope(User $viewer): ?string
+    {
+        foreach (['all', 'branch', 'group', 'own'] as $scope) {
+            if ($viewer->hasPermission('locations.scope.'.$scope)) return $scope;
+        }
+        return null;
+    }
+
     public function applyHistoryScope(Builder $query, User $viewer, User $target): Builder
     {
         if ($viewer->hasRole('rop')) {
             $this->assertCanViewModule($viewer);
             $groups = app(\App\Support\RopGroupAccess::class);
             $historical = $groups->scope(\App\Models\UserLocationPoint::query()->where('user_id', $target->id), $viewer, 'branch_group_id', 'branch_id');
+            $this->scopeHistoryRows($historical, $viewer, $target);
             abort_unless($this->canView($viewer, $target) || $historical->exists(), 404, 'NOT_FOUND');
-            return $groups->scope($query, $viewer, 'branch_group_id', 'branch_id');
+            $groups->scope($query, $viewer, 'branch_group_id', 'branch_id');
+        } else {
+            $this->assertCanView($viewer, $target);
         }
+        return $this->scopeHistoryRows($query, $viewer, $target);
+    }
 
-        $this->assertCanView($viewer, $target);
-        $role = $this->role($viewer);
-
-        if ($viewer->is($target) || in_array($role, ['admin', 'superadmin'], true)) {
-            return $query;
-        }
-
-        if ($role === 'mop') {
-            return $query->where('branch_group_id', $viewer->branch_group_id);
-        }
-
-        if (in_array($role, ['rop', 'branch_director'], true)) {
-            return $query->where('branch_id', $viewer->branch_id);
-        }
-
-        return $query->whereRaw('1 = 0');
+    private function scopeHistoryRows(Builder $query, User $viewer, User $target): Builder
+    {
+        $scope = $this->scope($viewer);
+        if ($scope === null) return $query->whereRaw('1 = 0');
+        if ($viewer->is($target) || $scope === 'all') return $query;
+        return match ($scope) {
+            'group' => $query->where('branch_group_id', $viewer->branch_group_id),
+            'branch' => $query->where('branch_id', $viewer->branch_id),
+            default => $query->whereRaw('1 = 0'),
+        };
     }
 
     public function deny(string $code, string $message, int $status = 403): never
