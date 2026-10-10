@@ -633,7 +633,7 @@ class ClientController extends Controller
             $agentsQuery = User::query()
                 ->with('role')
                 ->when(Schema::hasColumn('users', 'status'), fn ($query) => $query->where('status', User::STATUS_ACTIVE))
-                ->whereHas('role', fn ($query) => $query->whereIn('slug', ['agent', 'mop', 'rop', 'manager']))
+                ->whereHas('role', fn ($query) => $query->withPermission('clients.subject.mobile_filter'))
                 ->orderBy('name');
 
             if (! $this->isPrivilegedRole($authUser) && Schema::hasColumn('users', 'branch_id') && ! empty($authUser->branch_id)) {

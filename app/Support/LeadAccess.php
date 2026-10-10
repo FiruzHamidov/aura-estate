@@ -43,8 +43,6 @@ class LeadAccess
 
     public function visibleQuery(User $authUser): Builder
     {
-        $roleSlug = $this->roleSlug($authUser);
-
         $query = Lead::query()->with(['branch', 'creator', 'responsibleAgent', 'client']);
 
         if ($authUser?->usesAssignedGroupScope()) {
@@ -96,8 +94,6 @@ class LeadAccess
 
     public function normalizeCreationData(array $data, User $authUser): array
     {
-        $roleSlug = $this->roleSlug($authUser);
-
         if ($this->isBranchScoped($authUser)) {
             abort_if(empty($authUser->branch_id), 422, 'branch_id is required for this user.');
             $data['branch_id'] = $authUser->branch_id;
@@ -106,7 +102,7 @@ class LeadAccess
         $data['created_by'] = $authUser->id;
 
         if (
-            in_array($roleSlug, ['agent', 'mop', 'manager', 'operator'], true)
+            $authUser->hasPermission('leads.defaults.assign_creator')
             && empty($data['responsible_agent_id'])
         ) {
             $data['responsible_agent_id'] = $authUser->id;
@@ -117,8 +113,6 @@ class LeadAccess
 
     public function normalizeUpdateData(array $data, User $authUser, Lead $lead): array
     {
-        $roleSlug = $this->roleSlug($authUser);
-
         if ($this->isBranchScoped($authUser)) {
             $data['branch_id'] = $lead->branch_id ?: $authUser->branch_id;
         }
@@ -128,8 +122,6 @@ class LeadAccess
 
     public function validateMutationTargets(User $authUser, array $data): void
     {
-        $roleSlug = $this->roleSlug($authUser);
-
         if (! $this->isBranchScoped($authUser)) {
             return;
         }

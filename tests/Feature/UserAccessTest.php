@@ -2045,6 +2045,56 @@ class UserAccessTest extends TestCase
         $this->assertSame($dismissedAgent->id, $pendingProperty->created_by);
     }
 
+    public function test_lead_default_assignee_is_configurable_without_overriding_explicit_choice(): void
+    {
+        $role = Role::create(['name' => 'Custom creator', 'slug' => 'custom_lead_creator']);
+        $actor = User::create(['name' => 'Creator', 'phone' => '900003110', 'role_id' => $role->id, 'status' => 'active']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $access = app(\App\Support\LeadAccess::class);
+        foreach ([[], ['leads.defaults.assign_creator'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            $result = $access->normalizeCreationData([], $actor->fresh());
+            $this->assertSame($rights ? $actor->id : null, $result['responsible_agent_id'] ?? null);
+            $explicit = $access->normalizeCreationData(['responsible_agent_id' => 321], $actor->fresh());
+            $this->assertSame(321, $explicit['responsible_agent_id']);
+            $this->assertSame($actor->id, $explicit['created_by']);
+        }
+        foreach (['agent', 'mop', 'manager', 'operator', 'rop', 'admin'] as $slug) {
+            $legacy = new Role(['slug' => $slug]);
+            $this->assertSame(in_array($slug, ['agent', 'mop', 'manager', 'operator']), $legacy->hasPermission('leads.defaults.assign_creator'));
+        }
+    }
+
+    public function test_custom_role_participates_independently_in_report_public_and_mobile_lists(): void
+    {
+        $branch = Branch::create(['name' => 'Local']);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'superadmin']);
+        $role = Role::create(['name' => 'Custom employee', 'slug' => 'custom_directory_employee']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900003101', 'role_id' => $adminRole->id,
+            'branch_id' => $branch->id, 'status' => 'active']);
+        $employee = User::create(['name' => 'Employee', 'phone' => '900003102', 'role_id' => $role->id,
+            'branch_id' => $branch->id, 'status' => 'active']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        Sanctum::actingAs($admin->fresh());
+        foreach ([[], ['users.subject.report_selection'], ['users.subject.public_agent'],
+            ['clients.subject.mobile_filter'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            foreach ([['/api/user?report_agents=1', 'data', 'users.subject.report_selection'],
+                ['/api/user/agents', null, 'users.subject.public_agent'],
+                ['/api/mobile/clients/filters', 'responsible_agents', 'clients.subject.mobile_filter']] as [$url, $key, $permission]) {
+                $response = $this->getJson($url)->assertOk();
+                $ids = collect($response->json($key))->pluck('id')->all();
+                $this->assertSame(in_array($permission, $rights), in_array($employee->id, $ids), $permission);
+            }
+        }
+        $role->forceFill(['permissions' => ['users.subject.public_agent', 'clients.subject.mobile_filter']])->save();
+        $employee->forceFill(['status' => 'inactive'])->save();
+        $this->getJson('/api/user/agents')->assertOk()->assertJsonCount(0);
+        $this->getJson('/api/mobile/clients/filters')->assertOk()->assertJsonCount(0, 'responsible_agents');
+        $this->getJson('/api/user/agents?status=inactive')->assertOk()->assertJsonPath('0.id', $employee->id);
+        $this->assertNotNull($employee->fresh());
+    }
+
     public function test_user_index_exposes_meta_and_can_filter_report_agents(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);

@@ -20,8 +20,6 @@ use Illuminate\Validation\Rule;
 
 class UserController extends Controller
 {
-    private const REPORT_AGENT_ROLE_SLUGS = ['agent', 'intern', 'rop', 'mop'];
-    private const PUBLIC_AGENT_ROLE_SLUGS = ['agent', 'mop'];
 
     private function authUser(): User
     {
@@ -157,7 +155,7 @@ class UserController extends Controller
         }
 
         if (! empty($validated['report_agents'])) {
-            $query->whereHas('role', fn ($roleQuery) => $roleQuery->whereIn('slug', self::REPORT_AGENT_ROLE_SLUGS));
+            $query->whereHas('role', fn ($roleQuery) => $roleQuery->withPermission('users.subject.report_selection'));
         }
 
         if ($applyStatusFilter && ! empty($validated['status']) && $validated['status'] !== 'all') {
@@ -756,7 +754,7 @@ class UserController extends Controller
         $agents = User::with(['role', 'branch', 'branchGroup'])
             ->when($actor?->usesAssignedGroupScope(), fn ($query) => app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'users.branch_group_id', 'users.branch_id'))
             ->whereHas('role', function ($q) {
-                $q->whereIn('slug', self::PUBLIC_AGENT_ROLE_SLUGS);
+                $q->withPermission('users.subject.public_agent');
             })
             ->when($status !== 'all', function ($q) use ($status) {
                 $this->applyStatusFilter($q, $status);

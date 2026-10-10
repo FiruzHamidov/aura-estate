@@ -181,6 +181,13 @@
           "logs": [
             "/tmp/aura-rbac-attendance-subjects.log"
           ]
+        },
+        {
+          "change": "Общий список сотрудников для отчётов, публичный список агентов и фильтр ответственных мобильной CRM перенесены в users.subject.report_selection, users.subject.public_agent и clients.subject.mobile_filter. Отдельная настройка leads.defaults.assign_creator управляет автоназначением создателя лида при пустом ответственном. Исходные роли сохранены; явно выбранный ответственный не меняется.",
+          "verification": "110 серверных тестов / 3122 проверок: независимые списки для пользовательской роли, отзыв, активность, явный ответственный и исходные значения ролей. Публикация профиля обозначена чувствительной и содержит описание выдаваемых данных.",
+          "logs": [
+            "/tmp/aura-rbac-directory-subjects.log"
+          ]
         }
       ],
       "remaining_checks": [
@@ -389,10 +396,6 @@
     ],
     "pending_followups": [
       {
-        "file": "app/Support/LeadAccess.php",
-        "reason": "Автоназначение ответственного по agent/mop/manager/operator; требуется классификация и настройка."
-      },
-      {
         "file": "app/Services/GroupAccess/GroupDataProjection.php",
         "reason": "Вложенный профиль доступен только agent/mop; перенести ограничение полей."
       },
@@ -403,14 +406,6 @@
       {
         "file": "app/Http/Controllers/AccountDeletionController.php",
         "reason": "Прямая проверка agent/mop требует классификации."
-      },
-      {
-        "file": "app/Http/Controllers/UserController.php",
-        "reason": "REPORT_AGENT_ROLE_SLUGS и PUBLIC_AGENT_ROLE_SLUGS остаются в выборках; проверить назначение."
-      },
-      {
-        "file": "app/Http/Controllers/ClientController.php",
-        "reason": "Список ответственных agent/mop/rop/manager."
       },
       {
         "file": "app/Http/Controllers/BranchGroupController.php",
