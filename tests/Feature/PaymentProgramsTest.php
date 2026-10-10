@@ -43,6 +43,29 @@ class PaymentProgramsTest extends TestCase
             'source_url' => 'https://example.com/fixture-terms', 'confirmation_reference' => 'Internal fixture confirmation', 'conditions' => 'Только синтетическая программа для тестов. Не реальные банковские условия.', 'valid_from' => now()->subDay()->toDateString(), 'valid_until' => now()->addMonth()->toDateString(), 'data_verified_at' => now()->toIso8601String(), ...$values];
     }
 
+    public function test_payment_grants_allow_custom_management_but_separate_publication_and_revocation(): void
+    {
+        \Illuminate\Support\Facades\Schema::table('roles', fn (\Illuminate\Database\Schema\Blueprint $table) => $table->json('permissions')->nullable());
+        $actor = $this->actor('client');
+        $role = $actor->role;
+        $role->forceFill(['permissions' => ['payment_programs.global.manage']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $path = '/api/admin/payment-programs';
+        $terms = $this->terms(['type' => 'mortgage', 'bank_name' => 'Test bank']);
+        $this->postJson($path, $terms)->assertForbidden();
+        $id = $this->postJson($path, [...$terms, 'publication_status' => 'pending'])->assertCreated()->json('id');
+        $this->getJson($path)->assertOk()->assertJsonPath('can_publish', false);
+        $role->forceFill(['permissions' => ['payment_programs.global.manage', 'payment_programs.publish']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson($path.'/'.$id, ['version' => 1, 'publication_status' => 'published'])->assertOk();
+        $this->getJson($path)->assertOk()->assertJsonPath('can_publish', true);
+        $role->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson($path)->assertForbidden();
+        $this->patchJson($path.'/'.$id, ['version' => 2, 'title' => 'Forbidden'])->assertForbidden();
+        $this->assertDatabaseHas('payment_programs', ['id' => $id, 'version' => 2, 'publication_status' => 'published']);
+    }
+
     public function test_author_submits_and_moderator_confirms_with_required_evidence_and_version(): void
     {
         $agent = $this->actor('agent');
