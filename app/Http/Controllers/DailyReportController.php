@@ -770,11 +770,13 @@ class DailyReportController extends Controller
         if ($report) {
             $access->ensureVisible($actor, $report);
             abort_unless(in_array($report->role_slug, ['agent', 'mop'], true), 403, 'KPI_FORBIDDEN_ROLE_ACTION');
+            $this->ensureCanReadScopedReport($actor, $this->reportContextUser($employee, $report));
             return;
         }
         // A missing historical snapshot cannot be assigned to today's team.
         abort_unless($date === Carbon::now($this->timezone())->toDateString(), 404, 'NOT_FOUND');
         $access->ensureEmployee($actor, (int) $employee->id);
+        $this->ensureCanReadScopedReport($actor, $employee);
     }
 
     private function preserveReportSnapshot(User $employee, ?DailyReport $report, string $date): bool
@@ -800,38 +802,22 @@ class DailyReportController extends Controller
 
     private function ensureCanReadScopedReport(User $actor, User $targetUser): void
     {
-        $actorRole = (string) ($actor->role?->slug ?? '');
-        $targetRole = (string) ($targetUser->role?->slug ?? '');
-
-        if ($actorRole === 'agent') {
+        if ($actor->hasPermission('daily_reports.employee.scope.own')) {
             if ((int) $actor->id !== (int) $targetUser->id) {
                 $this->denyKpi('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
             }
-
             return;
         }
-
-        if (in_array($actorRole, ['mop', 'intern'], true)) {
-            if ((int) $actor->id !== (int) $targetUser->id) {
-                $this->denyKpi('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
-            }
-
-            return;
-        }
-
-        if (in_array($actorRole, ['rop', 'branch_director', 'admin', 'superadmin', 'owner'], true)) {
-            if (! in_array($targetRole, ['agent', 'mop'], true)) {
+        if ($actor->hasPermission('daily_reports.employee.scope.all') || $actor->hasPermission('daily_reports.employee.scope.branch')) {
+            if (! in_array($targetUser->role?->slug, ['agent', 'mop'], true)) {
                 $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Target role is not supported for this action.');
             }
-
-            if (in_array($actorRole, ['rop', 'branch_director'], true)
-                && (int) $actor->branch_id !== (int) $targetUser->branch_id) {
+            if (! $actor->hasPermission('daily_reports.employee.scope.all')
+                && (! $actor->branch_id || (int) $actor->branch_id !== (int) $targetUser->branch_id)) {
                 $this->denyKpi('KPI_FORBIDDEN_SCOPE', 'Forbidden in current scope.');
             }
-
             return;
         }
-
         $this->denyKpi('KPI_FORBIDDEN_ROLE_ACTION', 'Role is not allowed for this action.');
     }
 
@@ -845,18 +831,12 @@ class DailyReportController extends Controller
 
     private function canActorEditTargetInScope(User $actor, User $targetUser): bool
     {
-        $actorRole = (string) ($actor->role?->slug ?? '');
-        $targetRole = (string) ($targetUser->role?->slug ?? '');
-
-        if (in_array($actorRole, ['rop', 'branch_director'], true)) {
-            return in_array($targetRole, ['agent', 'mop'], true) && (int) $actor->branch_id === (int) $targetUser->branch_id;
-        }
-
-        if (in_array($actorRole, ['admin', 'superadmin', 'owner'], true)) {
-            return in_array($targetRole, ['agent', 'mop'], true);
-        }
-
-        return (int) $actor->id === (int) $targetUser->id;
+        if (! $actor->hasPermission('daily_reports.employee.edit')) return false;
+        if ($actor->hasPermission('daily_reports.employee.scope.own')) return (int) $actor->id === (int) $targetUser->id;
+        if (! in_array($targetUser->role?->slug, ['agent', 'mop'], true)) return false;
+        return $actor->hasPermission('daily_reports.employee.scope.all')
+            || ($actor->hasPermission('daily_reports.employee.scope.branch') && $actor->branch_id
+                && (int) $actor->branch_id === (int) $targetUser->branch_id);
     }
 
     private function validateStrictMetricKeys(Request $request, array $knownPayloadFields = ['report_date', 'ads', 'calls', 'comment', 'plans_for_tomorrow']): void
