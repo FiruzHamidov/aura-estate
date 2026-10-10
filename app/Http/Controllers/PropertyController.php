@@ -224,12 +224,12 @@ class PropertyController extends Controller
     private function propertyCapabilities(?User $user, Property $property, ?array $refreshState = null): array
     {
         $workflow = $this->moderationAccess->capabilities($user, $property);
-        $canMutate = $workflow['can_edit'];
         $refreshState ??= $this->listingDateRefreshState($property);
 
         return array_merge($workflow, [
-            'can_refresh_listing_date' => $canMutate && $refreshState['available'],
-            'can_view_history' => $canMutate,
+            'can_manage_listing_date' => $user && $this->moderationAccess->canRefreshListingDate($user, $property),
+            'can_refresh_listing_date' => $user && $this->moderationAccess->canRefreshListingDate($user, $property) && $refreshState['available'],
+            'can_view_history' => $user && $this->moderationAccess->canViewHistory($user, $property),
             'can_moderate' => $workflow['can_moderate'],
             'can_manage_co_owner' => $workflow['can_manage_co_owner'],
         ]);
@@ -2508,7 +2508,7 @@ class PropertyController extends Controller
 
         return DB::transaction(function () use ($property, $actor) {
             [$actor, $lockedProperty] = $this->lockPropertyWrite($actor, $property, []);
-            abort_unless($this->moderationAccess->canEdit($actor, $lockedProperty), 403);
+            abort_unless($this->moderationAccess->canRefreshListingDate($actor, $lockedProperty), 403);
 
             if ($lockedProperty->moderation_status !== Property::PUBLIC_MODERATION_STATUS) {
                 return response()->json([
@@ -3026,9 +3026,7 @@ class PropertyController extends Controller
     public function logs(Request $request, Property $property)
     {
         $viewer = $this->propertyShowAuthUser($request);
-        if (! $viewer || ! $this->moderationAccess->canViewSecurityReportProperty($viewer, $property)) {
-            $this->authorizePropertyMutation($property);
-        }
+        abort_unless($viewer && $this->moderationAccess->canViewHistory($viewer, $property), 403, 'Доступ к истории объекта запрещён.');
         $perPage = (int) $request->input('per_page', 50);
 
         $logs = $property->logs()->with('user')->paginate($perPage);

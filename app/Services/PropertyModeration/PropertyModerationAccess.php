@@ -60,6 +60,19 @@ final class PropertyModerationAccess
         return false;
     }
 
+    public function canViewHistory(User $user, Property $property): bool
+    {
+        if ($user->hasRole('rop') && ! app(RopGroupAccess::class)->allows($user, $property)) return false;
+
+        return $user->hasPermission('properties.history.view')
+            && ($this->canEdit($user, $property) || $this->canViewSecurityReportProperty($user, $property));
+    }
+
+    public function canRefreshListingDate(User $user, Property $property): bool
+    {
+        return $user->hasPermission('properties.listing_date.refresh') && $this->canEdit($user, $property);
+    }
+
     public function canManageCoOwner(User $user, Property $property): bool
     {
         return $user->hasPermission('properties.co_owner.manage') && $this->canEdit($user, $property);

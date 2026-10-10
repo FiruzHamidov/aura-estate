@@ -1836,6 +1836,51 @@ class PropertyConstructionFieldsTest extends TestCase
         $this->assertNull($property->status_comment);
     }
 
+    public function test_security_history_default_preserves_closed_stage_boundary_and_can_be_revoked(): void
+    {
+        [$owner, $property] = $this->createListingDateRefreshFixture('sold', '930000410');
+        $role = Role::create(['name' => 'Security', 'slug' => 'security']);
+        $security = User::create(['name' => 'Security', 'phone' => '930000411', 'role_id' => $role->id, 'status' => 'active']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        Sanctum::actingAs($security->fresh());
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertOk();
+        $this->postJson('/api/properties/'.$property->id.'/refresh-listing-date')->assertForbidden();
+        $property->forceFill(['moderation_status' => 'approved'])->save();
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        $property->forceFill(['moderation_status' => 'sold'])->save();
+        $role->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($security->fresh());
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+    }
+
+    public function test_history_and_listing_refresh_permissions_can_be_revoked_independently(): void
+    {
+        [$owner, $property] = $this->createListingDateRefreshFixture('approved', '930000409');
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role = Role::create(['name' => 'Custom editor', 'slug' => 'custom_history_editor', 'permissions' => ['properties.edit']]);
+        $owner->forceFill(['role_id' => $role->id])->save();
+        $grant = function (array $permissions) use ($role, $owner): void {
+            $role->forceFill(['permissions' => ['properties.edit', ...$permissions]])->save();
+            Sanctum::actingAs($owner->fresh());
+        };
+        $grant([]);
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        $this->postJson('/api/properties/'.$property->id.'/refresh-listing-date')->assertForbidden();
+        $grant(['properties.history.view']);
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertOk();
+        $this->postJson('/api/properties/'.$property->id.'/refresh-listing-date')->assertForbidden();
+        $grant(['properties.listing_date.refresh']);
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        $this->postJson('/api/properties/'.$property->id.'/refresh-listing-date')->assertOk()
+            ->assertJsonPath('data.capabilities.can_manage_listing_date', true)
+            ->assertJsonPath('data.capabilities.can_refresh_listing_date', false);
+        $grant([]);
+        $this->postJson('/api/properties/'.$property->id.'/refresh-listing-date')->assertForbidden();
+        $this->getJson('/api/properties/'.$property->id)->assertOk()
+            ->assertJsonPath('capabilities.can_manage_listing_date', false)
+            ->assertJsonPath('capabilities.can_view_history', false);
+    }
+
     public function test_owner_can_refresh_listing_date_without_changing_created_at_and_cooldown_blocks_repeat(): void
     {
         config(['property-listing.date_refresh_cooldown_seconds' => 86_400]);
