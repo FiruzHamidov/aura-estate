@@ -1922,6 +1922,46 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->assertSame($c['otherAgent']->id, (int) $existing->fresh()->user_id);
     }
 
+    public function test_custom_role_attendance_scopes_and_group_subjects_are_configurable(): void
+    {
+        $c = $this->context();
+        $role = Role::create(['name' => 'Attendance observer', 'slug' => 'attendance_observer']);
+        $c['hr']->forceFill(['role_id' => $role->id])->save();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $access = app(\App\Services\Attendance\AttendanceAccessService::class);
+        $url = '/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&view=users';
+        foreach ([null => 1, 'attendance.scope.group' => 2, 'attendance.scope.branch' => 5, 'attendance.all_branches.view' => 6] as $scope => $count) {
+            $role->forceFill(['permissions' => ['attendance.table.view', ...($scope ? [$scope] : [])]])->save();
+            $actor = $c['hr']->fresh();
+            Sanctum::actingAs($actor);
+            $this->getJson($url)->assertOk()->assertJsonCount($count, 'data');
+            $this->assertSame($count, $access->visibleUsersQuery($actor)->count());
+            $this->getJson('/api/attendance/users/'.$c['otherAgent']->id.'/days/2026-08-17')
+                ->assertStatus($scope === 'attendance.all_branches.view' ? 200 : 403);
+        }
+        $role->forceFill(['permissions' => ['attendance.table.view', 'attendance.scope.group']])->save();
+        $subjectRole = Role::create(['name' => 'Custom participant', 'slug' => 'attendance_participant']);
+        $c['agent']->forceFill(['role_id' => $subjectRole->id])->save();
+        foreach ([[], ['attendance.subject.group'], []] as $rights) {
+            $subjectRole->forceFill(['permissions' => $rights])->save();
+            Sanctum::actingAs($c['hr']->fresh());
+            $this->getJson($url)->assertOk()->assertJsonCount($rights ? 2 : 1, 'data');
+            $this->getJson('/api/attendance/users/'.$c['agent']->id.'/days/2026-08-17')
+                ->assertStatus($rights ? 200 : 403);
+        }
+        // Losing the group must never expand the selection to other unassigned employees.
+        $c['hr']->forceFill(['branch_group_id' => null])->save();
+        Sanctum::actingAs($c['hr']->fresh());
+        $this->getJson($url)->assertOk()->assertJsonCount(1, 'data');
+        $role->forceFill(['permissions' => ['attendance.scope.branch']])->save();
+        Sanctum::actingAs($c['hr']->fresh());
+        $this->getJson($url)->assertForbidden();
+        // Existing named roles also obey changes in their configured scope.
+        $c['mop']->role->forceFill(['permissions' => ['attendance.table.view']])->save();
+        Sanctum::actingAs($c['mop']->fresh());
+        $this->getJson($url)->assertOk()->assertJsonCount(1, 'data');
+    }
+
     private function context(): array
     {
         $branchA = Branch::firstOrCreate(['name' => 'Branch A']);

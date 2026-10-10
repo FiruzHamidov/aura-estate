@@ -142,25 +142,31 @@ final class AttendanceAccessService
             return $query;
         }
 
-        return match ($this->role($viewer)) {
-            'security' => $query->whereIn('users.branch_id', $this->securityBranchIds($viewer)),
-            'agent', 'intern' => $query->whereKey($viewer->id),
-            'mop' => $query->where(function (Builder $scope) use ($viewer) {
+        if ($viewer->hasRole('security')) {
+            return $query->whereIn('users.branch_id', $this->securityBranchIds($viewer));
+        }
+        if ($viewer->hasRole('rop')) {
+            return app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id')
+                ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop']));
+        }
+        if ($viewer->hasPermission('attendance.scope.branch')) {
+            return $viewer->branch_id === null
+                ? $query->whereKey($viewer->id)
+                : $query->where('users.branch_id', $viewer->branch_id);
+        }
+        if ($viewer->hasPermission('attendance.scope.group')) {
+            $roleIds = \App\Models\Role::query()->get()
+                ->filter(fn ($role) => $role->hasPermission('attendance.subject.group'))->modelKeys();
+            return $query->where(function (Builder $scope) use ($viewer, $roleIds) {
                 $scope->whereKey($viewer->id);
                 if ($viewer->branch_group_id !== null) {
-                    $scope->orWhere(function (Builder $agents) use ($viewer) {
-                        $agents->where('branch_group_id', $viewer->branch_group_id)
-                            ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'intern']));
-                    });
+                    $scope->orWhere(fn (Builder $employees) => $employees
+                        ->where('users.branch_group_id', $viewer->branch_group_id)
+                        ->whereIn('users.role_id', $roleIds));
                 }
-            }),
-            'rop' => app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id')
-                ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop'])),
-            'branch_director' => $viewer->branch_id === null
-                ? $query->whereKey($viewer->id)
-                : $query->where('branch_id', $viewer->branch_id),
-            default => $query->whereKey($viewer->id),
-        };
+            });
+        }
+        return $query->whereKey($viewer->id);
     }
 
     public function assertCanViewUser(User $viewer, User $target): void
