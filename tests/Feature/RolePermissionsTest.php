@@ -66,6 +66,48 @@ class RolePermissionsTest extends TestCase
         $this->assertNotContains('properties.search.owner', $catalog->defaults('new_custom'));
     }
 
+    public function test_owner_keeps_legacy_superadmin_website_controls_without_extra_api_grants(): void
+    {
+        $catalog = app(PermissionCatalog::class);
+        $owner = $catalog->defaults('owner');
+        foreach ([
+            'users.site.mutate',
+            'users.site.admin_targets',
+            'users.site.dismiss_clients',
+            'kpi.plans.site.view',
+            'kpi.plans.site.menu',
+            'kpi.reports.site.view',
+            'kpi.adjustments.site.view',
+            'kpi.rop_plans.site.view',
+            'kpi.rop_plans.site.apply',
+            'kpi.operations.site.view',
+            'motivation.site.view',
+            'motivation.site.manage',
+            'properties.site.own',
+            'properties.menu.own',
+            'properties.site.all',
+            'properties.menu.all',
+            'bookings.property.site.create',
+            'properties.internal_fields.site',
+            'properties.media.download.site',
+            'properties.matching.site.all',
+            'properties.contacts.site.all',
+            'properties.reports.site',
+            'liquidity.site.view',
+            'liquidity.site.report',
+            'property_reports.site.view',
+            'property_reports.site.monthly_menu',
+            'property_reports.site.branch_filter',
+            'property_reports.site.agent_filter',
+            'property_reports.site.economics',
+            'clients.site.cash_million',
+            'clients.site.cash_midrange',
+] as $permission) $this->assertContains($permission, $owner);
+        foreach (['roles.manage', 'users.update', 'properties.moderate', 'users.manage_all_roles'] as $permission) {
+            $this->assertNotContains($permission, $owner);
+        }
+    }
+
     public function test_learning_defaults_preserve_role_materials(): void
     {
         foreach (Role::all() as $role) {

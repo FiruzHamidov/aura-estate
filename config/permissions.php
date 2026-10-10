@@ -862,4 +862,41 @@ foreach ((require __DIR__.'/roles.php')['system'] as $role) {
         'roles' => $actors, 'sensitive' => true,
     ];
 }
+// The legacy website normalizes owner to superadmin. Preserve only these UI grants;
+// backend action and record-scope defaults continue to use the actual role.
+foreach ([
+    'users.site.mutate',
+    'users.site.admin_targets',
+    'users.site.dismiss_clients',
+    'kpi.plans.site.view',
+    'kpi.plans.site.menu',
+    'kpi.reports.site.view',
+    'kpi.adjustments.site.view',
+    'kpi.rop_plans.site.view',
+    'kpi.rop_plans.site.apply',
+    'kpi.operations.site.view',
+    'motivation.site.view',
+    'motivation.site.manage',
+    'properties.site.own',
+    'properties.menu.own',
+    'properties.site.all',
+    'properties.menu.all',
+    'bookings.property.site.create',
+    'properties.internal_fields.site',
+    'properties.media.download.site',
+    'properties.matching.site.all',
+    'properties.contacts.site.all',
+    'properties.reports.site',
+    'liquidity.site.view',
+    'liquidity.site.report',
+    'property_reports.site.view',
+    'property_reports.site.monthly_menu',
+    'property_reports.site.branch_filter',
+    'property_reports.site.agent_filter',
+    'property_reports.site.economics',
+    'clients.site.cash_million',
+    'clients.site.cash_midrange',
+] as $permission) {
+    $permissions[$permission]['roles'][] = 'owner';
+}
 return $permissions;
