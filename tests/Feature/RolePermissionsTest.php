@@ -36,6 +36,30 @@ class RolePermissionsTest extends TestCase
         return $user;
     }
 
+    public function test_role_catalog_read_grant_works_independently_of_role_name_and_management(): void
+    {
+        $target = Role::where('slug', 'agent')->firstOrFail();
+        Role::create(['name' => 'Custom reader', 'slug' => 'custom_reader']);
+        foreach (['client', 'external_agent', 'custom_reader', 'hr'] as $slug) {
+            $actor = $this->actor($slug);
+            $role = $actor->role;
+            $role->forceFill(['permissions' => ['roles.view']])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->getJson('/api/roles')->assertOk();
+            $this->getJson('/api/roles/'.$target->id)->assertOk()->assertJsonPath('slug', 'agent');
+            $this->getJson('/api/rbac')->assertForbidden();
+            $this->postJson('/api/roles', ['name' => 'Forbidden', 'slug' => 'forbidden'])->assertForbidden();
+            $this->putJson('/api/roles/'.$target->id, ['name' => 'Forbidden'])->assertForbidden();
+            $role->forceFill(['permissions' => []])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->getJson('/api/roles')->assertForbidden();
+            $this->getJson('/api/roles/'.$target->id)->assertForbidden();
+            $role->forceFill(['permissions' => ['roles.manage']])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->getJson('/api/roles')->assertOk();
+        }
+    }
+
     public function test_migration_preserves_defaults_for_every_existing_role(): void
     {
         foreach (Role::all() as $role) {

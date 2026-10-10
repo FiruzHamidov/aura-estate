@@ -3,6 +3,11 @@
 // Defaults are used for migration and for compatibility with an older database.
 // Runtime changes live on roles; editing this file must never reset saved grants.
 $permissions = [
+    'roles.view' => [
+        'group' => 'Администрирование', 'name' => 'Просмотр списка ролей',
+        'description' => 'Загрузка ролей для фильтров и формы назначения сотруднику: названия, описания, выданные права и число пользователей. Не разрешает создавать или изменять роли, открывать редактор прав или назначать роль сотруднику. Управление ролями уже включает этот просмотр.',
+        'roles' => array_values(array_diff([...array_column((require __DIR__.'/roles.php')['system'], 'slug'), 'owner'], ['client', 'external_agent'])),
+    ],
     'roles.manage' => [
         'group' => 'Администрирование', 'name' => 'Управление ролями и правами',
         'description' => 'Создание ролей, изменение их разрешений и назначение прав управления доступом. Даёт возможность расширять права других ролей.',

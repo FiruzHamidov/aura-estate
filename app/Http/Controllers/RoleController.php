@@ -11,6 +11,7 @@ class RoleController extends Controller
     // GET /roles — список ролей
     public function index(Request $request)
     {
+        $this->authorizeRead($request);
         // При желании можно добавить фильтры ?q=...
         $query = Role::query()->withCount('users');
 
@@ -45,8 +46,9 @@ class RoleController extends Controller
     }
 
     // GET /roles/{role} — просмотр
-    public function show(Role $role)
+    public function show(Request $request, Role $role)
     {
+        $this->authorizeRead($request);
         return response()->json($role);
     }
 
@@ -99,4 +101,9 @@ class RoleController extends Controller
 
         return response()->json(['message' => 'Role deleted']);
     }
+    private function authorizeRead(Request $request): void
+    {
+        abort_unless($request->user()?->hasPermission('roles.view') || $request->user()?->hasPermission('roles.manage'), 403);
+    }
+
 }

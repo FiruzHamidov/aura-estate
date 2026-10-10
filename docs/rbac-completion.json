@@ -58,7 +58,13 @@
         "app/Services/ReferenceCatalogService.php",
         "app/Http/Controllers/SelectionController.php"
       ],
-      "done_when": "Выданное разрешение работает у пользовательской роли и у изменённой системной роли. Неперенесённые действия не получают доступ через обход старого middleware."
+      "done_when": "Выданное разрешение работает у пользовательской роли и у изменённой системной роли. Неперенесённые действия не получают доступ через обход старого middleware.",
+      "completed_substeps": [
+        {
+          "change": "Чтение /roles и /roles/{id} управляется roles.view или roles.manage. Проверки контроллера и middleware согласованы, названия client/external_agent не блокируют выданное право. Прежний доступ внутренних и legacy custom ролей переносится миграцией.",
+          "verification": "RolePermissionsTest: 36 тестов, 1996 проверок; четыре типа ролей, чтение без изменения, отзыв и неявный просмотр для roles.manage."
+        }
+      ]
     },
     {
       "id": "notification_recipients",

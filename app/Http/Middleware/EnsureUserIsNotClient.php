@@ -35,7 +35,8 @@ class EnsureUserIsNotClient
             break;
         }
 
-        if ($request->is('api/roles', 'api/roles/*') && $user?->hasPermission('roles.manage')) {
+        if ($request->is('api/roles', 'api/roles/*')
+            && ($user?->hasPermission('roles.manage') || ($request->isMethodSafe() && $user?->hasPermission('roles.view')))) {
             return $next($request);
         }
 
