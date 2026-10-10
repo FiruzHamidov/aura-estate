@@ -299,7 +299,20 @@
         {
           "change": "Окно увольнения учитывает текущего пользователя, настройки и организационную область в ключе формы и preview. Смена области сбрасывает назначения и загружает новый план; отзыв права закрывает окно.",
           "verification": "12 браузерных сценариев увольнения и TypeScript прошли."
+        },
+        {
+          "change": "Таблица посещаемости больше не скрывает server-authorized строки по названиям client/external_agent. Фильтры должностей таблицы и HR-отчёта учитывают attendance.subject.exclude_table из permissions; для старого API без массива прав сохраняется прежний fallback.",
+          "verification": "6 Node-тестов прошли; два браузерных сценария 390/1280 подтверждают показ разрешённых client/external_agent/custom_employee и удаление строк при пустом ответе. Четыре связанных браузерных сценария HR и смены области также прошли. TypeScript проверен.",
+          "logs": [
+            "/tmp/aura-rbac-attendance-ui-policy-node.log",
+            "/tmp/aura-rbac-attendance-ui-policy-browser-focused.log",
+            "/tmp/aura-rbac-attendance-ui-policy-browser.log",
+            "/tmp/aura-rbac-attendance-ui-policy-tsc.log"
+          ]
         }
+      ],
+      "remaining_checks": [
+        "AttendanceSynchronization: выбор сотрудников пока использует общий useUsers и старый фильтр должностей. Нужна отдельная серверная выборка по mappingUsersQuery и настройке допустимости, с сохранением прежних исключений интерфейса. Остальные прямые ссылки frontend собраны в /tmp/aura-rbac-front-roles.txt; файл временный, не считать аудит завершённым."
       ]
     },
     {
