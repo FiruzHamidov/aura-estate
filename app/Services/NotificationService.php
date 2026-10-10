@@ -729,7 +729,7 @@ class NotificationService
                 continue;
             }
 
-            if (! in_array($user->role?->slug, ['agent', 'mop'], true)) {
+            if (! $user->hasPermission('notifications.receive.daily_report')) {
                 continue;
             }
 
@@ -842,11 +842,7 @@ class NotificationService
                 ->with('role')
                 ->where('status', User::STATUS_ACTIVE)
                 ->where('branch_id', $agent->branch_id)
-                ->where(function ($q) {
-                    $q->whereIn('role_id', function ($sub) {
-                        $sub->select('id')->from('roles')->whereIn('slug', ['rop', 'branch_director']);
-                    });
-                })
+                ->whereIn('role_id', $this->recipients->roleIdsWithPermission('notifications.receive.kpi_risk.branch'))
                 ->get();
 
             if ($receivers->isEmpty()) {
@@ -1646,7 +1642,7 @@ class NotificationService
         }
 
         $count = 0;
-        $managers = $this->recipients->usersByRole(['manager']);
+        $managers = $this->recipients->usersByPermission('notifications.receive.digest.leads.morning');
 
         foreach ($managers as $manager) {
             $leadStats = Lead::query()
@@ -1688,7 +1684,7 @@ class NotificationService
         }
 
         $count = 0;
-        $agents = $this->recipients->usersByRole(['agent']);
+        $agents = $this->recipients->usersByPermission('notifications.receive.digest.deals.morning');
 
         foreach ($agents as $agent) {
             $showsCount = Booking::query()
@@ -1729,7 +1725,7 @@ class NotificationService
         }
 
         $count = 0;
-        $managers = $this->recipients->usersByRole(['manager']);
+        $managers = $this->recipients->usersByPermission('notifications.receive.digest.leads.evening');
 
         foreach ($managers as $manager) {
             $processed = Lead::query()
@@ -1770,7 +1766,7 @@ class NotificationService
         }
 
         $count = 0;
-        $agents = $this->recipients->usersByRole(['agent']);
+        $agents = $this->recipients->usersByPermission('notifications.receive.digest.deals.evening');
 
         foreach ($agents as $agent) {
             $shows = Booking::query()

@@ -545,6 +545,37 @@ class NotificationFeatureTest extends TestCase
         $this->assertDatabaseMissing('notifications', ['user_id' => $local->id, 'subject_id' => $second->id]);
     }
 
+    public function test_digest_subscriptions_work_for_custom_roles_and_stop_on_revocation(): void
+    {
+        Queue::fake();
+        Schema::create('bookings', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('agent_id'); $table->timestamp('start_time');
+        });
+        Schema::create('crm_deals', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('responsible_agent_id');
+            $table->timestamp('closed_at')->nullable(); $table->string('lost_reason')->nullable(); $table->softDeletes();
+        });
+        $branch = Branch::create(['name' => 'Central']);
+        $role = Role::create(['name' => 'Subscriber', 'slug' => 'custom_digest']);
+        $user = $this->createUser($role, $branch, 'Subscriber');
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        foreach ([
+            ['dispatchManagerMorningDigest', 'digest.leads.morning', 8],
+            ['dispatchManagerEveningDigest', 'digest.leads.evening', 18],
+            ['dispatchAgentDayPlan', 'digest.deals.morning', 8],
+            ['dispatchAgentEveningDigest', 'digest.deals.evening', 18],
+        ] as [$methodName, $key, $hour]) {
+            $this->travelTo(\Carbon\CarbonImmutable::parse('2026-10-10')->setHour($hour));
+            $method = new \ReflectionMethod(NotificationService::class, $methodName);
+            $role->forceFill(['permissions' => ['notifications.receive.'.$key]])->save();
+            $this->assertSame(1, $method->invoke(app(NotificationService::class)));
+            $role->forceFill(['permissions' => []])->save();
+            $this->assertSame(0, $method->invoke(app(NotificationService::class)));
+        }
+        $this->assertSame(4, Notification::query()->where('user_id', $user->id)->count());
+        $this->travelBack();
+    }
+
     private function createUser(Role $role, Branch $branch, string $name): User
     {
         return User::create([
