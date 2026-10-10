@@ -92,6 +92,16 @@ class RolePermissionsTest extends TestCase
         $this->assertContains('properties.matching.view', app(PermissionCatalog::class)->migrationDefaults('legacy_custom'));
     }
 
+    public function test_internal_property_list_defaults_preserve_the_legacy_role_gate(): void
+    {
+        foreach (Role::all() as $role) {
+            $this->assertSame(!in_array($role->slug, ['client', 'external_agent'], true), $role->hasPermission('properties.list.internal'), $role->slug);
+        }
+        $catalog = app(PermissionCatalog::class);
+        $this->assertContains('properties.list.internal', $catalog->migrationDefaults('legacy_custom'));
+        $this->assertNotContains('properties.list.internal', $catalog->defaults('new_custom'));
+    }
+
     public function test_property_write_group_restriction_defaults_only_to_mop(): void
     {
         foreach (Role::all() as $role) {

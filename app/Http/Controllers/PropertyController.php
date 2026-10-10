@@ -727,6 +727,7 @@ class PropertyController extends Controller
      */
     public function myProperties(Request $request)
     {
+        abort_unless($request->user()?->hasPermission('properties.list.internal'), 403, 'Нет права получать внутренний список объектов.');
         $this->validateListFilters($request);
 
         $query = $this->baseQueryMyProperties($request);
