@@ -362,6 +362,10 @@
         {
           "change": "Страница чатов: кнопка обращения и подписи заявителя/ответственного управляются двумя независимыми messaging.support.site.* настройками. Миграция сохраняет клиентское оформление прежних пользовательских ролей; новые роли не получают его автоматически. Доступ к переписке не расширяется.",
           "verification": "39 серверных тестов / 2320 проверок, TypeScript и браузерный сценарий страницы чатов прошли: custom role получает элементы, отзыв скрывает их, доступный диалог остаётся."
+        },
+        {
+          "change": "Операции KPI используют существующую настраиваемую роль дашборда для дневной/недельной/сводной выгрузки, ждут загрузки настройки и показывают её ошибку. Семь служебных запросов разделяют кэш по контексту доступа; смена пользователя/прав/организации сбрасывает черновики страницы. Описания фильтра дополнены областью операций.",
+          "verification": "TypeScript и браузерная проверка реальной страницы прошли: actor slug agent отправляет настроенный mop, после смены филиала custom_target; старое качество данных скрыто до ответа нового филиала, отзыв прав скрывает данные."
         }
       ],
       "remaining_checks": [
@@ -593,14 +597,13 @@
       {
         "file": "app/_components/kpi/MonthlyKpiStickyBanner.tsx",
         "classification": "explicit roles omit job-based report parameter; legacy resolver only fallback; permission and access-context gated query"
-      }
-    ],
-    "pending_followups": [
+      },
       {
         "file": "app/profile/kpi/operations/page.tsx",
-        "finding": "Still passes resolveKpiRole(profile) as report role even with explicit permissions; unlike MonthlyKpiStickyBanner. Inspect server interpretation and query cache context before classifying or fixing."
+        "classification": "Configured roles use server dashboard_role policy for all three export queries, preserving existing defaults; legacy resolver only without permissions. Page drafts reset and seven operations query caches separate on access context changes."
       }
-    ]
+    ],
+    "pending_followups": []
   },
   "latest_full_verification": {
     "backend": {
