@@ -91,7 +91,7 @@ final class GroupRecordTransfer
             }
             if (!$actor->hasPermission('records.transfer.all_branches')) abort_unless((int) $actor->branch_id === (int) $group->branch_id, 403, 'RBAC_GROUP_SCOPE_VIOLATION');
             abort_unless($target->status === User::STATUS_ACTIVE && ! $target->isDeletedAccount()
-                && in_array($target->role?->slug, $employeeTransfer ? ['agent', 'mop', 'intern'] : ['agent', 'mop'], true)
+                && $target->hasPermission($employeeTransfer ? 'users.subject.group_transfer' : 'users.subject.record_recipient')
                 && (int) $target->branch_group_id === (int) $group->id
                 && (int) $target->branch_id === (int) $group->branch_id, 422, 'INVALID_TRANSFER_TARGET');
 

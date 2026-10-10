@@ -62,7 +62,7 @@ final class RopGroupAccess
     public function employees(User $actor): Builder
     {
         return $this->scope(User::query(), $actor, 'users.branch_group_id', 'users.branch_id')
-            ->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop']));
+            ->whereHas('role', fn (Builder $roles) => $roles->withPermission('users.subject.record_recipient'));
     }
 
     public function allowsGroup(User $actor, ?int $groupId): bool

@@ -22,8 +22,15 @@ class Role extends Model
 
     public function scopeUsingAssignedGroups(\Illuminate\Database\Eloquent\Builder $query, bool $enabled = true): void
     {
-        $permission = 'data.scope.assigned_groups';
-        $defaults = (config('permissions', [])[$permission]['roles'] ?? []);
+        $this->scopeWithPermission($query, 'data.scope.assigned_groups', $enabled);
+    }
+
+    /** SQL equivalent of a static catalog permission, including legacy defaults. */
+    public function scopeWithPermission(\Illuminate\Database\Eloquent\Builder $query, string $permission, bool $enabled = true): void
+    {
+        $definition = config('permissions', [])[$permission] ?? null;
+        if (! $definition) throw new \InvalidArgumentException('A registered catalog permission is required.');
+        $defaults = $definition['roles'] ?? config($definition['roles_config'], []);
         // Keep the predicate in SQL, so repeated group subqueries do not fetch all roles.
         // The legacy branch also supports deployments before the RBAC migration.
         if (! \Illuminate\Support\Facades\Schema::hasColumn($query->getModel()->getTable(), 'permissions')) {

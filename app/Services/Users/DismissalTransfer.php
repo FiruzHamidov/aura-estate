@@ -66,7 +66,7 @@ final class DismissalTransfer
     private function recipients(User $actor, User $employee)
     {
         return User::query()->with(['role', 'branch', 'branchGroup'])->whereKeyNot($employee->id)->where('status', User::STATUS_ACTIVE)
-            ->whereHas('role', fn ($q) => $q->whereIn('slug', ['agent', 'mop']))
+            ->whereHas('role', fn ($q) => $q->withPermission('users.subject.record_recipient'))
             ->when($actor->usesAssignedGroupScope(), fn ($q) => app(RopGroupAccess::class)->scope($q, $actor, 'users.branch_group_id', 'users.branch_id'))
             ->when(!$actor->hasPermission('users.dismissal.all_branches'), fn ($q) => $q->where('branch_id', $actor->branch_id))
             ->orderBy('id')->get()->reject(fn (User $user) => $user->isDeletedAccount());
@@ -204,7 +204,7 @@ final class DismissalTransfer
         abort_unless($actual === $expected, 422, 'COMPLETE_TRANSFER_PLAN_REQUIRED');
         $targets = $lockedUsers->filter(fn (User $target) => $target->id !== $employee->id
             && $target->status === User::STATUS_ACTIVE && ! $target->isDeletedAccount()
-            && in_array($target->role?->slug, ['agent', 'mop'], true));
+            && $target->hasPermission('users.subject.record_recipient'));
         $counts = array_fill_keys(array_keys(GroupRecordTransfer::MODELS), 0);
         foreach ($inventory as $record) {
             $reference = $this->parentReference($record);

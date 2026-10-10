@@ -17,7 +17,7 @@ final class EmployeeGroupTransfer
     private function authorize(User $actor, User $employee): void
     {
         abort_unless($actor->hasPermission('users.group_transfer'), 403, 'FORBIDDEN_ACTION');
-        abort_unless(in_array($employee->role?->slug, ['agent', 'mop', 'intern'], true), 422, 'EMPLOYEE_ROLE_REQUIRED');
+        abort_unless($employee->hasPermission('users.subject.group_transfer'), 422, 'EMPLOYEE_ROLE_REQUIRED');
         if ($actor->usesAssignedGroupScope()) {
             abort_unless($actor->id !== $employee->id && $employee->status === User::STATUS_ACTIVE && ! $employee->isDeletedAccount(), 403, 'FORBIDDEN_ACTION');
             app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $employee);
@@ -89,7 +89,7 @@ final class EmployeeGroupTransfer
             }
             if ($actor->usesAssignedGroupScope()) {
                 abort_unless($this->destinationQuery($actor)->whereKey($destination->id)->exists(), 403, 'RBAC_GROUP_SCOPE_VIOLATION');
-                abort_if($employee->hasRole('mop') && (int) $destination->id !== (int) $employee->branch_group_id, 403, 'Передавать в другую группу можно только агента или стажёра.');
+                abort_if(! $employee->hasPermission('users.subject.group_transfer_across') && (int) $destination->id !== (int) $employee->branch_group_id, 403, 'Роль сотрудника не допускает перевод в другую группу этим руководителем.');
             }
             $sameGroup = (int) $destination->id === (int) $employee->branch_group_id;
             $inventory = $this->inventory($employee, true);

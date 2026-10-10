@@ -222,6 +222,31 @@ class RopGroupAssignmentsTest extends TestCase
         $this->assertDatabaseHas('rop_branch_groups', ['rop_id' => $actor->id, 'branch_group_id' => $this->a->id]);
     }
 
+    public function test_custom_team_employee_can_be_edited_and_transferred_only_with_target_policies(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Custom employee', 'slug' => 'custom_employee']);
+        $rights = ['users.subject.team', 'users.subject.group_transfer'];
+        $role->forceFill(['permissions' => $rights])->save();
+        $employee = $this->user('custom_employee', $this->a);
+        $this->rop->supervisedGroups()->attach($this->a->id);
+        $receiver = $this->user('rop', $this->b);
+        $receiver->supervisedGroups()->attach($this->b->id);
+        Sanctum::actingAs($this->rop);
+        $this->patchJson('/api/user/'.$employee->id, ['name' => 'Edited custom employee', 'role_id' => $role->id])->assertOk();
+        $url = '/api/users/'.$employee->id.'/group-transfer';
+        $preview = $this->getJson($url)->assertOk()->json();
+        $plan = ['branch_group_id' => $this->b->id, 'revision' => $preview['revision'], 'reason' => 'Reviewed transfer', 'records' => []];
+        $this->postJson($url, $plan)->assertForbidden();
+        $role->forceFill(['permissions' => []])->save();
+        $this->patchJson('/api/user/'.$employee->id, ['name' => 'Denied'])->assertNotFound();
+        $this->postJson($url, $plan)->assertUnprocessable();
+        $this->assertSame($this->a->id, $employee->fresh()->branch_group_id);
+        $role->forceFill(['permissions' => [...$rights, 'users.subject.group_transfer_across']])->save();
+        $this->postJson($url, $plan)->assertOk();
+        $this->assertSame($this->b->id, $employee->fresh()->branch_group_id);
+    }
+
     private function url(): string
     {
         return '/api/users/'.$this->rop->id.'/supervised-groups';

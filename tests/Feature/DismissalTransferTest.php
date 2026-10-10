@@ -175,6 +175,36 @@ class DismissalTransferTest extends TestCase
                 'responsible_user_id' => $r['type'] === 'clients' || $r['id'] === 2 ? $this->second->id : $this->first->id], $preview['records'])]];
     }
 
+    public function test_custom_recipient_eligibility_is_rechecked_when_applying_dismissal(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Receiver', 'slug' => 'custom_receiver']);
+        $role->forceFill(['permissions' => ['users.subject.record_recipient']])->save();
+        DB::table('users')->where('id', $this->first->id)->update(['role_id' => $role->id]);
+        $plan = $this->plan();
+        $this->assertContains($this->first->id, $this->preview()['records'][0]['eligible_user_ids']);
+        $role->forceFill(['permissions' => []])->save();
+        $this->assertNotContains($this->first->id, $this->preview()['records'][0]['eligible_user_ids']);
+        $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertUnprocessable();
+        $this->assertDatabaseHas('users', ['id' => $this->employee->id, 'status' => 'active']);
+        $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $this->employee->id]);
+        $this->assertDatabaseCount('group_access_audit_logs', 0);
+        $role->forceFill(['permissions' => ['users.subject.record_recipient']])->save();
+        $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertOk();
+        $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $this->first->id]);
+    }
+
+    public function test_revoked_recipient_policy_does_not_bypass_existing_record_handover(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $role = Role::create(['name' => 'Former receiver', 'slug' => 'former_receiver']);
+        $role->forceFill(['permissions' => []])->save();
+        DB::table('users')->where('id', $this->employee->id)->update(['role_id' => $role->id]);
+        $this->patchJson('/api/user/'.$this->employee->id, ['status' => 'inactive'])->assertStatus(409);
+        $this->assertDatabaseHas('users', ['id' => $this->employee->id, 'status' => 'active']);
+        $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $this->employee->id]);
+    }
+
     public function test_dismissal_transfers_individual_records_clients_and_needs_atomically(): void
     {
         $token = $this->employee->createToken('employee');

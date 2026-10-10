@@ -22,6 +22,8 @@ final class RoleAssignmentGuard
             $added = array_diff($role->permissionKeys(), app(PermissionCatalog::class)->defaults($role->slug));
             foreach ($added as $permission) {
                 if (!$role->hasPermission($permission)) continue;
+                // Eligibility of a target is not an action grant acquired by that user.
+                if (config('permissions', [])[$permission]['subject_policy'] ?? false) continue;
                 abort_unless($actor->hasPermission($permission), 403, 'Нельзя управлять учётной записью с дополнительными правами, которых у вас нет.');
             }
         }

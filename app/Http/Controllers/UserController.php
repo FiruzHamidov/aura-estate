@@ -69,7 +69,7 @@ class UserController extends Controller
         $query = User::query()->with(['role', 'branch', 'branchGroup']);
         if ($authUser->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'users.branch_group_id', 'users.branch_id');
-            $query->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', ['agent', 'mop', 'intern']));
+            $query->whereHas('role', fn (Builder $roles) => $roles->withPermission('users.subject.team'));
         }
         if ($authUser->hasPermission('users.scope.all')) return $query;
         return $query->where(function (Builder $scope) use ($authUser, $includeUnassigned, $includeClients) {
@@ -225,7 +225,7 @@ class UserController extends Controller
             abort_unless(in_array($operation, ['update', 'dismiss'], true) && $authUser->id !== $targetUser->id
                 && ($operation === 'update' || $targetUser->status === User::STATUS_ACTIVE)
                 && ! $targetUser->isDeletedAccount()
-                && in_array($this->roleSlug($targetUser), ['agent', 'mop', 'intern'], true), 403, 'FORBIDDEN_ACTION');
+                && $targetUser->hasPermission('users.subject.team'), 403, 'FORBIDDEN_ACTION');
             app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $targetUser);
 
             return;
@@ -295,6 +295,9 @@ class UserController extends Controller
 
         if ($authUser->hasPermission('users.assign_any_role') || $authUser->hasPermission('users.assign_role.'.$targetRole->slug)) return;
 
+        if ($targetUser && $authUser->usesAssignedGroupScope()
+            && (int) $targetUser->role_id === (int) $targetRole->id && $targetRole->hasPermission('users.subject.team')) return;
+
         if ($targetUser && $authUser->hasPermission('users.manage_branch_roles')) {
             $targetUser->loadMissing('role');
             if ($this->roleSlug($targetUser) === $targetRole->slug
@@ -348,7 +351,10 @@ class UserController extends Controller
             return $data;
         }
 
-        if (! $this->isBranchScopedRole($roleSlug) && ! $this->isBranchGroupScopedRole($roleSlug)) {
+        $groupWorkflow = $targetRole->hasPermission('users.subject.team')
+            || $targetRole->hasPermission('users.subject.record_recipient')
+            || $targetRole->hasPermission('users.subject.group_transfer');
+        if (! $groupWorkflow && ! $this->isBranchScopedRole($roleSlug) && ! $this->isBranchGroupScopedRole($roleSlug)) {
             $data['branch_group_id'] = null;
 
             return $data;
@@ -520,7 +526,7 @@ class UserController extends Controller
 
             $targetRole = $this->resolveRequestedRole($request);
             if ($isRop) {
-                abort_unless(in_array($targetRole->slug, ['agent', 'mop', 'intern'], true), 403, 'РОП может создавать только стажёров, агентов и МОП в закреплённых группах.');
+                abort_unless($targetRole->hasPermission('users.subject.team'), 403, 'Роль сотрудника должна разрешать управление в закреплённых группах.');
                 $request->validate(['branch_group_id' => 'required|integer|exists:branch_groups,id'], [
                     'branch_group_id.required' => 'Выберите закреплённую за вами группу для нового сотрудника.',
                 ]);
@@ -672,7 +678,7 @@ class UserController extends Controller
             if ($authUser->usesAssignedGroupScope()) {
                 // Group transfers and dismissal use their dedicated, audited workflows.
                 $requestedRole = $this->resolveRequestedRole($request, $user);
-                abort_unless(in_array($requestedRole?->slug, ['intern', 'agent', 'mop'], true), 403, 'FORBIDDEN_ACTION');
+                abort_unless($requestedRole?->hasPermission('users.subject.team'), 403, 'FORBIDDEN_ACTION');
                 foreach (['branch_id', 'branch_group_id', 'status'] as $field) {
                     abort_if($request->exists($field) && (string) $request->input($field) !== (string) $user->{$field},
                         403, 'FORBIDDEN_ACTION');
