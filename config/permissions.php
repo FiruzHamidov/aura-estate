@@ -650,6 +650,8 @@ $permissions['kpi.periods.scope.all'] = ['group' => 'KPI', 'name' => 'Блоки
 $permissions['kpi.periods.scope.branch'] = ['group' => 'KPI', 'name' => 'Блокировки своего филиала', 'description' => 'Блокировка периодов своего филиала и его групп. Общий период без филиала разрешается отдельно; РОП всегда выбирает закреплённую группу.', 'roles' => ['rop', 'branch_director'], 'exclusive_group' => 'kpi.periods.scope'];
 $permissions['kpi.periods.global.lock'] = ['group' => 'KPI', 'name' => 'Общий период при доступе к филиалу', 'description' => 'Позволяет блокировать общий период без филиала и группы. Требуется блокировка периодов. Сохраняет прежнюю возможность директора филиала; РОП по-прежнему работает только с закреплёнными группами.', 'roles' => ['branch_director'], 'sensitive' => true];
 
+$permissions['kpi.adjustments.site.view'] = ['group' => 'KPI', 'name' => 'Страница корректировок KPI', 'description' => 'Открывает страницу корректировок и её пункт меню. История отображается только при праве просмотра корректировок; форма добавления — только при праве внесения корректировки. Закрытые периоды, причина и группы РОП проверяются на сервере.', 'roles' => ['admin', 'superadmin', 'rop', 'branch_director']];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],
