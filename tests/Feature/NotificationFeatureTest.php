@@ -637,6 +637,43 @@ class NotificationFeatureTest extends TestCase
         $this->assertFalse($policy->allows($broadcast, $observer->fresh()));
     }
 
+    public function test_kpi_risk_subject_policy_supports_custom_roles_and_revocation(): void
+    {
+        Queue::fake();
+        $this->travelTo(\Illuminate\Support\Carbon::parse('2026-10-09 18:31:00'));
+        Schema::create('daily_reports', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('user_id'); $table->date('report_date');
+            $table->unsignedBigInteger('branch_group_id')->nullable();
+            $table->string('role_slug')->nullable(); $table->timestamps();
+        });
+        $branch = Branch::create(['name' => 'Local']);
+        $other = Branch::create(['name' => 'Other']);
+        $subjectRole = Role::create(['name' => 'Custom subject', 'slug' => 'custom_risk_subject']);
+        $receiverRole = Role::create(['name' => 'Director', 'slug' => 'branch_director']);
+        $subject = $this->createUser($subjectRole, $branch, 'Subject');
+        $receiver = $this->createUser($receiverRole, $branch, 'Receiver');
+        $this->createUser($receiverRole, $other, 'Foreign receiver');
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        foreach (['2026-10-08', '2026-10-09'] as $date) {
+            DB::table('daily_reports')->insert(['user_id' => $subject->id, 'report_date' => $date]);
+        }
+        $service = app(NotificationService::class);
+        $dispatch = new \ReflectionMethod($service, 'dispatchKpiEarlyRisk');
+        $this->assertSame(0, $dispatch->invoke($service));
+        $subjectRole->forceFill(['permissions' => ['kpi.subject.early_risk']])->save();
+        $this->assertSame(1, $dispatch->invoke($service));
+        $this->assertSame([$receiver->id], Notification::query()->pluck('user_id')->all());
+        $subjectRole->forceFill(['permissions' => []])->save();
+        $this->assertSame(0, $dispatch->invoke($service));
+        $this->assertSame(1, Notification::count());
+        $this->assertSame(2, DB::table('daily_reports')->count());
+        foreach (['agent', 'mop', 'intern'] as $slug) {
+            $role = new Role(['slug' => $slug]);
+            $this->assertSame($slug !== 'intern', $role->hasPermission('kpi.subject.early_risk'));
+        }
+        $this->travelBack();
+    }
+
     private function createUser(Role $role, Branch $branch, string $name): User
     {
         return User::create([

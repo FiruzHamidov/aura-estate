@@ -816,7 +816,7 @@ class NotificationService
             $latest = $userReports->sortByDesc('report_date')->first();
             $agent = $latest?->user;
 
-            if (! $agent instanceof User || ! in_array($agent->role?->slug, ['agent', 'mop'], true)) {
+            if (! $agent instanceof User || ! $agent->hasPermission('kpi.subject.early_risk')) {
                 continue;
             }
 

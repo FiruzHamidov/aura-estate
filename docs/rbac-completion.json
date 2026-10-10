@@ -166,6 +166,14 @@
             "/tmp/aura-rbac-public-team-backend.log",
             "/tmp/aura-rbac-transition-public-tsc.log"
           ]
+        },
+        {
+          "change": "Состав сотрудников в уведомлениях о раннем риске KPI переведён с agent/mop на kpi.subject.early_risk; исходные роли и формула сохранены. Подписка получателя, филиал и границы закреплённых групп остаются отдельными условиями. Описание подписки уточнено.",
+          "verification": "13 тестов уведомлений / 113 проверок прошли: пользовательская роль, включение и отзыв участия, отсутствие уведомлений чужому филиалу, сохранность истории и отчётов, исходные agent/mop и исключённый intern.",
+          "logs": [
+            "/tmp/aura-rbac-risk-subject.log",
+            "/tmp/aura-rbac-risk-catalog.log"
+          ]
         }
       ],
       "remaining_checks": [
