@@ -66,6 +66,14 @@ class RolePermissionsTest extends TestCase
         $this->assertNotContains('properties.search.owner', $catalog->defaults('new_custom'));
     }
 
+    public function test_monthly_kpi_banner_defaults_preserve_agent_and_mop_visibility(): void
+    {
+        foreach (Role::all() as $role) {
+            $this->assertSame(in_array($role->slug, ['agent', 'mop'], true), $role->hasPermission('kpi.monthly.site.banner'), $role->slug);
+        }
+        $this->assertNotContains('kpi.monthly.site.banner', app(PermissionCatalog::class)->migrationDefaults('legacy_custom'));
+    }
+
     public function test_owner_keeps_legacy_superadmin_website_controls_without_extra_api_grants(): void
     {
         $catalog = app(PermissionCatalog::class);
