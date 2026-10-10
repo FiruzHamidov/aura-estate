@@ -89,6 +89,59 @@ class PropertyLiquidityFeatureTest extends TestCase
         }
     }
 
+    public function test_liquidity_write_grants_respect_scope_and_fresh_permissions_for_any_role(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $own = $this->createTarget(90_000, 3);
+        $foreign = $this->createTarget(88_000, 2);
+        $promotion = ['status' => 'planned', 'channel' => 'instagram'];
+        foreach (['client', 'external_agent', 'accountant', 'custom_liquidity'] as $slug) {
+            \Illuminate\Support\Facades\Bus::fake([\App\Jobs\RecalculatePropertyLiquidity::class]);
+            DB::table('roles')->where('id', 2)->update(['slug' => $slug, 'permissions' => json_encode(['liquidity.scope.own'])]);
+            Sanctum::actingAs(User::findOrFail(3));
+            $this->patchJson("/api/marketing/property-promotions/{$own->id}", $promotion)->assertForbidden();
+            $this->postJson("/api/admin/properties/{$own->id}/liquidity/recalculate")->assertForbidden();
+            DB::table('roles')->where('id', 2)->update(['permissions' => json_encode(['liquidity.scope.own', 'liquidity.promotion.manage', 'liquidity.settings.manage'])]);
+            Sanctum::actingAs(User::findOrFail(3));
+            $before = DB::table('property_social_promotions')->count();
+            $this->patchJson("/api/marketing/property-promotions/{$own->id}", $promotion)->assertCreated();
+            $this->postJson("/api/admin/properties/{$own->id}/liquidity/recalculate")->assertAccepted();
+            $this->patchJson("/api/marketing/property-promotions/{$foreign->id}", $promotion)->assertForbidden();
+            $this->postJson("/api/admin/properties/{$foreign->id}/liquidity/recalculate")->assertForbidden();
+            $this->assertSame($before + 1, DB::table('property_social_promotions')->count());
+            \Illuminate\Support\Facades\Bus::assertDispatchedTimes(\App\Jobs\RecalculatePropertyLiquidity::class, 2);
+            \Illuminate\Support\Facades\Bus::assertDispatched(\App\Jobs\RecalculatePropertyLiquidity::class, fn ($job) => $job->propertyId === $own->id);
+            // Keep the already loaded actor: authorization inside the lock must see revocation.
+            DB::table('roles')->where('id', 2)->update(['permissions' => json_encode(['liquidity.scope.own'])]);
+            $this->patchJson("/api/marketing/property-promotions/{$own->id}", $promotion)->assertForbidden();
+            $this->postJson("/api/admin/properties/{$own->id}/liquidity/recalculate")->assertForbidden();
+            DB::table('roles')->where('id', 2)->update(['permissions' => json_encode(['liquidity.promotion.manage', 'liquidity.settings.manage'])]);
+            Sanctum::actingAs(User::findOrFail(3));
+            $this->patchJson("/api/marketing/property-promotions/{$own->id}", $promotion)->assertForbidden();
+            $this->postJson("/api/admin/properties/{$own->id}/liquidity/recalculate")->assertForbidden();
+            $this->assertSame($before + 1, DB::table('property_social_promotions')->count());
+            \Illuminate\Support\Facades\Bus::assertDispatchedTimes(\App\Jobs\RecalculatePropertyLiquidity::class, 2);
+        }
+    }
+
+    public function test_rop_global_liquidity_write_grants_do_not_bypass_assigned_groups(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        \Illuminate\Support\Facades\Bus::fake([\App\Jobs\RecalculatePropertyLiquidity::class]);
+        $own = $this->createTarget(90_000, 1);
+        $foreign = $this->createTarget(88_000, 2);
+        DB::table('properties')->where('id', $own->id)->update(['branch_id' => 1, 'branch_group_id' => 1]);
+        DB::table('properties')->where('id', $foreign->id)->update(['branch_id' => 1, 'branch_group_id' => 3]);
+        DB::table('roles')->where('id', 4)->update(['permissions' => json_encode(['liquidity.scope.all', 'liquidity.promotion.manage', 'liquidity.settings.manage'])]);
+        Sanctum::actingAs(User::findOrFail(5));
+        $this->patchJson("/api/marketing/property-promotions/{$own->id}", ['status' => 'planned'])->assertCreated();
+        $this->postJson("/api/admin/properties/{$own->id}/liquidity/recalculate")->assertAccepted();
+        $this->patchJson("/api/marketing/property-promotions/{$foreign->id}", ['status' => 'planned'])->assertNotFound();
+        $this->postJson("/api/admin/properties/{$foreign->id}/liquidity/recalculate")->assertNotFound();
+        $this->assertSame(1, DB::table('property_social_promotions')->count());
+        \Illuminate\Support\Facades\Bus::assertDispatchedTimes(\App\Jobs\RecalculatePropertyLiquidity::class, 2);
+    }
+
     public function test_calculator_marks_competitive_apartment_below_market_and_exposes_only_public_badge_to_guest(): void
     {
         $property = $this->createTarget(90_000, 1);

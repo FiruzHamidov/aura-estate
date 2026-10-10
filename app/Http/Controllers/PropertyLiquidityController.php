@@ -167,10 +167,13 @@ class PropertyLiquidityController extends Controller
 
     public function recalculate(Request $request, Property $property)
     {
-        abort_unless($request->user()?->hasPermission('liquidity.settings.manage'), 403, 'Доступ запрещён');
-        RecalculatePropertyLiquidity::dispatch($property->id);
+        return DB::transaction(function () use ($request, $property) {
+            [$user, $property] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($request->user(), $property, null, null);
+            abort_unless($user->hasPermission('liquidity.settings.manage') && $this->access->canView($user, $property), 403, 'Доступ запрещён');
+            RecalculatePropertyLiquidity::dispatch($property->id)->afterCommit();
 
-        return response()->json(['message' => 'Пересчет поставлен в очередь.'], 202);
+            return response()->json(['message' => 'Пересчет поставлен в очередь.'], 202);
+        });
     }
 
     public function updatePromotion(Request $request, Property $property)
@@ -191,16 +194,20 @@ class PropertyLiquidityController extends Controller
             'metrics' => ['nullable', 'array'],
         ]);
 
-        $promotion = PropertySocialPromotion::query()->create($data + [
-            'property_id' => $property->id,
-            'priority_score_snapshot' => $property->promotion_priority_score,
-            'liquidity_score_snapshot' => $property->liquidity_score,
-            'published_by' => $data['status'] === 'published' ? $user->id : null,
-            'published_at' => $data['status'] === 'published' ? ($data['published_at'] ?? now()) : ($data['published_at'] ?? null),
-        ]);
-        RecalculatePropertyLiquidity::dispatch($property->id);
+        return DB::transaction(function () use ($request, $property, $data) {
+            [$user, $property] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire($request->user(), $property, null, null);
+            abort_unless($this->access->canManagePromotion($user) && $this->access->canView($user, $property), 403, 'Доступ запрещён');
+            $promotion = PropertySocialPromotion::query()->create($data + [
+                'property_id' => $property->id,
+                'priority_score_snapshot' => $property->promotion_priority_score,
+                'liquidity_score_snapshot' => $property->liquidity_score,
+                'published_by' => $data['status'] === 'published' ? $user->id : null,
+                'published_at' => $data['status'] === 'published' ? ($data['published_at'] ?? now()) : ($data['published_at'] ?? null),
+            ]);
+            RecalculatePropertyLiquidity::dispatch($property->id)->afterCommit();
 
-        return response()->json(['data' => $promotion], 201);
+            return response()->json(['data' => $promotion], 201);
+        });
     }
 
     public function updateBusinessPriority(Request $request, Property $property)

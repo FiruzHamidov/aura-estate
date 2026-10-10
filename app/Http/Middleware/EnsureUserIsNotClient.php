@@ -145,6 +145,8 @@ class EnsureUserIsNotClient
             return match ($method) {
                 'feed', 'report', 'history' => ['liquidity.view'],
                 'updateBusinessPriority' => ['liquidity.priority.manage'],
+                'updatePromotion' => ['liquidity.promotion.manage'],
+                'recalculate' => ['liquidity.settings.manage'],
                 default => [],
             };
         }
