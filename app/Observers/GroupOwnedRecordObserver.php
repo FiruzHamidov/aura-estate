@@ -77,7 +77,7 @@ final class GroupOwnedRecordObserver
             && $record->branch_group_id && $record->responsible_agent_id
             && (! $record->exists || $record->isDirty(['responsible_agent_id', 'branch_group_id', 'branch_id']))) {
             $responsible = User::query()->lockForUpdate()->findOrFail($record->responsible_agent_id);
-            if (in_array($responsible->role?->slug, ['agent', 'mop'], true)) {
+            if ($responsible->hasPermission('users.subject.assignment_group_required')) {
                 abort_unless((int) $responsible->branch_group_id === (int) $record->branch_group_id
                     && (int) $responsible->branch_id === (int) $record->branch_id,
                     422, 'RESPONSIBLE_GROUP_MISMATCH');

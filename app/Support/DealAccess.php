@@ -52,8 +52,6 @@ class DealAccess
 
     public function visibleQuery(User $authUser): Builder
     {
-        $roleSlug = $this->roleSlug($authUser);
-
         $query = Deal::query()->with([
             'client',
             'lead',
@@ -136,8 +134,6 @@ class DealAccess
 
     public function normalizeMutationData(array $data, User $authUser): array
     {
-        $roleSlug = $this->roleSlug($authUser);
-
         if ($this->isBranchScoped($authUser)) {
             abort_if(empty($authUser->branch_id), 422, 'branch_id is required for this user.');
             $data['branch_id'] = $authUser->branch_id;
@@ -150,7 +146,7 @@ class DealAccess
         $data['created_by'] ??= $authUser->id;
 
         if (
-            in_array($roleSlug, ['agent', 'manager', 'operator'], true)
+            $authUser->hasPermission('deals.defaults.assign_creator')
             && empty($data['responsible_agent_id'])
         ) {
             $data['responsible_agent_id'] = $authUser->id;
@@ -180,8 +176,6 @@ class DealAccess
 
     public function validateMutationTargets(User $authUser, array $data): void
     {
-        $roleSlug = $this->roleSlug($authUser);
-
         if (! $this->isBranchScoped($authUser)) {
             if (($this->scopeType($authUser) === 'hr')) {
                 $pipelineId = $data['pipeline_id'] ?? null;

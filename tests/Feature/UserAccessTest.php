@@ -2045,6 +2045,25 @@ class UserAccessTest extends TestCase
         $this->assertSame($dismissedAgent->id, $pendingProperty->created_by);
     }
 
+    public function test_deal_default_assignee_is_configurable_and_preserves_explicit_choice(): void
+    {
+        $role = Role::create(['name' => 'Custom creator', 'slug' => 'custom_deal_creator']);
+        $actor = User::create(['name' => 'Creator', 'phone' => '900003112', 'role_id' => $role->id, 'status' => 'active']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $access = app(\App\Support\DealAccess::class);
+        foreach ([[], ['deals.defaults.assign_creator'], []] as $rights) {
+            $role->forceFill(['permissions' => $rights])->save();
+            $result = $access->normalizeMutationData([], $actor->fresh());
+            $this->assertSame($rights ? $actor->id : null, $result['responsible_agent_id'] ?? null);
+            $explicit = $access->normalizeMutationData(['responsible_agent_id' => 321], $actor->fresh());
+            $this->assertSame(321, $explicit['responsible_agent_id']);
+        }
+        foreach (['agent', 'mop', 'manager', 'operator', 'rop', 'admin'] as $slug) {
+            $legacy = new Role(['slug' => $slug]);
+            $this->assertSame(in_array($slug, ['agent', 'manager', 'operator']), $legacy->hasPermission('deals.defaults.assign_creator'));
+        }
+    }
+
     public function test_lead_default_assignee_is_configurable_without_overriding_explicit_choice(): void
     {
         $role = Role::create(['name' => 'Custom creator', 'slug' => 'custom_lead_creator']);

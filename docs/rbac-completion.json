@@ -202,6 +202,13 @@
           "logs": [
             "/tmp/aura-rbac-assignment-policies.log"
           ]
+        },
+        {
+          "change": "Общий observer клиентов, лидов и сделок теперь использует users.subject.assignment_group_required для проверки группы, филиала и активности ответственного. Автоназначение ответственного сделки перенесено в deals.defaults.assign_creator с исходными agent/manager/operator. Неиспользуемые helpers isPrivilegedRole/isBranchScopedManager/isMop удалены после поиска вызовов.",
+          "verification": "172 теста / 3787 проверок прошли: API управления пользователями, группы, каталог прав и границы филиала, настраиваемый ответственный сделки и общий observer.",
+          "logs": [
+            "/tmp/aura-rbac-crm-final-policies.log"
+          ]
         }
       ],
       "remaining_checks": [
@@ -408,12 +415,20 @@
       "app/Http/Controllers/DailyReportController.php",
       "app/Http/Controllers/AttendanceWebController.php"
     ],
-    "pending_followups": [
+    "pending_followups": [],
+    "classified_business_references": [
       {
         "file": "app/Services/PropertyReportStaff.php",
-        "reason": "Колонки РОП/МОП отражают должности и комиссии; классифицировать как бизнес-данные после проверки потребителей."
+        "classification": "presentation_and_commission_participants",
+        "evidence": [
+          "app/Http/Controllers/PropertyController.php::myProperties calls attach only with properties.reports.economics",
+          "app/profile/reports/objects/page.tsx frontend columns РОП/МОП display report_rop/report_mop names, commission amount and currency",
+          "tests/Feature/PropertyMyPropertiesBranchFilterTest.php checks paid ROP amount and absence without report access"
+        ],
+        "decision": "Сохраняются должности участников выплат и текущие организационные связи. Это содержание отчёта, а не правило допуска читателя."
       }
-    ]
+    ],
+    "audit_note": "Дополнительный поиск по всему app выявил observer и DealAccess вне первоначального списка; оба перенесены. Pending followups очищен только для разобранного списка, полный аудит сервера и frontend остаётся открытым."
   },
   "execution_rules": [
     "Работать по одному открытому пункту, указывать конкретные завершённые подпункты и доказательства.",

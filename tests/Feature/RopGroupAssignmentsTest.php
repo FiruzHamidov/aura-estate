@@ -1237,6 +1237,9 @@ class RopGroupAssignmentsTest extends TestCase
             $role->forceFill(['permissions' => $rights])->save();
             foreach ([$this->a, $this->b] as $group) {
                 $checks = [
+                    fn () => app(\App\Observers\GroupOwnedRecordObserver::class)->saving(new Client([
+                        'responsible_agent_id' => $employee->id, 'branch_group_id' => $group->id,
+                        'branch_id' => $this->branch->id, 'full_name' => 'New client'])),
                     fn () => $lock->invoke($controller, $this->admin, null, ['agent_id' => $employee->id, 'branch_group_id' => $group->id]),
                     fn () => app(\App\Services\GroupAccess\TaskGroupOwnership::class)->validate(
                         new \App\Models\CrmTask(['assignee_id' => $employee->id, 'branch_group_id' => $group->id, 'status' => 'pending']), $this->admin),

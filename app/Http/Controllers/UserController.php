@@ -38,16 +38,6 @@ class UserController extends Controller
         return $user?->role?->slug;
     }
 
-    private function isPrivilegedRole(?string $roleSlug): bool
-    {
-        return in_array($roleSlug, ['superadmin', 'admin', 'marketing', 'hr'], true);
-    }
-
-    private function isBranchScopedManager(?string $roleSlug): bool
-    {
-        return in_array($roleSlug, ['branch_director', 'rop'], true);
-    }
-
     private function visibleUsersQuery(User $authUser, bool $includeUnassigned = false, bool $includeClients = true)
     {
         $query = User::query()->with(['role', 'branch', 'branchGroup']);
