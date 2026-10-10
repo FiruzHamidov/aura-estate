@@ -1403,6 +1403,32 @@ class PropertyModerationWorkflowTest extends TestCase
         } finally { $this->travelBack(); }
     }
 
+    public function test_analytics_agent_filter_uses_assignee_with_creator_fallback_and_combines_scopes(): void
+    {
+        (require database_path('migrations/2026_10_10_080000_add_property_contact_counters.php'))->up();
+        (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedInteger('views_count')->default(0));
+        [$agent, $admin] = $this->users();
+        $role = Role::firstOrCreate(['slug' => 'admin'], ['name' => 'Admin']);
+        $admin->forceFill(['role_id' => $role->id])->save();
+        $admin->unsetRelation('role');
+        $other = User::forceCreate(['name' => 'Other agent', 'phone' => '900000099', 'role_id' => $agent->role_id, 'branch_id' => 2, 'status' => 'active']);
+        DB::table('branch_groups')->insert(['id' => 2, 'branch_id' => 2, 'name' => 'Other']);
+        $own = $this->publishedProperty($agent);
+        $fallback = $this->publishedProperty($agent, ['agent_id' => null]);
+        $reassigned = $this->publishedProperty($agent, ['agent_id' => $other->id, 'branch_id' => 2, 'branch_group_id' => 2]);
+        DB::table('property_analytics_daily')->insert(['property_id' => $own->id, 'day' => '2026-10-10', 'phone_clicks' => 7]);
+        $this->actingAs($admin);
+        $url = '/api/marketing/property-contact-analytics';
+        $response = $this->getJson($url.'?agent_id='.$agent->id)->assertOk()->assertJsonPath('total', 2);
+        $this->assertEqualsCanonicalizing([$own->id, $fallback->id], array_column($response->json('data'), 'id'));
+        $this->getJson($url.'?agent_id='.$agent->id.'&period=custom&date_from=2026-10-10&date_to=2026-10-10&branch_id=1&group_id=1&sort=phone_clicks')
+            ->assertOk()->assertJsonPath('data.0.phone_clicks', 7)->assertJsonCount(1, 'agents')->assertJsonPath('agents.0.id', $agent->id);
+        $this->getJson($url.'?agent_id='.$other->id.'&branch_id=2&group_id=2')->assertOk()->assertJsonPath('data.0.id', $reassigned->id);
+        $this->getJson($url.'?agent_id='.$other->id.'&branch_id=1')->assertOk()->assertJsonPath('total', 0);
+        $this->getJson($url.'?agent_id=999999')->assertUnprocessable();
+    }
+
     private function detectedDuplicateFixture(): array
     {
         Schema::table('properties', fn (Blueprint $table) => $table->string('landmark')->nullable());

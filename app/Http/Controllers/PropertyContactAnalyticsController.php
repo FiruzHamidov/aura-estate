@@ -28,6 +28,7 @@ class PropertyContactAnalyticsController extends Controller
             'period' => ['sometimes', Rule::in(['all', 'today', 'week', 'month', 'custom'])],
             'date_from' => ['required_if:period,custom', 'nullable', 'date_format:Y-m-d'],
             'date_to' => ['required_if:period,custom', 'nullable', 'date_format:Y-m-d', 'after_or_equal:date_from'],
+            'agent_id' => ['nullable', 'integer', 'exists:users,id'],
             'branch_id' => ['nullable', 'integer', 'exists:branches,id'],
             'group_id' => ['nullable', 'integer', Rule::exists('branch_groups', 'id')->where(fn ($q) => $request->filled('branch_id') ? $q->where('branch_id', $request->integer('branch_id')) : $q)],
             'page' => ['sometimes', 'integer', 'min:1'],
@@ -54,6 +55,7 @@ class PropertyContactAnalyticsController extends Controller
         $query->selectRaw("(COALESCE($prefix.phone_clicks, 0) + COALESCE($prefix.chat_clicks, 0) + COALESCE($prefix.whatsapp_clicks, 0)) as total_clicks");
         if (! empty($data['branch_id'])) $query->where('p.branch_id', $data['branch_id']);
         if (! empty($data['group_id'])) $query->where('p.branch_group_id', $data['group_id']);
+        if (! empty($data['agent_id'])) $query->whereRaw('COALESCE(p.agent_id, p.created_by) = ?', [(int) $data['agent_id']]);
         if ($search = trim($data['search'] ?? '')) {
             $query->where(function ($q) use ($search) {
                 $q->where('title', 'like', '%'.$search.'%')->orWhere('address', 'like', '%'.$search.'%');
@@ -65,6 +67,13 @@ class PropertyContactAnalyticsController extends Controller
         $result['tracking_started_at'] = DB::table('property_analytics_coverage')->where('id', 1)->value('started_at');
         $result['branches'] = DB::table('branches')->select('id', 'name')->orderBy('name')->get();
         $result['groups'] = DB::table('branch_groups')->select('id', 'name', 'branch_id')->orderBy('name')->get();
+        // Options follow the same property ownership and organization scope as the rows.
+        $result['agents'] = DB::table('users as u')->select('u.id', 'u.name')
+            ->whereExists(function ($q) use ($data) {
+                $q->selectRaw('1')->from('properties as owned')->whereRaw('COALESCE(owned.agent_id, owned.created_by) = u.id');
+                if (! empty($data['branch_id'])) $q->where('owned.branch_id', $data['branch_id']);
+                if (! empty($data['group_id'])) $q->where('owned.branch_group_id', $data['group_id']);
+            })->orderBy('u.name')->orderBy('u.id')->get();
         return response()->json($result);
     }
 }
