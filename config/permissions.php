@@ -693,6 +693,12 @@ foreach (['view' => ['Просмотр своих напоминаний', 'Чт
 }
 $permissions['daily_reports.reminders.site'] = ['group' => 'Ежедневные отчёты', 'name' => 'Настройки напоминаний в профиле', 'description' => 'Показывает карточку личного напоминания в профиле. Требуется просмотр своих напоминаний; изменение включается отдельным правом.', 'roles' => ['agent', 'mop']];
 
+foreach (['view' => ['Просмотр настроек отслеживания', 'Чтение режима, расписания, интервалов и срока хранения координат сотрудника.'], 'update' => ['Изменение настроек отслеживания', 'Изменение режима, расписания и параметров отслеживания сотрудника с обязательной причиной и записью в аудит. Сам сотрудник должен иметь право передачи местоположения.']] as $action => [$name, $description]) {
+    $permissions['locations.settings.'.$action] = ['group' => 'Местоположение', 'name' => $name, 'description' => $description.' Требуется область настройки отслеживания.', 'roles' => ['admin', 'superadmin', 'branch_director'], 'sensitive' => $action === 'update'];
+}
+$permissions['locations.settings.scope.all'] = ['group' => 'Местоположение', 'name' => 'Настройка отслеживания всех филиалов', 'description' => 'Доступ к настройкам отслеживания сотрудников всех филиалов. Просмотр и изменение разрешаются отдельно.', 'roles' => ['admin', 'superadmin'], 'exclusive_group' => 'locations.settings.scope'];
+$permissions['locations.settings.scope.branch'] = ['group' => 'Местоположение', 'name' => 'Настройка отслеживания своего филиала', 'description' => 'Доступ к настройкам сотрудников своего назначенного филиала, которым разрешена передача местоположения. Просмотр и изменение разрешаются отдельно.', 'roles' => ['branch_director'], 'exclusive_group' => 'locations.settings.scope'];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],

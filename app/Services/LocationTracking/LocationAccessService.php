@@ -21,7 +21,7 @@ class LocationAccessService
     public function assertCanTransmit(User $user): void
     {
         if (! $user->hasPermission('locations.transmit')) {
-            $this->deny(self::FORBIDDEN_ROLE, 'Передача местоположения доступна только агентам и МОПам.');
+            $this->deny(self::FORBIDDEN_ROLE, 'Вашей роли не разрешена передача местоположения.');
         }
     }
 
@@ -95,20 +95,19 @@ class LocationAccessService
         }
     }
 
-    public function assertCanConfigure(User $actor, User $target): void
+    public function assertCanConfigure(User $actor, User $target, bool $write = true): void
     {
-        $role = $this->role($actor);
-
-        if (in_array($role, ['admin', 'superadmin'], true)) {
-            return;
+        if (! $actor->hasPermission($write ? 'locations.settings.update' : 'locations.settings.view')) {
+            $this->deny(self::FORBIDDEN_SCOPE, 'Нет доступа к настройкам отслеживания пользователя.');
         }
-
-        if ($role === 'branch_director'
+        if ($actor->hasRole('rop')) {
+            app(\App\Support\RopGroupAccess::class)->ensureEmployee($actor, $target->id);
+        }
+        if ($actor->hasPermission('locations.settings.scope.all')) return;
+        if ($actor->hasPermission('locations.settings.scope.branch')
             && $actor->branch_id !== null
             && (int) $actor->branch_id === (int) $target->branch_id
-            && in_array($this->role($target), ['agent', 'mop'], true)) {
-            return;
-        }
+            && $target->hasPermission('locations.transmit')) return;
 
         $this->deny(self::FORBIDDEN_SCOPE, 'Нет права изменять настройки отслеживания пользователя.');
     }

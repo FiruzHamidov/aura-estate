@@ -10,9 +10,7 @@ class LocationTrackingPolicyService
 {
     public function isEligible(User $user): bool
     {
-        $user->loadMissing('role');
-
-        return in_array($user->role?->slug, config('location_tracking.tracked_roles', []), true);
+        return $user->hasPermission('locations.transmit');
     }
 
     public function settingsFor(User $user): UserLocationTrackingSetting

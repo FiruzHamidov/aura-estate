@@ -479,6 +479,50 @@ class LocationTrackingFeatureTest extends TestCase
         $this->assertSame($context['groupA1']->id, (int) $point->branch_group_id);
     }
 
+    public function test_custom_location_transmission_permission_controls_runtime_policy(): void
+    {
+        $context = $this->context();
+        $role = Role::create(['name' => 'Custom tracked', 'slug' => 'custom_tracked']);
+        $user = $this->user($role, $context['branchA'], $context['groupA1'], 'Custom');
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        foreach ([[], ['locations.transmit'], []] as $permissions) {
+            $role->forceFill(['permissions' => $permissions])->save();
+            Sanctum::actingAs($user->fresh());
+            $this->getJson('/api/location-tracking/me/policy')->assertOk()
+                ->assertJsonPath('data.eligible_for_location_permission', $permissions !== [])
+                ->assertJsonPath('data.tracking_enabled', $permissions !== []);
+            $this->putJson('/api/location-tracking/me/device', $this->devicePayload())->assertStatus($permissions !== [] ? 200 : 403);
+        }
+    }
+
+    public function test_location_configuration_permissions_separate_action_and_branch_scope(): void
+    {
+        $context = $this->context();
+        $role = Role::create(['name' => 'Custom manager', 'slug' => 'custom_location_manager']);
+        $actor = $this->user($role, $context['branchA'], null, 'Manager');
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $local = '/api/location-tracking/admin/users/'.$context['agentA']->id.'/settings';
+        $foreign = '/api/location-tracking/admin/users/'.$context['agentB']->id.'/settings';
+        $data = ['mode' => 'off', 'change_reason' => 'Permission test'];
+        $role->forceFill(['permissions' => ['locations.settings.view', 'locations.settings.scope.branch']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson($local)->assertOk();
+        $this->getJson($foreign)->assertForbidden();
+        $this->patchJson($local, $data)->assertForbidden();
+        $role->forceFill(['permissions' => ['locations.settings.update', 'locations.settings.scope.branch']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson($local)->assertForbidden();
+        $this->patchJson($local, $data)->assertOk()->assertJsonPath('data.mode', 'off');
+        $this->patchJson($foreign, $data)->assertForbidden();
+        $role->forceFill(['permissions' => ['locations.settings.update', 'locations.settings.scope.all']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson($foreign, $data)->assertOk();
+        $this->patchJson('/api/location-tracking/admin/users/'.$context['admin']->id.'/settings', $data)->assertStatus(422);
+        $role->forceFill(['permissions' => ['locations.settings.update']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->patchJson($local, $data)->assertForbidden();
+    }
+
     private function context(): array
     {
         $roles = collect(['agent', 'mop', 'rop', 'branch_director', 'admin'])
