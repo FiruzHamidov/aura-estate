@@ -35,6 +35,7 @@ class DailyReportController extends Controller
     public function status(Request $request)
     {
         $user = $this->authUser();
+        abort_unless($user->hasPermission('daily_reports.self_history.view'), 403, 'Forbidden');
         $payload = $this->dailyReports->reportStatusPayload($user, $request->input('report_date'));
         $reportDate = (string) ($payload['report_date'] ?? $this->dailyReports->defaultReportDate($user));
         $report = $payload['report'] ?? null;
@@ -164,6 +165,7 @@ class DailyReportController extends Controller
         ]);
 
         $actor = $this->authUser();
+        abort_unless($actor->hasPermission('daily_reports.self_history.view'), 403, 'Forbidden');
         $query = DailyReport::query()->with(['user.role', 'user.branch', 'user.branchGroup', 'branchGroup', 'historicalRole'])
             ->where('user_id', $actor->id)
             ->orderByDesc('report_date');
@@ -189,6 +191,7 @@ class DailyReportController extends Controller
         abort_unless($this->isDate($date), 422, 'Invalid report date.');
 
         $user = $this->authUser();
+        abort_unless($user->hasPermission('daily_reports.self_history.view'), 403, 'Forbidden');
         $report = DailyReport::query()
             ->where('user_id', $user->id)
             ->whereDate('report_date', $date)
@@ -496,6 +499,7 @@ class DailyReportController extends Controller
             $user = $this->authUser();
             $reportDate = $validated['report_date'] ?? $this->dailyReports->defaultReportDate($user);
             [$user, $existing] = $this->lockOwnReport($user, $reportDate);
+            abort_unless($user->hasPermission('daily_reports.self_submit.create'), 403, 'Forbidden');
             $access = app(\App\Support\RopGroupAccess::class);
             if ($existing) $access->ensureVisible($user, $existing);
             $context = $this->reportContextUser($user, $existing);
@@ -1138,8 +1142,7 @@ class DailyReportController extends Controller
             return true;
         }
 
-        $role = $actor->role?->slug;
-        if (in_array($role, ['admin', 'superadmin', 'owner', 'rop', 'branch_director'], true)) {
+        if ($actor->hasPermission('daily_reports.submitted.override')) {
             return true;
         }
 
@@ -1147,7 +1150,7 @@ class DailyReportController extends Controller
             return true;
         }
 
-        if (in_array($role, ['agent', 'intern', 'mop'], true) && $this->isDateLocked($targetUser, $reportDate)) {
+        if (! $actor->hasPermission('daily_reports.locked_period.override') && $this->isDateLocked($targetUser, $reportDate)) {
             return false;
         }
 

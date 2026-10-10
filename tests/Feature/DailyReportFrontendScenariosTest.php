@@ -449,6 +449,36 @@ class DailyReportFrontendScenariosTest extends TestCase
         $this->patchJson('/api/daily-reports/'.$reports['agentA'], ['comment' => 'No scope'])->assertForbidden();
     }
 
+    public function test_legacy_self_routes_require_explicit_history_submission_and_repeat_edit_grants(): void
+    {
+        [$users, $reports] = $this->seedContext();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $actor = $users['agentA'];
+        $role = $actor->role;
+        DailyReport::findOrFail($reports['agentA'])->update(['submitted_at' => null]);
+        $role->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($actor->fresh());
+        $paths = ['/api/daily-reports/status?report_date=2026-05-01', '/api/daily-reports/my', '/api/daily-reports/my/2026-05-01'];
+        foreach ($paths as $path) $this->getJson($path)->assertForbidden();
+        $payload = ['report_date' => '2026-05-01', 'calls_count' => 12, 'comment' => 'Submitted'];
+        $this->postJson('/api/daily-reports', $payload)->assertForbidden();
+        $role->forceFill(['permissions' => ['daily_reports.self_history.view']])->save();
+        Sanctum::actingAs($actor->fresh());
+        foreach ($paths as $path) $this->getJson($path)->assertOk();
+        $this->postJson('/api/daily-reports', $payload)->assertForbidden();
+        $role->forceFill(['permissions' => ['daily_reports.self_submit.create']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/daily-reports', $payload)->assertCreated();
+        $this->postJson('/api/daily-reports', [...$payload, 'comment' => 'Repeat denied'])->assertForbidden();
+        $role->forceFill(['permissions' => ['daily_reports.self_submit.create', 'daily_reports.submitted.override', 'daily_reports.own.edit']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/daily-reports', [...$payload, 'comment' => 'Repeat allowed'])->assertCreated()->assertJsonPath('comment', 'Repeat allowed');
+        $this->putJson('/api/kpi/daily/my-report/draft', ['report_date' => '2026-05-01', 'ads' => 1, 'calls' => 2])->assertForbidden()->assertJsonPath('code', 'KPI_SUBMITTED_EDIT_FORBIDDEN');
+        $role->forceFill(['permissions' => ['daily_reports.submitted.override']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $this->postJson('/api/daily-reports', $payload)->assertForbidden();
+    }
+
     private function seedContext(): array
     {
         $roles = [

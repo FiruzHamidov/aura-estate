@@ -38,7 +38,7 @@ class PermissionCatalog
         // Existing custom roles could read contacts explicitly shared with their users.
         // New roles still start without grants; this exception applies only to the migration.
         if ($roleSlug !== null && ! in_array($roleSlug, [...array_column(\App\Models\Role::systemRoles(), 'slug'), 'owner'], true)) {
-            $defaults = [...$defaults, 'clients.shared.view', 'clients.attach', 'clients.duplicates.search', 'bookings.scope.all', 'bookings.create', 'bookings.update.own', 'bookings.reports.view', 'tasks.scope.own', 'tasks.create', 'tasks.update', 'tasks.assign.all', 'stories.own.view', 'stories.create', 'stories.update', 'stories.delete', 'stories.status', 'messaging.groups.manage_own', 'daily_reports.locked_period.override', 'daily_reports.list.scope.own'];
+            $defaults = [...$defaults, 'clients.shared.view', 'clients.attach', 'clients.duplicates.search', 'bookings.scope.all', 'bookings.create', 'bookings.update.own', 'bookings.reports.view', 'tasks.scope.own', 'tasks.create', 'tasks.update', 'tasks.assign.all', 'stories.own.view', 'stories.create', 'stories.update', 'stories.delete', 'stories.status', 'messaging.groups.manage_own', 'daily_reports.locked_period.override', 'daily_reports.list.scope.own', 'daily_reports.self_history.view', 'daily_reports.self_submit.create'];
             foreach (array_keys(config('catalog_permissions', [])) as $catalog) $defaults[] = 'catalogs.entries.'.$catalog.'.manage';
         }
 

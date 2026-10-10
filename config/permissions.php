@@ -606,6 +606,11 @@ $permissions['daily_reports.site.view'] = ['group' => 'Ежедневные от
 $permissions['daily_reports.site.own'] = ['group' => 'Ежедневные отчёты', 'name' => 'Личный блок на сайте', 'description' => 'Показывает личную форму и историю отчётов на странице сайта. Требуется право просмотра своего отчёта; сохранение требует права изменения.', 'roles' => ['agent', 'mop', 'intern']];
 $permissions['daily_reports.site.team'] = ['group' => 'Ежедневные отчёты', 'name' => 'Командный блок на сайте', 'description' => 'Показывает список отчётов с фильтрами на странице сайта. Нужна область доступа к списку; редактирование использует отдельные права карточки сотрудника.', 'roles' => ['admin', 'superadmin', 'rop', 'branch_director', 'mop', 'owner']];
 
+$dailyLegacyRoles = [...array_column((require __DIR__.'/roles.php')['system'], 'slug'), 'owner'];
+$permissions['daily_reports.self_history.view'] = ['group' => 'Ежедневные отчёты', 'name' => 'Статус и история своих отчётов', 'description' => 'Просмотр статуса отправки, списка своих отчётов и отчёта за дату через общий API. Личная KPI-форма имеет отдельное право просмотра. По умолчанию доступ сохранён для всех прежних ролей.', 'roles' => $dailyLegacyRoles];
+$permissions['daily_reports.self_submit.create'] = ['group' => 'Ежедневные отчёты', 'name' => 'Отправка своего отчёта через общий API', 'description' => 'Сохранение собственного отчёта через общий API ежедневных отчётов. Новая личная KPI-форма регулируется отдельным правом изменения. Периоды, финализация и повторная отправка проверяются отдельно.', 'roles' => $dailyLegacyRoles];
+$permissions['daily_reports.submitted.override'] = ['group' => 'Ежедневные отчёты', 'name' => 'Повторная правка отправленного отчёта', 'description' => 'Разрешает правку уже отправленного отчёта через общий API и карточку сотрудника без персонального разрешения повторной правки. Требуются права самой операции. Дедлайн, финализация и блокировка периода сохраняются; новая личная KPI-форма остаётся закрыта после отправки.', 'roles' => ['admin', 'superadmin', 'owner', 'rop', 'branch_director'], 'sensitive' => true];
+
 $assignments = [
     'marketing' => ['marketing', 'branch_director', 'rop', 'mop', 'agent', 'external_agent', 'manager', 'operator', 'intern', 'client'],
     'hr' => ['intern', 'agent', 'mop', 'manager', 'operator', 'reels_manager', 'rop', 'client'],
