@@ -70,6 +70,16 @@ final class PropertyModerationAccess
         return $user->hasPermission('properties.transfer') && $this->canModerate($user, $property);
     }
 
+    public function canRequestPromotion(User $user, Property $property): bool
+    {
+        return $user->hasPermission('properties.promotions.request') && $this->canEdit($user, $property);
+    }
+
+    public function canManagePromotion(User $user, Property $property): bool
+    {
+        return $user->hasPermission('properties.promotions.manage') && $this->canModerate($user, $property);
+    }
+
     public function canManageDeal(User $user, Property $property): bool
     {
         if ($user->hasRole('rop') && ! app(RopGroupAccess::class)->allows($user, $property)) return false;
@@ -166,6 +176,9 @@ final class PropertyModerationAccess
                 'can_manage_deal' => false,
                 'can_assign_deal_users' => false,
                 'can_reopen_listing' => false,
+                'can_withdraw_promotion_request' => false,
+                'can_revoke_promotion' => false,
+                'can_reject_promotion' => false,
                 'can_request_promotion' => false,
                 'can_approve_promotion' => false,
                 'can_manage_promotion_directly' => false,
@@ -219,9 +232,12 @@ final class PropertyModerationAccess
             'can_manage_deal' => $this->canManageDeal($user, $property),
             'can_assign_deal_users' => $this->canManageDeal($user, $property) && $user->hasPermission('properties.deal.assign_users'),
             'can_reopen_listing' => $canModerate && $property->needsReopening(),
-            'can_request_promotion' => $canEdit && in_array($property->publication_status, ['published', 'pending'], true) && $requestedPromotions->isEmpty(),
-            'can_approve_promotion' => $canModerate && $isPublished && $requestedPromotions->isNotEmpty(),
-            'can_manage_promotion_directly' => $canModerate && $isPublished,
+            'can_withdraw_promotion_request' => $this->canRequestPromotion($user, $property),
+            'can_revoke_promotion' => $this->canManagePromotion($user, $property),
+            'can_reject_promotion' => $this->canManagePromotion($user, $property) && $requestedPromotions->isNotEmpty(),
+            'can_request_promotion' => $this->canRequestPromotion($user, $property) && in_array($property->publication_status, ['published', 'pending'], true) && $requestedPromotions->isEmpty(),
+            'can_approve_promotion' => $this->canManagePromotion($user, $property) && $isPublished && $requestedPromotions->isNotEmpty(),
+            'can_manage_promotion_directly' => $this->canManagePromotion($user, $property) && $this->canRequestPromotion($user, $property) && $isPublished,
             'can_withdraw_changes' => $canEdit,
             'can_withdraw_listing' => $canEdit,
             'submit_requires_review' => $canEdit && (array) $property->approved_content_snapshot !== [],

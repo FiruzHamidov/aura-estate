@@ -847,6 +847,47 @@ class PropertyModerationWorkflowTest extends TestCase
         }
     }
 
+    public function test_custom_role_promotion_request_and_management_are_independent(): void
+    {
+        [$actor] = $this->users();
+        $property = Property::create($this->propertyPayload($actor, ['publication_status' => 'published', 'moderation_status' => 'approved', 'moderation_version' => 1]));
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role = Role::create(['name' => 'Promotion worker', 'slug' => 'promotion_worker', 'permissions' => []]);
+        $actor->forceFill(['role_id' => $role->id])->save();
+        $grant = function (array $permissions) use ($role, $actor): User {
+            $role->forceFill(['permissions' => ['properties.edit', 'properties.moderate', ...$permissions]])->save();
+            $fresh = $actor->fresh();
+            $this->actingAs($fresh);
+            return $fresh;
+        };
+        $denied = function (callable $action): void {
+            try { $action(); $this->fail('The promotion action must require its permission.'); }
+            catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) { $this->assertSame(403, $e->getStatusCode()); }
+        };
+        $service = app(PropertyPromotionService::class);
+        $access = app(PropertyModerationAccess::class);
+        $fresh = $grant([]);
+        $denied(fn () => $service->request($property, $fresh, 'vip', 'Проверка доступа', 7, 1));
+        $fresh = $grant(['properties.promotions.request']);
+        $promotion = $service->request($property, $fresh, 'vip', 'Проверка доступа', 7, 1);
+        $this->assertSame('requested', $promotion->status);
+        $this->assertTrue($access->capabilities($fresh, $property->fresh())['can_withdraw_promotion_request']);
+        $denied(fn () => $service->approve($promotion, $fresh, 7, 'Проверено', $promotion->version));
+        $fresh = $grant(['properties.promotions.manage']);
+        $this->assertTrue($access->capabilities($fresh, $property->fresh())['can_approve_promotion']);
+        $this->assertFalse($access->capabilities($fresh, $property->fresh())['can_manage_promotion_directly']);
+        $promotion = $service->approve($promotion, $fresh, 7, 'Проверено', $promotion->version);
+        $this->assertSame('active', $promotion->status);
+        $stale = $fresh;
+        $fresh = $grant([]);
+        $denied(fn () => $service->revoke($promotion, $fresh, 'Отмена', $promotion->version));
+        $denied(fn () => $service->setType($property->fresh(), $stale, 'regular', 7, 'Отмена', $property->fresh()->moderation_version));
+        $this->assertSame('active', $promotion->fresh()->status);
+        $fresh = $grant(['properties.promotions.manage']);
+        $service->revoke($promotion, $fresh, 'Отмена', $promotion->version);
+        $this->assertSame('regular', $property->fresh()->listing_type);
+    }
+
     public function test_owner_can_cancel_pending_promotion_but_cannot_revoke_active_promotion(): void
     {
         [$agent, $rop] = $this->users();
