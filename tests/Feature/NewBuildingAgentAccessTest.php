@@ -441,6 +441,13 @@ class NewBuildingAgentAccessTest extends TestCase
         Sanctum::actingAs($actor->fresh());
         $this->getJson('/api/admin/new-buildings')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $own->id);
         $this->getJson('/api/admin/new-buildings/'.$foreign->id)->assertForbidden();
+        foreach (['client', 'external_agent', 'accountant'] as $slug) {
+            $role->forceFill(['slug' => $slug])->save();
+            Sanctum::actingAs($actor->fresh());
+            $this->getJson('/api/admin/new-buildings')->assertOk()->assertJsonCount(1, 'data');
+            $this->getJson('/api/admin/new-buildings/'.$foreign->id)->assertForbidden();
+            $this->putJson('/api/new-buildings/'.$own->id, ['version' => 1, 'publication_status' => 'archived'])->assertForbidden();
+        }
         $role->forceFill(['slug' => 'admin', 'permissions' => ['new_buildings.manage', 'new_buildings.manage_all']])->save();
         Sanctum::actingAs($actor->fresh());
         $this->getJson('/api/admin/new-buildings')->assertOk()->assertJsonCount(2, 'data');

@@ -25,18 +25,54 @@ class EnsureUserIsNotClient
             if ($user?->hasPermission($permission)) return $next($request);
         }
 
+        // Photo mutations enforce both permission and ownership before validation;
+        // keep their established denial response and group-scope checks.
+        if (in_array($action, [
+            \App\Http\Controllers\PropertyPhotoController::class.'@store',
+            \App\Http\Controllers\PropertyPhotoController::class.'@destroy',
+            \App\Http\Controllers\PropertyPhotoController::class.'@reorder',
+        ], true)) return $next($request);
+
         // Catalog mutation grants replace the old internal-role blanket access.
         foreach (config('catalog_permissions', []) as $catalog => $definition) {
             $controller = 'App\\Http\\Controllers\\'.$definition['controller'].'@';
             if (!$action || !str_starts_with($action, $controller)) continue;
             $allowed = $user?->hasPermission('catalogs.entries.'.$catalog.'.manage');
-            if (!$request->isMethodSafe()) abort_unless($allowed, 403, 'FORBIDDEN_ACTION');
-            if ($allowed) return $next($request);
-            break;
+            abort_unless($allowed || ($request->isMethodSafe() && $user?->hasPermission('catalogs.details.view')), 403, 'FORBIDDEN_ACTION');
+            return $next($request);
         }
 
         if ($request->is('api/roles', 'api/roles/*')
             && ($user?->hasPermission('roles.manage') || ($request->isMethodSafe() && $user?->hasPermission('roles.view')))) {
+            return $next($request);
+        }
+
+        if ($action && str_starts_with($action, 'App\\Http\\Controllers\\SelectionController@')) {
+            $permission = str_ends_with($action, '@store') ? 'selections.create' : 'selections.view';
+            abort_unless($user?->hasPermission($permission), 403, 'FORBIDDEN_ACTION');
+            return $next($request);
+        }
+
+        // These controllers enforce action grants and resource scope after admission.
+        [$controller] = explode('@', $action ?? '', 2);
+        if (in_array($controller, [
+            \App\Http\Controllers\NewBuildingController::class,
+            \App\Http\Controllers\NewBuildingBlockController::class,
+            \App\Http\Controllers\NewBuildingPhotoController::class,
+            \App\Http\Controllers\DeveloperUnitController::class,
+            \App\Http\Controllers\DeveloperUnitPhotoController::class,
+            \App\Http\Controllers\ResidentialStructureController::class,
+            \App\Http\Controllers\ResidentialPlanController::class,
+        ], true) && $user?->hasPermission('new_buildings.manage')) {
+            return $next($request);
+        }
+        if (in_array($controller, [
+            \App\Http\Controllers\ClientTypeController::class,
+            \App\Http\Controllers\ClientNeedTypeController::class,
+            \App\Http\Controllers\ClientNeedStatusController::class,
+        ], true)) {
+            abort_unless($user?->hasPermission('clients.dictionaries.manage')
+                || ($request->isMethodSafe() && $user?->hasPermission('catalogs.details.view')), 403, 'FORBIDDEN_ACTION');
             return $next($request);
         }
 
@@ -104,31 +140,9 @@ class EnsureUserIsNotClient
         if ($request->is('api/reels', 'api/reels/*') && $user?->hasPermission('reels.view')
             && ($user->hasPermission('reels.scope.all') || $user->hasPermission('reels.scope.branch'))) return $next($request);
 
-        // HR can select existing roles/groups, but cannot change these dictionaries.
-        if ($user?->role?->slug === 'hr'
-            && $request->is('api/roles', 'api/roles/*', 'api/branch-groups', 'api/branch-groups/*')
-            && ! in_array($request->method(), ['GET', 'HEAD'], true)) {
-            return response()->json(['message' => 'Forbidden'], 403);
-        }
-
-        // Accountants can read the objects report and its filters, not modify properties or dictionaries.
-        if ($user?->role?->slug === 'accountant') {
-            if (in_array($request->method(), ['GET', 'HEAD'], true)
-                && (in_array($request->path(), ['api/roles', 'api/branch-groups', 'api/my-properties', 'api/branches', 'api/contract-types', 'api/document-types'], true)
-                    || ($request->path() === 'api/user' && $request->boolean('report_agents')))) {
-                return $next($request);
-            }
-
-            return response()->json(['message' => 'Forbidden'], 403);
-        }
-
-        if (in_array($user?->role?->slug, ['client', 'external_agent'], true)) {
-            return response()->json([
-                'message' => 'Forbidden',
-            ], 403);
-        }
-
-        return $next($request);
+        // Admission is explicit; controllers still enforce actions and record scope.
+        // New internal routes must declare their entry permission here.
+        return response()->json(['message' => 'Forbidden', 'code' => 'FORBIDDEN_ACTION'], 403);
     }
 
     private function propertyActionGrants(?string $action): array
