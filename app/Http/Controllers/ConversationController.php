@@ -164,10 +164,16 @@ class ConversationController extends Controller
         $authUser = $this->authUser();
         $validated = $request->validate([
             'search' => 'nullable|string|max:100',
+            'for_site' => 'nullable|boolean',
             'per_page' => 'nullable|integer|min:1|max:50',
         ]);
 
-        $query = $this->access->eligibleDirectUsers($authUser, directoryOnly: true);
+        $forSite = $request->boolean('for_site');
+        $query = $this->access->eligibleDirectUsers($authUser, directoryOnly: ! $forSite);
+        if ($forSite) {
+            $query->whereIn('role_id', $this->access->roleIdsWithPermission('messaging.personal.site'));
+            if (! $authUser->hasPermission('messaging.personal.site')) $query->whereRaw('1 = 0');
+        }
 
         if (filled($validated['search'] ?? null)) {
             $query->where('name', 'like', '%'.trim($validated['search']).'%');

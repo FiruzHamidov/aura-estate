@@ -18,16 +18,6 @@ class MessageAccessService
         'operator',
     ];
 
-    private const GLOBAL_PERSONAL_MESSAGING_ROLE_SLUGS = [
-        'admin',
-        'superadmin',
-        'owner',
-        'marketing',
-        'hr',
-        'accountant',
-        'reels_manager',
-    ];
-
     public function roleSlug(?User $user): ?string
     {
         $user?->loadMissing('role');
@@ -38,16 +28,6 @@ class MessageAccessService
     public function canJoinGroup(?User $user): bool
     {
         return $user?->hasPermission('messaging.groups.join') ?? false;
-    }
-
-    public function isClient(?User $user): bool
-    {
-        return $this->roleSlug($user) === 'client';
-    }
-
-    public function isAgent(?User $user): bool
-    {
-        return $this->roleSlug($user) === 'agent';
     }
 
     public function isSupportStaff(?User $user): bool
@@ -63,11 +43,11 @@ class MessageAccessService
             return false;
         }
 
-        if ($this->isClient($actor) && $this->isAgent($target)) {
+        if ($actor->hasPermission('messaging.personal.to_agents') && $target->hasPermission('messaging.personal.to_clients')) {
             return true;
         }
 
-        if ($this->isAgent($actor) && $this->isClient($target)) {
+        if ($actor->hasPermission('messaging.personal.to_clients') && $target->hasPermission('messaging.personal.to_agents')) {
             return true;
         }
 
@@ -85,45 +65,32 @@ class MessageAccessService
             ->whereNull('deleted_at')
             ->whereNull('deletion_requested_at');
 
-        if ($this->isClient($actor)) {
-            return $query->whereHas('role', fn (Builder $roles) => $roles->where('slug', 'agent'));
-        }
+        $staffRoles = $this->roleIdsWithPermission('messaging.personal.staff');
+        $globalRoles = $this->roleIdsWithPermission('messaging.personal.global');
+        $agentRoles = $this->roleIdsWithPermission('messaging.personal.to_clients');
+        $clientRoles = $this->roleIdsWithPermission('messaging.personal.to_agents');
 
-        if (! $this->isPersonalStaffUser($actor)) {
-            return $query->whereRaw('1 = 0');
-        }
-
-        $staffRoles = $this->personalStaffRoleSlugs();
-        $globalRoles = self::GLOBAL_PERSONAL_MESSAGING_ROLE_SLUGS;
-
-        return $query->where(function (Builder $eligible) use ($actor, $staffRoles, $globalRoles, $directoryOnly) {
-            $eligible->where(function (Builder $staff) use ($actor, $staffRoles, $globalRoles) {
-                $staff->whereHas('role', fn (Builder $roles) => $roles->whereIn('slug', $staffRoles));
-
-                if (! $this->isGlobalPersonalMessagingUser($actor)) {
-                    $staff->where(function (Builder $scope) use ($actor, $globalRoles) {
-                        $scope->where('branch_id', $actor->branch_id)
-                            ->whereNotNull('branch_id')
-                            ->orWhereHas('role', fn (Builder $roles) => $roles->whereIn('slug', $globalRoles));
-                    });
-                }
-            });
-
-            if ($this->isAgent($actor) && ! $directoryOnly) {
-                $eligible->orWhereHas('role', fn (Builder $roles) => $roles->where('slug', 'client'));
+        return $query->where(function (Builder $eligible) use ($actor, $staffRoles, $globalRoles, $agentRoles, $clientRoles, $directoryOnly) {
+            $eligible->whereRaw('1 = 0');
+            if ($this->isPersonalStaffUser($actor)) {
+                $eligible->orWhere(function (Builder $staff) use ($actor, $staffRoles, $globalRoles) {
+                    $staff->whereIn('role_id', $staffRoles);
+                    if (! $this->isGlobalPersonalMessagingUser($actor)) {
+                        $staff->where(function (Builder $scope) use ($actor, $globalRoles) {
+                            $scope->where('branch_id', $actor->branch_id)->whereNotNull('branch_id')
+                                ->orWhereIn('role_id', $globalRoles);
+                        });
+                    }
+                });
             }
+            if ($actor->hasPermission('messaging.personal.to_agents')) $eligible->orWhereIn('role_id', $agentRoles);
+            if (! $directoryOnly && $actor->hasPermission('messaging.personal.to_clients')) $eligible->orWhereIn('role_id', $clientRoles);
         });
     }
 
-    public function personalStaffRoleSlugs(): array
+    public function roleIdsWithPermission(string $permission): array
     {
-        return collect(Role::systemRoles())
-            ->pluck('slug')
-            ->filter(fn ($slug) => is_string($slug) && ! in_array($slug, ['client', 'external_agent'], true))
-            ->push('owner')
-            ->unique()
-            ->values()
-            ->all();
+        return Role::query()->get()->filter(fn (Role $role) => $role->hasPermission($permission))->modelKeys();
     }
 
     public function canCreateGroupConversation(User $actor, array $participants): bool
@@ -304,12 +271,12 @@ class MessageAccessService
 
     private function isPersonalStaffUser(?User $user): bool
     {
-        return in_array($this->roleSlug($user), $this->personalStaffRoleSlugs(), true);
+        return $user?->hasPermission('messaging.personal.staff') ?? false;
     }
 
     private function isGlobalPersonalMessagingUser(?User $user): bool
     {
-        return in_array($this->roleSlug($user), self::GLOBAL_PERSONAL_MESSAGING_ROLE_SLUGS, true);
+        return $user?->hasPermission('messaging.personal.global') ?? false;
     }
 
     private function isActiveVisibleUser(?User $user): bool
