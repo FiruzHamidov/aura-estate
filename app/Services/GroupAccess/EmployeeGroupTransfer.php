@@ -16,6 +16,7 @@ final class EmployeeGroupTransfer
 
     private function authorize(User $actor, User $employee): void
     {
+        if (app(\App\Support\RopGroupAccess::class)->canAssignUngroupedEmployee($actor, $employee)) return;
         abort_unless($actor->hasPermission('users.group_transfer'), 403, 'FORBIDDEN_ACTION');
         abort_unless($employee->hasPermission('users.subject.group_transfer'), 422, 'EMPLOYEE_ROLE_REQUIRED');
         if ($actor->usesAssignedGroupScope()) {
@@ -27,8 +28,14 @@ final class EmployeeGroupTransfer
         }
     }
 
-    public function destinationQuery(User $actor): \Illuminate\Database\Eloquent\Builder
+    public function destinationQuery(User $actor, bool $initialAssignment = false): \Illuminate\Database\Eloquent\Builder
     {
+        if ($initialAssignment) {
+            abort_unless($actor->usesAssignedGroupScope() && $actor->hasPermission('users.ungrouped.view')
+                && $actor->hasPermission('users.ungrouped.assign'), 403, 'FORBIDDEN_ACTION');
+            return BranchGroup::query()->where('branch_id', $actor->branch_id ?? 0)
+                ->whereIn('id', app(\App\Support\RopGroupAccess::class)->groupsQuery($actor));
+        }
         abort_unless($actor->usesAssignedGroupScope() && $actor->hasPermission('users.group_transfer'), 403, 'FORBIDDEN_ACTION');
         return BranchGroup::query()->where('branch_id', $actor->branch_id ?? 0)
             ->whereHas('rops', fn ($rops) => $rops->where('users.status', User::STATUS_ACTIVE)
@@ -62,8 +69,9 @@ final class EmployeeGroupTransfer
     public function preview(User $actor, User $employee): array
     {
         $this->authorize($actor, $employee);
+        $initialAssignment = app(\App\Support\RopGroupAccess::class)->canAssignUngroupedEmployee($actor, $employee);
         $records = $this->inventory($employee);
-        foreach ($records as $item) $this->records->authorize($actor, $this->records->model($item['type'], $item['id']), employeeTransfer: true);
+        foreach ($records as $item) $this->records->authorize($actor, $this->records->model($item['type'], $item['id']), employeeTransfer: true, ungroupedEmployeeId: $initialAssignment ? $employee->id : null);
         return ['user_id' => $employee->id, 'branch_id' => $employee->branch_id,
             'branch_group_id' => $employee->branch_group_id, 'records' => $records,
             'revision' => $this->revision($employee, $records)];
@@ -78,6 +86,7 @@ final class EmployeeGroupTransfer
             $employee = $users->get($employee->id);
             abort_unless($actor && $employee, 404, 'NOT_FOUND');
             $this->authorize($actor, $employee);
+            $initialAssignment = app(\App\Support\RopGroupAccess::class)->canAssignUngroupedEmployee($actor, $employee);
             // Use the same users → groups → records order as individual record transfers.
             // The unlocked inventory only identifies locks; validate the locked inventory below.
             $groupIds = [$data['branch_group_id'], ...array_column($this->inventory($employee), 'branch_group_id')];
@@ -88,8 +97,8 @@ final class EmployeeGroupTransfer
                 abort_unless((int) $destination->branch_id === (int) $actor->branch_id, 403, 'RBAC_GROUP_SCOPE_VIOLATION');
             }
             if ($actor->usesAssignedGroupScope()) {
-                abort_unless($this->destinationQuery($actor)->whereKey($destination->id)->exists(), 403, 'RBAC_GROUP_SCOPE_VIOLATION');
-                abort_if(! $employee->hasPermission('users.subject.group_transfer_across') && (int) $destination->id !== (int) $employee->branch_group_id, 403, 'Роль сотрудника не допускает перевод в другую группу этим руководителем.');
+                abort_unless($this->destinationQuery($actor, $initialAssignment)->whereKey($destination->id)->exists(), 403, 'RBAC_GROUP_SCOPE_VIOLATION');
+                abort_if(! $initialAssignment && ! $employee->hasPermission('users.subject.group_transfer_across') && (int) $destination->id !== (int) $employee->branch_group_id, 403, 'Роль сотрудника не допускает перевод в другую группу этим руководителем.');
             }
             $sameGroup = (int) $destination->id === (int) $employee->branch_group_id;
             $inventory = $this->inventory($employee, true);
@@ -107,7 +116,11 @@ final class EmployeeGroupTransfer
                 abort_if($inventory === [] || collect($plans)->contains(fn ($plan) => $plan['action'] !== 'retain'),
                     422, 'REPLACEMENT_EMPLOYEE_REQUIRED');
             }
-            foreach ($inventory as $item) $this->records->authorize($actor, $this->records->model($item['type'], $item['id']), employeeTransfer: true);
+            foreach ($inventory as $item) $this->records->authorize($actor, $this->records->model($item['type'], $item['id']), employeeTransfer: true, ungroupedEmployeeId: $initialAssignment ? $employee->id : null);
+            if ($initialAssignment) {
+                // Initial assignment never redistributes records to another employee.
+                abort_if(collect($plans)->contains(fn ($plan) => $plan['action'] !== 'move'), 422, 'COMPLETE_TRANSFER_PLAN_REQUIRED');
+            }
             $before = $employee->only(['role_id', 'branch_id', 'branch_group_id']);
             $employee->forceFill(['branch_id' => $destination->branch_id, 'branch_group_id' => $destination->id,
                 'access_scope_version' => (int) $employee->access_scope_version + 1])->save();
@@ -122,7 +135,7 @@ final class EmployeeGroupTransfer
                     'responsible_user_id' => $responsible, 'reason' => $data['reason'],
                     'revision' => $this->records->revision($record),
                     ...array_intersect_key($plan, array_flip(['pipeline_id', 'stage_id'])),
-                ], employeeTransfer: true);
+                ], employeeTransfer: true, ungroupedEmployeeId: $initialAssignment ? $employee->id : null);
             }
             // Includes records newly assigned by a concurrent writer before our final consistency check.
             foreach ($this->organization->activeQueries($employee->id) as $table => $query) {

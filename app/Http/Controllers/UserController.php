@@ -42,7 +42,16 @@ class UserController extends Controller
     {
         $query = User::query()->with(['role', 'branch', 'branchGroup']);
         if ($authUser->usesAssignedGroupScope()) {
-            app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, 'users.branch_group_id', 'users.branch_id');
+            $access = app(\App\Support\RopGroupAccess::class);
+            $query->where('users.branch_id', $authUser->branch_id ?? 0)
+                ->where(function (Builder $groups) use ($authUser, $access) {
+                    $groups->whereIn('users.branch_group_id', $access->groupsQuery($authUser));
+                    if ($authUser->hasPermission('users.ungrouped.view')) {
+                        $groups->orWhere(fn (Builder $unassigned) => $unassigned->whereNull('users.branch_group_id')
+                            ->where('users.status', User::STATUS_ACTIVE)->whereNull('users.deleted_at')
+                            ->where('users.id', '!=', $authUser->id));
+                    }
+                });
             $query->whereHas('role', fn (Builder $roles) => $roles->withPermission('users.subject.team'));
         }
         if ($authUser->hasPermission('users.scope.all')) return $query;
