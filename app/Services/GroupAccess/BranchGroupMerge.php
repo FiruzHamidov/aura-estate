@@ -10,6 +10,9 @@ use Illuminate\Support\Facades\Schema;
 /** Consolidate current work without rewriting historical group snapshots. */
 final class BranchGroupMerge
 {
+    private const LABELS = ['properties' => 'Объект', 'clients' => 'Клиент', 'leads' => 'Лид',
+        'crm_deals' => 'Сделка', 'bookings' => 'Показ', 'crm_tasks' => 'Задача'];
+
     public function authorize(User $actor, BranchGroup $source, BranchGroup $target): void
     {
         abort_unless($actor->hasPermission('branch_groups.merge') && !$actor->usesAssignedGroupScope(), 403, 'FORBIDDEN_ACTION');
@@ -34,6 +37,7 @@ final class BranchGroupMerge
         $records = [];
         // The same active-state predicates are used by individual employee transfers.
         foreach (app(UserOrganizationService::class)->activeQueries(null) as $table => $query) {
+            $label = self::LABELS[$table];
             $field = GroupOwnedRecordObserver::RESPONSIBLES[$table];
             if ($table === 'crm_deals' && Schema::hasColumn('crm_deal_pipelines', 'code')) {
                 // Recruitment is shared HR work and must never acquire a sales group.
@@ -45,11 +49,11 @@ final class BranchGroupMerge
                 // An employee's existing work in the target already belongs there.
                 if ((int) $row->branch_group_id === (int) $target->id) continue;
                 if ($row->branch_group_id && (int) $row->branch_group_id !== (int) $source->id) {
-                    $blockers[] = "{$table} #{$row->id}: запись сотрудника относится к другой группе.";
+                    $blockers[] = "{$label} #{$row->id}: запись сотрудника относится к другой группе.";
                     continue;
                 }
                 if (isset($row->branch_id) && (int) $row->branch_id !== (int) $source->branch_id) {
-                    $blockers[] = "{$table} #{$row->id}: запись относится к другому филиалу.";
+                    $blockers[] = "{$label} #{$row->id}: запись относится к другому филиалу.";
                 }
                 $records[$table][$row->id] = (array) $row;
             }
@@ -84,15 +88,16 @@ final class BranchGroupMerge
         foreach ($records as $table => $rows) foreach ($rows as $row) $ownerIds[] = $row[GroupOwnedRecordObserver::RESPONSIBLES[$table]] ?? null;
         $owners = User::query()->with('role')->whereIn('id', array_filter($ownerIds))->get()->keyBy('id');
         foreach ($records as $table => $rows) foreach ($rows as $row) {
+            $label = self::LABELS[$table];
             $responsible = $row[GroupOwnedRecordObserver::RESPONSIBLES[$table]] ?? null;
             $owner = $responsible ? $owners->get($responsible) : null;
             if (isset($row['branch_id']) && (int) $row['branch_id'] !== (int) $source->branch_id) {
-                $blockers[] = "{$table} #{$row['id']}: запись относится к другому филиалу.";
+                $blockers[] = "{$label} #{$row['id']}: запись относится к другому филиалу.";
             }
-            if ($responsible && !$owner) $blockers[] = "{$table} #{$row['id']}: ответственный не найден.";
+            if ($responsible && !$owner) $blockers[] = "{$label} #{$row['id']}: ответственный не найден.";
             if ($owner && $owner->hasPermission('users.subject.assignment_group_required')
                 && (!in_array($owner->id, $ids, true) && (int) $owner->branch_group_id !== (int) $target->id)) {
-                $blockers[] = "{$table} #{$row['id']}: ответственный не входит в объединяемую команду. Сначала передайте запись.";
+                $blockers[] = "{$label} #{$row['id']}: ответственный не входит в объединяемую команду. Сначала передайте запись.";
             }
             if ($table === 'crm_deals' && ($row['control_kind'] ?? null) === 'security_property_closure') {
                 $propertyId = $row['primary_property_id'] ?? null;
