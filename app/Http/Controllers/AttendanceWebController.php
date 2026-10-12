@@ -31,6 +31,14 @@ final class AttendanceWebController extends Controller
         private readonly AttendanceScheduleResolver $scheduleResolver,
     ) {}
 
+    public function access(Request $request)
+    {
+        $this->access->assertCanViewModule($request->user());
+        return response()->json(['permissions' => $this->access->permissions($request->user()),
+            'selectable_branches' => !$request->user()->usesAssignedGroupScope() && $request->user()->hasPermission('attendance.scope.assigned_branches')
+                ? \App\Models\Branch::query()->whereIn('id', $this->access->securityBranchIds($request->user()))->orderBy('name')->get(['id', 'name']) : null]);
+    }
+
     public function matrix(Request $request)
     {
         $this->access->assertCanViewTable($request->user());
@@ -70,7 +78,7 @@ final class AttendanceWebController extends Controller
                 'date_to' => $to->toDateString(),
                 'permissions' => $this->access->permissions($request->user()),
                 'access_scope' => app(\App\Support\RopGroupAccess::class)->describe($request->user()),
-                'selectable_branches' => $request->user()->hasPermission('attendance.scope.assigned_branches')
+                'selectable_branches' => !$request->user()->usesAssignedGroupScope() && $request->user()->hasPermission('attendance.scope.assigned_branches')
                     ? \App\Models\Branch::query()->whereIn('id', $this->access->securityBranchIds($request->user()))->orderBy('name')->get(['id', 'name'])
                     : null,
                 'summary' => $this->summary($request->user(), $activeUsersCount, $from, $to),

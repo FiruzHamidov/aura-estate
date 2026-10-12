@@ -2046,6 +2046,53 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->getJson($url)->assertForbidden();
     }
 
+    public function test_mapping_right_alone_loads_scoped_terminal_picker_and_saves_mapping(): void
+    {
+        $c = $this->context();
+        $own = $this->device('PICKER-OWN', $c['branch'], $c['group']);
+        $foreign = $this->device('PICKER-FOREIGN', $c['otherAgent']->branch, $c['otherAgent']->branchGroup);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $c['rop']->role->forceFill(['permissions' => ['attendance.mappings.manage', 'data.scope.assigned_groups']])->save();
+        Sanctum::actingAs($c['rop']->fresh());
+        $this->getJson('/api/attendance/access')->assertOk()->assertJsonPath('permissions.can_manage_mappings', true)
+            ->assertJsonPath('permissions.can_view_attendance_table', false)->assertJsonPath('permissions.can_view_devices', false);
+        $this->getJson('/api/attendance/matrix')->assertForbidden();
+        $this->getJson('/api/attendance/devices')->assertForbidden();
+        $result = $this->getJson('/api/attendance/mapping-devices')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $own->id)->json('data.0');
+        $this->assertArrayNotHasKey('last_ip', $result);
+        $this->assertArrayNotHasKey('communication_key', $result);
+        $payload = ['device_id' => $own->id, 'device_user_id' => '00012', 'user_id' => $c['agent']->id];
+        $this->putJson('/api/attendance/device-users', $payload)->assertOk();
+        $this->putJson('/api/attendance/device-users', [...$payload, 'device_id' => $foreign->id])->assertNotFound();
+        $c['rop']->role->forceFill(['permissions' => ['data.scope.assigned_groups']])->save();
+        Sanctum::actingAs($c['rop']->fresh());
+        $this->getJson('/api/attendance/mapping-devices')->assertForbidden();
+        $this->putJson('/api/attendance/device-users', $payload)->assertForbidden();
+    }
+
+    public function test_rop_broad_attendance_grants_never_override_assigned_groups(): void
+    {
+        $c = $this->context();
+        $own = AttendanceDailySummary::create(['user_id' => $c['agent']->id, 'branch_group_id' => $c['group']->id,
+            'work_date' => '2026-08-17', 'status' => 'present']);
+        $foreign = AttendanceDailySummary::create(['user_id' => $c['otherAgent']->id, 'branch_group_id' => $c['otherAgent']->branch_group_id,
+            'work_date' => '2026-08-17', 'status' => 'present']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $rights = $c['rop']->role->permissionKeys();
+        foreach ([['attendance.all_branches.view'], ['attendance.scope.assigned_branches'], ['attendance.all_branches.view', 'attendance.scope.assigned_branches']] as $extra) {
+            $c['rop']->role->forceFill(['permissions' => array_values(array_unique([...$rights, ...$extra]))])->save();
+            Sanctum::actingAs($c['rop']->fresh());
+            $response = $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17')->assertOk()
+                ->assertJsonPath('meta.permissions.can_view_all_branches', false)->assertJsonPath('meta.selectable_branches', null);
+            $ids = collect($response->json('data'))->pluck('user.id')->all();
+            $this->assertContains($c['agent']->id, $ids);
+            $this->assertNotContains($c['otherAgent']->id, $ids);
+            $visible = app(\App\Services\Attendance\AttendanceGroupScope::class)->apply(AttendanceDailySummary::query(), $c['rop']->fresh())->pluck('id')->all();
+            $this->assertContains($own->id, $visible); $this->assertNotContains($foreign->id, $visible);
+            $this->getJson('/api/attendance/users/'.$c['otherAgent']->id.'/days/2026-08-17')->assertNotFound();
+        }
+    }
+
     private function context(): array
     {
         $branchA = Branch::firstOrCreate(['name' => 'Branch A']);
