@@ -108,7 +108,8 @@ final class GroupRecordTransfer
             if ($record instanceof Deal) {
                 $stage = DealStage::query()->with('pipeline')->findOrFail($data['stage_id'] ?? $record->stage_id);
                 abort_unless($stage->is_active && $stage->pipeline?->is_active
-                    && (int) $stage->pipeline->branch_id === (int) $group->branch_id
+                    && ! $stage->pipeline->isHrRecruitment() && ! $stage->pipeline->isPropertyControl()
+                    && ($stage->pipeline->branch_id === null || (int) $stage->pipeline->branch_id === (int) $group->branch_id)
                     && (int) $stage->pipeline_id === (int) ($data['pipeline_id'] ?? $record->pipeline_id), 422, 'TRANSFER_PIPELINE_REQUIRED');
                 // A group transfer does not close or reopen a deal through a different stage.
                 abort_unless((bool) $stage->is_closed === (bool) $record->stage?->is_closed, 422, 'TRANSFER_STAGE_STATE_MISMATCH');

@@ -1435,4 +1435,66 @@ class RopGroupAssignmentsTest extends TestCase
         $this->getJson($url)->assertNotFound();
     }
 
+    public static function globalPipelineTransferActors(): array
+    {
+        return [['superadmin', false], ['rop', true]];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('globalPipelineTransferActors')]
+    public function test_employee_transfer_preserves_global_sales_pipeline(string $role, bool $grouped): void
+    {
+        Schema::create('crm_deal_pipelines', function (Blueprint $t) {
+            $t->id(); $t->string('name'); $t->string('code')->nullable(); $t->string('type')->nullable();
+            $t->unsignedBigInteger('branch_id')->nullable(); $t->boolean('is_active')->default(true); $t->timestamps();
+        });
+        Schema::create('crm_deal_stages', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('pipeline_id'); $t->string('name');
+            $t->boolean('is_active')->default(true); $t->boolean('is_closed')->default(false); $t->timestamps();
+        });
+        Schema::create('crm_deals', function (Blueprint $t) {
+            $t->id(); $t->string('title'); $t->unsignedBigInteger('branch_id')->nullable();
+            $t->unsignedBigInteger('branch_group_id')->nullable(); $t->unsignedBigInteger('responsible_agent_id');
+            $t->unsignedBigInteger('pipeline_id'); $t->unsignedBigInteger('stage_id');
+            $t->timestamp('closed_at')->nullable(); $t->softDeletes(); $t->timestamps();
+        });
+        Role::firstOrCreate(['slug' => $role], ['name' => $role]);
+        $actor = $role === 'rop' ? $this->rop : $this->user($role);
+        $this->rop->supervisedGroups()->attach($this->a->id);
+        $receiver = $this->user('rop', $this->b);
+        $receiver->supervisedGroups()->attach($this->b->id);
+        $employee = $this->user('agent', $grouped ? $this->a : null);
+        $client = Client::create(['full_name' => 'Active client', 'status' => 'active',
+            'branch_id' => $this->branch->id, 'branch_group_id' => $employee->branch_group_id,
+            'responsible_agent_id' => $employee->id]);
+        $pipeline = \App\Models\DealPipeline::create(['name' => 'Global sales', 'type' => 'sales', 'is_active' => true]);
+        $stage = \App\Models\DealStage::create(['name' => 'New', 'pipeline_id' => $pipeline->id, 'is_active' => true, 'is_closed' => false]);
+        $dealId = DB::table('crm_deals')->insertGetId(['title' => 'Active deal', 'branch_id' => $this->branch->id,
+            'branch_group_id' => $employee->branch_group_id, 'responsible_agent_id' => $employee->id,
+            'pipeline_id' => $pipeline->id, 'stage_id' => $stage->id, 'created_at' => now(), 'updated_at' => now()]);
+        Sanctum::actingAs($actor);
+        $url = '/api/users/'.$employee->id.'/group-transfer';
+        $preview = $this->getJson($url)->assertOk()->json();
+        $payload = ['branch_group_id' => $this->b->id, 'revision' => $preview['revision'], 'reason' => 'Move to another team',
+            'records' => [['type' => 'clients', 'id' => $client->id, 'action' => 'move'],
+                ['type' => 'deals', 'id' => $dealId, 'action' => 'move']]];
+
+        // Invalid pipelines must still reject the entire operation, including earlier client updates.
+        foreach ([['branch_id' => 999], ['is_active' => false], ['code' => 'hr_recruitment'], ['type' => 'property_control']] as $invalid) {
+            $invalidPipeline = \App\Models\DealPipeline::create(['name' => 'Invalid target', 'type' => 'sales', 'is_active' => true, ...$invalid]);
+            $invalidStage = \App\Models\DealStage::create(['name' => 'New', 'pipeline_id' => $invalidPipeline->id, 'is_active' => true, 'is_closed' => false]);
+            $invalidPayload = $payload;
+            $invalidPayload['records'][1] += ['pipeline_id' => $invalidPipeline->id, 'stage_id' => $invalidStage->id];
+            $this->postJson($url, $invalidPayload)->assertUnprocessable()->assertJsonPath('code', 'TRANSFER_PIPELINE_REQUIRED');
+            $this->assertSame($grouped ? $this->a->id : null, $employee->fresh()->branch_group_id);
+            $this->assertSame($grouped ? $this->a->id : null, $client->fresh()->branch_group_id);
+            $this->assertDatabaseCount('group_access_audit_logs', 0);
+        }
+        $pipeline->forceFill(['branch_id' => null, 'is_active' => true, 'code' => null, 'type' => 'sales'])->save();
+        $this->postJson($url, $payload)->assertOk()->assertJsonPath('transferred_records', 2);
+        $this->assertSame($this->b->id, $employee->fresh()->branch_group_id);
+        $this->assertSame($this->b->id, $client->fresh()->branch_group_id);
+        $this->assertDatabaseHas('crm_deals', ['id' => $dealId, 'branch_group_id' => $this->b->id,
+            'pipeline_id' => $pipeline->id, 'stage_id' => $stage->id, 'responsible_agent_id' => $employee->id]);
+    }
+
 }
