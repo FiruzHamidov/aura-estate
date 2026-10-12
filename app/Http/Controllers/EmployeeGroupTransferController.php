@@ -12,7 +12,7 @@ final class EmployeeGroupTransferController extends Controller
 {
     public function destinations(Request $request, EmployeeGroupTransfer $transfers)
     {
-        $groups = $transfers->destinationQuery($request->user())->with(['rops' => fn ($rops) => $rops
+        $groups = $transfers->destinationQuery($request->user(), $request->boolean('initial_assignment'))->with(['rops' => fn ($rops) => $rops
             ->where('users.status', User::STATUS_ACTIVE)->whereNull('users.deleted_at')
             ->whereHas('role', fn ($roles) => $roles->usingAssignedGroups())])->orderBy('name')->get();
         return response()->json(['data' => $groups->map(fn ($group) => [

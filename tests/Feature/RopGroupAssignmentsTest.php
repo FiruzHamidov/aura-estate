@@ -1435,4 +1435,141 @@ class RopGroupAssignmentsTest extends TestCase
         $this->getJson($url)->assertNotFound();
     }
 
+    public static function globalPipelineTransferActors(): array
+    {
+        return [['superadmin', false], ['rop', true], ['rop_ungrouped', false]];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('globalPipelineTransferActors')]
+    public function test_employee_transfer_preserves_global_sales_pipeline(string $role, bool $grouped): void
+    {
+        Schema::create('crm_deal_pipelines', function (Blueprint $t) {
+            $t->id(); $t->string('name'); $t->string('code')->nullable(); $t->string('type')->nullable();
+            $t->unsignedBigInteger('branch_id')->nullable(); $t->boolean('is_active')->default(true); $t->timestamps();
+        });
+        Schema::create('crm_deal_stages', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('pipeline_id'); $t->string('name');
+            $t->boolean('is_active')->default(true); $t->boolean('is_closed')->default(false); $t->timestamps();
+        });
+        Schema::create('crm_deals', function (Blueprint $t) {
+            $t->id(); $t->string('title'); $t->unsignedBigInteger('branch_id')->nullable();
+            $t->unsignedBigInteger('branch_group_id')->nullable(); $t->unsignedBigInteger('responsible_agent_id');
+            $t->unsignedBigInteger('pipeline_id'); $t->unsignedBigInteger('stage_id');
+            $t->timestamp('closed_at')->nullable(); $t->softDeletes(); $t->timestamps();
+        });
+        if ($role === 'rop_ungrouped') {
+            Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+            $this->rop->role->forceFill(['permissions' => [...array_values(array_diff($this->rop->role->permissionKeys(),
+                ['users.group_transfer', 'records.transfer'])), 'users.ungrouped.view', 'users.ungrouped.assign']])->save();
+            $role = 'rop';
+        }
+        Role::firstOrCreate(['slug' => $role], ['name' => $role]);
+        $actor = $role === 'rop' ? $this->rop : $this->user($role);
+        $this->rop->supervisedGroups()->attach($this->a->id);
+        $receiver = $this->user('rop', $this->b);
+        $receiver->supervisedGroups()->attach($this->b->id);
+        if ($role === 'rop' && ! $grouped) $this->rop->supervisedGroups()->attach($this->b->id);
+        $employee = $this->user('agent', $grouped ? $this->a : null);
+        $client = Client::create(['full_name' => 'Active client', 'status' => 'active',
+            'branch_id' => $this->branch->id, 'branch_group_id' => $employee->branch_group_id,
+            'responsible_agent_id' => $employee->id]);
+        $pipeline = \App\Models\DealPipeline::create(['name' => 'Global sales', 'type' => 'sales', 'is_active' => true]);
+        $stage = \App\Models\DealStage::create(['name' => 'New', 'pipeline_id' => $pipeline->id, 'is_active' => true, 'is_closed' => false]);
+        $dealId = DB::table('crm_deals')->insertGetId(['title' => 'Active deal', 'branch_id' => $this->branch->id,
+            'branch_group_id' => $employee->branch_group_id, 'responsible_agent_id' => $employee->id,
+            'pipeline_id' => $pipeline->id, 'stage_id' => $stage->id, 'created_at' => now(), 'updated_at' => now()]);
+        Sanctum::actingAs($actor);
+        $url = '/api/users/'.$employee->id.'/group-transfer';
+        $preview = $this->getJson($url)->assertOk()->json();
+        $payload = ['branch_group_id' => $this->b->id, 'revision' => $preview['revision'], 'reason' => 'Move to another team',
+            'records' => [['type' => 'clients', 'id' => $client->id, 'action' => 'move'],
+                ['type' => 'deals', 'id' => $dealId, 'action' => 'move']]];
+
+        // Invalid pipelines must still reject the entire operation, including earlier client updates.
+        foreach ([['branch_id' => 999], ['is_active' => false], ['code' => 'hr_recruitment'], ['type' => 'property_control']] as $invalid) {
+            $invalidPipeline = \App\Models\DealPipeline::create(['name' => 'Invalid target', 'type' => 'sales', 'is_active' => true, ...$invalid]);
+            $invalidStage = \App\Models\DealStage::create(['name' => 'New', 'pipeline_id' => $invalidPipeline->id, 'is_active' => true, 'is_closed' => false]);
+            $invalidPayload = $payload;
+            $invalidPayload['records'][1] += ['pipeline_id' => $invalidPipeline->id, 'stage_id' => $invalidStage->id];
+            $this->postJson($url, $invalidPayload)->assertUnprocessable()->assertJsonPath('code', 'TRANSFER_PIPELINE_REQUIRED');
+            $this->assertSame($grouped ? $this->a->id : null, $employee->fresh()->branch_group_id);
+            $this->assertSame($grouped ? $this->a->id : null, $client->fresh()->branch_group_id);
+            $this->assertDatabaseCount('group_access_audit_logs', 0);
+        }
+        $pipeline->forceFill(['branch_id' => null, 'is_active' => true, 'code' => null, 'type' => 'sales'])->save();
+        $this->postJson($url, $payload)->assertOk()->assertJsonPath('transferred_records', 2);
+        $this->assertSame($this->b->id, $employee->fresh()->branch_group_id);
+        $this->assertSame($this->b->id, $client->fresh()->branch_group_id);
+        $this->assertDatabaseHas('crm_deals', ['id' => $dealId, 'branch_group_id' => $this->b->id,
+            'pipeline_id' => $pipeline->id, 'stage_id' => $stage->id, 'responsible_agent_id' => $employee->id]);
+    }
+
+    public function test_ungrouped_permissions_are_separate_and_limited_to_own_branch_and_groups(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $this->rop->supervisedGroups()->attach($this->a->id);
+        $defaults = $this->rop->role->permissionKeys();
+        $employee = $this->user('agent');
+        $otherGroup = $this->user('agent', $this->b);
+        $otherBranch = $this->user('agent');
+        $otherBranch->forceFill(['branch_id' => Branch::create(['name' => 'Other'])->id])->save();
+        $inactive = $this->user('agent'); $inactive->forceFill(['status' => 'inactive'])->save();
+        $admin = $this->user('admin');
+        $client = Client::create(['full_name' => 'Unclassified', 'status' => 'active',
+            'branch_id' => $this->branch->id, 'responsible_agent_id' => $employee->id]);
+        $url = '/api/users/'.$employee->id.'/group-transfer';
+        $grant = function (array $extra) use ($defaults) {
+            $this->rop->role->forceFill(['permissions' => array_values(array_unique([...$defaults, ...$extra]))])->save();
+            Sanctum::actingAs($this->rop->fresh());
+        };
+        $grant([]);
+        $this->getJson('/api/user/'.$employee->id)->assertNotFound();
+        $grant(['users.ungrouped.assign']);
+        $this->getJson($url)->assertNotFound();
+        $grant(['users.ungrouped.view']);
+        $ids = $this->getJson('/api/user?per_page=100')->assertOk()->json('data.*.id');
+        $this->assertContains($employee->id, $ids);
+        foreach ([$otherGroup, $otherBranch, $inactive, $admin] as $hidden) {
+            $this->assertNotContains($hidden->id, $ids);
+            $this->getJson('/api/user/'.$hidden->id)->assertNotFound();
+        }
+        $this->getJson('/api/user/'.$employee->id)->assertOk();
+        $this->getJson($url)->assertNotFound();
+        $this->patchJson('/api/user/'.$employee->id, ['name' => 'Forbidden'])->assertNotFound();
+        $grant(['users.ungrouped.view', 'users.ungrouped.assign']);
+        $preview = $this->getJson($url)->assertOk()->json();
+        $this->getJson('/api/employee-transfer-destinations?initial_assignment=1')->assertOk()
+            ->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $this->a->id);
+        $payload = ['branch_group_id' => $this->b->id, 'revision' => $preview['revision'], 'reason' => 'Initial team assignment',
+            'records' => [['type' => 'clients', 'id' => $client->id, 'action' => 'move']]];
+        $this->postJson($url, $payload)->assertForbidden();
+        $this->assertNull($employee->fresh()->branch_group_id);
+        $payload['branch_group_id'] = $this->a->id;
+        $grant(['users.ungrouped.view']);
+        $this->postJson($url, $payload)->assertNotFound();
+        $grant(['users.ungrouped.view', 'users.ungrouped.assign']);
+        $this->postJson($url, [...$payload, 'records' => []])->assertUnprocessable();
+        DB::table('clients')->where('id', $client->id)->update(['branch_group_id' => $this->b->id]);
+        $this->getJson($url)->assertNotFound();
+        DB::table('clients')->where('id', $client->id)->update(['branch_group_id' => null]);
+        Schema::create('crm_tasks', function (Blueprint $t) {
+            $t->id(); $t->string('title'); $t->unsignedBigInteger('assignee_id')->nullable();
+            $t->unsignedBigInteger('branch_group_id')->nullable(); $t->string('status')->nullable();
+            $t->timestamp('completed_at')->nullable(); $t->string('related_entity_type');
+            $t->unsignedBigInteger('related_entity_id'); $t->timestamps();
+        });
+        $taskId = DB::table('crm_tasks')->insertGetId(['title' => 'Foreign related task',
+            'assignee_id' => $otherGroup->id, 'branch_group_id' => $this->b->id,
+            'related_entity_type' => 'client', 'related_entity_id' => $client->id]);
+        $this->postJson($url, $payload)->assertForbidden();
+        $this->assertNull($employee->fresh()->branch_group_id);
+        $this->assertNull($client->fresh()->branch_group_id);
+        DB::table('crm_tasks')->where('id', $taskId)->update(['assignee_id' => null, 'branch_group_id' => null]);
+        $this->postJson($url, $payload)->assertOk();
+        $this->assertDatabaseHas('crm_tasks', ['id' => $taskId, 'assignee_id' => $employee->id, 'branch_group_id' => $this->a->id]);
+        $this->assertSame($this->a->id, $employee->fresh()->branch_group_id);
+        $this->assertSame($this->a->id, $client->fresh()->branch_group_id);
+        $this->assertDatabaseHas('group_access_audit_logs', ['subject_id' => $employee->id, 'event' => 'employee_group_transferred']);
+    }
+
 }

@@ -24,8 +24,21 @@ final class GroupRecordTransfer
         return self::MODELS[$type]::query()->when($lock, fn ($query) => $query->lockForUpdate())->findOrFail($id);
     }
 
-    public function authorize(User $actor, Model $record, bool $employeeTransfer = false): void
+    public function authorize(User $actor, Model $record, bool $employeeTransfer = false, ?int $ungroupedEmployeeId = null): void
     {
+        if ($employeeTransfer && $ungroupedEmployeeId !== null) {
+            abort_unless($actor->usesAssignedGroupScope() && $actor->hasPermission('users.ungrouped.view')
+                && $actor->hasPermission('users.ungrouped.assign'), 403, 'FORBIDDEN_ACTION');
+            $attributes = $record->getAttributes();
+            $responsible = GroupOwnedRecordObserver::RESPONSIBLES[$record->getTable()];
+            abort_unless((int) ($attributes[$responsible] ?? 0) === $ungroupedEmployeeId, 403, 'FORBIDDEN_ACTION');
+            // Existing classified records must already belong to this manager's scope.
+            if (($attributes['branch_group_id'] ?? null) !== null) $this->access->ensureVisible($actor, $record);
+            abort_unless($actor->branch_id && (($attributes['branch_id'] ?? null) === null
+                || (int) $attributes['branch_id'] === (int) $actor->branch_id), 403, 'RBAC_GROUP_SCOPE_VIOLATION');
+            if ($record instanceof Deal) abort_if($record->isPropertyControl() || $record->pipeline?->isHrRecruitment(), 403, 'FORBIDDEN_ACTION');
+            return;
+        }
         abort_unless($actor->hasPermission('records.transfer'), 403, 'FORBIDDEN_ACTION');
         $this->access->ensureVisible($actor, $record);
         if (!$actor->hasPermission('records.transfer.all_branches')) {
@@ -69,9 +82,9 @@ final class GroupRecordTransfer
                 'stage_is_closed' => (bool) $record->stage?->is_closed] : [])];
     }
 
-    public function transfer(User $actor, string $type, int $id, array $data, bool $employeeTransfer = false): Model
+    public function transfer(User $actor, string $type, int $id, array $data, bool $employeeTransfer = false, ?int $ungroupedEmployeeId = null): Model
     {
-        return DB::transaction(function () use ($actor, $type, $id, $data, $employeeTransfer) {
+        return DB::transaction(function () use ($actor, $type, $id, $data, $employeeTransfer, $ungroupedEmployeeId) {
             $users = User::query()->whereIn('id', [$actor->id, $data['responsible_user_id']])->orderBy('id')->lockForUpdate()->get()->keyBy('id');
             $actor = $users->get($actor->id);
             $target = $users->get((int) $data['responsible_user_id']);
@@ -82,10 +95,12 @@ final class GroupRecordTransfer
             $taskAlreadyMoved = $employeeTransfer && $record instanceof CrmTask
                 && (int) $record->branch_group_id === (int) $group->id
                 && (int) $record->assignee_id === (int) $target->id;
-            if (! $taskAlreadyMoved) $this->authorize($actor, $record, $employeeTransfer);
+            if (! $taskAlreadyMoved) $this->authorize($actor, $record, $employeeTransfer, $ungroupedEmployeeId);
             abort_unless(hash_equals($this->revision($record), $data['revision']), 409, 'RECORD_VERSION_CONFLICT');
             if ($actor->usesAssignedGroupScope()) {
-                if ($employeeTransfer && (int) $record->getAttribute(GroupOwnedRecordObserver::RESPONSIBLES[$record->getTable()]) === (int) $target->id) {
+                if ($ungroupedEmployeeId !== null) {
+                    $this->access->ensureGroup($actor, $group->id);
+                } elseif ($employeeTransfer && (int) $record->getAttribute(GroupOwnedRecordObserver::RESPONSIBLES[$record->getTable()]) === (int) $target->id) {
                     abort_unless(app(EmployeeGroupTransfer::class)->destinationQuery($actor)->whereKey($group->id)->exists(), 403, 'RBAC_GROUP_SCOPE_VIOLATION');
                 } else $this->access->ensureGroup($actor, $group->id);
             }
@@ -108,7 +123,8 @@ final class GroupRecordTransfer
             if ($record instanceof Deal) {
                 $stage = DealStage::query()->with('pipeline')->findOrFail($data['stage_id'] ?? $record->stage_id);
                 abort_unless($stage->is_active && $stage->pipeline?->is_active
-                    && (int) $stage->pipeline->branch_id === (int) $group->branch_id
+                    && ! $stage->pipeline->isHrRecruitment() && ! $stage->pipeline->isPropertyControl()
+                    && ($stage->pipeline->branch_id === null || (int) $stage->pipeline->branch_id === (int) $group->branch_id)
                     && (int) $stage->pipeline_id === (int) ($data['pipeline_id'] ?? $record->pipeline_id), 422, 'TRANSFER_PIPELINE_REQUIRED');
                 // A group transfer does not close or reopen a deal through a different stage.
                 abort_unless((bool) $stage->is_closed === (bool) $record->stage?->is_closed, 422, 'TRANSFER_STAGE_STATE_MISMATCH');
@@ -151,6 +167,10 @@ final class GroupRecordTransfer
                     ->orderBy('id')->lockForUpdate()->get();
                 $taskChanges = ['branch_group_id' => $group->id, 'assignee_id' => $target->id];
                 foreach ($tasks as $task) {
+                    if ($ungroupedEmployeeId !== null) {
+                        abort_unless($task->branch_group_id === null || $this->access->allowsGroup($actor, (int) $task->branch_group_id), 403, 'RBAC_GROUP_SCOPE_VIOLATION');
+                        abort_unless($task->assignee_id === null || (int) $task->assignee_id === $ungroupedEmployeeId, 403, 'FORBIDDEN_ACTION');
+                    }
                     $taskBefore = array_intersect_key((array) $task, $taskChanges);
                     if ((int) $task->branch_group_id === (int) $group->id && (int) $task->assignee_id === (int) $target->id) {
                         continue;

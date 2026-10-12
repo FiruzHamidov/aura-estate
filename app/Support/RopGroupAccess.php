@@ -59,6 +59,22 @@ final class RopGroupAccess
         return $query;
     }
 
+    public function canViewUngroupedEmployee(User $actor, User $employee): bool
+    {
+        return $this->applies($actor) && $actor->hasPermission('users.ungrouped.view')
+            && $actor->id !== $employee->id && $actor->branch_id
+            && (int) $employee->branch_id === (int) $actor->branch_id
+            && $employee->branch_group_id === null && $employee->status === User::STATUS_ACTIVE
+            && ! $employee->isDeletedAccount() && $employee->hasPermission('users.subject.team');
+    }
+
+    public function canAssignUngroupedEmployee(User $actor, User $employee): bool
+    {
+        return $this->canViewUngroupedEmployee($actor, $employee)
+            && $actor->hasPermission('users.ungrouped.assign')
+            && $employee->hasPermission('users.subject.group_transfer');
+    }
+
     public function employees(User $actor, string $permission = 'users.subject.record_recipient'): Builder
     {
         return $this->scope(User::query(), $actor, 'users.branch_group_id', 'users.branch_id')
