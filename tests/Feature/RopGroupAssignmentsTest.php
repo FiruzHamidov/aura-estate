@@ -54,6 +54,152 @@ class RopGroupAssignmentsTest extends TestCase
         $this->rop = $this->user('rop', $this->a);
     }
 
+    private function mergeRights(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $this->admin->role->forceFill(['permissions' => ['branch_groups.merge', 'branch_groups.scope.all', 'branch_groups.manage.all']])->save();
+        Sanctum::actingAs($this->admin->fresh());
+    }
+
+    public function test_group_merge_preserves_history_owners_and_supervisor_assignments(): void
+    {
+        $this->mergeRights();
+        $agent = $this->user('agent', $this->a);
+        $inactive = $this->user('agent', $this->a); $inactive->update(['status' => 'inactive']);
+        $this->rop->supervisedGroups()->attach($this->a->id);
+        $make = fn ($status) => Client::create(['full_name' => 'Fixture', 'status' => $status,
+            'branch_id' => $this->branch->id, 'branch_group_id' => $this->a->id, 'responsible_agent_id' => $agent->id]);
+        $active = $make('active'); $history = $make('inactive');
+        $url = '/api/branch-groups/'.$this->a->id;
+        $preview = $this->postJson($url.'/merge-preview', ['target_group_id' => $this->b->id])->assertOk()
+            ->assertJsonPath('counts.clients', 1)->assertJsonPath('blockers', [])->json();
+        $this->assertSame($this->a->id, $agent->fresh()->branch_group_id);
+        $payload = ['target_group_id' => $this->b->id, 'revision' => $preview['revision'], 'reason' => 'Consolidate teams'];
+        $this->postJson($url.'/merge', $payload)->assertOk();
+        $this->assertSame($this->b->id, $agent->fresh()->branch_group_id);
+        $this->assertSame($this->a->id, $inactive->fresh()->branch_group_id);
+        $this->assertSame($this->b->id, $active->fresh()->branch_group_id);
+        $this->assertSame($agent->id, $active->fresh()->responsible_agent_id);
+        $this->assertSame($this->a->id, $history->fresh()->branch_group_id);
+        $this->assertDatabaseHas('rop_branch_groups', ['rop_id' => $this->rop->id, 'branch_group_id' => $this->a->id]);
+        $this->assertDatabaseMissing('rop_branch_groups', ['rop_id' => $this->rop->id, 'branch_group_id' => $this->b->id]);
+        $this->assertDatabaseHas('group_access_audit_logs', ['event' => 'branch_groups_merged', 'subject_id' => $this->a->id]);
+        $this->assertDatabaseHas('branch_groups', ['id' => $this->a->id]);
+        $this->postJson($url.'/merge', $payload)->assertConflict();
+    }
+
+    public function test_group_merge_rejects_stale_plan_and_revoked_permission(): void
+    {
+        $this->mergeRights(); $this->user('agent', $this->a);
+        $url = '/api/branch-groups/'.$this->a->id;
+        $preview = $this->postJson($url.'/merge-preview', ['target_group_id' => $this->b->id])->assertOk()->json();
+        $this->user('agent', $this->a);
+        $payload = ['target_group_id' => $this->b->id, 'revision' => $preview['revision'], 'reason' => 'Consolidate teams'];
+        $this->postJson($url.'/merge', $payload)->assertConflict();
+        $this->admin->role->forceFill(['permissions' => ['branch_groups.scope.all', 'branch_groups.manage.all']])->save();
+        Sanctum::actingAs($this->admin->fresh());
+        $this->postJson($url.'/merge', $payload)->assertForbidden();
+        $this->postJson($url.'/merge-preview', ['target_group_id' => $this->b->id])->assertForbidden();
+        $this->assertDatabaseCount('group_access_audit_logs', 0);
+    }
+
+    public function test_group_merge_rejects_cross_branch_same_group_and_assigned_scope(): void
+    {
+        $this->mergeRights();
+        $other = Branch::create(['name' => 'Other']);
+        $foreign = BranchGroup::create(['name' => 'Foreign', 'branch_id' => $other->id]);
+        $url = '/api/branch-groups/'.$this->a->id.'/merge-preview';
+        foreach ([$this->a->id, $foreign->id] as $id) $this->postJson($url, ['target_group_id' => $id])->assertUnprocessable();
+        $this->rop->role->forceFill(['permissions' => [...$this->rop->role->permissionKeys(), 'branch_groups.merge', 'branch_groups.manage.all', 'branch_groups.scope.all']])->save();
+        Sanctum::actingAs($this->rop->fresh());
+        $this->postJson($url, ['target_group_id' => $this->b->id])->assertForbidden();
+    }
+
+    public function test_group_merge_blocks_foreign_work_without_partial_changes(): void
+    {
+        $this->mergeRights(); $agent = $this->user('agent', $this->a);
+        $foreign = Client::withoutEvents(fn () => Client::create(['full_name' => 'Foreign work', 'status' => 'active',
+            'branch_id' => $this->branch->id, 'branch_group_id' => $this->c->id, 'responsible_agent_id' => $agent->id]));
+        $url = '/api/branch-groups/'.$this->a->id;
+        $preview = $this->postJson($url.'/merge-preview', ['target_group_id' => $this->b->id])->assertOk()->json();
+        $this->assertNotEmpty($preview['blockers']);
+        $this->postJson($url.'/merge', ['target_group_id' => $this->b->id, 'revision' => $preview['revision'], 'reason' => 'Consolidate teams'])->assertUnprocessable();
+        $this->assertSame($this->a->id, $agent->fresh()->branch_group_id);
+        $this->assertSame($this->c->id, $foreign->fresh()->branch_group_id);
+        $this->assertDatabaseCount('group_access_audit_logs', 0);
+    }
+
+    public function test_group_merge_moves_active_tasks_with_parent_and_keeps_completed_history(): void
+    {
+        $this->mergeRights(); $agent = $this->user('agent', $this->a);
+        Schema::create('crm_tasks', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('branch_group_id')->nullable(); $t->unsignedBigInteger('assignee_id')->nullable();
+            $t->string('related_entity_type')->nullable(); $t->unsignedBigInteger('related_entity_id')->nullable();
+            $t->string('status')->nullable(); $t->timestamp('completed_at')->nullable(); $t->timestamps();
+        });
+        $client = Client::create(['full_name' => 'Active', 'status' => 'active', 'branch_id' => $this->branch->id,
+            'branch_group_id' => $this->a->id, 'responsible_agent_id' => $agent->id]);
+        foreach ([['id' => 1, 'completed_at' => null, 'status' => 'todo'], ['id' => 2, 'completed_at' => now(), 'status' => 'done']] as $task) {
+            DB::table('crm_tasks')->insert($task + ['branch_group_id' => $this->a->id, 'assignee_id' => null,
+                'related_entity_type' => 'client', 'related_entity_id' => $client->id]);
+        }
+        $url = '/api/branch-groups/'.$this->a->id;
+        $preview = $this->postJson($url.'/merge-preview', ['target_group_id' => $this->b->id])->assertOk()->assertJsonPath('counts.crm_tasks', 1)->json();
+        $this->postJson($url.'/merge', ['target_group_id' => $this->b->id, 'revision' => $preview['revision'], 'reason' => 'Merge teams'])->assertOk();
+        $this->assertDatabaseHas('crm_tasks', ['id' => 1, 'branch_group_id' => $this->b->id, 'assignee_id' => null]);
+        $this->assertDatabaseHas('crm_tasks', ['id' => 2, 'branch_group_id' => $this->a->id]);
+    }
+
+    public function test_group_merge_branch_manager_cannot_merge_foreign_groups(): void
+    {
+        $this->mergeRights();
+        $director = $this->user('branch_director');
+        $director->role->forceFill(['permissions' => ['branch_groups.merge', 'branch_groups.scope.branch', 'branch_groups.manage.branch']])->save();
+        Sanctum::actingAs($director->fresh());
+        $this->postJson('/api/branch-groups/'.$this->a->id.'/merge-preview', ['target_group_id' => $this->b->id])->assertOk();
+        $other = Branch::create(['name' => 'Other']);
+        $foreign = BranchGroup::create(['name' => 'Foreign', 'branch_id' => $other->id]);
+        $this->postJson('/api/branch-groups/'.$this->a->id.'/merge-preview', ['target_group_id' => $foreign->id])->assertForbidden();
+    }
+
+    public function test_group_merge_keeps_closed_roots_and_hr_work_in_place(): void
+    {
+        $this->mergeRights(); $agent = $this->user('agent', $this->a);
+        foreach (['properties' => 'agent_id', 'leads' => 'responsible_agent_id', 'crm_deals' => 'responsible_agent_id', 'bookings' => 'agent_id'] as $table => $field) {
+            Schema::create($table, function (Blueprint $t) use ($table, $field) {
+                $t->id(); $t->unsignedBigInteger('branch_group_id')->nullable(); $t->unsignedBigInteger('branch_id')->nullable(); $t->unsignedBigInteger($field)->nullable();
+                if ($table === 'properties') {$t->string('moderation_status')->nullable(); $t->integer('moderation_version')->default(0);}
+                if (in_array($table, ['leads', 'crm_deals'])) $t->timestamp('closed_at')->nullable();
+                if ($table === 'crm_deals') $t->unsignedBigInteger('pipeline_id')->nullable();
+                if ($table === 'bookings') $t->timestamp('end_time');
+                $t->softDeletes(); $t->timestamps();
+            });
+            foreach ([1, 2] as $id) {
+                $state = match ($table) {
+                    'properties' => ['moderation_status' => $id === 1 ? 'approved' : 'sold'],
+                    'bookings' => ['end_time' => $id === 1 ? now()->addDay() : now()->subDay()],
+                    default => ['closed_at' => $id === 1 ? null : now()],
+                };
+                DB::table($table)->insert(['id' => $id, 'branch_group_id' => $this->a->id, 'branch_id' => $this->branch->id, $field => $agent->id] + $state);
+            }
+        }
+        Schema::create('crm_deal_pipelines', function (Blueprint $t) {$t->id(); $t->string('code');});
+        DB::table('crm_deal_pipelines')->insert(['id' => 1, 'code' => 'hr_recruitment']);
+        DB::table('crm_deals')->insert(['id' => 3, 'pipeline_id' => 1, 'responsible_agent_id' => $agent->id]);
+        Schema::create('daily_reports', function (Blueprint $t) {$t->id(); $t->unsignedBigInteger('branch_group_id');});
+        DB::table('daily_reports')->insert(['id' => 1, 'branch_group_id' => $this->a->id]);
+        $url = '/api/branch-groups/'.$this->a->id;
+        $preview = $this->postJson($url.'/merge-preview', ['target_group_id' => $this->b->id])->assertOk()->json();
+        $this->postJson($url.'/merge', ['target_group_id' => $this->b->id, 'revision' => $preview['revision'], 'reason' => 'Merge teams'])->assertOk();
+        foreach (['properties', 'leads', 'crm_deals', 'bookings'] as $table) {
+            $this->assertDatabaseHas($table, ['id' => 1, 'branch_group_id' => $this->b->id]);
+            $this->assertDatabaseHas($table, ['id' => 2, 'branch_group_id' => $this->a->id]);
+        }
+        $this->assertDatabaseHas('crm_deals', ['id' => 3, 'branch_group_id' => null]);
+        $this->assertDatabaseHas('daily_reports', ['id' => 1, 'branch_group_id' => $this->a->id]);
+        $this->assertDatabaseHas('properties', ['id' => 1, 'moderation_version' => 1]);
+    }
+
     private function user(string $role, ?BranchGroup $group = null): User
     {
         return User::create(['name' => $role, 'phone' => (string) random_int(900000000, 999999999),

@@ -578,6 +578,8 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         Route::apiResource('document-types', DocumentTypeController::class)->except(['index']);
         Route::apiResource('repair-types', RepairTypeController::class)->except(['index']);
         Route::apiResource('branches', BranchController::class)->except(['index']);
+        Route::post('branch-groups/{branchGroup}/merge-preview', [BranchGroupController::class, 'mergePreview'])->middleware('rop.branch.scope');
+        Route::post('branch-groups/{branchGroup}/merge', [BranchGroupController::class, 'merge'])->middleware('rop.branch.scope');
         Route::apiResource('branch-groups', BranchGroupController::class)->middleware('rop.branch.scope');
         Route::apiResource('developers', DeveloperController::class)->except(['index', 'show']);
         Route::apiResource('features', FeatureController::class)->except(['index', 'show']);

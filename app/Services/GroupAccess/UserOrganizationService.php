@@ -85,7 +85,7 @@ final class UserOrganizationService
         return false;
     }
 
-    public function activeQueries(int $userId): array
+    public function activeQueries(?int $userId): array
     {
         $queries = [];
         foreach (['properties' => 'agent_id', 'clients' => 'responsible_agent_id', 'leads' => 'responsible_agent_id',
@@ -93,7 +93,8 @@ final class UserOrganizationService
             if (! Schema::hasTable($table) || ! Schema::hasColumn($table, $responsible)) {
                 continue;
             }
-            $query = DB::table($table)->where($responsible, $userId);
+            $query = DB::table($table);
+            if ($userId !== null) $query->where($responsible, $userId);
             if (Schema::hasColumn($table, 'deleted_at')) {
                 $query->whereNull('deleted_at');
             }

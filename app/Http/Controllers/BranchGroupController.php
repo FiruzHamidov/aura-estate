@@ -112,6 +112,21 @@ class BranchGroupController extends Controller
         return (int) $authUser->branch_id;
     }
 
+    public function mergePreview(Request $request, BranchGroup $branchGroup)
+    {
+        $data = $request->validate(['target_group_id' => 'required|integer|exists:branch_groups,id']);
+        return response()->json(app(\App\Services\GroupAccess\BranchGroupMerge::class)->preview(
+            $this->authUser(), $branchGroup, BranchGroup::findOrFail($data['target_group_id'])));
+    }
+
+    public function merge(Request $request, BranchGroup $branchGroup)
+    {
+        $data = $request->validate(['target_group_id' => 'required|integer|exists:branch_groups,id',
+            'revision' => 'required|string|size:64', 'reason' => 'required|string|min:3|max:2000']);
+        return response()->json(app(\App\Services\GroupAccess\BranchGroupMerge::class)->merge(
+            $this->authUser(), $branchGroup, BranchGroup::findOrFail($data['target_group_id']), $data['revision'], trim($data['reason'])));
+    }
+
     public function index(Request $request)
     {
         $authUser = $this->authUser();
