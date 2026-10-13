@@ -21,6 +21,17 @@ class InternationalPhoneTest extends TestCase
         }
     }
 
+    public function test_copied_phone_ignores_direction_marks_but_not_invalid_visible_text(): void
+    {
+        foreach (["\u{202a}+992001234567\u{202c}", "\u{200e}+992\u{00a0}001234567\u{200f}"] as $raw) {
+            $this->assertSame('+992001234567', InternationalPhone::e164($raw));
+            $this->assertSame('001234567', InternationalPhone::accountValue($raw));
+            $this->assertSame('992001234567', ClientPhone::normalize($raw));
+        }
+        $this->assertNull(InternationalPhone::e164("\u{202a}+99200123456\u{202c}"));
+        $this->assertNull(InternationalPhone::e164("\u{202a}+992001234567x\u{202c}"));
+    }
+
     public function test_country_lengths_and_legacy_formats(): void
     {
         foreach (['+99290123456', '+9929012345678', '+7912345678', '+791234567890', '+99890123456', '+999123456789', 'abc', '+992901234567 ext 1', '+99290+1234567'] as $invalid) {
