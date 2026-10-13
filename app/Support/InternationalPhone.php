@@ -8,6 +8,12 @@ use libphonenumber\PhoneNumberUtil;
 
 final class InternationalPhone
 {
+    /** Remove invisible copy/paste formatting without removing invalid visible text. */
+    public static function clean(string $raw): string
+    {
+        return trim(preg_replace('/[\x{061C}\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}\x{2066}-\x{2069}\x{FEFF}]/u', '', $raw) ?? $raw);
+    }
+
     /** Preserve the existing account identifier convention used by login and OTP. */
     public static function accountValue(string $raw): string
     {
@@ -22,8 +28,8 @@ final class InternationalPhone
     /** Validate national length, without rejecting newly allocated operator prefixes. */
     public static function e164(?string $raw): ?string
     {
-        $raw = trim($raw ?? '');
-        if ($raw === '' || ! preg_match('/^\+?[\d\s().-]+$/D', $raw)) {
+        $raw = self::clean($raw ?? '');
+        if ($raw === '' || ! preg_match('/^\+?[\d\s().-]+$/Du', $raw)) {
             return null;
         }
 

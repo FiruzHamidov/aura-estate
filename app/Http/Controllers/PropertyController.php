@@ -595,7 +595,7 @@ class PropertyController extends Controller
             if ($ownerClient) {
                 $this->syncClientContactKind($ownerClient, Client::CONTACT_KIND_SELLER);
                 $data['owner_name'] = $ownerClient->full_name;
-                $data['owner_phone'] = $ownerClient->phone;
+                $data['owner_phone'] = is_string($ownerClient->phone) ? \App\Support\InternationalPhone::clean($ownerClient->phone) : $ownerClient->phone;
                 $data['is_business_owner'] = (bool) ($ownerClient->type?->is_business ?? false);
             }
         }
@@ -2624,6 +2624,10 @@ class PropertyController extends Controller
      */
     public function validateProperty(Request $request, bool $isUpdate = false, ?Property $property = null)
     {
+        if (is_string($request->input('owner_phone'))) {
+            $request->merge(['owner_phone' => \App\Support\InternationalPhone::clean($request->input('owner_phone'))]);
+        }
+
         // Older multipart clients encode an empty selection as the JSON string "[]".
         // Keep missing fields absent (PATCH semantics), but accept explicit clearing.
         foreach (['features', 'tags'] as $field) {
