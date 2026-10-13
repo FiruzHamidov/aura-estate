@@ -13,7 +13,7 @@ final class AttendanceGroupScope
 
     public function apply(Builder $query, User $viewer): Builder
     {
-        if ($viewer->hasPermission('attendance.scope.assigned_branches')) {
+        if (!$viewer->usesAssignedGroupScope() && $viewer->hasPermission('attendance.scope.assigned_branches')) {
             $access = app(AttendanceAccessService::class);
             $table = $query->getModel()->getTable();
             $query->whereIn($table.'.user_id', $access->visibleUsersQuery($viewer)->select('users.id'));

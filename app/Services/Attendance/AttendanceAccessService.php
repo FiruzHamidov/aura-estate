@@ -110,7 +110,7 @@ final class AttendanceAccessService
             'can_view_presence' => $user->hasPermission('attendance.presence.view'),
             'can_view_hr_report' => $user->hasPermission('attendance.hr_report.view'),
             'can_view_attendance_table' => $user->hasPermission('attendance.table.view'),
-            'can_view_all_branches' => $user->hasPermission('attendance.all_branches.view'),
+            'can_view_all_branches' => !$user->usesAssignedGroupScope() && $user->hasPermission('attendance.all_branches.view'),
             'can_comment_late_day' => $user->hasPermission('attendance.comments.manage'),
             'can_manage_mappings' => $user->hasPermission('attendance.mappings.manage'),
             'can_manage_schedules' => $user->hasPermission('attendance.schedules.manage'),
@@ -137,16 +137,17 @@ final class AttendanceAccessService
             ->whereHas('role', fn (Builder $roles) => $roles->withPermission('attendance.subject.exclude_table', false))
             ->with(['role', 'branch', 'branchGroup']);
 
+        if ($viewer->usesAssignedGroupScope()) {
+            return app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id')
+                ->whereHas('role', fn (Builder $roles) => $roles->withPermission('attendance.subject.assigned_groups'));
+        }
+
         if ($viewer->hasPermission('attendance.all_branches.view')) {
             return $query;
         }
 
         if ($viewer->hasPermission('attendance.scope.assigned_branches')) {
             return $query->whereIn('users.branch_id', $this->securityBranchIds($viewer));
-        }
-        if ($viewer->usesAssignedGroupScope()) {
-            return app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id')
-                ->whereHas('role', fn (Builder $roles) => $roles->withPermission('attendance.subject.assigned_groups'));
         }
         if ($viewer->hasPermission('attendance.scope.branch')) {
             return $viewer->branch_id === null

@@ -22,6 +22,15 @@ final class AttendanceMappingController extends Controller
         private readonly AttendanceParticipantService $participants,
     ) {}
 
+    public function devices(Request $request)
+    {
+        $this->access->assertCanManageMappings($request->user());
+        $data = $request->validate(['per_page' => ['nullable', 'integer', 'between:1,100']]);
+        return response()->json($this->access->mappingDevicesQuery($request->user())
+            ->select(['id', 'name', 'branch_id', 'branch_group_id', 'is_active'])->orderBy('name')->orderBy('id')
+            ->paginate($data['per_page'] ?? 100));
+    }
+
     public function users(Request $request)
     {
         $this->access->assertCanManageMappings($request->user());
