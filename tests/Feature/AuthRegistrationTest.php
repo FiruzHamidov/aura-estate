@@ -179,6 +179,25 @@ class AuthRegistrationTest extends TestCase
         $this->assertDatabaseCount('users', 2);
     }
 
+    public function test_password_disambiguates_active_legacy_accounts_without_changing_phone_only_auth(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $first = User::create(['name' => 'First', 'phone' => '901234567', 'password' => Hash::make('first-password'), 'role_id' => $role->id, 'status' => 'active']);
+        $second = User::create(['name' => 'Second', 'phone' => '+992901234567', 'password' => Hash::make('second-password'), 'role_id' => $role->id, 'status' => 'active']);
+        User::create(['name' => 'Inactive', 'phone' => '992901234567', 'password' => Hash::make('inactive-password'), 'role_id' => $role->id, 'status' => 'inactive']);
+        foreach (['901234567', '+992901234567', '+992 90 123-45-67'] as $phone) {
+            $this->postJson('/api/login', ['phone' => $phone, 'password' => 'first-password'])->assertOk()->assertJsonPath('user.id', $first->id);
+            $this->postJson('/api/login', ['phone' => $phone, 'password' => 'second-password'])->assertOk()->assertJsonPath('user.id', $second->id);
+        }
+        $tokens = \DB::table('personal_access_tokens')->count();
+        foreach (['wrong-password', 'inactive-password'] as $password) {
+            $this->postJson('/api/login', ['phone' => '901234567', 'password' => $password])->assertUnauthorized();
+        }
+        $this->postJson('/api/sms/request', ['phone' => '901234567'])->assertStatus(409)->assertJsonPath('code', 'PHONE_IDENTITY_CONFLICT');
+        $this->assertDatabaseCount('personal_access_tokens', $tokens);
+        $this->assertDatabaseCount('users', 3);
+    }
+
     public function test_two_active_equivalent_accounts_require_manual_resolution(): void
     {
         $role = Role::create(['name' => 'Client', 'slug' => 'client']);

@@ -703,6 +703,66 @@ class DealBoardFeatureTest extends TestCase
         ]);
     }
 
+    public function test_admin_deletes_closed_sale_without_deleting_client_or_property(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $admin = $this->createUser(Role::create(['name' => 'Admin', 'slug' => 'admin']), $branch, 'Admin');
+        $client = $this->createClient($branch, $admin, 'Buyer', '992960000019');
+        [$pipeline, $stage] = $this->createPipelineWithStages($branch);
+        $property = Property::create(['title' => 'Listing', 'created_by' => $admin->id, 'agent_id' => $admin->id]);
+        $deal = $this->createDeal($pipeline, $stage, $branch, $admin, $client, 'Closed sale');
+        $deal->update(['closed_at' => now(), 'primary_property_id' => $property->id]);
+        Sanctum::actingAs($admin);
+        $this->getJson('/api/deals/'.$deal->id)->assertOk()->assertJsonPath('capabilities.can_delete', true);
+        $this->deleteJson('/api/deals/'.$deal->id)->assertOk();
+        $this->assertSoftDeleted('crm_deals', ['id' => $deal->id]);
+        $this->assertDatabaseHas('clients', ['id' => $client->id]);
+        $this->assertDatabaseHas('properties', ['id' => $property->id]);
+    }
+
+    public function test_admins_can_delete_open_and_closed_control_cards_with_audit(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        foreach (['admin', 'superadmin'] as $slug) {
+            $admin = $this->createUser(Role::create(['name' => $slug, 'slug' => $slug]), $branch, $slug);
+            [$pipeline, $stage] = $this->createPropertyControlPipeline($branch);
+            foreach ([null, now()] as $closedAt) {
+                $deal = $this->createControlDeal($pipeline, $stage, $branch, $admin, 'Deletable card');
+                $deal->update(['closed_at' => $closedAt]);
+                Sanctum::actingAs($admin);
+                $this->getJson('/api/deals/'.$deal->id)->assertOk()->assertJsonPath('capabilities.can_delete', true);
+                $this->deleteJson('/api/deals/'.$deal->id)->assertOk();
+                $this->assertSoftDeleted('crm_deals', ['id' => $deal->id]);
+                $this->assertDatabaseHas('crm_audit_logs', ['auditable_id' => $deal->id, 'actor_id' => $admin->id, 'event' => 'deleted']);
+                $this->getJson('/api/deals/'.$deal->id)->assertNotFound();
+            }
+        }
+    }
+
+    public function test_control_deletion_permission_migration_preserves_revocations_and_other_roles(): void
+    {
+        $branch = Branch::create(['name' => 'Branch']);
+        $admin = $this->createUser(Role::create(['name' => 'Admin', 'slug' => 'admin']), $branch, 'Admin');
+        $revoked = Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']);
+        $manager = Role::create(['name' => 'Manager', 'slug' => 'manager']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $admin->role->fresh()->forceFill(['permissions' => ['deals.delete', 'deals.scope.all']])->save();
+        $revoked->forceFill(['permissions' => ['deals.scope.all']])->save();
+        $manager->forceFill(['permissions' => ['deals.delete', 'deals.scope.all']])->save();
+        $migration = require database_path('migrations/2026_10_14_100000_allow_admin_control_deletion.php');
+        $migration->up(); $migration->up();
+        $this->assertTrue($admin->role->fresh()->hasPermission('deals.control.delete'));
+        $this->assertFalse($revoked->fresh()->hasPermission('deals.control.delete'));
+        $this->assertFalse($manager->fresh()->hasPermission('deals.control.delete'));
+        $this->assertDatabaseCount('role_permission_audits', 1);
+        [$pipeline, $stage] = $this->createPropertyControlPipeline($branch);
+        $deal = $this->createControlDeal($pipeline, $stage, $branch, $admin, 'Protected');
+        $admin->role->fresh()->forceFill(['permissions' => ['deals.delete', 'deals.scope.all']])->save();
+        Sanctum::actingAs($admin->fresh());
+        $this->deleteJson('/api/deals/'.$deal->id)->assertForbidden();
+        $this->assertNotSoftDeleted('crm_deals', ['id' => $deal->id]);
+    }
+
     public function test_security_cannot_create_update_or_delete_deals(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);
@@ -880,9 +940,16 @@ class DealBoardFeatureTest extends TestCase
         $property->update(['moderation_status' => 'approved']);
         $this->assertSame('cancelled', $first->fresh('stage')->stage->slug);
 
+        $first->delete();
+        app(PropertyControlService::class)->syncForProperty($property->fresh(), $agent, $uuid);
+        $this->assertSoftDeleted('crm_deals', ['id' => $first->id]);
         $property->update(['moderation_status' => 'sold']);
-        $this->assertSame(2, Deal::query()->where('primary_property_id', $property->id)->count());
-        $this->assertNotSame($first->source_event_uuid, Deal::query()->latest('id')->firstOrFail()->source_event_uuid);
+        $latest = Deal::query()->latest('id')->firstOrFail();
+        $latest->delete();
+        app(PropertyControlService::class)->syncForProperty($property->fresh(), $agent, $latest->source_event_uuid);
+        $this->assertSame(0, Deal::query()->where('primary_property_id', $property->id)->count());
+        $this->assertSame(2, Deal::withTrashed()->where('primary_property_id', $property->id)->count());
+        $this->assertNotSame($first->source_event_uuid, $latest->source_event_uuid);
     }
 
     public function test_rop_with_multiple_groups_can_confirm_duplicate_with_control_card_in_property_group(): void

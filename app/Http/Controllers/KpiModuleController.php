@@ -654,6 +654,8 @@ class KpiModuleController extends Controller
             'agent_id' => 'nullable|integer|exists:users,id',
             'user_id' => 'nullable|integer|exists:users,id',
             'include_breakdown' => 'nullable|boolean',
+            'user_ids' => 'sometimes|array|min:1|max:100',
+            'user_ids.*' => 'integer|distinct',
         ]);
 
         $start = Carbon::createFromDate((int) $validated['year'], (int) $validated['month'], 1, 'Asia/Dushanbe')->startOfMonth();

@@ -105,6 +105,7 @@ Route::post('/lead-requests', [LeadRequestController::class, 'store'])->middlewa
 
 Route::get('/properties', [PropertyController::class, 'index']);
 Route::get('/properties/count', [PropertyController::class, 'count']);
+Route::get('/feed/properties/stats', [PropertyController::class, 'stats']);
 Route::get('/properties/map', [PropertyController::class, 'map']);
 Route::get('/properties/search', [PropertyController::class, 'search']);
 Route::get('/properties/{property}', [PropertyController::class, 'show'])->whereNumber('property');
@@ -607,6 +608,9 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         Route::get('/crm/property-control/report', [PropertyControlReportController::class, 'summary']);
         Route::get('/crm/property-control/export', [PropertyControlReportController::class, 'export']);
         Route::get('/crm/property-control/meta', [PropertyControlReportController::class, 'meta']);
+        Route::get('/crm/marketing-leads', [\App\Http\Controllers\MarketingLeadReportController::class, 'index'])->middleware('rop.branch.scope');
+        Route::post('/crm/marketing-leads/{lead}/sales/{property}/review', [\App\Http\Controllers\MarketingLeadReportController::class, 'review'])->middleware('rop.branch.scope');
+        Route::post('/crm/marketing-leads/{lead}/classification', [\App\Http\Controllers\MarketingLeadReportController::class, 'classify'])->middleware('rop.branch.scope');
         Route::post('/leads/{lead}/convert', [LeadController::class, 'convert'])->middleware('rop.branch.scope');
         Route::apiResource('leads', LeadController::class)->middleware('rop.branch.scope');
         Route::get('/crm/leads/{lead}/activities', [CrmActivityController::class, 'leadIndex'])->middleware('rop.branch.scope');

@@ -156,6 +156,9 @@ final class GroupRecordTransfer
                 }
             } else {
                 DB::table($record->getTable())->where('id', $record->id)->update($changes);
+                if ($record instanceof Lead && (int) ($before['responsible_agent_id'] ?? 0) !== (int) $target->id) {
+                    app(\App\Services\Marketing\LeadReceiptTracker::class)->reassigned($record->fresh(), true);
+                }
             }
             if ($record instanceof Client && Schema::hasTable('client_needs')) {
                 DB::table('client_needs')->where('client_id', $record->id)->update(['responsible_agent_id' => $target->id, 'updated_at' => now()]);

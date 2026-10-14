@@ -77,6 +77,12 @@ class Lead extends Model
         'need_id',
     ];
 
+    protected static function booted(): void
+    {
+        static::created(fn (Lead $lead) => app(\App\Services\Marketing\LeadReceiptTracker::class)->capture($lead));
+        static::updated(fn (Lead $lead) => app(\App\Services\Marketing\LeadReceiptTracker::class)->reassigned($lead));
+    }
+
     public static function statuses(): array
     {
         return [

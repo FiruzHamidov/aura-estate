@@ -634,6 +634,21 @@ class ClientIntegrationTest extends TestCase
             ->assertJsonPath('unique_clients', 1)->assertJsonPath('business_clients', 1);
     }
 
+    public function test_rop_can_load_bookings_from_assigned_groups_with_hidden_property(): void
+    {
+        $ctx = $this->seedReportBranchScopeContext();
+        $own = $ctx['users']['agentA'];
+        $foreign = $ctx['users']['agentB'];
+        $property = Property::where('agent_id', $foreign->id)->firstOrFail();
+        DB::table('bookings')->where('agent_id', $own->id)->update(['property_id' => $property->id]);
+        Sanctum::actingAs($ctx['users']['rop']);
+        $this->getJson('/api/bookings?per_page=100')->assertOk()->assertJsonPath('total', 1)
+            ->assertJsonPath('data.0.agent_id', $own->id)->assertJsonPath('data.0.property', null);
+        $this->getJson('/api/bookings?branch_group_id='.$own->branch_group_id)->assertOk()->assertJsonPath('total', 1);
+        $ctx['users']['rop']->supervisedGroups()->detach();
+        $this->getJson('/api/bookings')->assertOk()->assertJsonPath('total', 0);
+    }
+
     public function test_rop_show_count_uses_booking_group_and_does_not_filter_on_hidden_property_details(): void
     {
         $ctx = $this->seedReportBranchScopeContext();

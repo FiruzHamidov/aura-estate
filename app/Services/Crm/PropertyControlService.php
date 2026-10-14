@@ -239,7 +239,8 @@ class PropertyControlService
         return DB::transaction(function () use ($property, $pipeline, $actor, $sourceEventUuid, $triggeredAt) {
             Property::query()->whereKey($property->id)->lockForUpdate()->first();
 
-            $existing = Deal::query()
+            // A deleted card still consumes its unique event; do not recreate it on retries.
+            $existing = Deal::withTrashed()
                 ->where('source_event_uuid', $sourceEventUuid)
                 ->first();
 

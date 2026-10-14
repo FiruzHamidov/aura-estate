@@ -695,8 +695,8 @@ class DealController extends Controller
         $deal->setAttribute(
             'capabilities',
             $this->propertyControlWorkflow->isControlDeal($deal)
-                ? $this->propertyControlWorkflow->capabilities($authUser, $deal)
-                : null
+                ? $this->propertyControlWorkflow->capabilities($authUser, $deal) + ['can_delete' => $authUser->hasPermission('deals.delete') && $authUser->hasPermission('deals.control.delete')]
+                : ['can_delete' => $authUser->hasPermission('deals.delete')]
         );
         if ($this->propertyControlWorkflow->isControlDeal($deal)) {
             $this->auditLogger->log(

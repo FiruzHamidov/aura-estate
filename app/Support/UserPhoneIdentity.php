@@ -5,6 +5,7 @@ namespace App\Support;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Exceptions\HttpResponseException;
+use Illuminate\Support\Facades\Hash;
 
 final class UserPhoneIdentity
 {
@@ -48,10 +49,21 @@ final class UserPhoneIdentity
         });
     }
 
-    public static function resolve(string $phone): ?User
+    public static function resolve(string $phone, ?string $password = null): ?User
     {
         $matches = self::query($phone)->with('role')->get();
         $active = $matches->filter(fn (User $user) => $user->status === User::STATUS_ACTIVE && ! $user->isDeletedAccount());
+        if ($active->count() > 1 && $password !== null) {
+            // A password can identify one legacy account; a phone/OTP alone cannot.
+            $authenticated = $active->filter(fn (User $user) => is_string($user->password)
+                && $user->password !== '' && Hash::check($password, $user->password));
+            if ($authenticated->isEmpty()) {
+                throw new HttpResponseException(response()->json(['message' => 'Неверный пароль'], 401));
+            }
+            if ($authenticated->count() === 1) {
+                return $authenticated->first();
+            }
+        }
         if ($active->count() > 1) {
             throw new HttpResponseException(response()->json([
                 'code' => 'PHONE_IDENTITY_CONFLICT',

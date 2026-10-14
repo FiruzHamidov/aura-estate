@@ -79,7 +79,7 @@ class EnsureUserIsNotClient
         // Migrated CRM endpoints enforce action permissions and record scope themselves.
         // A grant must work for any role, including a former client/accountant role.
         $crmScopes = [
-            'leads' => ['api/leads', 'api/leads/*', 'api/crm/leads/*'],
+            'leads' => ['api/leads', 'api/leads/*', 'api/crm/leads/*', 'api/crm/marketing-leads', 'api/crm/marketing-leads/*'],
             'deals' => ['api/deals', 'api/deals/*', 'api/crm/deals/*'],
             'pipelines' => ['api/deal-pipelines', 'api/deal-pipelines/*', 'api/deal-stages', 'api/deal-stages/*'],
         ];
