@@ -145,6 +145,10 @@ class UserController extends Controller
             }
         }
 
+        if (! empty($validated['without_group'])) {
+            $query->whereNull('branch_group_id');
+        }
+
         if (! empty($validated['role'])) {
             $query->whereHas('role', fn ($roleQuery) => $roleQuery->where('slug', $validated['role']));
         }
@@ -440,6 +444,7 @@ class UserController extends Controller
             'role' => 'nullable|string|exists:roles,slug',
             'roles' => 'nullable|array',
             'roles.*' => 'string|exists:roles,slug',
+            'without_group' => 'nullable|boolean',
             'report_agents' => 'nullable|boolean',
             'include_record_counts' => 'nullable|boolean',
             'include_unassigned' => 'nullable',

@@ -45,6 +45,23 @@ class RolePermissionsTest extends TestCase
         $this->assertFalse($rop->fresh()->hasPermission('users.dismissal.employee_records'));
     }
 
+    public function test_ungrouped_visibility_migration_keeps_assignment_separate_and_is_idempotent(): void
+    {
+        $rop = Role::where('slug', 'rop')->firstOrFail();
+        $rop->forceFill(['permissions' => ['users.scope.branch', 'data.scope.assigned_groups']])->save();
+        $migration = require database_path('migrations/2026_10_14_130000_allow_rop_ungrouped_visibility.php');
+        $migration->up();
+        $this->assertTrue($rop->fresh()->hasPermission('users.ungrouped.view'));
+        $this->assertFalse($rop->fresh()->hasPermission('users.ungrouped.assign'));
+        $version = $rop->fresh()->permissions_version;
+        $migration->up();
+        $this->assertSame($version, $rop->fresh()->permissions_version);
+        $this->assertDatabaseHas('role_permission_audits', ['role_id' => $rop->id, 'version' => $version]);
+        $rop->forceFill(['permissions' => []])->save();
+        $migration->up();
+        $this->assertSame([], $rop->fresh()->permissions);
+    }
+
     private function actor(string $slug): User
     {
         $user = User::create(['name' => $slug, 'role_id' => Role::where('slug', $slug)->firstOrFail()->id]);
