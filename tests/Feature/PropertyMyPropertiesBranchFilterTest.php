@@ -149,6 +149,31 @@ class PropertyMyPropertiesBranchFilterTest extends TestCase
         }
     }
 
+    public function test_internal_responsibility_filter_keeps_unpublished_records_and_respects_access(): void
+    {
+        $role = Role::create(['name' => 'Reader', 'slug' => 'responsibility_reader']);
+        $actor = User::create(['name' => 'Recipient', 'phone' => 'responsibility-reader', 'role_id' => $role->id, 'branch_id' => 2, 'branch_group_id' => 20]);
+        $type = PropertyType::create(['name' => 'Apartment']);
+        $status = PropertyStatus::create(['name' => 'Active']);
+        $make = fn (array $extra) => Property::create(array_merge([
+            'title' => 'Object', 'type_id' => $type->id, 'status_id' => $status->id,
+            'price' => 100000, 'created_by' => 999, 'agent_id' => $actor->id,
+            'branch_id' => 2, 'branch_group_id' => 20,
+        ], $extra));
+        $transferred = $make(['moderation_status' => 'approved']);
+        $pending = $make(['moderation_status' => 'pending']);
+        $unassigned = $make(['created_by' => $actor->id, 'agent_id' => null]);
+        $make(['created_by' => $actor->id, 'agent_id' => 999]);
+        $make(['branch_id' => 3, 'branch_group_id' => 30]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role->forceFill(['permissions' => ['properties.list.internal', 'properties.list.scope.group']])->save();
+        Sanctum::actingAs($actor->fresh());
+        foreach ([(string) $actor->id, $actor->id.',888'] as $ids) {
+            $response = $this->getJson('/api/my-properties?responsible_user_id='.$ids)->assertOk();
+            $this->assertEqualsCanonicalizing([$transferred->id, $pending->id, $unassigned->id], array_column($response->json('data'), 'id'));
+        }
+    }
+
     public function test_custom_list_scopes_are_shared_by_list_count_map_and_my_properties(): void
     {
         Schema::table('properties', function (Blueprint $table): void {

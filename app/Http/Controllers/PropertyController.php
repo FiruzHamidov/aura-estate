@@ -1515,6 +1515,17 @@ class PropertyController extends Controller
             return array_values(array_filter(array_map('trim', explode(',', $value)), fn ($v) => $v !== ''));
         };
 
+        // Match current responsibility, just like employee record counts. Keep
+        // created_by and agent_id filters available for explicit historical queries.
+        $responsibleIds = $toArray($request->input('responsible_user_id'));
+        if ($responsibleIds !== []) {
+            $query->where(fn (Builder $owner) => $owner
+                ->whereIn('properties.agent_id', $responsibleIds)
+                ->orWhere(fn (Builder $unassigned) => $unassigned
+                    ->whereNull('properties.agent_id')
+                    ->whereIn('properties.created_by', $responsibleIds)));
+        }
+
         if ($this->supportsPropertyTags()) {
             $rawTags = $request->input('tag_ids', $request->input('tags'));
             $tagIds = array_values(array_unique(array_filter(array_map('intval', $toArray($rawTags)))));
