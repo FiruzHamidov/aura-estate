@@ -119,6 +119,21 @@ class DismissalTransferTest extends TestCase
         Sanctum::actingAs($this->actor);
     }
 
+    public function test_author_owned_unassigned_property_is_included_in_handover_without_reassigning_transferred_history(): void
+    {
+        DB::table('properties')->where('id', 1)->update(['agent_id' => null]);
+        DB::table('properties')->where('id', 2)->update(['agent_id' => $this->first->id]);
+        $preview = $this->preview();
+        $ids = array_column(array_filter($preview['records'], fn ($r) => $r['type'] === 'properties'), 'id');
+        $this->assertSame([1], $ids);
+        $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => null]);
+        $plan = ['transfer_plan' => ['revision' => $preview['revision'], 'reason' => 'Assign orphaned active records',
+            'records' => array_map(fn ($r) => ['type' => $r['type'], 'id' => $r['id'], 'responsible_user_id' => $this->first->id], $preview['records'])]];
+        $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertOk();
+        $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $this->first->id, 'created_by' => $this->employee->id]);
+        $this->assertDatabaseHas('properties', ['id' => 3, 'agent_id' => $this->employee->id, 'moderation_status' => 'sold']);
+    }
+
     public function test_rop_employee_transfer_moves_properties_bookings_and_tasks_with_their_owner(): void
     {
         Schema::create('crm_deals', function (Blueprint $t) {
@@ -141,6 +156,7 @@ class DismissalTransferTest extends TestCase
         DB::table('crm_tasks')->insert(['title' => 'Property follow-up', 'assignee_id' => $this->employee->id,
             'branch_group_id' => $this->group->id, 'related_entity_type' => 'property', 'related_entity_id' => 1]);
         Sanctum::actingAs($rop);
+        DB::table('properties')->where('id', 1)->update(['agent_id' => null]);
         $url = '/api/users/'.$this->employee->id.'/group-transfer';
         $preview = $this->getJson($url)->assertOk()->json();
         $plans = array_map(fn ($row) => ['type' => $row['type'], 'id' => $row['id'], 'action' => 'move'], $preview['records']);
@@ -370,7 +386,7 @@ class DismissalTransferTest extends TestCase
         $this->actingAsGroupRop();
         $otherBranch = Branch::create(['name' => 'Other branch']);
         $otherGroup = BranchGroup::create(['name' => 'Other group', 'branch_id' => $otherBranch->id]);
-        DB::table('properties')->where('id', 1)->update(['branch_id' => $otherBranch->id, 'branch_group_id' => $otherGroup->id]);
+        DB::table('properties')->where('id', 1)->update(['agent_id' => null, 'branch_id' => $otherBranch->id, 'branch_group_id' => $otherGroup->id]);
         DB::table('clients')->where('id', 1)->update(['branch_group_id' => null]);
         Schema::create('crm_deals', function (Blueprint $t) {
             $t->id(); $t->unsignedBigInteger('primary_property_id')->nullable(); $t->string('control_kind')->nullable(); $t->timestamp('closed_at')->nullable(); $t->softDeletes();

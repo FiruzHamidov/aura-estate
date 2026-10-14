@@ -355,6 +355,10 @@ class PropertyController extends Controller
         }
 
         $payload = $property->toArray();
+        if ($authUser) {
+            $property->loadMissing('agent');
+            $payload['responsible_agent'] = $property->agent?->only(['id', 'name']);
+        }
         $payload['branch_id'] = $this->resolvePropertyBranchId($property);
         $payload['branch_group_id'] = $this->resolvePropertyBranchGroupId($property);
 

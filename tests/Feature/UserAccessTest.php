@@ -61,6 +61,7 @@ class UserAccessTest extends TestCase
             $table->text('description')->nullable();
             $table->date('birthday')->nullable();
             $table->string('photo')->nullable();
+            $table->softDeletes();
             $table->string('telegram_id')->nullable();
             $table->string('telegram_username')->nullable();
             $table->string('telegram_photo_url')->nullable();
@@ -176,13 +177,14 @@ class UserAccessTest extends TestCase
         DB::table('bookings')->insert(['agent_id' => $employee->id]);
         DB::table('bookings')->insert(['agent_id' => $admin->id, 'created_by' => $employee->id]);
         Sanctum::actingAs($admin);
-        $expected = ['properties' => 8, 'properties_active' => 4, 'properties_completed' => 4, 'clients' => 1, 'bookings' => 1, 'deals' => 1];
+        DB::table('properties')->insert(['title' => 'Unassigned legacy listing', 'agent_id' => null, 'created_by' => $employee->id, 'moderation_status' => 'approved']);
+        $expected = ['properties' => 9, 'properties_active' => 5, 'properties_completed' => 4, 'properties_unassigned' => 1, 'clients' => 1, 'bookings' => 1, 'deals' => 1];
         $this->getJson('/api/user/'.$employee->id.'?include_record_counts=1')
             ->assertOk()->assertJsonPath('record_counts', $expected);
         $response = $this->getJson('/api/user?status=inactive&include_record_counts=1')->assertOk();
         $rows = collect($response->json('data'))->keyBy('id');
         $this->assertSame($expected, $rows[$employee->id]['record_counts']);
-        $this->assertSame(['properties' => 0, 'properties_active' => 0, 'properties_completed' => 0, 'clients' => 0, 'bookings' => 0, 'deals' => 0], $rows[$empty->id]['record_counts']);
+        $this->assertSame(['properties' => 0, 'properties_active' => 0, 'properties_completed' => 0, 'properties_unassigned' => 0, 'clients' => 0, 'bookings' => 0, 'deals' => 0], $rows[$empty->id]['record_counts']);
         $this->getJson('/api/user/'.$employee->id)->assertOk()->assertJsonMissingPath('record_counts');
     }
 
@@ -211,12 +213,12 @@ class UserAccessTest extends TestCase
         }
         Sanctum::actingAs($rop);
         $this->getJson('/api/user/'.$employee->id.'?include_record_counts=1')->assertOk()
-            ->assertJsonPath('record_counts', ['properties' => 1, 'properties_active' => 1, 'properties_completed' => 0, 'clients' => 1, 'bookings' => 1, 'deals' => 1]);
+            ->assertJsonPath('record_counts', ['properties' => 1, 'properties_active' => 1, 'properties_completed' => 0, 'properties_unassigned' => 0, 'clients' => 1, 'bookings' => 1, 'deals' => 1]);
         $director = User::create(['name' => 'Director', 'phone' => '900010013', 'role_id' => $directorRole->id,
             'branch_id' => $branch->id, 'status' => 'active']);
         Sanctum::actingAs($director);
         $this->getJson('/api/user/'.$employee->id.'?include_record_counts=1')->assertOk()
-            ->assertJsonPath('record_counts', ['properties' => 2, 'properties_active' => 2, 'properties_completed' => 0, 'clients' => 2, 'bookings' => 2, 'deals' => 2]);
+            ->assertJsonPath('record_counts', ['properties' => 2, 'properties_active' => 2, 'properties_completed' => 0, 'properties_unassigned' => 0, 'clients' => 2, 'bookings' => 2, 'deals' => 2]);
     }
 
     public function test_rop_user_index_excludes_directors_and_uses_explicit_groups(): void
