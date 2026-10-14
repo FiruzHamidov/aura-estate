@@ -499,6 +499,21 @@ class PropertySearchFeatureTest extends TestCase
         $this->assertSame(85000.0, $chatResults[0]['discount_price']);
     }
 
+    public function test_current_responsible_filter_includes_transfers_and_unassigned_authored_listings(): void
+    {
+        $recipient = $this->agent->id;
+        $transferred = $this->createProperty(['created_by' => 999, 'agent_id' => $recipient]);
+        $unassigned = $this->createProperty(['agent_id' => null]);
+        $this->createProperty(['agent_id' => 999]); // Authored here, now assigned away.
+        $this->createProperty(['created_by' => 999, 'agent_id' => null]);
+        $this->createProperty(['agent_id' => $recipient, 'moderation_status' => 'pending']);
+
+        $response = $this->getJson('/api/properties?responsible_user_id='.$recipient)->assertOk();
+        $this->assertEqualsCanonicalizing([$transferred->id, $unassigned->id], array_column($response->json('data'), 'id'));
+        $this->getJson('/api/properties/count?responsible_user_id='.$recipient)->assertOk()->assertJsonPath('count', 2);
+        $this->getJson('/api/properties?responsible_user_id=')->assertOk()->assertJsonPath('total', 4);
+    }
+
     private function createProperty(array $attributes = []): Property
     {
         $property = Property::create(array_merge([
