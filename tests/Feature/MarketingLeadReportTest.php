@@ -232,10 +232,36 @@ class MarketingLeadReportTest extends LeadFeatureTest
         $this->assertSame(1, $this->report($marketer, ['horizon_days' => 60])['summary']['worked_contacts']);
         DB::table('marketing_lead_assignments')->delete();
         DB::table('marketing_lead_receipts')->delete();
-        $this->artisan('marketing:backfill-leads')->assertSuccessful();
-        $this->artisan('marketing:backfill-leads')->assertSuccessful();
+        (require database_path('migrations/2026_10_14_110000_backfill_marketing_lead_receipts.php'))->up();
+        (require database_path('migrations/2026_10_14_110000_backfill_marketing_lead_receipts.php'))->up();
         $this->assertDatabaseCount('marketing_lead_receipts', 1);
         $this->assertDatabaseCount('marketing_lead_assignments', 1);
         $this->assertDatabaseHas('marketing_lead_receipts', ['historical' => true]);
     }
+    public function test_marketing_report_keeps_assigned_group_boundary_even_for_admin_role(): void
+    {
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $marketer = $this->actor('marketing');
+        $agent = $this->actor('agent');
+        $admin = $this->actor('admin');
+        $group = \App\Models\BranchGroup::create(['branch_id' => 1, 'name' => 'Allowed']);
+        $other = \App\Models\BranchGroup::create(['branch_id' => 1, 'name' => 'Hidden']);
+        $admin->role->forceFill(['permissions' => ['data.scope.assigned_groups', 'leads.scope.all']])->save();
+        $admin->supervisedGroups()->attach($group->id);
+        $agent->update(['branch_group_id' => $group->id]);
+        $lead = $this->marketingLead($marketer, $agent);
+        $lead->update(['branch_group_id' => $group->id]);
+        $otherAgent = $this->actor('agent');
+        $otherAgent->update(['branch_group_id' => $other->id]);
+        $hidden = $this->marketingLead($marketer, $otherAgent, '900999887');
+        $hidden->update(['branch_group_id' => $other->id]);
+        $this->assertSame(1, $this->report($admin)['summary']['leads']);
+        $this->assertFalse($this->report($admin)['meta']['can_review']);
+        Sanctum::actingAs($admin);
+        $this->postJson('/api/crm/marketing-leads/'.$lead->id.'/classification', ['returning' => true, 'reason' => 'Review denied'])
+            ->assertForbidden();
+        $admin->role->forceFill(['permissions' => []])->save();
+        $this->getJson('/api/crm/marketing-leads?date_from=2026-09-01&date_to=2026-09-25')->assertForbidden();
+    }
+
 }

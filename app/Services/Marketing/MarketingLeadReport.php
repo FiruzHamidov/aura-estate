@@ -31,7 +31,7 @@ class MarketingLeadReport
     public function salesQuery(User $actor): Builder
     {
         $q = Property::query()->where('moderation_status', 'sold')->whereNotNull('sold_at');
-        if ($actor->hasRole('rop')) {
+        if ($actor->usesAssignedGroupScope()) {
             return app(RopGroupAccess::class)->scope($q, $actor, 'properties.branch_group_id', 'properties.branch_id');
         }
         if (! in_array($actor->role?->slug, ['admin', 'superadmin', 'marketing'], true)) {
@@ -166,9 +166,9 @@ class MarketingLeadReport
                 'no_next_step' => ! $lead->is_closed && ! $lead->next_activity_at && ! $lead->next_follow_up_at,
                 'lost_reason' => $lead->lost_reason, 'status' => $lead->status];
         }
-        if (! in_array($actor->role?->slug, ['admin', 'superadmin', 'marketing'], true)) {
+        if ($actor->usesAssignedGroupScope() || ! in_array($actor->role?->slug, ['admin', 'superadmin', 'marketing'], true)) {
             $visiblePeople = User::query();
-            if ($actor->hasRole('rop')) {
+            if ($actor->usesAssignedGroupScope()) {
                 app(RopGroupAccess::class)->scope($visiblePeople, $actor, 'users.branch_group_id', 'users.branch_id');
             } else {
                 $visiblePeople->where('branch_id', $actor->branch_id ?: -1);
@@ -206,7 +206,7 @@ class MarketingLeadReport
             'rows' => array_slice($rows, ($page - 1) * $perPage, $perPage),
             'meta' => ['total' => count($rows), 'page' => $page, 'per_page' => $perPage, 'last_page' => max(1, (int) ceil(count($rows) / $perPage)),
                 'date_from' => $from->toDateString(), 'date_to' => $to->toDateString(), 'horizon_days' => $horizon,
-                'can_review' => in_array($actor->role?->slug, self::REVIEW_ROLES, true), 'as_of' => $now->toIso8601String()]];
+                'can_review' => $actor->hasPermission('leads.update') && in_array($actor->role?->slug, self::REVIEW_ROLES, true), 'as_of' => $now->toIso8601String()]];
     }
 
     public function summarize(Collection $rows): array

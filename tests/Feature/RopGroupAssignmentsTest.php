@@ -1637,7 +1637,8 @@ class RopGroupAssignmentsTest extends TestCase
             $invalidStage = \App\Models\DealStage::create(['name' => 'New', 'pipeline_id' => $invalidPipeline->id, 'is_active' => true, 'is_closed' => false]);
             $invalidPayload = $payload;
             $invalidPayload['records'][1] += ['pipeline_id' => $invalidPipeline->id, 'stage_id' => $invalidStage->id];
-            $this->postJson($url, $invalidPayload)->assertUnprocessable()->assertJsonPath('code', 'TRANSFER_PIPELINE_REQUIRED');
+            $this->postJson($url, $invalidPayload)->assertUnprocessable()->assertJsonPath('code', 'TRANSFER_PIPELINE_REQUIRED')
+                ->assertJsonStructure(['details' => ['errors' => ['records.deals:'.$dealId]]]);
             $this->assertSame($grouped ? $this->a->id : null, $employee->fresh()->branch_group_id);
             $this->assertSame($grouped ? $this->a->id : null, $client->fresh()->branch_group_id);
             $this->assertDatabaseCount('group_access_audit_logs', 0);

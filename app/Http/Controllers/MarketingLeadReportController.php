@@ -33,7 +33,7 @@ class MarketingLeadReportController extends Controller
     public function classify(Request $request, Lead $lead)
     {
         $actor = $request->user()->loadMissing('role');
-        abort_unless(in_array($actor->role?->slug, MarketingLeadReport::REVIEW_ROLES, true), 403);
+        abort_unless($actor->hasPermission('leads.update') && in_array($actor->role?->slug, MarketingLeadReport::REVIEW_ROLES, true), 403);
         app(LeadAccess::class)->ensureVisible($actor, $lead);
         $data = $request->validate(['returning' => 'required|boolean', 'reason' => 'required|string|min:5|max:2000']);
 
@@ -53,7 +53,7 @@ class MarketingLeadReportController extends Controller
     public function review(Request $request, Lead $lead, Property $property, MarketingLeadReport $report)
     {
         $actor = $request->user()->loadMissing('role');
-        abort_unless(in_array($actor->role?->slug, MarketingLeadReport::REVIEW_ROLES, true), 403);
+        abort_unless($actor->hasPermission('leads.update') && in_array($actor->role?->slug, MarketingLeadReport::REVIEW_ROLES, true), 403);
         app(LeadAccess::class)->ensureVisible($actor, $lead);
         $data = $request->validate(['decision' => ['required', Rule::in(['confirm', 'reject'])], 'reason' => 'required|string|min:5|max:2000']);
 
