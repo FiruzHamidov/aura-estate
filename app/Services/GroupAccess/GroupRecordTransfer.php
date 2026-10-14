@@ -82,9 +82,9 @@ final class GroupRecordTransfer
                 'stage_is_closed' => (bool) $record->stage?->is_closed] : [])];
     }
 
-    public function transfer(User $actor, string $type, int $id, array $data, bool $employeeTransfer = false, ?int $ungroupedEmployeeId = null): Model
+    public function transfer(User $actor, string $type, int $id, array $data, bool $employeeTransfer = false, ?int $ungroupedEmployeeId = null, ?User $dismissalEmployee = null): Model
     {
-        return DB::transaction(function () use ($actor, $type, $id, $data, $employeeTransfer, $ungroupedEmployeeId) {
+        return DB::transaction(function () use ($actor, $type, $id, $data, $employeeTransfer, $ungroupedEmployeeId, $dismissalEmployee) {
             $users = User::query()->whereIn('id', [$actor->id, $data['responsible_user_id']])->orderBy('id')->lockForUpdate()->get()->keyBy('id');
             $actor = $users->get($actor->id);
             $target = $users->get((int) $data['responsible_user_id']);
@@ -95,7 +95,18 @@ final class GroupRecordTransfer
             $taskAlreadyMoved = $employeeTransfer && $record instanceof CrmTask
                 && (int) $record->branch_group_id === (int) $group->id
                 && (int) $record->assignee_id === (int) $target->id;
-            if (! $taskAlreadyMoved) $this->authorize($actor, $record, $employeeTransfer, $ungroupedEmployeeId);
+            if ($dismissalEmployee !== null) {
+                // Internal dismissal context only; ordinary record-transfer endpoints never pass it.
+                $dismissalEmployee = User::query()->lockForUpdate()->findOrFail($dismissalEmployee->id);
+                abort_unless($actor->usesAssignedGroupScope() && $actor->hasPermission('users.dismiss')
+                    && $actor->hasPermission('users.dismissal.employee_records') && $actor->hasPermission('users.dismissal.change_group')
+                    && $dismissalEmployee->id !== $actor->id && $dismissalEmployee->status === User::STATUS_ACTIVE
+                    && ! $dismissalEmployee->isDeletedAccount() && $dismissalEmployee->hasPermission('users.subject.team')
+                    && in_array($type, ['properties', 'clients'], true)
+                    && (int) $record->getAttribute(GroupOwnedRecordObserver::RESPONSIBLES[$record->getTable()]) === (int) $dismissalEmployee->id,
+                    403, 'FORBIDDEN_ACTION');
+                $this->access->ensureVisible($actor, $dismissalEmployee);
+            } elseif (! $taskAlreadyMoved) $this->authorize($actor, $record, $employeeTransfer, $ungroupedEmployeeId);
             abort_unless(hash_equals($this->revision($record), $data['revision']), 409, 'RECORD_VERSION_CONFLICT');
             if ($actor->usesAssignedGroupScope()) {
                 if ($ungroupedEmployeeId !== null) {
@@ -136,7 +147,13 @@ final class GroupRecordTransfer
                 DB::table('properties')->where('id', $record->id)->update(['branch_group_id' => $group->id, 'branch_id' => $group->branch_id]);
                 $ownership = ['agent_id' => $target->id];
                 if ((int) $record->co_owner_user_id === (int) $target->id) $ownership['co_owner_user_id'] = null;
-                if ($employeeTransfer && (int) $record->agent_id === (int) $target->id) {
+                if ($dismissalEmployee !== null) {
+                    if ((int) $record->co_owner_user_id === (int) $dismissalEmployee->id) $ownership['co_owner_user_id'] = null;
+                    DB::table('properties')->where('id', $record->id)->update([
+                        ...$ownership, 'updated_at' => now(), 'moderation_version' => (int) $record->moderation_version + 1,
+                    ]);
+                    $record = $record->fresh();
+                } elseif ($employeeTransfer && (int) $record->agent_id === (int) $target->id) {
                     // Ownership is unchanged; only the employee's organization moves.
                     DB::table('properties')->where('id', $record->id)->update(['updated_at' => now(), 'moderation_version' => (int) $record->moderation_version + 1]);
                     $record = $record->fresh();
