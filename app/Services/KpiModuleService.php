@@ -1315,6 +1315,7 @@ class KpiModuleService
         $page = max(1, (int) ($filters['page'] ?? 1));
 
         $usersPaginator = ($authUser->usesAssignedGroupScope() ? $this->historicalKpiUsersQuery($authUser, $filters, $from, $to) : $this->weeklyUsersScopeQuery($authUser, $filters))
+            ->when(isset($filters['user_ids']), fn (Builder $query) => $query->whereIn('users.id', $filters['user_ids']))
             ->orderBy('users.name')
             ->paginate($perPage, ['*'], 'page', $page);
         $userIds = collect($usersPaginator->items())->pluck('id')->map(fn ($id) => (int) $id)->values();
