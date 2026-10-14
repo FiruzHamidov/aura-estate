@@ -61,6 +61,7 @@ class UserAccessTest extends TestCase
             $table->text('description')->nullable();
             $table->date('birthday')->nullable();
             $table->string('photo')->nullable();
+            $table->softDeletes();
             $table->string('telegram_id')->nullable();
             $table->string('telegram_username')->nullable();
             $table->string('telegram_photo_url')->nullable();
