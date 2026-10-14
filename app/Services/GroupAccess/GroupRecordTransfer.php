@@ -31,7 +31,7 @@ final class GroupRecordTransfer
                 && $actor->hasPermission('users.ungrouped.assign'), 403, 'FORBIDDEN_ACTION');
             $attributes = $record->getAttributes();
             $responsible = GroupOwnedRecordObserver::RESPONSIBLES[$record->getTable()];
-            abort_unless((int) ($attributes[$responsible] ?? 0) === $ungroupedEmployeeId, 403, 'FORBIDDEN_ACTION');
+            abort_unless((int) ($attributes[$responsible] ?? ($record instanceof Property ? $record->created_by : null)) === $ungroupedEmployeeId, 403, 'FORBIDDEN_ACTION');
             // Existing classified records must already belong to this manager's scope.
             if (($attributes['branch_group_id'] ?? null) !== null) $this->access->ensureVisible($actor, $record);
             abort_unless($actor->branch_id && (($attributes['branch_id'] ?? null) === null
@@ -103,7 +103,7 @@ final class GroupRecordTransfer
                     && $dismissalEmployee->id !== $actor->id && $dismissalEmployee->status === User::STATUS_ACTIVE
                     && ! $dismissalEmployee->isDeletedAccount() && $dismissalEmployee->hasPermission('users.subject.team')
                     && in_array($type, ['properties', 'clients'], true)
-                    && (int) $record->getAttribute(GroupOwnedRecordObserver::RESPONSIBLES[$record->getTable()]) === (int) $dismissalEmployee->id,
+                    && (int) ($record->getAttribute(GroupOwnedRecordObserver::RESPONSIBLES[$record->getTable()]) ?? ($record instanceof Property ? $record->created_by : null)) === (int) $dismissalEmployee->id,
                     403, 'FORBIDDEN_ACTION');
                 $this->access->ensureVisible($actor, $dismissalEmployee);
             } elseif (! $taskAlreadyMoved) $this->authorize($actor, $record, $employeeTransfer, $ungroupedEmployeeId);
@@ -111,7 +111,7 @@ final class GroupRecordTransfer
             if ($actor->usesAssignedGroupScope()) {
                 if ($ungroupedEmployeeId !== null) {
                     $this->access->ensureGroup($actor, $group->id);
-                } elseif ($employeeTransfer && (int) $record->getAttribute(GroupOwnedRecordObserver::RESPONSIBLES[$record->getTable()]) === (int) $target->id) {
+                } elseif ($employeeTransfer && (int) ($record->getAttribute(GroupOwnedRecordObserver::RESPONSIBLES[$record->getTable()]) ?? ($record instanceof Property ? $record->created_by : null)) === (int) $target->id) {
                     abort_unless(app(EmployeeGroupTransfer::class)->destinationQuery($actor)->whereKey($group->id)->exists(), 403, 'RBAC_GROUP_SCOPE_VIOLATION');
                 } else $this->access->ensureGroup($actor, $group->id);
             }
@@ -153,9 +153,9 @@ final class GroupRecordTransfer
                         ...$ownership, 'updated_at' => now(), 'moderation_version' => (int) $record->moderation_version + 1,
                     ]);
                     $record = $record->fresh();
-                } elseif ($employeeTransfer && (int) $record->agent_id === (int) $target->id) {
-                    // Ownership is unchanged; only the employee's organization moves.
-                    DB::table('properties')->where('id', $record->id)->update(['updated_at' => now(), 'moderation_version' => (int) $record->moderation_version + 1]);
+                } elseif ($employeeTransfer && (int) ($record->agent_id ?? $record->created_by) === (int) $target->id) {
+                    // Preserve the employee responsible for this move; classify legacy author-only records.
+                    DB::table('properties')->where('id', $record->id)->update(['agent_id' => $target->id, 'updated_at' => now(), 'moderation_version' => (int) $record->moderation_version + 1]);
                     $record = $record->fresh();
                 } else {
                     $record = app(PropertyModerationService::class)->transfer($record->fresh(), $actor, $ownership, $data['reason'], (int) $record->moderation_version);

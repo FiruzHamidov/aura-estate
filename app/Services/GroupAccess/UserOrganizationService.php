@@ -94,7 +94,12 @@ final class UserOrganizationService
                 continue;
             }
             $query = DB::table($table);
-            if ($userId !== null) $query->where($responsible, $userId);
+            if ($userId !== null) {
+                if ($table === 'properties') {
+                    $query->where(fn ($q) => $q->where('agent_id', $userId)
+                        ->orWhere(fn ($unassigned) => $unassigned->whereNull('agent_id')->where('created_by', $userId)));
+                } else $query->where($responsible, $userId);
+            }
             if (Schema::hasColumn($table, 'deleted_at')) {
                 $query->whereNull('deleted_at');
             }

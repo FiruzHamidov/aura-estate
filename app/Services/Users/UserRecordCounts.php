@@ -9,7 +9,7 @@ use Illuminate\Support\Collection;
 
 final class UserRecordCounts
 {
-    /** Count current responsibility, never historical authorship, in four queries per page. */
+    /** Count current responsibility, falling back to authorship only when no agent is assigned. */
     public function attach(Collection $users, User $actor): void
     {
         if ($users->isEmpty() || !$actor->hasPermission('users.record_counts.view')) {
@@ -23,7 +23,8 @@ final class UserRecordCounts
             'bookings' => [Booking::class, 'agent_id', false],
             'deals' => [Deal::class, 'responsible_agent_id', true],
         ] as $type => [$class, $responsible, $hasBranch]) {
-            $query = $class::query()->whereIn($responsible, $users->pluck('id'));
+            $owner = $type === 'properties' ? 'COALESCE(agent_id, created_by)' : $responsible;
+            $query = $class::query()->whereIn(\Illuminate\Support\Facades\DB::raw($owner), $users->pluck('id'));
             if ($type === 'properties') {
                 $query->where(fn ($q) => $q->whereNull('moderation_status')->orWhere('moderation_status', '!=', 'deleted'));
             }
@@ -39,12 +40,14 @@ final class UserRecordCounts
             if ($type === 'properties') {
                 $closed = UserOrganizationService::CLOSED_PROPERTY_STATUSES;
                 $placeholders = implode(',', array_fill(0, count($closed), '?'));
-                $rows = $query->selectRaw($responsible.', COUNT(*) as total')
+                $rows = $query->selectRaw($owner.' as counted_user_id, COUNT(*) as total')
                     ->selectRaw("SUM(CASE WHEN moderation_status IN ($placeholders) THEN 1 ELSE 0 END) as completed", $closed)
-                    ->groupBy($responsible)->get();
-                $counts[$type] = $rows->pluck('total', $responsible);
-                $counts['properties_active'] = $rows->mapWithKeys(fn ($row) => [$row->$responsible => (int) $row->total - (int) $row->completed]);
-                $counts['properties_completed'] = $rows->pluck('completed', $responsible);
+                    ->selectRaw('SUM(CASE WHEN agent_id IS NULL THEN 1 ELSE 0 END) as unassigned')
+                    ->groupByRaw($owner)->get();
+                $counts[$type] = $rows->pluck('total', 'counted_user_id');
+                $counts['properties_active'] = $rows->mapWithKeys(fn ($row) => [$row->counted_user_id => (int) $row->total - (int) $row->completed]);
+                $counts['properties_completed'] = $rows->pluck('completed', 'counted_user_id');
+                $counts['properties_unassigned'] = $rows->pluck('unassigned', 'counted_user_id');
                 continue;
             }
             $counts[$type] = $query->selectRaw($responsible.', COUNT(*) as total')
