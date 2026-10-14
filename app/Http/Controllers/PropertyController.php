@@ -916,7 +916,8 @@ class PropertyController extends Controller
 
         if ($user->hasPermission('properties.list.scope.own')) {
             $query->where(function (Builder $ownerQuery) use ($user) {
-                $ownerQuery->where('created_by', $user->id);
+                $ownerQuery->where('created_by', $user->id)
+                    ->orWhere('agent_id', $user->id);
                 if ($this->supportsPropertyCoOwner()) $ownerQuery->orWhere('co_owner_user_id', $user->id);
             });
         } elseif ($user->hasPermission('properties.list.scope.group')) {
