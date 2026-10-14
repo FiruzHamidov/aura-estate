@@ -171,7 +171,7 @@ class DealAccess
     public function ensureCanDelete(User $authUser, ?Deal $deal = null): void
     {
         $this->ensureAction($authUser, 'delete');
-        abort_if($deal?->isPropertyControl(), 403, 'System property-control cards cannot be deleted.');
+        abort_if($deal?->isPropertyControl() && !$authUser->hasPermission('deals.control.delete'), 403, 'Нет права на удаление карточки контроля.');
     }
 
     public function validateMutationTargets(User $authUser, array $data): void
