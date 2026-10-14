@@ -174,6 +174,33 @@ class PropertyMyPropertiesBranchFilterTest extends TestCase
         }
     }
 
+    public function test_own_scope_includes_assigned_listings_and_excludes_unrelated_records(): void
+    {
+        $role = Role::create(['name' => 'Recipient', 'slug' => 'own_recipient']);
+        $actor = User::create(['name' => 'Recipient', 'phone' => 'own-recipient', 'role_id' => $role->id]);
+        $type = PropertyType::create(['name' => 'Apartment']);
+        $status = PropertyStatus::create(['name' => 'Active']);
+        $make = fn (array $extra) => Property::create(array_merge([
+            'title' => 'Object', 'type_id' => $type->id, 'status_id' => $status->id,
+            'price' => 100000, 'created_by' => 999, 'agent_id' => $actor->id,
+            'moderation_status' => 'approved',
+        ], $extra));
+        $assigned = $make([]);
+        $own = $make(['created_by' => $actor->id, 'agent_id' => null]);
+        $pending = $make(['moderation_status' => 'pending']);
+        $make(['created_by' => $actor->id, 'agent_id' => 999]);
+        $make(['agent_id' => 999]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role->forceFill(['permissions' => ['properties.list.internal', 'properties.list.scope.own']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $url = '/api/my-properties?responsible_user_id='.$actor->id;
+        $response = $this->getJson($url.'&moderation_status=approved')->assertOk()->assertJsonPath('total', 2);
+        $this->assertEqualsCanonicalizing([$assigned->id, $own->id], array_column($response->json('data'), 'id'));
+        $this->getJson($url.'&moderation_status=approved&per_page=1')->assertOk()->assertJsonPath('total', 2);
+        $this->getJson($url.'&moderation_status=pending')->assertOk()->assertJsonPath('total', 1)->assertJsonPath('data.0.id', $pending->id);
+        $this->getJson('/api/my-properties?responsible_user_id=888')->assertOk()->assertJsonPath('total', 0);
+    }
+
     public function test_custom_list_scopes_are_shared_by_list_count_map_and_my_properties(): void
     {
         Schema::table('properties', function (Blueprint $table): void {
@@ -206,7 +233,7 @@ class PropertyMyPropertiesBranchFilterTest extends TestCase
             Sanctum::actingAs($actor->fresh());
         };
         foreach ([
-            'own' => [$own->id, $coOwned->id],
+            'own' => [$own->id, $coOwned->id, $assignedOnly->id],
             'group' => [$own->id, $group->id],
             'public' => [$own->id, $foreign->id, $coOwned->id, $assignedOnly->id],
             'all' => [$own->id, $group->id, $foreign->id, $deleted->id, $coOwned->id, $assignedOnly->id],
