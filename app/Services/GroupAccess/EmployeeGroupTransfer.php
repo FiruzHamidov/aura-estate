@@ -146,6 +146,7 @@ final class EmployeeGroupTransfer
                         'INVALID_TRANSFER_TARGET' => 'Выберите действующего ответственного из нужной группы.',
                     ];
                     throw \Illuminate\Validation\ValidationException::withMessages([
+                        'code' => $error->getMessage(),
                         'records.'.$item['type'].':'.$item['id'] => $messages[$error->getMessage()] ?? $error->getMessage(),
                     ]);
                 }
