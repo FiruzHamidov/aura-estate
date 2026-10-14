@@ -105,6 +105,7 @@ Route::post('/lead-requests', [LeadRequestController::class, 'store'])->middlewa
 
 Route::get('/properties', [PropertyController::class, 'index']);
 Route::get('/properties/count', [PropertyController::class, 'count']);
+Route::get('/feed/properties/stats', [PropertyController::class, 'stats']);
 Route::get('/properties/map', [PropertyController::class, 'map']);
 Route::get('/properties/search', [PropertyController::class, 'search']);
 Route::get('/properties/{property}', [PropertyController::class, 'show'])->whereNumber('property');
