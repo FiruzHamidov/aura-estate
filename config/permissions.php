@@ -367,7 +367,7 @@ $permissions = [
         'group' => 'CRM · Сделки', 'name' => 'Редактирование сделок', 'description' => 'Изменение доступных сделок. Системные карточки контроля требуют отдельного права редактирования.', 'roles' => ['admin', 'superadmin', 'marketing', 'branch_director', 'rop', 'manager', 'agent', 'operator', 'hr'],
     ],
     'deals.delete' => [
-        'group' => 'CRM · Сделки', 'name' => 'Удаление сделок', 'description' => 'Удаление доступных сделок. Системные карточки контроля объектов удалять нельзя.', 'roles' => ['admin', 'superadmin', 'marketing', 'branch_director', 'rop', 'manager', 'agent', 'operator', 'hr'], 'sensitive' => true,
+        'group' => 'CRM · Сделки', 'name' => 'Удаление сделок', 'description' => 'Удаление доступных сделок. Для карточек контроля требуется отдельное право.', 'roles' => ['admin', 'superadmin', 'marketing', 'branch_director', 'rop', 'manager', 'agent', 'operator', 'hr'], 'sensitive' => true,
     ],
     'deals.move' => [
         'group' => 'CRM · Сделки', 'name' => 'Перемещение сделок', 'description' => 'Перемещение доступных сделок между этапами. Переходы карточек контроля дополнительно ограничены правилами процесса.', 'roles' => ['admin', 'superadmin', 'marketing', 'branch_director', 'rop', 'manager', 'agent', 'operator', 'hr', 'security'],
@@ -377,6 +377,9 @@ $permissions = [
     ],
     'deals.related_control.view' => [
         'group' => 'CRM · Сделки', 'name' => 'Контроль своих объектов', 'description' => 'Включает в выборку своих сделок карточки контроля по вашим объявлениям.', 'roles' => ['agent', 'intern'],
+    ],
+    'deals.control.delete' => [
+        'group' => 'CRM · Сделки', 'name' => 'Удаление карточек контроля', 'description' => 'Удаление доступных карточек контроля объектов с сохранением аудита. Требуется общее право удаления сделок.', 'roles' => ['admin', 'superadmin'], 'sensitive' => true,
     ],
     'deals.control.edit' => [
         'group' => 'CRM · Сделки', 'name' => 'Редактирование данных карточки контроля', 'description' => 'Изменение основных данных системной карточки контроля. Требуется общее право редактирования сделок.', 'roles' => ['admin', 'superadmin'], 'sensitive' => true,
