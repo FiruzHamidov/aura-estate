@@ -1651,11 +1651,28 @@ class RopGroupAssignmentsTest extends TestCase
             'pipeline_id' => $pipeline->id, 'stage_id' => $stage->id, 'responsible_agent_id' => $employee->id]);
     }
 
+    public function test_rop_sees_ungrouped_team_in_own_branch_and_can_filter_them(): void
+    {
+        $this->rop->supervisedGroups()->attach($this->a->id);
+        $ungrouped = $this->user('agent');
+        $grouped = $this->user('agent', $this->a);
+        $foreign = $this->user('agent');
+        $foreign->forceFill(['branch_id' => Branch::create(['name' => 'Other'])->id])->save();
+        Sanctum::actingAs($this->rop);
+        $ids = $this->getJson('/api/user?per_page=100')->assertOk()->json('data.*.id');
+        $this->assertContains($ungrouped->id, $ids);
+        $this->assertContains($grouped->id, $ids);
+        $this->assertNotContains($foreign->id, $ids);
+        $filtered = $this->getJson('/api/user?without_group=1&per_page=100')->assertOk()->json('data.*.id');
+        $this->assertSame([$ungrouped->id], $filtered);
+        $this->getJson('/api/users/'.$ungrouped->id.'/group-transfer')->assertNotFound();
+    }
+
     public function test_ungrouped_permissions_are_separate_and_limited_to_own_branch_and_groups(): void
     {
         Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
         $this->rop->supervisedGroups()->attach($this->a->id);
-        $defaults = $this->rop->role->permissionKeys();
+        $defaults = array_values(array_diff($this->rop->role->permissionKeys(), ['users.ungrouped.view']));
         $employee = $this->user('agent');
         $otherGroup = $this->user('agent', $this->b);
         $otherBranch = $this->user('agent');
