@@ -29,6 +29,22 @@ class RolePermissionsTest extends TestCase
         (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
     }
 
+    public function test_dismissal_employee_records_grant_migration_is_audited_and_preserves_revocation(): void
+    {
+        $rop = Role::where('slug', 'rop')->firstOrFail();
+        $rop->forceFill(['permissions' => ['users.dismiss', 'data.scope.assigned_groups']])->save();
+        $migration = require database_path('migrations/2026_10_14_120000_allow_rop_dismissal_employee_records.php');
+        $migration->up();
+        $this->assertTrue($rop->fresh()->hasPermission('users.dismissal.employee_records'));
+        $version = $rop->fresh()->permissions_version;
+        $migration->up();
+        $this->assertSame($version, $rop->fresh()->permissions_version);
+        $this->assertDatabaseHas('role_permission_audits', ['role_id' => $rop->id, 'version' => $version]);
+        $rop->forceFill(['permissions' => []])->save();
+        $migration->up();
+        $this->assertFalse($rop->fresh()->hasPermission('users.dismissal.employee_records'));
+    }
+
     private function actor(string $slug): User
     {
         $user = User::create(['name' => $slug, 'role_id' => Role::where('slug', $slug)->firstOrFail()->id]);

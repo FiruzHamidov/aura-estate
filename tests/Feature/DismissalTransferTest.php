@@ -346,12 +346,17 @@ class DismissalTransferTest extends TestCase
 
     public function test_rop_cannot_transfer_foreign_or_unclassified_records_or_edit_employee(): void
     {
+        $permissions = config('permissions');
+        $permissions['users.dismissal.employee_records']['roles'] = [];
+        config(['permissions' => $permissions]);
         $this->actingAsGroupRop();
         $plan = $this->plan();
         $other = BranchGroup::create(['name' => 'Other', 'branch_id' => $this->group->branch_id]);
         foreach ([$other->id, null] as $groupId) {
             DB::table('clients')->where('id', 1)->update(['branch_group_id' => $groupId]);
-            $this->getJson('/api/user/'.$this->employee->id.'/dismissal-preview')->assertForbidden();
+            $preview = $this->getJson('/api/user/'.$this->employee->id.'/dismissal-preview')->assertOk()
+                ->assertJsonPath('can_submit', false)->assertJsonPath('blocked_records_count', 1);
+            $this->assertEmpty(array_filter($preview->json('records'), fn ($r) => $r['type'] === 'clients' && $r['id'] === 1));
             $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertForbidden();
             $this->assertSame('active', $this->employee->fresh()->status);
             $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $this->employee->id]);
@@ -360,13 +365,57 @@ class DismissalTransferTest extends TestCase
         $this->postJson('/api/user/'.$this->employee->id.'/restore')->assertForbidden();
     }
 
+    public function test_rop_can_preview_and_transfer_own_employee_records_from_any_branch_with_dedicated_permission(): void
+    {
+        $this->actingAsGroupRop();
+        $otherBranch = Branch::create(['name' => 'Other branch']);
+        $otherGroup = BranchGroup::create(['name' => 'Other group', 'branch_id' => $otherBranch->id]);
+        DB::table('properties')->where('id', 1)->update(['branch_id' => $otherBranch->id, 'branch_group_id' => $otherGroup->id]);
+        DB::table('clients')->where('id', 1)->update(['branch_group_id' => null]);
+        Schema::create('crm_deals', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('primary_property_id')->nullable(); $t->string('control_kind')->nullable(); $t->timestamp('closed_at')->nullable(); $t->softDeletes();
+        });
+        $preview = $this->preview();
+        $this->assertTrue($preview['can_submit']);
+        $this->assertSame(0, $preview['blocked_records_count']);
+        $this->assertSame('active', $this->employee->fresh()->status);
+        $records = array_map(fn ($r) => ['type' => $r['type'], 'id' => $r['id'],
+            'responsible_user_id' => $this->first->id, 'destination_branch_group_id' => $this->group->id], $preview['records']);
+        $this->deleteJson('/api/user/'.$this->employee->id, ['transfer_plan' => [
+            'revision' => $preview['revision'], 'reason' => 'Reviewed employee handover', 'records' => $records,
+        ]])->assertOk();
+        $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $this->first->id, 'branch_group_id' => $this->group->id, 'branch_id' => $this->group->branch_id]);
+        $this->assertDatabaseHas('clients', ['id' => 1, 'responsible_agent_id' => $this->first->id, 'branch_group_id' => $this->group->id]);
+        $this->assertDatabaseHas('properties', ['id' => 3, 'agent_id' => $this->employee->id, 'moderation_status' => 'sold']);
+    }
+
+    public function test_extended_dismissal_permission_does_not_allow_regular_record_transfer_and_is_rechecked(): void
+    {
+        $rop = $this->actingAsGroupRop();
+        DB::table('clients')->where('id', 1)->update(['branch_group_id' => null]);
+        $plan = $this->plan();
+        try {
+            app(\App\Services\GroupAccess\GroupRecordTransfer::class)->preview($rop, 'clients', 1);
+            $this->fail('Ordinary transfer must retain group scope');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
+            $this->assertContains($e->getStatusCode(), [403, 404]);
+        }
+        $permissions = config('permissions');
+        $permissions['users.dismissal.employee_records']['roles'] = [];
+        config(['permissions' => $permissions]);
+        $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertForbidden();
+        $this->assertSame('active', $this->employee->fresh()->status);
+        $this->assertDatabaseHas('clients', ['id' => 1, 'responsible_agent_id' => $this->employee->id, 'branch_group_id' => null]);
+    }
+
     public function test_director_cannot_transfer_a_record_outside_their_branch(): void
     {
         Sanctum::actingAs($this->person('branch_director'));
         $plan = $this->plan();
         $otherBranch = Branch::create(['name' => 'Other']);
         DB::table('clients')->where('id', 1)->update(['branch_id' => $otherBranch->id]);
-        $this->getJson('/api/user/'.$this->employee->id.'/dismissal-preview')->assertForbidden();
+        $this->getJson('/api/user/'.$this->employee->id.'/dismissal-preview')->assertOk()
+            ->assertJsonPath('can_submit', false)->assertJsonPath('blocked_records_count', 1);
         $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertForbidden();
         $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $this->employee->id]);
         $this->assertDatabaseHas('users', ['id' => $this->employee->id, 'status' => 'active']);

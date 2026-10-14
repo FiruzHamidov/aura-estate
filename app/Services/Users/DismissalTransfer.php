@@ -100,7 +100,7 @@ final class DismissalTransfer
         }
 
         if (empty($record['linked_task_fixed_group']) && $target->branch_group_id
-            && ($actor->hasPermission('users.dismissal.change_group') && ($record['type'] !== 'properties' || !$actor->usesAssignedGroupScope()))
+            && ($actor->hasPermission('users.dismissal.change_group') && ($record['type'] !== 'properties' || !$actor->usesAssignedGroupScope() || $actor->hasPermission('users.dismissal.employee_records')))
             && ($actor->hasPermission('users.dismissal.all_branches') || (int) $actor->branch_id === (int) $target->branch_id)) {
             return $record['type'] !== 'deals' || $this->dealDestination($record, $target) !== null;
         }
@@ -125,27 +125,34 @@ final class DismissalTransfer
         return ['pipeline_id' => $matches[0]->pipeline_id, 'stage_id' => $matches[0]->id];
     }
 
+    private function recordScopeError(User $actor, array $record): ?string
+    {
+        if ($actor->usesAssignedGroupScope() && $actor->hasPermission('users.dismissal.employee_records')) return null;
+        $sameBranch = $actor->branch_id && (int) $record['branch_id'] === (int) $actor->branch_id;
+        if ($actor->usesAssignedGroupScope()
+            && (! $sameBranch || ! app(RopGroupAccess::class)->allowsGroup($actor, $record['branch_group_id']))) {
+            return 'RBAC_GROUP_SCOPE_VIOLATION';
+        }
+        if (! $actor->hasPermission('users.dismissal.all_branches') && ! $sameBranch) {
+            return 'FORBIDDEN_ACTION';
+        }
+        return null;
+    }
+
     private function ensureRecordScope(User $actor, array $records): void
     {
-        if ($actor->usesAssignedGroupScope()) {
-            $access = app(RopGroupAccess::class);
-            foreach ($records as $record) {
-                abort_unless($actor->branch_id && (int) $record['branch_id'] === (int) $actor->branch_id
-                    && $access->allowsGroup($actor, $record['branch_group_id']), 403, 'RBAC_GROUP_SCOPE_VIOLATION');
-            }
-        }
-
-        if (!$actor->hasPermission('users.dismissal.all_branches')) {
-            foreach ($records as $record) {
-                abort_unless($actor->branch_id && (int) $record['branch_id'] === (int) $actor->branch_id, 403, 'FORBIDDEN_ACTION');
-            }
+        foreach ($records as $record) {
+            $error = $this->recordScopeError($actor, $record);
+            abort_if($error !== null, 403, $error ?? 'FORBIDDEN_ACTION');
         }
     }
 
     public function preview(User $actor, User $employee): array
     {
-        $records = $this->inventory($employee);
-        $this->ensureRecordScope($actor, $records);
+        $inventory = $this->inventory($employee);
+        // Preview only visible records; apply still requires the complete inventory in scope.
+        $records = array_values(array_filter($inventory, fn ($record) => $this->recordScopeError($actor, $record) === null));
+        $blockedCount = count($inventory) - count($records);
         $recipients = $this->recipients($actor, $employee);
         $parents = collect($records)->keyBy(fn ($r) => $r['type'].':'.$r['id']);
         $groups = BranchGroup::whereIn('id', array_filter(array_column($records, 'branch_group_id')))->pluck('name', 'id');
@@ -157,7 +164,9 @@ final class DismissalTransfer
                 ->selectRaw('agent_id, COUNT(*) as total')->pluck('total', 'agent_id')->all();
         }
 
-        return ['revision' => $this->revision($employee, $records),
+        return ['revision' => $this->revision($employee, $inventory),
+            'can_submit' => $blockedCount === 0,
+            'blocked_records_count' => $blockedCount,
             'records' => array_map(function ($r) use ($actor, $recipients, $parents, $groups) {
                 $reference = $this->parentReference($r);
                 $parentType = $reference['type'] ?? null;
@@ -244,7 +253,7 @@ final class DismissalTransfer
                 $transfer->transfer($actor, $record['type'], $record['id'], [
                     'branch_group_id' => $target->branch_group_id, 'responsible_user_id' => $target->id,
                     'revision' => $transfer->revision($model), 'reason' => $plan['reason'],
-                ]);
+                ], dismissalEmployee: $actor->usesAssignedGroupScope() && $actor->hasPermission('users.dismissal.employee_records') ? $employee : null);
                 $counts[$record['type']]++;
                 continue;
             }
