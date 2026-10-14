@@ -130,12 +130,25 @@ final class EmployeeGroupTransfer
                 $responsible = $move ? $employee->id : ($plan['responsible_user_id'] ?? null);
                 abort_unless($responsible && ($move || (int) $responsible !== (int) $employee->id), 422, 'REPLACEMENT_EMPLOYEE_REQUIRED');
                 $record = $this->records->model($item['type'], $item['id'], true);
-                $this->records->transfer($actor, $item['type'], $item['id'], [
-                    'branch_group_id' => $move ? $destination->id : $item['branch_group_id'],
-                    'responsible_user_id' => $responsible, 'reason' => $data['reason'],
-                    'revision' => $this->records->revision($record),
-                    ...array_intersect_key($plan, array_flip(['pipeline_id', 'stage_id'])),
-                ], employeeTransfer: true, ungroupedEmployeeId: $initialAssignment ? $employee->id : null);
+                try {
+                    $this->records->transfer($actor, $item['type'], $item['id'], [
+                        'branch_group_id' => $move ? $destination->id : $item['branch_group_id'],
+                        'responsible_user_id' => $responsible, 'reason' => $data['reason'],
+                        'revision' => $this->records->revision($record),
+                        ...array_intersect_key($plan, array_flip(['pipeline_id', 'stage_id'])),
+                    ], employeeTransfer: true, ungroupedEmployeeId: $initialAssignment ? $employee->id : null);
+                } catch (\Symfony\Component\HttpKernel\Exception\HttpExceptionInterface $error) {
+                    if ($error->getStatusCode() !== 422) throw $error;
+                    $messages = [
+                        'TRANSFER_PIPELINE_REQUIRED' => 'Выберите доступную воронку и этап для новой группы.',
+                        'TRANSFER_STAGE_STATE_MISMATCH' => 'Выберите этап с тем же состоянием сделки.',
+                        'TASK_MUST_FOLLOW_PARENT_GROUP' => 'Задача должна перейти в ту же группу, что и связанная запись.',
+                        'INVALID_TRANSFER_TARGET' => 'Выберите действующего ответственного из нужной группы.',
+                    ];
+                    throw \Illuminate\Validation\ValidationException::withMessages([
+                        'records.'.$item['type'].':'.$item['id'] => $messages[$error->getMessage()] ?? $error->getMessage(),
+                    ]);
+                }
             }
             // Includes records newly assigned by a concurrent writer before our final consistency check.
             foreach ($this->organization->activeQueries($employee->id) as $table => $query) {
