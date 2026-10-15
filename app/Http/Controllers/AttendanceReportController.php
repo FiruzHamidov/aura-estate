@@ -27,7 +27,7 @@ final class AttendanceReportController extends Controller
     public function events(Request $request)
     {
         $validated = $this->filters($request);
-        $query = AttendanceEvent::query()->with(['user.role', 'device']);
+        $query = AttendanceEvent::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->with(['user.role', 'device']);
         $this->scopeEvents($query, $request->user());
         $this->applyEventFilters($query, $validated);
 
@@ -68,7 +68,7 @@ final class AttendanceReportController extends Controller
     {
         $validated = $this->filters($request);
         $visibleIds = $this->groupScope->users($request->user(), $validated['date_from'] ?? null, $validated['date_to'] ?? null)->select('users.id');
-        $query = AttendanceDailySummary::query()->with(['user.role', 'user.branch', 'user.branchGroup'])
+        $query = AttendanceDailySummary::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->with(['user.role', 'user.branch', 'user.branchGroup'])
             ->whereIn('user_id', $visibleIds);
         $this->applySummaryFilters($query, $validated);
 
@@ -152,7 +152,7 @@ final class AttendanceReportController extends Controller
     {
         $validated = $this->filters($request);
         $visibleIds = $this->attendanceUsersQuery($request)->pluck('users.id');
-        $query = AttendanceDailySummary::query()->with('user')->whereIn('user_id', $visibleIds);
+        $query = AttendanceDailySummary::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->with('user')->whereIn('user_id', $visibleIds);
         $this->applySummaryFilters($query, $validated);
 
         if ($request->query('format') === 'xlsx') {
@@ -208,14 +208,14 @@ final class AttendanceReportController extends Controller
     private function assertExportScope(User $actor): void
     {
         if ($actor->hasPermission('attendance.scope.assigned_branches')) {
-            $fresh = User::query()->with('role')->find($actor->id);
+            $fresh = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->with('role')->find($actor->id);
             abort_unless($fresh && $fresh->hasPermission('attendance.scope.assigned_branches') && $fresh->status === User::STATUS_ACTIVE
                 && $this->access->securityBranchIds($fresh) === $this->access->securityBranchIds($actor),
                 409, 'ACCESS_SCOPE_VERSION_CONFLICT');
             return;
         }
         if (! $actor->usesAssignedGroupScope()) return;
-        $fresh = User::query()->with('role')->find($actor->id);
+        $fresh = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->with('role')->find($actor->id);
         abort_unless($fresh && $fresh->usesAssignedGroupScope() && $fresh->status === User::STATUS_ACTIVE
             && (int) $fresh->branch_id === (int) $actor->branch_id
             && (int) $fresh->access_scope_version === (int) $actor->access_scope_version,
@@ -345,7 +345,7 @@ final class AttendanceReportController extends Controller
             });
         }
         if (isset($filters['verification_method'])) {
-            $query->whereIn('user_id', $this->groupScope->apply(AttendanceEvent::query(), request()->user())->select('user_id')
+            $query->whereIn('user_id', $this->groupScope->apply(AttendanceEvent::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q)), request()->user())->select('user_id')
                 ->where('verification_method', $filters['verification_method'])
                 ->when(isset($filters['date_from']), fn ($events) => $events->where('occurred_at', '>=', \Carbon\CarbonImmutable::parse($filters['date_from'], config('attendance.timezone'))->startOfDay()->utc()))
                 ->when(isset($filters['date_to']), fn ($events) => $events->where('occurred_at', '<=', \Carbon\CarbonImmutable::parse($filters['date_to'], config('attendance.timezone'))->endOfDay()->utc())));

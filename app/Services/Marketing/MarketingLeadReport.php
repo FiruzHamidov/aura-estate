@@ -30,7 +30,7 @@ class MarketingLeadReport
 
     public function salesQuery(User $actor): Builder
     {
-        $q = Property::query()->where('moderation_status', 'sold')->whereNotNull('sold_at');
+        $q = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->where('moderation_status', 'sold')->whereNotNull('sold_at');
         if ($actor->usesAssignedGroupScope()) {
             return app(RopGroupAccess::class)->scope($q, $actor, 'properties.branch_group_id', 'properties.branch_id');
         }
@@ -51,7 +51,7 @@ class MarketingLeadReport
         $to = Carbon::parse($filters['date_to'], 'Asia/Dushanbe')->endOfDay();
         $horizon = (int) ($filters['horizon_days'] ?? 90);
         $now = Carbon::now('Asia/Dushanbe');
-        $q = app(LeadAccess::class)->visibleQuery($actor)->withTrashed()
+        $q = app(LeadAccess::class)->visibleQuery($actor)->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->withTrashed()
             ->join('marketing_lead_receipts as mr', 'mr.lead_id', '=', 'leads.id')
             ->whereBetween('mr.received_at', [$from, $to])
             ->select('leads.*', 'mr.phone_key as receipt_phone', 'mr.source as receipt_source', 'mr.campaign as receipt_campaign',
@@ -71,15 +71,15 @@ class MarketingLeadReport
         $leads = $q->orderBy('leads.id')->get();
         $end = $to->copy()->addDays($horizon)->min($now);
         $assignments = DB::table('marketing_lead_assignments')->whereIn('lead_id', $leads->modelKeys())->orderBy('id')->get()->groupBy('lead_id');
-        $deals = Deal::query()->whereIn('lead_id', $leads->modelKeys())->get();
+        $deals = Deal::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->whereIn('lead_id', $leads->modelKeys())->get();
         $clientIds = $leads->pluck('client_id')->merge($leads->pluck('converted_client_id'))->filter()->unique();
         $calls = CrmAuditLog::query()->whereIn('event', ['call', 'show_completed'])->whereBetween('created_at', [$from, $end])
             ->where(function ($q) use ($leads, $deals) {
                 $q->where(fn ($q) => $q->where('auditable_type', (new Lead)->getMorphClass())->whereIn('auditable_id', $leads->modelKeys()))
                     ->orWhere(fn ($q) => $q->where('auditable_type', (new Deal)->getMorphClass())->whereIn('auditable_id', $deals->modelKeys()));
             })->orderBy('created_at')->get();
-        $bookings = Booking::query()->whereIn('crm_client_id', $clientIds)->whereBetween('start_time', [$from, $end])->get();
-        $tasks = CrmTask::query()->where('status', 'done')->whereNotNull('result_code')->whereBetween('completed_at', [$from, $end])
+        $bookings = Booking::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->whereIn('crm_client_id', $clientIds)->whereBetween('start_time', [$from, $end])->get();
+        $tasks = CrmTask::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->where('status', 'done')->whereNotNull('result_code')->whereBetween('completed_at', [$from, $end])
             ->where(function ($q) use ($leads, $deals) {
                 $q->where(fn ($q) => $q->where('related_entity_type', 'lead')->whereIn('related_entity_id', $leads->modelKeys()))
                     ->orWhere(fn ($q) => $q->where('related_entity_type', 'deal')->whereIn('related_entity_id', $deals->modelKeys()));
@@ -92,7 +92,7 @@ class MarketingLeadReport
         $tasksByEntity = $tasks->groupBy(fn ($task) => $task->related_entity_type.':'.$task->related_entity_id);
         $reviews = DB::table('marketing_sale_reviews')->whereIn('property_id', $sales->modelKeys())->get()->keyBy('property_id');
         // Only a unique explicit deal -> lead -> buyer path is automatically confirmed.
-        $saleDeals = Deal::query()->whereIn('primary_property_id', $sales->modelKeys())->whereNotNull('lead_id')->get()->groupBy('primary_property_id');
+        $saleDeals = Deal::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->whereIn('primary_property_id', $sales->modelKeys())->whereNotNull('lead_id')->get()->groupBy('primary_property_id');
         $rows = [];
         foreach ($leads as $lead) {
             $received = Carbon::parse($lead->receipt_at);
@@ -167,7 +167,7 @@ class MarketingLeadReport
                 'lost_reason' => $lead->lost_reason, 'status' => $lead->status];
         }
         if ($actor->usesAssignedGroupScope() || ! in_array($actor->role?->slug, ['admin', 'superadmin', 'marketing'], true)) {
-            $visiblePeople = User::query();
+            $visiblePeople = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
             if ($actor->usesAssignedGroupScope()) {
                 app(RopGroupAccess::class)->scope($visiblePeople, $actor, 'users.branch_group_id', 'users.branch_id');
             } else {
@@ -197,7 +197,7 @@ class MarketingLeadReport
         if (! empty($filters['user_ids'])) {
             $agents = array_values(array_filter($agents, fn ($a) => in_array($a['agent_id'], $filters['user_ids'])));
         }
-        $names = User::query()->whereIn('id', collect($rows)->flatMap(fn ($r) => array_merge(
+        $names = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->whereIn('id', collect($rows)->flatMap(fn ($r) => array_merge(
             array_column($r['assignments'], 'agent_id'), array_column($r['actions'], 'actor_id'), array_column($r['sales'], 'seller_id')))->filter()->unique())->pluck('name', 'id');
         $page = max(1, (int) ($filters['page'] ?? 1));
         $perPage = (int) ($filters['per_page'] ?? 25);

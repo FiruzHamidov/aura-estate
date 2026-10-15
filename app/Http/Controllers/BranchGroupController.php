@@ -30,7 +30,7 @@ class BranchGroupController extends Controller
 
     private function visibleQuery(User $authUser)
     {
-        $query = BranchGroup::query()
+        $query = BranchGroup::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->with(['branch', 'rops:id,name,branch_id']);
 
         if ($authUser->usesAssignedGroupScope()) {
@@ -141,7 +141,7 @@ class BranchGroupController extends Controller
 
         // Attendance and HR user creation only need group labels, not CRM counts/settings.
         $query = ($authUser->hasPermission('branch_groups.labels.list') && !$authUser->hasPermission('branch_groups.scope.all') && !$authUser->hasPermission('branch_groups.scope.branch') && !$authUser->usesAssignedGroupScope())
-            ? BranchGroup::query()->select(['id', 'name', 'branch_id'])
+            ? BranchGroup::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->select(['id', 'name', 'branch_id'])
             : $this->visibleQuery($authUser);
 
         if (!empty($validated['search'])) {

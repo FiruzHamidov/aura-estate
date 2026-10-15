@@ -9,12 +9,26 @@ class Branch extends Model
 {
     use HasFactory;
 
+    protected static function booted(): void
+    {
+        static::addGlobalScope('visible', fn ($query) => \App\Support\BranchVisibility::apply($query, 'branches.id'));
+    }
+
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        // Management endpoints must still be able to restore hidden branches.
+        return parent::resolveRouteBindingQuery($query, $value, $field)->withoutGlobalScope('visible');
+    }
+
+    protected $casts = ['is_hidden' => 'boolean'];
+
     protected $fillable = [
         'name',
         'lat',
         'lng',
         'landmark',
         'photo',
+        'is_hidden',
     ];
 
     public function users()

@@ -642,7 +642,7 @@ class BookingController extends Controller
             $to   = $this->normalizeFilterBoundaryToUtc($toRaw, 'end');
 
             $employeeColumn = \App\Support\BookingAttribution::column();
-            $q = Booking::query();
+            $q = Booking::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
 
             if ($from) {
                 $q->where('start_time', '>=', $from);

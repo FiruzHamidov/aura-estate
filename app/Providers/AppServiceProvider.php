@@ -21,6 +21,7 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
+        $this->app->scoped(\App\Support\BranchVisibility::class);
         $this->app->bind(AttendanceDeviceProtocol::class, ZktecoTaPushProtocol::class);
     }
 

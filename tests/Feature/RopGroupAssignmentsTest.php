@@ -32,7 +32,7 @@ class RopGroupAssignmentsTest extends TestCase
             $t->id(); $t->string('name'); $t->string('slug'); $t->timestamps();
         });
         Schema::create('branches', function (Blueprint $t) {
-            $t->id(); $t->string('name'); $t->timestamps();
+            $t->id(); $t->string('name'); $t->boolean('is_hidden')->default(false); $t->timestamps();
         });
         Schema::create('users', function (Blueprint $t) {
             $t->id(); $t->string('name'); $t->string('phone'); $t->unsignedBigInteger('role_id');
@@ -334,7 +334,7 @@ class RopGroupAssignmentsTest extends TestCase
                 $this->assertSame('Updated employee', $employee->fresh()->name);
             }
         }
-        foreach ([$this->user('agent', $this->c), $this->user('agent'), $this->admin, $this->rop] as $foreign) {
+        foreach ([$this->user('agent', $this->c), $this->admin, $this->rop] as $foreign) {
             $this->patchJson('/api/user/'.$foreign->id, ['name' => 'Forbidden'])->assertNotFound();
             $this->assertNotSame('Forbidden', $foreign->fresh()->name);
         }
@@ -1770,7 +1770,14 @@ class RopGroupAssignmentsTest extends TestCase
         }
         $this->getJson('/api/user/'.$employee->id)->assertOk();
         $this->getJson($url)->assertNotFound();
-        $this->patchJson('/api/user/'.$employee->id, ['name' => 'Forbidden'])->assertNotFound();
+        $this->patchJson('/api/user/'.$employee->id, ['name' => 'Updated employee'])->assertOk();
+        $this->assertSame('Updated employee', $employee->fresh()->name);
+        $this->assertNull($employee->fresh()->branch_group_id);
+        foreach (['branch_group_id' => $this->a->id, 'branch_id' => $otherBranch->branch_id, 'status' => 'inactive', 'role_id' => $admin->role_id] as $field => $value) {
+            $this->patchJson('/api/user/'.$employee->id, [$field => $value])->assertForbidden();
+        }
+        $this->patchJson('/api/user/'.$otherBranch->id, ['name' => 'Forbidden'])->assertNotFound();
+        $this->patchJson('/api/user/'.$otherGroup->id, ['name' => 'Forbidden'])->assertNotFound();
         $grant(['users.ungrouped.view', 'users.ungrouped.assign']);
         $preview = $this->getJson($url)->assertOk()->json();
         $this->getJson('/api/employee-transfer-destinations?initial_assignment=1')->assertOk()

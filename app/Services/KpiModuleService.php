@@ -551,7 +551,7 @@ class KpiModuleService
 
     public function dailyRows(User $authUser, Carbon $date, array $filters): Collection
     {
-        $query = DailyReport::query()->with(['user.role'])->whereDate('report_date', $date->toDateString());
+        $query = DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->with(['user.role'])->whereDate('report_date', $date->toDateString());
         $this->applyScope($query, $authUser, $filters);
 
         return $query->orderBy('user_id')->get();
@@ -559,7 +559,7 @@ class KpiModuleService
 
     public function periodRows(User $authUser, string $periodType, Carbon $from, Carbon $to, array $filters): Collection
     {
-        $query = DailyReport::query()->with(['user.role'])
+        $query = DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->with(['user.role'])
             ->where('report_date', '>=', $from->toDateString())
             ->where('report_date', '<', $to->copy()->startOfDay()->addDay()->toDateString());
         $this->applyScope($query, $authUser, $filters);
@@ -615,7 +615,7 @@ class KpiModuleService
         $dayStartUtc = $dayStart->copy()->setTimezone('UTC');
         $dayEndUtc = $dayEnd->copy()->setTimezone('UTC');
 
-        $sourceUsers = User::query()->whereIn('id', collect($base['ranking'])->pluck('user.id'))->get()->keyBy('id');
+        $sourceUsers = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->whereIn('id', collect($base['ranking'])->pluck('user.id'))->get()->keyBy('id');
         $ranking = collect($base['ranking'])->map(function (array $row) use ($date, $authUser, $sourceUsers) {
             $userId = (int) ($row['user']['id'] ?? 0);
             $user = $sourceUsers->get($userId);
@@ -687,7 +687,7 @@ class KpiModuleService
     public function taskDailySummary(User $authUser, Carbon $date, array $filters): Collection
     {
         $start = $date->copy()->startOfDay();
-        $query = CrmTask::query()->where('created_at', '>=', $start->toDateTimeString())
+        $query = CrmTask::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->where('created_at', '>=', $start->toDateTimeString())
             ->where('created_at', '<', $start->copy()->addDay()->toDateTimeString());
         $this->applyTaskScope($query, $authUser, $filters);
 
@@ -697,7 +697,7 @@ class KpiModuleService
     public function taskWeeklySummary(User $authUser, int $year, int $week, array $filters): Collection
     {
         $start = Carbon::now(self::TZ)->setISODate($year, $week)->startOfWeek(Carbon::MONDAY);
-        $query = CrmTask::query()->where('created_at', '>=', $start->toDateTimeString())
+        $query = CrmTask::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->where('created_at', '>=', $start->toDateTimeString())
             ->where('created_at', '<', $start->copy()->addWeek()->toDateTimeString());
         $this->applyTaskScope($query, $authUser, $filters);
 
@@ -719,7 +719,7 @@ class KpiModuleService
     public function myDailyProgress(User $authUser, Carbon $date): array
     {
         abort_unless($authUser->hasPermission('kpi.reports.view'), 403, 'KPI_FORBIDDEN_SCOPE');
-        $report = DailyReport::query()
+        $report = DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->where('user_id', $authUser->id)
             ->whereDate('report_date', $date->toDateString())
             ->first();
@@ -760,7 +760,7 @@ class KpiModuleService
     public function myDailyProgressStrict(User $authUser, Carbon $date, array $filters = []): array
     {
         $targetUser = $this->resolveTargetUser($authUser, isset($filters['user_id']) ? (int) $filters['user_id'] : null);
-        $report = DailyReport::query()
+        $report = DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->where('user_id', (int) $targetUser->id)
             ->whereDate('report_date', $date->toDateString())
             ->first();
@@ -887,7 +887,7 @@ class KpiModuleService
         if (Schema::hasColumn('users', 'email')) {
             $selectColumns[] = 'users.email';
         }
-        $query = User::query()
+        $query = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->select($selectColumns)
             ->with('role:id,slug');
 
@@ -1153,7 +1153,7 @@ class KpiModuleService
             );
         }
 
-        $query = DailyReport::query()
+        $query = DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->with(['user.role', 'user.branch', 'user.branchGroup', 'branchGroup.branch'])
             ->whereDate('report_date', '>=', $from->toDateString())
             ->whereDate('report_date', '<=', $to->toDateString());
@@ -1327,14 +1327,14 @@ class KpiModuleService
                 ->mapWithKeys(fn (User $user) => [$user->id.'|'.$user->branch_group_id.'|'.$user->role?->slug => (int) $user->id])->all()
             : [];
         $currentUserIds = array_values(array_unique(array_values($currentContexts)));
-        $currentReports = $currentUserIds === [] ? collect() : DailyReport::query()
+        $currentReports = $currentUserIds === [] ? collect() : DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->whereIn('user_id', $currentUserIds)
             ->whereDate('report_date', '>=', $from->toDateString())
             ->whereDate('report_date', '<=', $to->toDateString())->get()->groupBy('user_id');
         $currentAutoMetrics = $this->preloadAutoMetricsByUserDate($currentUserIds, $from, $to, $authUser, false);
         $currentSales = $this->preloadSalesCreditsByUserDate($currentUserIds, $from, $to, $authUser, false);
 
-        $reports = DailyReport::query()
+        $reports = DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->with(['user.role', 'user.branch', 'user.branchGroup'])
             ->whereDate('report_date', '>=', $from->toDateString())
             ->whereDate('report_date', '<=', $to->toDateString())
@@ -1578,7 +1578,7 @@ class KpiModuleService
         }
 
         if ($historical) $select[] = 'branch_group_id';
-        $soldProperties = DB::table('properties')->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id'))
+        $soldProperties = DB::table('properties')->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id'))
             ->select($select)
             ->where('moderation_status', 'sold')
             ->whereBetween('sold_at', [
@@ -1637,7 +1637,7 @@ class KpiModuleService
         $localDate = static fn ($value): string => Carbon::parse((string) $value, 'UTC')->setTimezone(self::TZ)->toDateString();
 
         if (Schema::hasTable('crm_tasks') && Schema::hasTable('crm_task_types')) {
-            $tasks = DB::table('crm_tasks')->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'crm_tasks.branch_group_id'))
+            $tasks = DB::table('crm_tasks')->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'crm_tasks.branch_group_id'))
                 ->join('crm_task_types', 'crm_task_types.id', '=', 'crm_tasks.task_type_id')
                 ->select(['crm_tasks.assignee_id', 'crm_tasks.completed_at', 'crm_task_types.code'])
                 ->whereIn('crm_tasks.assignee_id', $userIds)
@@ -1652,7 +1652,7 @@ class KpiModuleService
         }
 
         if (Schema::hasTable('bookings')) {
-            foreach (DB::table('bookings')->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'bookings.branch_group_id'))->select([\App\Support\BookingAttribution::column().' as agent_id', 'start_time'])
+            foreach (DB::table('bookings')->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'bookings.branch_group_id'))->select([\App\Support\BookingAttribution::column().' as agent_id', 'start_time'])
                 ->whereIn(\App\Support\BookingAttribution::column(), $userIds)->whereBetween('start_time', [$start, $end])->when($historical, fn ($q) => $q->addSelect('bookings.branch_group_id'))->get() as $booking) {
                 $date = $localDate($booking->start_time);
                 $put($result, $historical ? (int) $booking->agent_id.'|'.$booking->branch_group_id : (int) $booking->agent_id, $date, 'shows_count', 1);
@@ -1661,7 +1661,7 @@ class KpiModuleService
         }
 
         if (Schema::hasTable('clients')) {
-            foreach (DB::table('clients')->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'clients.branch_group_id'))->select(['created_by', 'responsible_agent_id', 'created_at'])
+            foreach (DB::table('clients')->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'clients.branch_group_id'))->select(['created_by', 'responsible_agent_id', 'created_at'])
                 ->whereBetween('created_at', [$start, $end])
                 ->where(function ($q) use ($userIds) {
                     $q->whereIn('created_by', $userIds)->orWhereIn('responsible_agent_id', $userIds);
@@ -1680,7 +1680,7 @@ class KpiModuleService
         }
 
         if (Schema::hasTable('properties')) {
-            foreach (DB::table('properties')->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id'))->select(['created_by', 'agent_id', 'created_at'])
+            foreach (DB::table('properties')->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id'))->select(['created_by', 'agent_id', 'created_at'])
                 ->whereBetween('created_at', [$start, $end])
                 ->where(function ($q) use ($userIds) {
                     $q->whereIn('created_by', $userIds)->orWhere(function ($legacy) use ($userIds) {
@@ -1911,7 +1911,7 @@ class KpiModuleService
         $current = $this->weeklyUsersScopeQuery($actor, $filters)->reorder()->select([
             'users.id as user_id', 'users.branch_group_id', 'users.role_id',
         ])->toBase();
-        $history = DailyReport::query()->join('roles as historical_roles', 'historical_roles.slug', '=', 'daily_reports.role_slug')
+        $history = DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->join('roles as historical_roles', 'historical_roles.slug', '=', 'daily_reports.role_slug')
             ->where('report_date', '>=', $from->toDateString())
             ->where('report_date', '<', $to->copy()->addDay()->toDateString());
         $this->applyScope($history, $actor, $filters);
@@ -1922,7 +1922,7 @@ class KpiModuleService
         // Do not add a second historical row and double-count that employee.
         $history->whereNotIn('daily_reports.user_id', (clone $current)->select('users.id'));
         $contexts = $current->union($history->select(['daily_reports.user_id', 'daily_reports.branch_group_id', 'historical_roles.id as role_id'])->toBase());
-        return User::query()->joinSub($contexts, 'kpi_context', fn ($join) => $join->on('users.id', '=', 'kpi_context.user_id'))
+        return User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->joinSub($contexts, 'kpi_context', fn ($join) => $join->on('users.id', '=', 'kpi_context.user_id'))
             ->join('branch_groups as historical_groups', 'historical_groups.id', '=', 'kpi_context.branch_group_id')
             ->select(['users.id', 'users.name', 'kpi_context.branch_group_id', 'kpi_context.role_id', 'historical_groups.branch_id'])
             ->with(['role:id,slug', 'branch:id,name', 'branchGroup:id,branch_id,name']);
@@ -1930,7 +1930,7 @@ class KpiModuleService
 
     public function reportUsersQuery(User $actor): Builder
     {
-        $query = User::query()->select(['users.id', 'users.name', 'users.role_id', 'users.branch_id', 'users.branch_group_id', 'users.status'])
+        $query = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->select(['users.id', 'users.name', 'users.role_id', 'users.branch_id', 'users.branch_group_id', 'users.status'])
             ->with(['role:id,name,slug', 'branch:id,name', 'branchGroup:id,branch_id,name'])
             ->where('users.status', User::STATUS_ACTIVE)
             ->whereHas('role', fn (Builder $roles) => $roles->withPermission('kpi.subject.report_selection'));
@@ -1943,7 +1943,7 @@ class KpiModuleService
         $authUser->loadMissing('role');
         $includeInactive = (bool) ($filters['include_inactive'] ?? false);
 
-        $query = User::query()
+        $query = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->select('users.*')
             ->with(['role:id,slug', 'branch:id,name', 'branchGroup:id,branch_id,name'])
             ->whereHas('role', fn (Builder $q) => $q->withPermission('kpi.subject.period_reports'));
@@ -2438,7 +2438,7 @@ class KpiModuleService
         ]));
         $rows = collect((array) ($v2['rows'] ?? []));
 
-        $reportedUserIds = DailyReport::query()
+        $reportedUserIds = DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->whereDate('report_date', '>=', $from->toDateString())
             ->whereDate('report_date', '<=', $to->toDateString())
             ->when($authUser->usesAssignedGroupScope(), fn (Builder $q) => $this->applyScope($q, $authUser, $filters))
@@ -2624,7 +2624,7 @@ class KpiModuleService
         $monthStart = $date->copy()->startOfMonth()->toDateString();
         $monthEnd = $date->copy()->endOfMonth()->toDateString();
 
-        $query = DailyReport::query()
+        $query = DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->where('user_id', (int) $user->id)
             ->whereBetween('report_date', [$monthStart, $monthEnd]);
 

@@ -7,9 +7,15 @@ use Illuminate\Http\Request;
 
 class BranchController extends Controller
 {
-    public function index()
+    public function index(Request $request)
     {
-        return response()->json(Branch::query()->orderBy('id')->get());
+        $query = Branch::query();
+        if ($request->boolean('include_hidden')) {
+            $actor = $request->user() ?? auth('sanctum')->user();
+            abort_unless($actor?->hasPermission('catalogs.entries.branches.manage'), 403, 'FORBIDDEN_ACTION');
+            $query->withoutGlobalScope('visible');
+        }
+        return response()->json($query->orderBy('id')->get());
     }
 
     public function store(Request $request)
@@ -42,6 +48,7 @@ class BranchController extends Controller
     public function update(Request $request, Branch $branch)
     {
         $validated = $request->validate([
+            'is_hidden' => 'sometimes|boolean',
             'name' => 'sometimes|required|string|max:255',
             'lat' => 'nullable|numeric|between:-90,90',
             'lng' => 'nullable|numeric|between:-180,180',
@@ -68,7 +75,7 @@ class BranchController extends Controller
     public function destroy(Branch $branch)
     {
         return \DB::transaction(function () use ($branch) {
-            $branch = Branch::query()->whereKey($branch->id)->lockForUpdate()->firstOrFail();
+            $branch = Branch::withoutGlobalScope('visible')->whereKey($branch->id)->lockForUpdate()->firstOrFail();
             if ($branch->users()->exists()) {
                 return response()->json([
                     'message' => 'Нельзя удалить филиал: к нему привязаны пользователи',

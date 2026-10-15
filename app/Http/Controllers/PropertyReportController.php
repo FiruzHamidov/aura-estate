@@ -65,7 +65,7 @@ class PropertyReportController extends Controller
                 'total_floorsTo', 'year_builtFrom', 'year_builtTo',
             ])) {
                 // Filtering by a related property's private attributes must not reveal a foreign property.
-                $query->whereIn('properties.id', $access->scope(Property::query(), $authUser,
+                $query->whereIn('properties.id', $access->scope(Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q)), $authUser,
                     'properties.branch_group_id', 'properties.branch_id')->select('properties.id'));
             }
             return;
@@ -91,7 +91,7 @@ class PropertyReportController extends Controller
         if ($request->filled('branch_id')) {
             $branchIds = $this->toArray($request->input('branch_id'));
             if (!empty($branchIds)) {
-                $query->whereIn($creatorColumn, User::query()->whereIn('branch_id', $branchIds)->select('id'));
+                $query->whereIn($creatorColumn, User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->whereIn('branch_id', $branchIds)->select('id'));
             }
         }
 
@@ -102,7 +102,7 @@ class PropertyReportController extends Controller
                 return;
             }
 
-            $query->whereIn($creatorColumn, User::query()->where('branch_id', $authUser->branch_id)->select('id'));
+            $query->whereIn($creatorColumn, User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->where('branch_id', $authUser->branch_id)->select('id'));
         }
 
         if ($authUser?->hasPermission('property_reports.scope.group')) {
@@ -148,14 +148,14 @@ class PropertyReportController extends Controller
                     return;
                 }
 
-                $query->whereIn($userColumn, User::query()->whereIn('branch_group_id', $branchGroupIds)->select('id'));
+                $query->whereIn($userColumn, User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->whereIn('branch_group_id', $branchGroupIds)->select('id'));
             }
         }
 
         if ($request->filled('branch_id')) {
             $branchIds = $this->toArray($request->input('branch_id'));
             if (!empty($branchIds)) {
-                $query->whereIn($userColumn, User::query()->whereIn('branch_id', $branchIds)->select('id'));
+                $query->whereIn($userColumn, User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->whereIn('branch_id', $branchIds)->select('id'));
             }
         }
 
@@ -165,7 +165,7 @@ class PropertyReportController extends Controller
                 return;
             }
 
-            $query->whereIn($userColumn, User::query()->where('branch_id', $authUser->branch_id)->select('id'));
+            $query->whereIn($userColumn, User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->where('branch_id', $authUser->branch_id)->select('id'));
         }
 
         if ($authUser?->hasPermission('property_reports.scope.group')) {
@@ -179,7 +179,7 @@ class PropertyReportController extends Controller
                 return;
             }
 
-            $query->whereIn($userColumn, User::query()->where('branch_group_id', $authUser->branch_group_id)->select('id'));
+            $query->whereIn($userColumn, User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->where('branch_group_id', $authUser->branch_group_id)->select('id'));
         }
     }
 
@@ -206,7 +206,7 @@ class PropertyReportController extends Controller
 
                 $agentQuery
                     ->whereNotNull('properties.agent_id')
-                    ->whereIn('properties.agent_id', User::query()
+                    ->whereIn('properties.agent_id', User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
                         ->whereIn('branch_group_id', $branchGroupIds)
                         ->select('id'));
             });
@@ -221,11 +221,11 @@ class PropertyReportController extends Controller
                     ->where(function ($agentFallbackQuery) {
                         $agentFallbackQuery
                             ->whereNull('properties.agent_id')
-                            ->orWhereNotIn('properties.agent_id', User::query()
+                            ->orWhereNotIn('properties.agent_id', User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
                                 ->whereNotNull('branch_group_id')
                                 ->select('id'));
                     })
-                    ->whereIn('properties.created_by', User::query()
+                    ->whereIn('properties.created_by', User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
                         ->whereIn('branch_group_id', $branchGroupIds)
                         ->select('id'));
             });
@@ -257,14 +257,14 @@ class PropertyReportController extends Controller
         $soldStatuses = ['sold', 'rented'];
         $salesUserExpr = 'COALESCE(sale_user_id, agent_id, created_by)';
 
-        $addedQ = Property::query()
+        $addedQ = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->whereBetween('created_at', [$start, $end]);
         $this->applyBranchAccessFilter($request, $addedQ, 'created_by');
         if ($request->filled('agent_id')) {
             $addedQ->whereIn('created_by', $this->toArray($request->input('agent_id')));
         }
 
-        $closedQ = Property::query()
+        $closedQ = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->whereIn('moderation_status', $soldStatuses)
             ->whereBetween('sold_at', [$start, $end]);
         $this->applyBranchAccessFilter($request, $closedQ, 'created_by');
@@ -279,7 +279,7 @@ class PropertyReportController extends Controller
             });
         }
 
-        $depositQ = Property::query()
+        $depositQ = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->where('moderation_status', 'deposit')
             ->whereBetween('deposit_received_at', [$start, $end]);
         $this->applyBranchAccessFilter($request, $depositQ, 'created_by');
@@ -287,7 +287,7 @@ class PropertyReportController extends Controller
             $depositQ->whereIn('created_by', $this->toArray($request->input('agent_id')));
         }
 
-        $showsQ = Booking::query()
+        $showsQ = Booking::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->leftJoin('properties', 'properties.id', '=', 'bookings.property_id')
             ->whereBetween('bookings.start_time', [$start->copy()->utc(), $end->copy()->utc()]);
 
@@ -674,7 +674,7 @@ class PropertyReportController extends Controller
 
         if ($request->filled('branch_group_id')) {
             foreach ($this->toArray($request->input('branch_group_id')) as $branchGroupId) {
-                $belongs = BranchGroup::query()
+                $belongs = BranchGroup::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
                     ->whereKey((int) $branchGroupId)
                     ->where('branch_id', $authUser->branch_id)
                     ->exists();
@@ -689,7 +689,7 @@ class PropertyReportController extends Controller
             $agentIds = array_map('intval', $this->toArray($request->input('agent_id')));
 
             if (! empty($agentIds)) {
-                $count = User::query()
+                $count = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
                     ->whereIn('id', $agentIds)
                     ->where('branch_id', $authUser->branch_id)
                     ->count();
@@ -756,7 +756,7 @@ class PropertyReportController extends Controller
     {
         $clientOwnerExpr = 'created_by';
 
-        $clientsQ = DB::table('clients')
+        $clientsQ = DB::table('clients')->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->selectRaw($clientOwnerExpr.' as agent_group_id')
             ->selectRaw('COUNT(DISTINCT id) as unique_clients_count')
             ->whereRaw($clientOwnerExpr.' IS NOT NULL');
@@ -925,7 +925,7 @@ class PropertyReportController extends Controller
         ]));
         $filterRequest->setUserResolver(fn () => $request->user());
 
-        $base = Property::query();
+        $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
         [$q] = $this->applyCommonFilters($filterRequest, $base);
         $q = $this->applyAgentPropertiesPeriodFilter($request, $q, $soldStatuses);
 
@@ -994,7 +994,7 @@ class PropertyReportController extends Controller
         $soldStatuses = ['sold', 'rented', 'sold_by_owner'];
         $uniqueClientsMap = $this->buildManagerUniqueClientsMap($request, $groupBy, $soldStatuses);
 
-        $scopedUsersQuery = User::query()->select('id');
+        $scopedUsersQuery = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->select('id');
         $this->applyBranchAccessByUserColumn($request, $scopedUsersQuery, 'id');
         if ($request->filled('agent_id')) {
             $scopedUsersQuery->whereIn('id', array_map('intval', $this->toArray($request->input('agent_id'))));
@@ -1007,7 +1007,7 @@ class PropertyReportController extends Controller
         $allowedUserMap = array_fill_keys($allowedUserIds, true);
 
         // --- 1) Основной запрос (aligned period: open by created_at, closed by sold_at)
-        $base = Property::query();
+        $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
         $periodRequestData = $request->except([
             'date_from',
             'date_to',
@@ -1047,7 +1047,7 @@ class PropertyReportController extends Controller
         $soldRequest['sold_at_from'] = $request->input('date_from');
         $soldRequest['sold_at_to']   = $request->input('date_to');
 
-        $soldBase = Property::query()->whereIn('moderation_status', $soldStatuses);
+        $soldBase = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->whereIn('moderation_status', $soldStatuses);
         [$soldQ] = $this->applyCommonFilters(new Request($soldRequest), $soldBase);
 
         $soldSelect = ['id', 'moderation_status', 'agent_id', 'created_by'];
@@ -1174,7 +1174,7 @@ class PropertyReportController extends Controller
     // --- 3) Распределение по статусам
     public function byStatus(Request $request)
     {
-        $base = Property::query();
+        $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
         [$q] = $this->applyCommonFilters($request, $base);
 
         $rows = (clone $q)->select('moderation_status', DB::raw('COUNT(*) as cnt'))
@@ -1186,7 +1186,7 @@ class PropertyReportController extends Controller
     // --- 4) По типам
     public function byType(Request $request)
     {
-        $base = Property::query()->with('type:id,name');
+        $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->with('type:id,name');
         [$q] = $this->applyCommonFilters($request, $base);
 
         $rows = (clone $q)->select('type_id', DB::raw('COUNT(*) as cnt'))
@@ -1204,7 +1204,7 @@ class PropertyReportController extends Controller
     // --- 5) По локациям
     public function byLocation(Request $request)
     {
-        $base = Property::query()->with('location:id,name');
+        $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->with('location:id,name');
         [$q] = $this->applyCommonFilters($request, $base);
 
         $rows = (clone $q)->select('location_id', DB::raw('COUNT(*) as cnt'))
@@ -1237,7 +1237,7 @@ class PropertyReportController extends Controller
         ]));
         $filterRequest->setUserResolver(fn () => $request->user());
 
-        $base = Property::query();
+        $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
         [$q] = $this->applyCommonFilters($filterRequest, $base);
         $q = $this->applyAgentPropertiesPeriodFilter($request, $q, $soldStatuses);
 
@@ -1279,7 +1279,7 @@ class PropertyReportController extends Controller
     {
         $buckets = max(1, (int)$request->input('buckets', 8));
 
-        $base = Property::query()->whereNotNull('price')->where('price', '>', 0);
+        $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->whereNotNull('price')->where('price', '>', 0);
         [$q] = $this->applyCommonFilters($request, $base);
 
         $min = (clone $q)->min('price');
@@ -1327,7 +1327,7 @@ class PropertyReportController extends Controller
         ]));
         $filterRequest->setUserResolver(fn () => $request->user());
 
-        $base = Property::query()->whereNotNull('rooms');
+        $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->whereNotNull('rooms');
         [$q] = $this->applyCommonFilters($filterRequest, $base);
         $q = $this->applyAgentPropertiesPeriodFilter($request, $q, $soldStatuses);
 
@@ -1347,7 +1347,7 @@ class PropertyReportController extends Controller
 
         [$expr, $alias] = $this->priceExpr($request);
 
-        $base = Property::query()->whereIn('moderation_status', ['sold', 'rented']);
+        $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->whereIn('moderation_status', ['sold', 'rented']);
         $soldRequest = $request->except(['date_from', 'date_to']);
         $soldRequest['sold_at_from'] = $request->input('date_from');
         $soldRequest['sold_at_to'] = $request->input('date_to');
@@ -1426,7 +1426,7 @@ class PropertyReportController extends Controller
     // --- 10) Воронка конверсии
     public function conversionFunnel(Request $request)
     {
-        $base = Property::query();
+        $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
         [$q] = $this->applyCommonFilters($request, $base);
 
         // группируем по агенту (или created_by — если так у вас хранится автор)
@@ -1516,7 +1516,7 @@ class PropertyReportController extends Controller
             $select[] = 'properties.branch_group_id';
         }
 
-        $base = Property::query()
+        $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->select($select);
 
         [$q] = $this->applyCommonFilters($request, $base);
@@ -1564,7 +1564,7 @@ class PropertyReportController extends Controller
 
     public function missingPhoneAgentsByStatus(Request $request)
     {
-        $base = Property::query();
+        $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
         [$q] = $this->applyCommonFilters($request, $base);
         $this->scopeVisiblePropertyClient($request, $q, 'properties.owner_client_id');
 
@@ -1648,7 +1648,7 @@ class PropertyReportController extends Controller
                 $propertySelect[] = 'sale_user_id';
             }
 
-            $propsQ = Property::query()
+            $propsQ = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
                 ->select($propertySelect)
                 ->with(['type' => function ($q) {
                     $q->select(['id','slug']);
@@ -1823,7 +1823,7 @@ class PropertyReportController extends Controller
     // === Кол-во объявлений по типу договора для агента ===
     public function agentContractsStats(Request $request)
     {
-        $base = Property::query();
+        $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
         [$q] = $this->applyCommonFilters($request, $base);
 
         if ($request->filled('agent_id')) {
@@ -1859,7 +1859,7 @@ class PropertyReportController extends Controller
     // === Уникальные клиенты + бизнесмены ===
     public function agentClientsStats(Request $request)
     {
-        $base = Property::query();
+        $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
         [$q] = $this->applyCommonFilters($request, $base, 'properties.created_by');
 
         if ($request->filled('agent_id')) {
@@ -1942,7 +1942,7 @@ class PropertyReportController extends Controller
     {
         $this->ensureReportsAllowed($request);
         $column = \App\Support\BookingAttribution::column();
-        $query = Booking::query()->leftJoin('properties', 'properties.id', '=', 'bookings.property_id');
+        $query = Booking::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->leftJoin('properties', 'properties.id', '=', 'bookings.property_id');
         // Apply explicit property filters, but never the listing's creation period.
         $propertyFilters = clone $request;
         $propertyFilters->query->remove('date_from');
@@ -1969,7 +1969,7 @@ class PropertyReportController extends Controller
 
         $soldStatuses = ['sold', 'rented', 'sold_by_owner'];
 
-        $base = Property::query()
+        $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->whereIn('moderation_status', $soldStatuses);
 
         $soldRequest = $request->except(['date_from', 'date_to']);

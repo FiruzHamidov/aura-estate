@@ -19,7 +19,7 @@ class KpiReportService
         $dateFrom = Carbon::parse($filters['date_from'])->startOfDay();
         $dateTo = Carbon::parse($filters['date_to'])->endOfDay();
 
-        $query = DailyReport::query()
+        $query = DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->with(['user.role'])
             ->whereDate('report_date', '>=', $dateFrom->toDateString())
             ->whereDate('report_date', '<=', $dateTo->toDateString());

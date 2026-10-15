@@ -124,6 +124,21 @@ class KpiReportFeatureTest extends TestCase
         $this->assertCount(3, $response->json('data'));
     }
 
+    public function test_hidden_branch_is_excluded_from_reports_and_returns_when_restored(): void
+    {
+        [$users] = $this->seedContext();
+        (require database_path('migrations/2026_10_16_010000_add_branch_visibility.php'))->up();
+        $branch = Branch::where('name', 'Branch B')->firstOrFail();
+        $branch->update(['is_hidden' => true]);
+        Sanctum::actingAs($users['admin']);
+        $url = '/api/kpi-reports?period_type=day&date_from=2026-05-01&date_to=2026-05-01';
+        $this->getJson($url)->assertOk()->assertJsonCount(2, 'data');
+        $this->getJson($url.'&branch_id='.$branch->id)->assertOk()->assertJsonCount(0, 'data');
+        $this->assertDatabaseCount('daily_reports', 3);
+        $branch->update(['is_hidden' => false]);
+        $this->getJson($url)->assertOk()->assertJsonCount(3, 'data');
+    }
+
     public function test_legacy_kpi_dashboard_endpoint_is_supported(): void
     {
         [$users] = $this->seedContext();

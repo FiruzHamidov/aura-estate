@@ -50,7 +50,7 @@ class CrmReportController extends Controller
         [$from, $to] = $this->resolveDateRange($validated);
         $scope = $this->resolveScope($authUser, $validated);
 
-        $users = User::query()
+        $users = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->with(['role', 'branch'])
             ->whereHas('role', fn ($query) => $query->withPermission('crm_reports.subject.'.$validated['role_type']))
             ->when($scope['branch_id'], fn ($query, $branchId) => $query->where('branch_id', $branchId))
@@ -171,7 +171,7 @@ class CrmReportController extends Controller
                 ->where('event', 'status_change')
                 ->filter(fn (CrmAuditLog $log) => $this->isForwardLeadStatusMove($log))
                 ->count(),
-            'overdue_follow_up_count' => Lead::query()
+            'overdue_follow_up_count' => Lead::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
                 ->where('responsible_agent_id', $user->id)
                 ->when($branchId, fn ($query, $value) => $query->where('branch_id', $value))
                 ->whereNotIn('status', Lead::closedStatuses())
@@ -258,7 +258,7 @@ class CrmReportController extends Controller
 
     private function averageLeadFirstProcessingMinutes(User $user, Carbon $from, Carbon $to, ?int $branchId): ?float
     {
-        $leads = Lead::query()
+        $leads = Lead::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->where('responsible_agent_id', $user->id)
             ->when($branchId, fn ($query, $value) => $query->where('branch_id', $value))
             ->whereBetween('created_at', [$from, $to])
@@ -322,6 +322,7 @@ class CrmReportController extends Controller
     {
         return CrmAuditLog::query()
             ->where('auditable_type', Lead::class)
+            ->whereIn('auditable_id', Lead::query()->withTrashed()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->select('id'))
             ->where('actor_id', $userId)
             ->whereBetween('created_at', [$from, $to])
             ->whereIn('event', self::REPORT_EVENTS)
@@ -347,7 +348,7 @@ class CrmReportController extends Controller
 
     private function propertyControlDealsQuery(?int $branchId)
     {
-        return Deal::query()
+        return Deal::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->whereHas('pipeline', fn ($query) => $query->where('code', DealPipeline::CODE_PROPERTY_CONTROL))
             ->when($branchId, fn ($query, $value) => $query->where('branch_id', $value));
     }

@@ -75,7 +75,7 @@ class DailyReportController extends Controller
             'per_page' => 'nullable|integer|min:1|max:100',
         ]);
 
-        $query = DailyReport::query()
+        $query = DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->with(['user.role', 'user.branch', 'user.branchGroup', 'branchGroup', 'historicalRole']);
 
         $this->validateScopeFilters($validated, $authUser);
@@ -166,7 +166,7 @@ class DailyReportController extends Controller
 
         $actor = $this->authUser();
         abort_unless($actor->hasPermission('daily_reports.self_history.view'), 403, 'Forbidden');
-        $query = DailyReport::query()->with(['user.role', 'user.branch', 'user.branchGroup', 'branchGroup', 'historicalRole'])
+        $query = DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->with(['user.role', 'user.branch', 'user.branchGroup', 'branchGroup', 'historicalRole'])
             ->where('user_id', $actor->id)
             ->orderByDesc('report_date');
 
@@ -192,7 +192,7 @@ class DailyReportController extends Controller
 
         $user = $this->authUser();
         abort_unless($user->hasPermission('daily_reports.self_history.view'), 403, 'Forbidden');
-        $report = DailyReport::query()
+        $report = DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->where('user_id', $user->id)
             ->whereDate('report_date', $date)
             ->first();
@@ -355,10 +355,10 @@ class DailyReportController extends Controller
             'employee_id' => 'required|integer|exists:users,id',
         ]);
 
-        $targetUser = User::query()->with('role')->findOrFail((int) $validated['employee_id']);
+        $targetUser = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->with('role')->findOrFail((int) $validated['employee_id']);
 
         $date = (string) $validated['date'];
-        $report = DailyReport::query()
+        $report = DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->where('user_id', $targetUser->id)
             ->whereDate('report_date', $date)
             ->first();

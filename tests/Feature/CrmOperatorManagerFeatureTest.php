@@ -212,6 +212,7 @@ class CrmOperatorManagerFeatureTest extends TestCase
             $table->unsignedBigInteger('client_id')->nullable();
             $table->unsignedBigInteger('lead_id')->nullable();
             $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('branch_group_id')->nullable();
             $table->unsignedBigInteger('created_by')->nullable();
             $table->unsignedBigInteger('responsible_agent_id')->nullable();
             $table->unsignedBigInteger('pipeline_id');

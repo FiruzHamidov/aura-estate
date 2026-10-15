@@ -64,7 +64,7 @@ class PropertyControlReportController extends Controller
     public function meta(Request $request)
     {
         [$user] = $this->context($request);
-        $pipelines = DealPipeline::query()
+        $pipelines = DealPipeline::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->with(['branch:id,name', 'stages' => fn ($stages) => $stages->where('is_active', true)->orderBy('sort_order')])
             ->where('code', DealPipeline::CODE_PROPERTY_CONTROL)
             ->where('is_active', true)
@@ -73,7 +73,7 @@ class PropertyControlReportController extends Controller
         return response()->json([
             'branches' => $pipelines->pluck('branch')->filter()->unique('id')->values(),
             'stages' => $pipelines->flatMap->stages->unique('slug')->values(),
-            'security_officers' => User::query()
+            'security_officers' => User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
                 ->select(['id', 'name', 'branch_id'])
                 ->where('status', User::STATUS_ACTIVE)
                 ->whereHas('role', fn ($role) => $role->withPermission('property_control.subject.report_filter'))
@@ -139,6 +139,7 @@ class PropertyControlReportController extends Controller
         $validated = $request->validate($this->dealListQuery->rules());
         $validated['pipeline_type'] = 'property_control';
         $query = $this->dealListQuery->build($request, $user, $validated);
+        \App\Support\BranchVisibility::records($query);
 
         return [$user, $validated, $query];
     }

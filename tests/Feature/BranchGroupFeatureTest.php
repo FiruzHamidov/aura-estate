@@ -85,6 +85,65 @@ class BranchGroupFeatureTest extends TestCase
         });
     }
 
+    public function test_visibility_migration_hides_only_the_verified_gissar_branch(): void
+    {
+        Branch::create(['name' => 'Head office']);
+        Branch::create(['name' => 'Other office']);
+        $gissar = Branch::create(['name' => 'Филиал Гиссар']);
+        $this->assertSame(3, $gissar->id);
+        (require database_path('migrations/2026_10_16_010000_add_branch_visibility.php'))->up();
+        $this->assertSame([1, 2], Branch::query()->orderBy('id')->pluck('id')->all());
+        $this->assertDatabaseHas('branches', ['id' => 3, 'name' => 'Филиал Гиссар', 'is_hidden' => true]);
+        $this->assertSame(3, Branch::withoutGlobalScope('visible')->count());
+    }
+
+    public function test_branch_can_be_hidden_and_restored_without_losing_data(): void
+    {
+        (require database_path('migrations/2026_10_16_010000_add_branch_visibility.php'))->up();
+        $branch = Branch::create(['name' => 'Visible']);
+        $hidden = Branch::create(['name' => 'Hidden']);
+        $group = BranchGroup::create(['name' => 'Historical group', 'branch_id' => $hidden->id]);
+        $admin = $this->createUser(Role::create(['name' => 'Admin', 'slug' => 'admin']), $branch, 'Admin');
+        $this->getJson('/api/branches?include_hidden=1')->assertForbidden();
+        Sanctum::actingAs($admin);
+        $this->putJson('/api/branches/'.$hidden->id, ['is_hidden' => true])->assertOk()->assertJsonPath('is_hidden', true);
+        $this->getJson('/api/branches')->assertOk()->assertJsonCount(1)->assertJsonPath('0.id', $branch->id);
+        $this->getJson('/api/branches?include_hidden=1')->assertOk()->assertJsonCount(2);
+        $this->getJson('/api/branch-groups')->assertOk()->assertJsonCount(0, 'data');
+        $this->assertDatabaseHas('branch_groups', ['id' => $group->id, 'branch_id' => $hidden->id]);
+        $this->putJson('/api/branches/'.$hidden->id, ['is_hidden' => false])->assertOk()->assertJsonPath('is_hidden', false);
+        $this->getJson('/api/branches')->assertOk()->assertJsonCount(2);
+        $this->getJson('/api/branch-groups')->assertOk()->assertJsonCount(1, 'data');
+        Sanctum::actingAs($this->createUser(Role::create(['name' => 'ROP', 'slug' => 'rop']), $branch, 'ROP'));
+        $this->putJson('/api/branches/'.$hidden->id, ['is_hidden' => true])->assertForbidden();
+        $this->getJson('/api/branches?include_hidden=1')->assertForbidden();
+    }
+
+    public function test_report_visibility_uses_record_group_before_employee_current_branch(): void
+    {
+        (require database_path('migrations/2026_10_16_010000_add_branch_visibility.php'))->up();
+        $visible = Branch::create(['name' => 'Visible']);
+        $hidden = Branch::create(['name' => 'Hidden', 'is_hidden' => true]);
+        $visibleGroup = BranchGroup::create(['name' => 'Visible', 'branch_id' => $visible->id]);
+        $hiddenGroup = BranchGroup::create(['name' => 'Hidden', 'branch_id' => $hidden->id]);
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $employee = $this->createUser($role, $hidden, 'Employee');
+        Schema::create('bookings', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('branch_group_id')->nullable(); $table->unsignedBigInteger('agent_id')->nullable();
+        });
+        \Illuminate\Support\Facades\DB::table('bookings')->insert([
+            ['id' => 1, 'branch_group_id' => $visibleGroup->id, 'agent_id' => $employee->id],
+            ['id' => 2, 'branch_group_id' => $hiddenGroup->id, 'agent_id' => null],
+            ['id' => 3, 'branch_group_id' => null, 'agent_id' => $employee->id],
+            ['id' => 4, 'branch_group_id' => null, 'agent_id' => null],
+        ]);
+        $query = fn () => \Illuminate\Support\Facades\DB::table('bookings')
+            ->tap(fn ($query) => \App\Support\BranchVisibility::records($query))->orderBy('id');
+        $this->assertSame([1, 4], $query()->pluck('id')->all());
+        $hidden->update(['is_hidden' => false]);
+        $this->assertSame([1, 2, 3, 4], $query()->pluck('id')->all());
+    }
+
     public function test_admin_can_create_group_for_any_branch(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);

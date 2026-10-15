@@ -213,7 +213,10 @@ class UserController extends Controller
                 && ($operation === 'update' || $targetUser->status === User::STATUS_ACTIVE)
                 && ! $targetUser->isDeletedAccount()
                 && $targetUser->hasPermission('users.subject.team'), 403, 'FORBIDDEN_ACTION');
-            app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $targetUser);
+            $groups = app(\App\Support\RopGroupAccess::class);
+            if ($operation !== 'update' || !$groups->canViewUngroupedEmployee($authUser, $targetUser)) {
+                $groups->ensureVisible($authUser, $targetUser);
+            }
 
             return;
         }
@@ -689,7 +692,9 @@ class UserController extends Controller
                 'branch_group_id' => $user->branch_group_id,
             ], $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'description', 'birthday']));
             $data = $this->normalizeBranchIdForMutation($data, $authUser, $targetRole);
-            $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
+            $preservesUngroupedRole = $authUser->usesAssignedGroupScope() && $user->branch_group_id === null
+                && (int) $targetRole?->id === (int) $user->role_id;
+            if (!$preservesUngroupedRole) $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
             if ($request->exists('security_attendance_branch_ids')) {
                 abort_unless($authUser->hasPermission('users.security_attendance.assign'), 403, 'Нет права назначать филиалы посещаемости.');
                 abort_unless($targetRole->hasPermission('attendance.scope.assigned_branches'), 422, 'Роли сотрудника нужен доступ к посещаемости назначенных филиалов.');
