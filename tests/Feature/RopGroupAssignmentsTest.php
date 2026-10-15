@@ -200,6 +200,77 @@ class RopGroupAssignmentsTest extends TestCase
         $this->assertDatabaseHas('properties', ['id' => 1, 'moderation_version' => 1]);
     }
 
+    private function createPropertyControlTables(): void
+    {
+        Schema::create('properties', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('branch_group_id')->nullable(); $t->unsignedBigInteger('agent_id')->nullable();
+            $t->string('moderation_status')->nullable(); $t->integer('moderation_version')->default(0);
+            $t->softDeletes(); $t->timestamps();
+        });
+        Schema::create('crm_deals', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('branch_group_id')->nullable(); $t->unsignedBigInteger('responsible_agent_id')->nullable();
+            $t->string('control_kind')->nullable(); $t->unsignedBigInteger('primary_property_id')->nullable();
+            $t->timestamp('closed_at')->nullable(); $t->softDeletes(); $t->timestamps();
+        });
+        Schema::create('crm_tasks', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('branch_group_id')->nullable(); $t->unsignedBigInteger('assignee_id')->nullable();
+            $t->string('related_entity_type')->nullable(); $t->unsignedBigInteger('related_entity_id')->nullable();
+            $t->timestamp('completed_at')->nullable(); $t->timestamps();
+        });
+    }
+
+    public function test_merge_keeps_historical_property_controls_and_tasks_but_moves_active_work(): void
+    {
+        $this->mergeRights();
+        $this->createPropertyControlTables();
+        $agent = $this->user('agent', $this->a);
+        $states = ['approved', 'archived', 'sold', 'rented', 'sold_by_owner', 'deleted', 'soft_deleted'];
+        foreach ($states as $index => $state) {
+            $id = $index + 1;
+            DB::table('properties')->insert(['id' => $id, 'branch_group_id' => $this->a->id, 'agent_id' => $agent->id,
+                'moderation_status' => $state === 'soft_deleted' ? 'approved' : $state,
+                'deleted_at' => $state === 'soft_deleted' ? now() : null]);
+            DB::table('crm_deals')->insert(['id' => $id, 'branch_group_id' => $this->a->id,
+                'responsible_agent_id' => $agent->id, 'control_kind' => 'security_property_closure', 'primary_property_id' => $id]);
+            DB::table('crm_tasks')->insert(['id' => $id, 'branch_group_id' => $this->a->id, 'assignee_id' => $agent->id,
+                'related_entity_type' => 'deal', 'related_entity_id' => $id]);
+        }
+        $url = '/api/branch-groups/'.$this->a->id;
+        $preview = $this->postJson($url.'/merge-preview', ['target_group_id' => $this->b->id])->assertOk()
+            ->assertJsonPath('blockers', [])->assertJsonPath('counts.properties', 1)
+            ->assertJsonPath('counts.crm_deals', 1)->assertJsonPath('counts.crm_tasks', 1)->json();
+        $this->postJson($url.'/merge', ['target_group_id' => $this->b->id, 'revision' => $preview['revision'],
+            'reason' => 'Consolidate current work'])->assertOk();
+        $this->assertSame($this->b->id, $agent->fresh()->branch_group_id);
+        foreach ($states as $index => $state) {
+            $id = $index + 1;
+            $group = $id === 1 ? $this->b->id : $this->a->id;
+            foreach (['properties', 'crm_deals', 'crm_tasks'] as $table) {
+                $this->assertDatabaseHas($table, ['id' => $id, 'branch_group_id' => $group]);
+                if ($id > 1) $this->assertDatabaseMissing('group_access_audit_logs', [
+                    'event' => 'record_group_merged', 'subject_type' => $table, 'subject_id' => $id]);
+            }
+            $this->assertDatabaseHas('crm_deals', ['id' => $id, 'closed_at' => null, 'responsible_agent_id' => $agent->id]);
+        }
+    }
+
+    public function test_merge_still_blocks_controls_with_missing_or_foreign_properties(): void
+    {
+        $this->mergeRights();
+        $this->createPropertyControlTables();
+        $agent = $this->user('agent', $this->a);
+        DB::table('properties')->insert(['id' => 1, 'branch_group_id' => $this->c->id, 'moderation_status' => 'archived']);
+        foreach ([1, 999] as $id) DB::table('crm_deals')->insert(['id' => $id,
+            'branch_group_id' => $this->a->id, 'control_kind' => 'security_property_closure', 'primary_property_id' => $id]);
+        $url = '/api/branch-groups/'.$this->a->id;
+        $preview = $this->postJson($url.'/merge-preview', ['target_group_id' => $this->b->id])->assertOk()->json();
+        $this->assertCount(2, $preview['blockers']);
+        $this->postJson($url.'/merge', ['target_group_id' => $this->b->id, 'revision' => $preview['revision'],
+            'reason' => 'Consolidate current work'])->assertUnprocessable();
+        $this->assertSame($this->a->id, $agent->fresh()->branch_group_id);
+        $this->assertDatabaseCount('group_access_audit_logs', 0);
+    }
+
     private function user(string $role, ?BranchGroup $group = null): User
     {
         return User::create(['name' => $role, 'phone' => (string) random_int(900000000, 999999999),

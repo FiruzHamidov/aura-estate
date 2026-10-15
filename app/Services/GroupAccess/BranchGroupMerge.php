@@ -35,6 +35,19 @@ final class BranchGroupMerge
             if ((int) $employee->branch_id !== (int) $source->branch_id) $blockers[] = "Сотрудник #{$employee->id}: филиал не совпадает с группой.";
         }
         $records = [];
+        // Unfinished control of historical properties stays with the property, even
+        // when its responsible employee moves. Keep linked tasks there as well.
+        $retainedControls = [];
+        if (Schema::hasColumn('crm_deals', 'control_kind') && Schema::hasTable('properties')) {
+            $historical = DB::table('properties')->where('branch_group_id', $source->id)
+                ->where(function ($query) {
+                    $query->whereIn('moderation_status', UserOrganizationService::CLOSED_PROPERTY_STATUSES);
+                    if (Schema::hasColumn('properties', 'deleted_at')) $query->orWhereNotNull('deleted_at');
+                })->orderBy('id')->when($lock, fn ($q) => $q->lockForUpdate())->pluck('id');
+            $retainedControls = DB::table('crm_deals')->where('control_kind', 'security_property_closure')
+                ->where('branch_group_id', $source->id)->whereIn('primary_property_id', $historical)
+                ->orderBy('id')->when($lock, fn ($q) => $q->lockForUpdate())->pluck('id')->all();
+        }
         // The same active-state predicates are used by individual employee transfers.
         foreach (app(UserOrganizationService::class)->activeQueries(null) as $table => $query) {
             $label = self::LABELS[$table];
@@ -46,6 +59,10 @@ final class BranchGroupMerge
             }
             $query->where(fn ($q) => $q->where('branch_group_id', $source->id)->orWhereIn($field, $ids));
             foreach ($query->orderBy('id')->when($lock, fn ($q) => $q->lockForUpdate())->get() as $row) {
+                if ($table === 'crm_deals' && in_array($row->id, $retainedControls, true)) continue;
+                if ($table === 'crm_tasks' && ($row->related_entity_type ?? null) === 'deal'
+                    && in_array($row->related_entity_id ?? null, $retainedControls, true)
+                    && (!$row->branch_group_id || (int) $row->branch_group_id === (int) $source->id)) continue;
                 // An employee's existing work in the target already belongs there.
                 if ((int) $row->branch_group_id === (int) $target->id) continue;
                 if ($row->branch_group_id && (int) $row->branch_group_id !== (int) $source->id) {
