@@ -447,6 +447,17 @@ class BookingController extends Controller
             ->paginate((int) ($validated['per_page'] ?? 20))
             ->withQueryString();
 
+        // A public link is separate from the private, group-scoped property relation.
+        // Resolve the page in one query and use the same visibility rule as the storefront.
+        if ($this->authUser($request)?->usesAssignedGroupScope()) {
+            $publicProperties = \App\Models\Property::query()->publicSearchable()
+                ->whereKey($bookings->getCollection()->pluck('property_id')->filter()->unique())
+                ->get(['id', 'title'])->keyBy('id');
+            foreach ($bookings as $booking) {
+                $booking->setAttribute('public_property', $publicProperties->get($booking->property_id)?->only(['id', 'title']));
+            }
+        }
+
         $bookings->getCollection()
             ->transform(fn (Booking $booking) => $this->transformBookingForResponse($booking));
 

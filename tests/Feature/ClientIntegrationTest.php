@@ -646,6 +646,14 @@ class ClientIntegrationTest extends TestCase
         Sanctum::actingAs($ctx['users']['rop']);
         $this->getJson('/api/bookings?per_page=100')->assertOk()->assertJsonPath('total', 1)
             ->assertJsonPath('data.0.agent_id', $own->id)->assertJsonPath('data.0.property', null);
+        $property->forceFill(['moderation_status' => 'approved'])->saveQuietly();
+        $response = $this->getJson('/api/bookings?per_page=100')->assertOk()
+            ->assertJsonPath('data.0.property', null)
+            ->assertJsonPath('data.0.public_property.id', $property->id)
+            ->assertJsonPath('data.0.public_property.title', $property->title);
+        $this->assertEqualsCanonicalizing(['id', 'title'], array_keys($response->json('data.0.public_property')));
+        $property->forceFill(['moderation_status' => 'pending'])->saveQuietly();
+        $this->getJson('/api/bookings')->assertOk()->assertJsonPath('data.0.public_property', null);
         $this->getJson('/api/bookings?branch_group_id='.$own->branch_group_id)->assertOk()->assertJsonPath('total', 1);
         $ctx['users']['rop']->supervisedGroups()->detach();
         $this->getJson('/api/bookings')->assertOk()->assertJsonPath('total', 0);
