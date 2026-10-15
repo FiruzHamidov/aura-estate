@@ -320,6 +320,8 @@ class ClientIntegrationTest extends TestCase
         $this->travelTo(\Illuminate\Support\Carbon::parse('2026-03-01T00:00:00Z'));
         [$agent, $client, $property] = $this->seedClientContext();
 
+        (require database_path('migrations/2026_10_15_180000_add_created_by_to_bookings.php'))->up();
+
         Sanctum::actingAs($agent);
 
         $response = $this->postJson('/api/bookings', [
@@ -330,7 +332,7 @@ class ClientIntegrationTest extends TestCase
             'end_time' => '2026-03-07T11:00:00+05:00',
         ]);
 
-        $response->assertCreated();
+        $response->assertCreated()->assertJsonPath('booking.created_by', $agent->id);
         $response->assertJsonPath('booking.crm_client_id', $client->id);
         $response->assertJsonPath('booking.client_name', $client->full_name);
         $response->assertJsonPath('booking.client_phone', $client->phone);
@@ -692,8 +694,8 @@ class ClientIntegrationTest extends TestCase
 
         Sanctum::actingAs($ctx['users']['admin']);
         $this->getJson('/api/reports/agents/'.$agent->id.'/properties')->assertOk()
-            ->assertJsonPath('summary.total_shows', 2)
-            ->assertJsonPath('properties.0.first_show', '2020-01-01 10:00:00');
+            ->assertJsonPath('summary.total_shows', 1)
+            ->assertJsonPath('properties.0.first_show', $ownDate);
     }
 
     public function test_missing_phone_report_keeps_foreign_author_signature_without_email(): void
@@ -1687,6 +1689,70 @@ class ClientIntegrationTest extends TestCase
         $superadmin->assertOk();
         $superadminRows = collect($superadmin->json());
         $this->assertTrue($superadminRows->contains(fn (array $row) => (int) ($row['agent_id'] ?? 0) === $ctx['users']['agentB']->id));
+    }
+
+    public function test_reports_count_booking_authors_even_without_properties_in_period(): void
+    {
+        $ctx = $this->seedReportBranchScopeContext();
+        $a = $ctx['users']['agentA'];
+        $b = $ctx['users']['agentB'];
+        (require database_path('migrations/2026_10_15_180000_add_created_by_to_bookings.php'))->up();
+        // A created a show on B's old listing, assigned to B. B created another on A's listing.
+        DB::table('properties')->update(['created_at' => '2026-02-01 10:00:00']);
+        DB::table('bookings')->where('agent_id', $a->id)->update([
+            'created_by' => $b->id, 'start_time' => '2026-03-12 10:00:00',
+        ]);
+        DB::table('bookings')->where('agent_id', $b->id)->update([
+            'created_by' => $a->id, 'start_time' => '2026-02-28 19:00:00',
+        ]);
+        Sanctum::actingAs($ctx['users']['admin']);
+        $period = '?date_from=2026-03-01&date_to=2026-03-31';
+        $this->getJson('/api/reports/agents/'.$a->id.'/properties'.$period)->assertOk()
+            ->assertJsonPath('summary.total_properties', 0)->assertJsonPath('summary.total_shows', 1);
+        $list = $this->getJson('/api/reports/agents/properties'.$period)->assertOk()->json();
+        $this->assertSame(1, collect($list)->firstWhere('agent_id', $a->id)['summary']['total_shows']);
+        $this->assertSame(1, collect($list)->firstWhere('agent_id', $b->id)['summary']['total_shows']);
+        $this->getJson('/api/reports/agent/shows'.$period.'&agent_id='.$a->id)->assertOk()
+            ->assertJsonPath('shows_count', 1);
+        $this->getJson('/api/bookings'.$period.'&attribution=author&agent_id='.$a->id)->assertOk()
+            ->assertJsonPath('total', 1)->assertJsonPath('data.0.created_by', $a->id);
+        $report = $this->getJson('/api/bookings/agents-report'.$period.'&agent_id='.$a->id)->assertOk()->json();
+        $this->assertSame(1, $report[0]['shows_count']);
+        $this->assertSame($a->id, $report[0]['agent_id']);
+    }
+
+    public function test_booking_author_migration_restores_audited_creator_and_keeps_legacy_agent(): void
+    {
+        $ctx = $this->seedReportBranchScopeContext();
+        $a = $ctx['users']['agentA'];
+        $b = $ctx['users']['agentB'];
+        $bookingId = DB::table('bookings')->where('agent_id', $a->id)->value('id');
+        DB::table('crm_audit_logs')->insert([
+            'auditable_type' => 'App\\Models\\Client', 'auditable_id' => 1,
+            'actor_id' => $b->id, 'event' => 'booking_created',
+            'context' => json_encode(['booking_id' => $bookingId]),
+        ]);
+        (require database_path('migrations/2026_10_15_180000_add_created_by_to_bookings.php'))->up();
+        $this->assertDatabaseHas('bookings', ['id' => $bookingId, 'created_by' => $b->id]);
+        $this->assertDatabaseHas('bookings', ['agent_id' => $b->id, 'created_by' => $b->id]);
+    }
+
+    public function test_booking_author_is_authenticated_creator_and_survives_reassignment(): void
+    {
+        $ctx = $this->seedReportBranchScopeContext();
+        (require database_path('migrations/2026_10_15_180000_add_created_by_to_bookings.php'))->up();
+        $a = $ctx['users']['agentA'];
+        $b = $ctx['users']['agentB'];
+        $b->update(['branch_id' => $a->branch_id, 'branch_group_id' => $a->branch_group_id]);
+        Sanctum::actingAs($a);
+        $booking = \App\Models\Booking::create([
+            'property_id' => Property::firstOrFail()->id, 'agent_id' => $b->id,
+            'created_by' => $b->id, 'start_time' => '2026-03-12 10:00:00', 'end_time' => '2026-03-12 11:00:00',
+        ]);
+        $this->assertSame($a->id, (int) $booking->fresh()->created_by);
+        Sanctum::actingAs($ctx['users']['admin']);
+        $booking->update(['agent_id' => $a->id, 'created_by' => $b->id]);
+        $this->assertSame($a->id, (int) $booking->fresh()->created_by);
     }
 
     private function seedClientContext(bool $withProperty = true): array

@@ -1630,8 +1630,8 @@ class KpiModuleService
         }
 
         if (Schema::hasTable('bookings')) {
-            foreach (DB::table('bookings')->when($authUser->usesAssignedGroupScope(), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'bookings.branch_group_id'))->select(['agent_id', 'start_time'])
-                ->whereIn('agent_id', $userIds)->whereBetween('start_time', [$start, $end])->when($authUser->usesAssignedGroupScope(), fn ($q) => $q->addSelect('bookings.branch_group_id'))->get() as $booking) {
+            foreach (DB::table('bookings')->when($authUser->usesAssignedGroupScope(), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'bookings.branch_group_id'))->select([\App\Support\BookingAttribution::column().' as agent_id', 'start_time'])
+                ->whereIn(\App\Support\BookingAttribution::column(), $userIds)->whereBetween('start_time', [$start, $end])->when($authUser->usesAssignedGroupScope(), fn ($q) => $q->addSelect('bookings.branch_group_id'))->get() as $booking) {
                 $date = $localDate($booking->start_time);
                 $put($result, $authUser->usesAssignedGroupScope() ? (int) $booking->agent_id.'|'.$booking->branch_group_id : (int) $booking->agent_id, $date, 'shows_count', 1);
                 $put($result, $authUser->usesAssignedGroupScope() ? (int) $booking->agent_id.'|'.$booking->branch_group_id : (int) $booking->agent_id, $date, 'meetings_count', 1);

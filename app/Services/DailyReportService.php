@@ -180,7 +180,7 @@ class DailyReportService
         }
 
         return DB::table('bookings')->tap(fn ($query) => $this->scopeMetricQuery($query, 'bookings', $user))
-            ->where('agent_id', $user->id)
+            ->where(\App\Support\BookingAttribution::column(), $user->id)
             ->whereBetween('start_time', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
             ->orderBy('id')
             ->pluck('id')

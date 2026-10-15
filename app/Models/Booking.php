@@ -26,9 +26,24 @@ class Booking extends Model
         'client_phone'
     ];
 
+    protected static function booted(): void
+    {
+        static::creating(function (self $booking) {
+            if (\Illuminate\Support\Facades\Schema::hasColumn('bookings', 'created_by')) {
+                // Do not accept an author supplied by the client. Imports without an actor use the agent.
+                $booking->created_by = auth()->id() ?? $booking->agent_id;
+            }
+        });
+    }
+
     public function property()
     {
         return $this->belongsTo(Property::class);
+    }
+
+    public function creator()
+    {
+        return $this->belongsTo(User::class, 'created_by');
     }
 
     public function agent()

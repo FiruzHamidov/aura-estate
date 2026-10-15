@@ -405,6 +405,7 @@ class BookingController extends Controller
     {
         $validated = $request->validate([
             'agent_id' => 'nullable|integer',
+            'attribution' => 'nullable|in:agent,author',
             'branch_id' => 'nullable',
             'branch_group_id' => 'nullable',
             'date_from' => 'nullable|string',
@@ -415,7 +416,9 @@ class BookingController extends Controller
             'page' => 'nullable|integer|min:1',
         ]);
 
-        $q = Booking::query()->with(['property', 'agent', 'client.type']);
+        $employeeColumn = $request->input('attribution') === 'author'
+            ? \App\Support\BookingAttribution::column() : 'agent_id';
+        $q = Booking::query()->with(['property', 'agent', 'client.type', 'creator:id,name']);
 
         // from / to: convert to UTC for DB comparison
         $fromRaw = $request->input('from') ?? $request->input('date_from');
@@ -432,13 +435,13 @@ class BookingController extends Controller
         }
 
         if ($request->filled('agent_id')) {
-            $q->where('agent_id', $request->integer('agent_id'));
+            $q->where($employeeColumn, $request->integer('agent_id'));
         }
         if ($request->filled('property_id')) {
             $q->where('property_id', $request->integer('property_id'));
         }
 
-        $this->applyBranchAccessForAgents($request, $q, 'agent_id');
+        $this->applyBranchAccessForAgents($request, $q, $employeeColumn);
 
         $bookings = $q->orderByDesc('start_time')
             ->paginate((int) ($validated['per_page'] ?? 20))
@@ -627,6 +630,7 @@ class BookingController extends Controller
             $from = $this->normalizeFilterBoundaryToUtc($fromRaw, 'start');
             $to   = $this->normalizeFilterBoundaryToUtc($toRaw, 'end');
 
+            $employeeColumn = \App\Support\BookingAttribution::column();
             $q = Booking::query();
 
             if ($from) {
@@ -638,14 +642,14 @@ class BookingController extends Controller
             }
 
             if ($request->filled('agent_id')) {
-                $q->where('agent_id', $request->integer('agent_id'));
+                $q->where($employeeColumn, $request->integer('agent_id'));
             }
 
             if ($request->filled('property_id')) {
                 $q->where('property_id', $request->integer('property_id'));
             }
 
-            $this->applyBranchAccessForAgents($request, $q, 'agent_id');
+            $this->applyBranchAccessForAgents($request, $q, $employeeColumn);
 
             // DB driver
             $driver = DB::getPdo()->getAttribute(\PDO::ATTR_DRIVER_NAME);
@@ -657,13 +661,13 @@ class BookingController extends Controller
             };
 
             $q->select([
-                'agent_id',
+                $employeeColumn.' as agent_id',
                 DB::raw('COUNT(*) as shows_count'),
                 DB::raw($minutesExpr),
                 DB::raw('MIN(start_time) as first_show'),
                 DB::raw('MAX(start_time) as last_show'),
             ])
-                ->groupBy('agent_id')
+                ->groupBy($employeeColumn)
                 ->orderByDesc('shows_count');
             app(\App\Services\GroupAccess\BookingReportCounts::class)->select($q, $request->user());
             $rows = $q->get();
