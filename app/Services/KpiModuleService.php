@@ -1320,6 +1320,20 @@ class KpiModuleService
             ->paginate($perPage, ['*'], 'page', $page);
         $userIds = collect($usersPaginator->items())->pluck('id')->map(fn ($id) => (int) $id)->values();
 
+        // Current team members have the same employee totals for every viewer.
+        // Former members retain the restricted historical group context below.
+        $currentContexts = $authUser->usesAssignedGroupScope()
+            ? $this->weeklyUsersScopeQuery($authUser, $filters)->whereIn('users.id', $userIds->all())->get()
+                ->mapWithKeys(fn (User $user) => [$user->id.'|'.$user->branch_group_id.'|'.$user->role?->slug => (int) $user->id])->all()
+            : [];
+        $currentUserIds = array_values(array_unique(array_values($currentContexts)));
+        $currentReports = $currentUserIds === [] ? collect() : DailyReport::query()
+            ->whereIn('user_id', $currentUserIds)
+            ->whereDate('report_date', '>=', $from->toDateString())
+            ->whereDate('report_date', '<=', $to->toDateString())->get()->groupBy('user_id');
+        $currentAutoMetrics = $this->preloadAutoMetricsByUserDate($currentUserIds, $from, $to, $authUser, false);
+        $currentSales = $this->preloadSalesCreditsByUserDate($currentUserIds, $from, $to, $authUser, false);
+
         $reports = DailyReport::query()
             ->with(['user.role', 'user.branch', 'user.branchGroup'])
             ->whereDate('report_date', '>=', $from->toDateString())
@@ -1348,11 +1362,16 @@ class KpiModuleService
         $planTraceRows = [];
         $preloadedSalesByUserDate = $this->preloadSalesCreditsByUserDate($userIds->all(), $from, $to, $authUser);
 
-        $data = collect($usersPaginator->items())->map(function (User $user) use ($authUser, $reports, $periodType, $from, $to, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, $preloadedSalesByUserDate, $autoMetricsByUserDate, $planResolutions, $lockedScopes, &$globalSourceError, &$planTraceRows) {
+        $data = collect($usersPaginator->items())->map(function (User $user) use ($currentContexts, $currentReports, $currentAutoMetrics, $currentSales, $authUser, $reports, $periodType, $from, $to, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, $preloadedSalesByUserDate, $autoMetricsByUserDate, $planResolutions, $lockedScopes, &$globalSourceError, &$planTraceRows) {
             $contextKey = $authUser->usesAssignedGroupScope() ? $user->id.'|'.$user->branch_group_id : $user->id;
             $rows = collect($reports->get($contextKey, collect()));
             if ($authUser->usesAssignedGroupScope()) $rows = $rows->where('role_slug', $user->role?->slug)->values();
             $autoByDate = $autoMetricsByUserDate[$contextKey] ?? [];
+            $currentMember = isset($currentContexts[$user->id.'|'.$user->branch_group_id.'|'.$user->role?->slug]);
+            if ($currentMember) {
+                $rows = $currentReports->get($user->id, collect());
+                $autoByDate = $currentAutoMetrics[$user->id] ?? [];
+            }
             $sourceErrors = [];
             $targetResolution = $planResolutions[$user->id.'|'.$user->branch_group_id.'|'.$user->role?->slug] ?? $this->defaultPeriodTargetMap($defaultTargetMap, $from);
             $targetMap = $targetResolution['targets'];
@@ -1360,7 +1379,8 @@ class KpiModuleService
             $metricPlanDailyMap = $targetResolution['plan_daily_values'];
             $metricPlanMetaMap = $targetResolution['plan_meta'];
 
-            foreach ($preloadedSalesByUserDate[$contextKey] ?? [] as $dayKey => $salesCredit) {
+            $salesByDate = $currentMember ? ($currentSales[$user->id] ?? []) : ($preloadedSalesByUserDate[$contextKey] ?? []);
+            foreach ($salesByDate as $dayKey => $salesCredit) {
                 $autoByDate[$dayKey] = array_merge($autoByDate[$dayKey] ?? [], [
                     'deals_count' => (int) floor($salesCredit),
                     'sales_count' => $salesCredit,
@@ -1544,8 +1564,9 @@ class KpiModuleService
         ];
     }
 
-    private function preloadSalesCreditsByUserDate(array $userIds, Carbon $from, Carbon $to, User $authUser): array
+    private function preloadSalesCreditsByUserDate(array $userIds, Carbon $from, Carbon $to, User $authUser, bool $scopeRecords = true): array
     {
+        $historical = $scopeRecords && $authUser->usesAssignedGroupScope();
         $userIds = array_values(array_unique(array_map('intval', $userIds)));
         if ($userIds === [] || ! Schema::hasTable('properties') || ! Schema::hasColumn('properties', 'sold_at')) {
             return [];
@@ -1556,8 +1577,8 @@ class KpiModuleService
             $select[] = 'sale_agent_id';
         }
 
-        if ($authUser->usesAssignedGroupScope()) $select[] = 'branch_group_id';
-        $soldProperties = DB::table('properties')->when($authUser->usesAssignedGroupScope(), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id'))
+        if ($historical) $select[] = 'branch_group_id';
+        $soldProperties = DB::table('properties')->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id'))
             ->select($select)
             ->where('moderation_status', 'sold')
             ->whereBetween('sold_at', [
@@ -1586,7 +1607,7 @@ class KpiModuleService
                 if (! isset($targetUsers[(int) $agentId])) {
                     continue;
                 }
-                $key = $authUser->usesAssignedGroupScope() ? $agentId.'|'.$property->branch_group_id : (int) $agentId;
+                $key = $historical ? $agentId.'|'.$property->branch_group_id : (int) $agentId;
                 $result[$key][$dayKey] = round((float) ($result[$key][$dayKey] ?? 0.0) + (float) $credit, 4);
             }
         }
@@ -1599,8 +1620,9 @@ class KpiModuleService
      * of index-friendly range queries. Dates are converted in PHP so the SQL
      * predicates remain sargable (no DATE()/CONVERT_TZ() on indexed columns).
      */
-    private function preloadAutoMetricsByUserDate(array $userIds, Carbon $from, Carbon $to, User $authUser): array
+    private function preloadAutoMetricsByUserDate(array $userIds, Carbon $from, Carbon $to, User $authUser, bool $scopeRecords = true): array
     {
+        $historical = $scopeRecords && $authUser->usesAssignedGroupScope();
         $userIds = array_values(array_unique(array_map('intval', $userIds)));
         if ($userIds === []) {
             return [];
@@ -1615,35 +1637,35 @@ class KpiModuleService
         $localDate = static fn ($value): string => Carbon::parse((string) $value, 'UTC')->setTimezone(self::TZ)->toDateString();
 
         if (Schema::hasTable('crm_tasks') && Schema::hasTable('crm_task_types')) {
-            $tasks = DB::table('crm_tasks')->when($authUser->usesAssignedGroupScope(), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'crm_tasks.branch_group_id'))
+            $tasks = DB::table('crm_tasks')->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'crm_tasks.branch_group_id'))
                 ->join('crm_task_types', 'crm_task_types.id', '=', 'crm_tasks.task_type_id')
                 ->select(['crm_tasks.assignee_id', 'crm_tasks.completed_at', 'crm_task_types.code'])
                 ->whereIn('crm_tasks.assignee_id', $userIds)
                 ->where('crm_tasks.status', 'done')
                 ->whereIn('crm_task_types.code', ['CALL', 'AD_PUBLICATION', 'AD_CREATE'])
                 ->whereBetween('crm_tasks.completed_at', [$start, $end])
-                ->when($authUser->usesAssignedGroupScope(), fn ($q) => $q->addSelect('crm_tasks.branch_group_id'))->get();
+                ->when($historical, fn ($q) => $q->addSelect('crm_tasks.branch_group_id'))->get();
             foreach ($tasks as $task) {
                 $metric = $task->code === 'CALL' ? 'calls_count' : 'ad_count';
-                $put($result, $authUser->usesAssignedGroupScope() ? (int) $task->assignee_id.'|'.$task->branch_group_id : (int) $task->assignee_id, $localDate($task->completed_at), $metric, 1);
+                $put($result, $historical ? (int) $task->assignee_id.'|'.$task->branch_group_id : (int) $task->assignee_id, $localDate($task->completed_at), $metric, 1);
             }
         }
 
         if (Schema::hasTable('bookings')) {
-            foreach (DB::table('bookings')->when($authUser->usesAssignedGroupScope(), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'bookings.branch_group_id'))->select([\App\Support\BookingAttribution::column().' as agent_id', 'start_time'])
-                ->whereIn(\App\Support\BookingAttribution::column(), $userIds)->whereBetween('start_time', [$start, $end])->when($authUser->usesAssignedGroupScope(), fn ($q) => $q->addSelect('bookings.branch_group_id'))->get() as $booking) {
+            foreach (DB::table('bookings')->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'bookings.branch_group_id'))->select([\App\Support\BookingAttribution::column().' as agent_id', 'start_time'])
+                ->whereIn(\App\Support\BookingAttribution::column(), $userIds)->whereBetween('start_time', [$start, $end])->when($historical, fn ($q) => $q->addSelect('bookings.branch_group_id'))->get() as $booking) {
                 $date = $localDate($booking->start_time);
-                $put($result, $authUser->usesAssignedGroupScope() ? (int) $booking->agent_id.'|'.$booking->branch_group_id : (int) $booking->agent_id, $date, 'shows_count', 1);
-                $put($result, $authUser->usesAssignedGroupScope() ? (int) $booking->agent_id.'|'.$booking->branch_group_id : (int) $booking->agent_id, $date, 'meetings_count', 1);
+                $put($result, $historical ? (int) $booking->agent_id.'|'.$booking->branch_group_id : (int) $booking->agent_id, $date, 'shows_count', 1);
+                $put($result, $historical ? (int) $booking->agent_id.'|'.$booking->branch_group_id : (int) $booking->agent_id, $date, 'meetings_count', 1);
             }
         }
 
         if (Schema::hasTable('clients')) {
-            foreach (DB::table('clients')->when($authUser->usesAssignedGroupScope(), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'clients.branch_group_id'))->select(['created_by', 'responsible_agent_id', 'created_at'])
+            foreach (DB::table('clients')->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'clients.branch_group_id'))->select(['created_by', 'responsible_agent_id', 'created_at'])
                 ->whereBetween('created_at', [$start, $end])
                 ->where(function ($q) use ($userIds) {
                     $q->whereIn('created_by', $userIds)->orWhereIn('responsible_agent_id', $userIds);
-                })->when($authUser->usesAssignedGroupScope(), fn ($q) => $q->addSelect('clients.branch_group_id'))->get() as $client) {
+                })->when($historical, fn ($q) => $q->addSelect('clients.branch_group_id'))->get() as $client) {
                 $clientUserIds = array_values(array_unique([
                     (int) $client->created_by,
                     (int) $client->responsible_agent_id,
@@ -1652,13 +1674,13 @@ class KpiModuleService
                     if ($userId <= 0 || ! in_array($userId, $userIds, true)) {
                         continue;
                     }
-                    $put($result, $authUser->usesAssignedGroupScope() ? $userId.'|'.$client->branch_group_id : $userId, $localDate($client->created_at), 'new_clients_count', 1);
+                    $put($result, $historical ? $userId.'|'.$client->branch_group_id : $userId, $localDate($client->created_at), 'new_clients_count', 1);
                 }
             }
         }
 
         if (Schema::hasTable('properties')) {
-            foreach (DB::table('properties')->when($authUser->usesAssignedGroupScope(), fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id'))->select(['created_by', 'agent_id', 'created_at'])
+            foreach (DB::table('properties')->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id'))->select(['created_by', 'agent_id', 'created_at'])
                 ->whereBetween('created_at', [$start, $end])
                 ->where(function ($q) use ($userIds) {
                     $q->whereIn('created_by', $userIds)->orWhere(function ($legacy) use ($userIds) {
@@ -1666,11 +1688,11 @@ class KpiModuleService
                             $creatorMissing->whereNull('created_by')->orWhere('created_by', 0);
                         });
                     });
-                })->when($authUser->usesAssignedGroupScope(), fn ($q) => $q->addSelect('properties.branch_group_id'))->get() as $property) {
+                })->when($historical, fn ($q) => $q->addSelect('properties.branch_group_id'))->get() as $property) {
                 $creator = (int) $property->created_by;
                 $userId = $creator > 0 ? $creator : (int) $property->agent_id;
                 if ($userId > 0) {
-                    $put($result, $authUser->usesAssignedGroupScope() ? $userId.'|'.$property->branch_group_id : $userId, $localDate($property->created_at), 'new_properties_count', 1);
+                    $put($result, $historical ? $userId.'|'.$property->branch_group_id : $userId, $localDate($property->created_at), 'new_properties_count', 1);
                 }
             }
         }
@@ -1896,6 +1918,9 @@ class KpiModuleService
         foreach (['assignee_id', 'agent_id', 'mop_id'] as $key) {
             if (! empty($filters[$key])) $history->where('daily_reports.user_id', (int) $filters[$key]);
         }
+        // A current member's full-period row already contains their earlier activity.
+        // Do not add a second historical row and double-count that employee.
+        $history->whereNotIn('daily_reports.user_id', (clone $current)->select('users.id'));
         $contexts = $current->union($history->select(['daily_reports.user_id', 'daily_reports.branch_group_id', 'historical_roles.id as role_id'])->toBase());
         return User::query()->joinSub($contexts, 'kpi_context', fn ($join) => $join->on('users.id', '=', 'kpi_context.user_id'))
             ->join('branch_groups as historical_groups', 'historical_groups.id', '=', 'kpi_context.branch_group_id')

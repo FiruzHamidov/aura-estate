@@ -186,6 +186,56 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertSame(8, $report->fresh()->calls_count);
     }
 
+    public function test_current_team_monthly_totals_match_admin_even_when_source_records_have_other_or_missing_groups(): void
+    {
+        $branch = Branch::create(['name' => 'Main']);
+        $own = BranchGroup::create(['name' => 'Own', 'branch_id' => $branch->id]);
+        $other = BranchGroup::create(['name' => 'Other', 'branch_id' => $branch->id]);
+        $users = [];
+        foreach (['admin', 'rop', 'agent'] as $i => $slug) {
+            $role = Role::create(['name' => $slug, 'slug' => $slug]);
+            $users[$slug] = User::create(['name' => $slug, 'phone' => '91710000'.$i, 'role_id' => $role->id,
+                'branch_id' => $branch->id, 'branch_group_id' => $own->id]);
+        }
+        $users['rop']->supervisedGroups()->attach($own->id);
+        $agent = $users['agent'];
+        Schema::create('properties', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('created_by'); $t->unsignedBigInteger('agent_id')->nullable();
+            $t->unsignedBigInteger('branch_group_id')->nullable(); $t->timestamps();
+        });
+        Schema::create('clients', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('created_by'); $t->unsignedBigInteger('responsible_agent_id')->nullable();
+            $t->unsignedBigInteger('branch_group_id')->nullable(); $t->timestamps();
+        });
+        $call = CrmTaskType::create(['code' => 'CALL', 'name' => 'Call']);
+        foreach ([$own->id, $other->id, null] as $i => $groupId) {
+            \DB::table('crm_tasks')->insert(['assignee_id' => $agent->id, 'task_type_id' => $call->id,
+                'branch_group_id' => $groupId, 'title' => 'Call', 'status' => 'done', 'completed_at' => '2026-05-01 10:00:00']);
+            DailyReport::create(['user_id' => $agent->id, 'branch_group_id' => $groupId, 'role_slug' => 'agent',
+                'report_date' => '2026-05-0'.($i + 1), 'calls_count' => 10, 'ad_count' => 5]);
+            foreach (['properties', 'clients'] as $table) {
+                \DB::table($table)->insert(['created_by' => $agent->id, 'branch_group_id' => $groupId, 'created_at' => '2026-05-01 10:00:00']);
+            }
+        }
+        $url = '/api/kpi/monthly?year=2026&month=5&v=2&branch_group_id='.$own->id.'&agent_id='.$agent->id;
+        Sanctum::actingAs($users['admin']);
+        $admin = $this->getJson($url)->assertOk()->json('data.0');
+        Sanctum::actingAs($users['rop']);
+        $rop = $this->getJson($url)->assertOk()->assertJsonCount(1, 'data')->json('data.0');
+        $this->assertEquals(3, $rop['metrics']['calls']['final_value']);
+        $this->assertEquals(30, $rop['metrics']['calls']['manual_value']);
+        $this->assertEquals(3, $rop['metrics']['calls']['fact_value']);
+        $this->assertEquals(15, $rop['metrics']['ads']['final_value']);
+        $this->assertEquals(3, $rop['metrics']['objects']['final_value']);
+        $this->assertEquals($admin['metrics'], $rop['metrics']);
+        $this->assertEquals($admin['clients'], $rop['clients']);
+        $users['rop']->supervisedGroups()->attach($other->id);
+        $this->getJson('/api/kpi/monthly?year=2026&month=5&v=2&agent_id='.$agent->id)
+            ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.metrics.calls.final_value', 3);
+        $users['rop']->supervisedGroups()->detach();
+        $this->getJson($url)->assertForbidden();
+    }
+
     public function test_period_kpi_keeps_automatic_facts_and_personal_plans_in_their_historical_group(): void
     {
         $branch = Branch::create(['name' => 'Main']);
