@@ -1034,14 +1034,9 @@ class UserController extends Controller
                 $this->authorizeUserMutation($authUser, $user, 'restore');
             }
 
-        if ($authUser->hasPermission('users.manage_hr_roles')) {
-            $this->ensureUserIsVisible($authUser, $user, false);
-            $this->authorizeUserMutation($authUser, $user, 'restore');
-        }
-
-        if ($user->status === User::STATUS_ACTIVE) {
-            return response()->json(['message' => 'Пользователь уже активен']);
-        }
+            if ($user->status === User::STATUS_ACTIVE) {
+                return response()->json(['message' => 'Пользователь уже активен']);
+            }
 
             $oldStatus = $user->status;
             $user->status = User::STATUS_ACTIVE;
