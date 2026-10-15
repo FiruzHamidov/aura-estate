@@ -335,6 +335,17 @@ class PropertyController extends Controller
         }
     }
 
+    private function serializeResponsibleAgent(Property $property): ?array
+    {
+        $property->loadMissing('agent.role');
+        if (! $property->agent) return null;
+
+        // Only the public contact fields, never a full employee profile.
+        return array_merge($property->agent->only(['id', 'name', 'phone', 'photo']), [
+            'role' => $property->agent->role?->only(['name', 'slug']),
+        ]);
+    }
+
     private function serializePropertyShow(Property $property, ?User $authUser): array
     {
         $includeAuthContacts = $authUser?->hasPermission('properties.contacts.view') ?? false;
@@ -355,10 +366,7 @@ class PropertyController extends Controller
         }
 
         $payload = $property->toArray();
-        if ($authUser) {
-            $property->loadMissing('agent');
-            $payload['responsible_agent'] = $property->agent?->only(['id', 'name']);
-        }
+        $payload['responsible_agent'] = $this->serializeResponsibleAgent($property);
         $payload['branch_id'] = $this->resolvePropertyBranchId($property);
         $payload['branch_group_id'] = $this->resolvePropertyBranchGroupId($property);
 
@@ -2476,6 +2484,7 @@ class PropertyController extends Controller
         if ($payload['creator']) {
             $payload['creator']['role'] = $property->creator->role?->only(['name', 'slug']);
         }
+        $payload['responsible_agent'] = $this->serializeResponsibleAgent($property);
         $payload['public_view_only'] = true;
         $payload['capabilities'] = $this->propertyCapabilities(null, $property);
 

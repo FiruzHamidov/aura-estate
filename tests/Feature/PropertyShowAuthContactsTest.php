@@ -222,6 +222,37 @@ class PropertyShowAuthContactsTest extends TestCase
         return [$rop, $property, $agent];
     }
 
+    public function test_property_contact_uses_the_assigned_employee_for_guest_and_authenticated_views(): void
+    {
+        [$rop, $property, $agent] = $this->publicRopFixture();
+        Schema::table('users', fn (Blueprint $table) => $table->string('photo')->nullable());
+        $author = User::create(['name' => 'Former author', 'phone' => '900555555',
+            'role_id' => $agent->role_id, 'status' => 'inactive']);
+        $property->forceFill(['created_by' => $author->id])->saveQuietly();
+        $agent->forceFill(['photo' => 'agents/current.jpg', 'email' => 'private@example.test'])->saveQuietly();
+
+        foreach ([null, $rop, $agent] as $viewer) {
+            $this->app['auth']->forgetGuards();
+            $this->withHeader('Authorization', $viewer ? 'Bearer '.$viewer->createToken('test')->plainTextToken : '');
+            $response = $this->getJson('/api/properties/'.$property->id)->assertOk()
+                ->assertJsonPath('creator.id', $author->id)
+                ->assertJsonPath('responsible_agent.id', $agent->id)
+                ->assertJsonPath('responsible_agent.name', $agent->name)
+                ->assertJsonPath('responsible_agent.phone', $agent->phone)
+                ->assertJsonPath('responsible_agent.photo', 'agents/current.jpg')
+                ->assertJsonPath('responsible_agent.role.slug', 'agent')
+                ->assertJsonMissingPath('responsible_agent.email')
+                ->assertJsonMissingPath('responsible_agent.password');
+            $this->assertEqualsCanonicalizing(['id', 'name', 'phone', 'photo', 'role'], array_keys($response->json('responsible_agent')));
+        }
+        $this->app['auth']->forgetGuards();
+        $this->withHeader('Authorization', '');
+        $property->forceFill(['agent_id' => null])->saveQuietly();
+        $this->getJson('/api/properties/'.$property->id)->assertOk()->assertJsonPath('responsible_agent', null);
+        $property->forceFill(['agent_id' => 999999])->saveQuietly();
+        $this->getJson('/api/properties/'.$property->id)->assertOk()->assertJsonPath('responsible_agent', null);
+    }
+
     public function test_rop_reads_public_foreign_listing_without_private_fields_or_actions(): void
     {
         [$rop, $property, $agent] = $this->publicRopFixture();
