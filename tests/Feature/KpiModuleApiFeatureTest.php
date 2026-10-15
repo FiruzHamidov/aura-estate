@@ -3587,6 +3587,29 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->getJson($readPath)->assertForbidden();
     }
 
+    public function test_monthly_kpi_counts_booking_creator_instead_of_assignee(): void
+    {
+        $this->createDailyKpiSystemTables();
+        (require database_path('migrations/2026_10_15_180000_add_created_by_to_bookings.php'))->up();
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'G1']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900002051', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => 'Agent', 'phone' => '900002052', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        \DB::table('bookings')->insert([
+            ['agent_id' => $admin->id, 'created_by' => $agent->id, 'start_time' => '2026-04-30 19:00:00'],
+            ['agent_id' => $agent->id, 'created_by' => $admin->id, 'start_time' => '2026-05-12 10:00:00'],
+            ['agent_id' => $admin->id, 'created_by' => $agent->id, 'start_time' => '2026-05-31 19:00:00'],
+        ]);
+        Sanctum::actingAs($admin);
+        $response = $this->getJson('/api/kpi/monthly?year=2026&month=5&v=2&agent_id='.$agent->id)->assertOk();
+        $row = collect($response->json('data'))->firstWhere('employee_id', $agent->id);
+        $this->assertSame(1, (int) data_get($row, 'metrics.shows.final_value'));
+        $daily = app(\App\Services\DailyReportService::class)->autoMetrics($agent, '2026-05-01');
+        $this->assertSame(1, $daily['shows_count']);
+    }
+
     private function createDailyKpiSystemTables(): void
     {
         if (! Schema::hasTable('bookings')) {

@@ -72,6 +72,11 @@ class PropertyReportController extends Controller
         }
 
 
+        if ($query->getModel() instanceof Booking) {
+            $this->applyBranchAccessByUserColumn($request, $query, $creatorColumn);
+            return;
+        }
+
         if ($request->filled('branch_group_id')) {
             $branchGroupIds = array_values(array_filter(
                 array_map('intval', $this->toArray($request->input('branch_group_id')))
@@ -284,21 +289,21 @@ class PropertyReportController extends Controller
 
         $showsQ = Booking::query()
             ->leftJoin('properties', 'properties.id', '=', 'bookings.property_id')
-            ->whereBetween('bookings.start_time', [$start, $end]);
+            ->whereBetween('bookings.start_time', [$start->copy()->utc(), $end->copy()->utc()]);
 
-        $this->applyBranchAccessByUserColumn($request, $showsQ, 'bookings.agent_id');
+        $this->applyBranchAccessByUserColumn($request, $showsQ, \App\Support\BookingAttribution::column());
 
         if ($request->filled('agent_id')) {
-            $showsQ->whereIn('bookings.agent_id', $this->toArray($request->input('agent_id')));
+            $showsQ->whereIn(\App\Support\BookingAttribution::column(), $this->toArray($request->input('agent_id')));
         }
 
         $topShowsQuery = (clone $showsQ)
             ->select([
-                'bookings.agent_id',
+                \App\Support\BookingAttribution::column().' as agent_id',
                 DB::raw('COUNT(*) as shows_count'),
             ])
-            ->whereNotNull('bookings.agent_id')
-            ->groupBy('bookings.agent_id')
+            ->whereNotNull(\App\Support\BookingAttribution::column())
+            ->groupBy(\App\Support\BookingAttribution::column())
             ->orderByDesc('shows_count')
             ->limit(10);
         app(\App\Services\GroupAccess\BookingReportCounts::class)->select($topShowsQuery, $request->user());
@@ -597,8 +602,8 @@ class PropertyReportController extends Controller
                 $containsClosed = $statusVals === [] || array_intersect($statusVals, $closedStatuses) !== [];
                 $containsOpen = $statusVals === [] || array_diff($statusVals, $closedStatuses) !== [];
 
-                if ($creatorColumn === 'bookings.agent_id') {
-                    $query->whereIn('bookings.agent_id', $agentIds);
+                if (str_starts_with($creatorColumn, 'bookings.')) {
+                    $query->whereIn($creatorColumn, $agentIds);
                 } elseif ($isSalesColumn || ($containsClosed && !$containsOpen)) {
                     $query->where($applySalesFilter);
                 } elseif ($containsClosed && $containsOpen) {
@@ -1619,8 +1624,6 @@ class PropertyReportController extends Controller
     public function agentPropertiesReport(Request $request, $agentId = null)
     {
         try {
-            $from = $request->input('from', $request->input('date_from'));
-            $to   = $request->input('to', $request->input('date_to'));
             $soldStatuses = ['sold', 'sold_by_owner', 'rented'];
 
             // Build base properties query (we'll refine below)
@@ -1693,33 +1696,13 @@ class PropertyReportController extends Controller
                 });
 
                 $properties = $propsQ->get();
-                $propertyIds = $properties->pluck('id')->values()->all();
 
-                // aggregate bookings for these properties
-                $bookingsQ = Booking::query()
-                    ->select([
-                        'property_id',
-                        DB::raw('COUNT(*) as shows_count'),
-                        DB::raw('MIN(start_time) as first_show'),
-                        DB::raw('MAX(start_time) as last_show'),
-                    ])
-                    ->whereIn('property_id', $propertyIds)
-                    ->groupBy('property_id');
-
-                if ($request->user()?->usesAssignedGroupScope()) {
-                    $this->applyBranchAccessByUserColumn($request, $bookingsQ, 'bookings.agent_id');
-                }
-
-                $bookingFrom = $from && preg_match('/^\d{4}-\d{2}-\d{2}$/', (string) $from)
-                    ? $from.' 00:00:00'
-                    : $from;
-                $bookingTo = $to && preg_match('/^\d{4}-\d{2}-\d{2}$/', (string) $to)
-                    ? $to.' 23:59:59'
-                    : $to;
-                if ($bookingFrom) $bookingsQ->where('start_time', '>=', $bookingFrom);
-                if ($bookingTo)   $bookingsQ->where('start_time', '<=', $bookingTo);
-
-                $bookings = $bookingsQ->get()->keyBy('property_id');
+                // Count this employee's own shows across all properties in the period.
+                $bookings = $this->employeeShowsQuery($request)
+                    ->where(\App\Support\BookingAttribution::column(), $agentId)
+                    ->select(['property_id', DB::raw('COUNT(*) as shows_count'),
+                        DB::raw('MIN(start_time) as first_show'), DB::raw('MAX(start_time) as last_show')])
+                    ->groupBy('property_id')->get()->keyBy('property_id');
 
                 $propsOut = $properties->map(function ($p) use ($bookings) {
                     $b = $bookings->get($p->id);
@@ -1777,11 +1760,6 @@ class PropertyReportController extends Controller
             // fetch all properties (with possible filters applied above)
             $properties = $propsQ->get();
 
-            if ($properties->isEmpty()) {
-                // return empty array for consistency
-                return response()->json([]);
-            }
-
             // group properties by agent key (for closed deals prefer sale_user_id)
             $grouped = $properties->groupBy(function ($p) {
                 if (
@@ -1795,34 +1773,15 @@ class PropertyReportController extends Controller
                 return $p->created_by;
             });
 
-            // collect property IDs for bookings aggregation
-            $allPropertyIds = $properties->pluck('id')->values()->all();
-
-            // aggregate bookings for all relevant properties in one query
-            $bookingsQ = Booking::query()
-                ->select([
-                    'property_id',
-                    DB::raw('COUNT(*) as shows_count'),
-                    DB::raw('MIN(start_time) as first_show'),
-                    DB::raw('MAX(start_time) as last_show'),
-                ])
-                ->whereIn('property_id', $allPropertyIds)
-                ->groupBy('property_id');
-
-            if ($request->user()?->usesAssignedGroupScope()) {
-                $this->applyBranchAccessByUserColumn($request, $bookingsQ, 'bookings.agent_id');
+            $bookingsByAgent = $this->employeeShowsQuery($request)
+                ->select([\App\Support\BookingAttribution::column().' as employee_id', DB::raw('COUNT(*) as shows_count')])
+                ->groupBy(\App\Support\BookingAttribution::column())->get()->keyBy('employee_id');
+            // Employees with shows on old or other employees' listings must also appear.
+            foreach ($bookingsByAgent->keys() as $employeeId) {
+                if (! $grouped->has($employeeId)) {
+                    $grouped->put($employeeId, collect());
+                }
             }
-
-            $bookingFrom = $from && preg_match('/^\d{4}-\d{2}-\d{2}$/', (string) $from)
-                ? $from.' 00:00:00'
-                : $from;
-            $bookingTo = $to && preg_match('/^\d{4}-\d{2}-\d{2}$/', (string) $to)
-                ? $to.' 23:59:59'
-                : $to;
-            if ($bookingFrom) $bookingsQ->where('start_time', '>=', $bookingFrom);
-            if ($bookingTo)   $bookingsQ->where('start_time', '<=', $bookingTo);
-
-            $bookings = $bookingsQ->get()->keyBy('property_id');
 
             $result = collect();
 
@@ -1834,38 +1793,8 @@ class PropertyReportController extends Controller
                 // skip if agentKey is null (no agent/creator)
                 if (!$agentKey) continue;
 
-                $propsOut = $propsForAgent->map(function ($p) use ($bookings) {
-                    $b = $bookings->get($p->id);
-                    return [
-                        'id' => (int)$p->id,
-                        'title' => $p->title,
-                        'price' => $p->price,
-                        'currency' => $p->currency,
-                        'moderation_status' => $p->moderation_status,
-                        'branch_group_id' => $p->branch_group_id,
-                        'created_at' => $p->created_at ? (string)$p->created_at : null,
-                        'shows_count' => $b ? (int)$b->shows_count : 0,
-                        'first_show' => $b && $b->first_show ? (string)$b->first_show : null,
-                        'last_show' => $b && $b->last_show ? (string)$b->last_show : null,
-
-                        // fields for frontend title generation
-                        'type' => [
-                            'id' => $p->type->id ?? null,
-                            'slug' => $p->type->slug ?? null,
-                        ],
-                        'apartment_type' => $p->apartment_type ?? null,
-                        'rooms' => $p->rooms !== null ? (int)$p->rooms : null,
-                        'contract_type_id' => $p->contract_type_id !== null ? (int)$p->contract_type_id : null,
-                        'total_area' => $p->total_area !== null ? (float)$p->total_area : null,
-                        'living_area' => $p->living_area !== null ? (float)$p->living_area : null,
-                        'land_size' => $p->land_size !== null ? (float)$p->land_size : null,
-                        'floor' => $p->floor !== null ? (int)$p->floor : null,
-                        'total_floors' => $p->total_floors !== null ? (int)$p->total_floors : null,
-                    ];
-                })->values();
-
                 $totalProps = $propsForAgent->count();
-                $totalShows = (int)$propsOut->sum('shows_count');
+                $totalShows = (int) ($bookingsByAgent->get($agentKey)?->shows_count ?? 0);
                 $byStatus = $this->statusSummaryFromProperties($propsForAgent);
                 $contracts = $this->contractSummaryFromProperties($propsForAgent);
 
@@ -2003,31 +1932,33 @@ class PropertyReportController extends Controller
         ]);
     }
 
-    // === Кол-во показов агента ===
+    // The same attribution and period as the agent table and KPI.
     public function agentShowsStats(Request $request)
     {
-        $base = Booking::query()
-            ->join('properties', 'properties.id', '=', 'bookings.property_id');
+        return response()->json(['shows_count' => $this->employeeShowsQuery($request)->count()]);
+    }
 
-        // ЯВНО указываем поле даты для bookings
-        $requestWithDateField = $request->merge([
-            'date_field' => 'bookings.created_at',
-        ]);
-
-        $isRop = $request->user()?->usesAssignedGroupScope();
-        [$q] = $this->applyCommonFilters($requestWithDateField, $base, $isRop ? 'bookings.agent_id' : 'properties.created_by');
-
-        if ($request->filled('agent_id')) {
-            $agentIds = $this->toArray($request->input('agent_id'));
-            // РОП фильтрует по ответственному за показ; другие роли сохраняют прежнюю атрибуцию.
-            $q->whereIn($isRop ? 'bookings.agent_id' : 'properties.created_by', $agentIds);
+    private function employeeShowsQuery(Request $request)
+    {
+        $this->ensureReportsAllowed($request);
+        $column = \App\Support\BookingAttribution::column();
+        $query = Booking::query()->leftJoin('properties', 'properties.id', '=', 'bookings.property_id');
+        // Apply explicit property filters, but never the listing's creation period.
+        $propertyFilters = clone $request;
+        $propertyFilters->query->remove('date_from');
+        $propertyFilters->query->remove('date_to');
+        [$query] = $this->applyCommonFilters($propertyFilters, $query, $column);
+        foreach (['from' => ['date_from', '>='], 'to' => ['date_to', '<=']] as $key => [$alias, $operator]) {
+            $raw = $request->input($key, $request->input($alias));
+            if ($raw) {
+                $date = Carbon::parse($raw, 'Asia/Dushanbe');
+                if (preg_match('/^\d{4}-\d{2}-\d{2}$/', (string) $raw)) {
+                    $date = $key === 'from' ? $date->startOfDay() : $date->endOfDay();
+                }
+                $query->where('bookings.start_time', $operator, $date->utc()->toDateTimeString());
+            }
         }
-
-        $totalShows = (clone $q)->count();
-
-        return response()->json([
-            'shows_count' => (int)$totalShows,
-        ]);
+        return $query;
     }
 
     // === Отчет по заработку агента ===
