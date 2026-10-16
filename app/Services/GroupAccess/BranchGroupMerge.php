@@ -65,10 +65,6 @@ final class BranchGroupMerge
                     && (!$row->branch_group_id || (int) $row->branch_group_id === (int) $source->id)) continue;
                 // An employee's existing work in the target already belongs there.
                 if ((int) $row->branch_group_id === (int) $target->id) continue;
-                if ($row->branch_group_id && (int) $row->branch_group_id !== (int) $source->id) {
-                    $blockers[] = "{$label} #{$row->id}: запись сотрудника относится к другой группе.";
-                    continue;
-                }
                 if (isset($row->branch_id) && (int) $row->branch_id !== (int) $source->branch_id) {
                     $blockers[] = "{$label} #{$row->id}: запись относится к другому филиалу.";
                 }
@@ -81,9 +77,6 @@ final class BranchGroupMerge
                 ->whereIn('primary_property_id', array_keys($records['properties']))->whereNull('closed_at');
             if (Schema::hasColumn('crm_deals', 'deleted_at')) $controls->whereNull('deleted_at');
             foreach ($controls->orderBy('id')->when($lock, fn ($q) => $q->lockForUpdate())->get() as $row) {
-                if ($row->branch_group_id && !in_array((int) $row->branch_group_id, [$source->id, $target->id], true)) {
-                    $blockers[] = "Карточка контроля #{$row->id}: относится к другой группе.";
-                }
                 $records['crm_deals'][$row->id] = (array) $row;
             }
         }
@@ -95,16 +88,16 @@ final class BranchGroupMerge
                 ->whereIn('related_entity_type', $types)->whereIn('related_entity_id', array_keys($records[$table]));
             if (Schema::hasColumn('crm_tasks', 'deleted_at')) $query->whereNull('deleted_at');
             foreach ($query->orderBy('id')->when($lock, fn ($q) => $q->lockForUpdate())->get() as $row) {
-                if ($row->branch_group_id && !in_array((int) $row->branch_group_id, [$source->id, $target->id], true)) {
-                    $blockers[] = "Задача #{$row->id}: связана с другой группой.";
-                }
                 $records['crm_tasks'][$row->id] = (array) $row;
             }
         }
         $ownerIds = [];
         foreach ($records as $table => $rows) foreach ($rows as $row) $ownerIds[] = $row[GroupOwnedRecordObserver::RESPONSIBLES[$table]] ?? null;
         $owners = User::query()->with('role')->whereIn('id', array_filter($ownerIds))->get()->keyBy('id');
+        $otherGroupCount = 0;
+        $outsideTeamCount = 0;
         foreach ($records as $table => $rows) foreach ($rows as $row) {
+            if (!empty($row['branch_group_id']) && !in_array((int) $row['branch_group_id'], [(int) $source->id, (int) $target->id], true)) $otherGroupCount++;
             $label = self::LABELS[$table];
             $responsible = $row[GroupOwnedRecordObserver::RESPONSIBLES[$table]] ?? null;
             $owner = $responsible ? $owners->get($responsible) : null;
@@ -114,7 +107,7 @@ final class BranchGroupMerge
             if ($responsible && !$owner) $blockers[] = "{$label} #{$row['id']}: ответственный не найден.";
             if ($owner && $owner->hasPermission('users.subject.assignment_group_required')
                 && (!in_array($owner->id, $ids, true) && (int) $owner->branch_group_id !== (int) $target->id)) {
-                $blockers[] = "{$label} #{$row['id']}: ответственный не входит в объединяемую команду. Сначала передайте запись.";
+                $outsideTeamCount++;
             }
             if ($table === 'crm_deals' && ($row['control_kind'] ?? null) === 'security_property_closure') {
                 $propertyId = $row['primary_property_id'] ?? null;
@@ -130,19 +123,24 @@ final class BranchGroupMerge
                 }
             }
         }
+        // Group merge explicitly consolidates active work, preserving its assignees.
+        // Existing group/assignee mismatches are disclosed, not silently reassigned.
+        $warnings = [];
+        if ($otherGroupCount) $warnings[] = "Записи из других групп: {$otherGroupCount}. Они также перейдут в выбранную группу.";
+        if ($outsideTeamCount) $warnings[] = "Записи с ответственными вне объединяемой команды: {$outsideTeamCount}. Ответственные сохранятся; сотрудники других групп не переводятся.";
         foreach ($records as &$rows) ksort($rows);
         unset($rows);
         ksort($records);
         $snapshot = [$source->getAttributes(), $target->getAttributes(), $employees->map->getAttributes()->all(), $records];
         return ['employees' => $employees, 'records' => $records, 'blockers' => array_values(array_unique($blockers)),
-            'revision' => hash('sha256', json_encode($snapshot, JSON_THROW_ON_ERROR))];
+            'warnings' => $warnings, 'revision' => hash('sha256', json_encode($snapshot, JSON_THROW_ON_ERROR))];
     }
 
     private function summary(BranchGroup $source, BranchGroup $target, array $inventory): array
     {
         return ['source' => $source->only(['id', 'name', 'branch_id']), 'target' => $target->only(['id', 'name', 'branch_id']),
             'employees' => $inventory['employees']->map->only(['id', 'name'])->values()->all(),
-            'counts' => array_map('count', $inventory['records']), 'blockers' => $inventory['blockers'], 'revision' => $inventory['revision']];
+            'counts' => array_map('count', $inventory['records']), 'warnings' => $inventory['warnings'], 'blockers' => $inventory['blockers'], 'revision' => $inventory['revision']];
     }
 
     public function preview(User $actor, BranchGroup $source, BranchGroup $target): array

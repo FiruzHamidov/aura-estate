@@ -115,15 +115,46 @@ class RopGroupAssignmentsTest extends TestCase
         $this->postJson($url, ['target_group_id' => $this->b->id])->assertForbidden();
     }
 
-    public function test_group_merge_blocks_foreign_work_without_partial_changes(): void
+    public function test_group_merge_moves_disputed_work_without_reassigning_outside_employees(): void
+    {
+        $this->mergeRights();
+        $agent = $this->user('agent', $this->a);
+        $outside = $this->user('agent', $this->c);
+        $make = fn ($group, $owner, $status = 'active') => Client::withoutEvents(fn () => Client::create([
+            'full_name' => 'Disputed work', 'status' => $status, 'branch_id' => $this->branch->id,
+            'branch_group_id' => $group->id, 'responsible_agent_id' => $owner->id]));
+        $foreign = $make($this->c, $agent);
+        $outsideOwned = $make($this->a, $outside);
+        $unrelated = $make($this->c, $outside);
+        $history = $make($this->c, $agent, 'inactive');
+        $url = '/api/branch-groups/'.$this->a->id;
+        $preview = $this->postJson($url.'/merge-preview', ['target_group_id' => $this->b->id])->assertOk()
+            ->assertJsonPath('blockers', [])->assertJsonPath('counts.clients', 2)->json();
+        $this->assertCount(2, $preview['warnings']);
+        $this->postJson($url.'/merge', ['target_group_id' => $this->b->id, 'revision' => $preview['revision'],
+            'reason' => 'Consolidate disputed work'])->assertOk();
+        $this->assertSame($this->b->id, $agent->fresh()->branch_group_id);
+        $this->assertSame($this->c->id, $outside->fresh()->branch_group_id);
+        foreach ([$foreign, $outsideOwned] as $client) {
+            $this->assertSame($this->b->id, $client->fresh()->branch_group_id);
+            $this->assertSame($client->responsible_agent_id, $client->fresh()->responsible_agent_id);
+            $this->assertDatabaseHas('group_access_audit_logs', ['event' => 'record_group_merged', 'subject_id' => $client->id]);
+        }
+        $this->assertSame($this->c->id, $unrelated->fresh()->branch_group_id);
+        $this->assertSame($this->c->id, $history->fresh()->branch_group_id);
+    }
+
+    public function test_group_merge_still_blocks_cross_branch_records_without_partial_changes(): void
     {
         $this->mergeRights(); $agent = $this->user('agent', $this->a);
-        $foreign = Client::withoutEvents(fn () => Client::create(['full_name' => 'Foreign work', 'status' => 'active',
-            'branch_id' => $this->branch->id, 'branch_group_id' => $this->c->id, 'responsible_agent_id' => $agent->id]));
+        $branch = Branch::create(['name' => 'Other']);
+        $foreign = Client::withoutEvents(fn () => Client::create(['full_name' => 'Foreign branch', 'status' => 'active',
+            'branch_id' => $branch->id, 'branch_group_id' => $this->c->id, 'responsible_agent_id' => $agent->id]));
         $url = '/api/branch-groups/'.$this->a->id;
         $preview = $this->postJson($url.'/merge-preview', ['target_group_id' => $this->b->id])->assertOk()->json();
         $this->assertNotEmpty($preview['blockers']);
-        $this->postJson($url.'/merge', ['target_group_id' => $this->b->id, 'revision' => $preview['revision'], 'reason' => 'Consolidate teams'])->assertUnprocessable();
+        $this->postJson($url.'/merge', ['target_group_id' => $this->b->id, 'revision' => $preview['revision'],
+            'reason' => 'Consolidate teams'])->assertUnprocessable();
         $this->assertSame($this->a->id, $agent->fresh()->branch_group_id);
         $this->assertSame($this->c->id, $foreign->fresh()->branch_group_id);
         $this->assertDatabaseCount('group_access_audit_logs', 0);
