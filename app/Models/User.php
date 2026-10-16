@@ -84,7 +84,7 @@ class User extends Authenticatable
 
     public function branchGroup()
     {
-        return $this->belongsTo(BranchGroup::class);
+        return $this->belongsTo(BranchGroup::class)->withoutGlobalScope('active');
     }
 
     /** Shared entry point for the assigned-group data policy, separate from job identity. */

@@ -21,6 +21,7 @@ final class BranchGroupMerge
             abort_unless(($actor->hasPermission('branch_groups.scope.all') || ($sameBranch && $actor->hasPermission('branch_groups.scope.branch')))
                 && ($actor->hasPermission('branch_groups.manage.all') || ($sameBranch && $actor->hasPermission('branch_groups.manage.branch'))), 403, 'FORBIDDEN_ACTION');
         }
+        abort_if($source->is_archived || $target->is_archived, 422, 'Архивную группу нельзя объединить.');
         abort_if($source->id === $target->id, 422, 'Выберите другую группу назначения.');
         abort_unless((int) $source->branch_id === (int) $target->branch_id, 422, 'Объединять можно только группы одного филиала.');
     }

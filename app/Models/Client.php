@@ -112,7 +112,7 @@ class Client extends Model
 
     public function branchGroup()
     {
-        return $this->belongsTo(BranchGroup::class);
+        return $this->belongsTo(BranchGroup::class)->withoutGlobalScope('active');
     }
 
     public function creator()

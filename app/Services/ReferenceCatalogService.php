@@ -375,6 +375,7 @@ class ReferenceCatalogService
         return DB::table($definition['table'])
             ->select(array_values(array_unique($columns)))
             ->where('id', '!=', $sourceId)
+            ->when($definition['table'] === 'branch_groups' && Schema::hasColumn('branch_groups', 'is_archived'), fn ($q) => $q->where('is_archived', false))
             ->orderBy($definition['label_columns'][0])
             ->orderBy('id');
     }

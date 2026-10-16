@@ -34,7 +34,7 @@ final class UserRecordCounts
                 if ($hasBranch) {
                     $query->where('branch_id', $actor->branch_id);
                 } else {
-                    $query->whereIn('branch_group_id', BranchGroup::query()->where('branch_id', $actor->branch_id)->select('id'));
+                    $query->whereIn('branch_group_id', BranchGroup::withoutGlobalScope('active')->where('branch_id', $actor->branch_id)->select('id'));
                 }
             }
             if ($type === 'properties') {

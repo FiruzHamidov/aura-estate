@@ -54,7 +54,7 @@ class DailyReport extends Model
 
     public function branchGroup()
     {
-        return $this->belongsTo(BranchGroup::class);
+        return $this->belongsTo(BranchGroup::class)->withoutGlobalScope('active');
     }
 
     public function historicalRole()

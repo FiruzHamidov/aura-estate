@@ -82,7 +82,7 @@ class BranchController extends Controller
                 ], 409);
             }
 
-            foreach (\App\Models\BranchGroup::query()->where('branch_id', $branch->id)->orderBy('id')->lockForUpdate()->get() as $group) {
+            foreach (\App\Models\BranchGroup::withoutGlobalScope('active')->where('branch_id', $branch->id)->orderBy('id')->lockForUpdate()->get() as $group) {
                 abort_if($group->hasAssignedData(true) || (\Schema::hasTable('rop_branch_groups') && $group->hasAssignedRops(true)), 409, 'GROUP_HAS_ASSIGNED_DATA');
             }
 

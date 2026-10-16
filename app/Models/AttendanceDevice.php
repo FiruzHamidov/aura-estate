@@ -32,7 +32,7 @@ class AttendanceDevice extends Model
 
     public function branchGroup(): BelongsTo
     {
-        return $this->belongsTo(BranchGroup::class);
+        return $this->belongsTo(BranchGroup::class)->withoutGlobalScope('active');
     }
 
     public function userMappings(): HasMany

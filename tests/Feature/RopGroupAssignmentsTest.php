@@ -302,6 +302,41 @@ class RopGroupAssignmentsTest extends TestCase
         $this->assertDatabaseCount('group_access_audit_logs', 0);
     }
 
+    public function test_archived_groups_disappear_from_choices_but_keep_history_and_can_be_restored(): void
+    {
+        $this->mergeRights();
+        (require database_path('migrations/2026_10_16_050000_add_branch_group_archive.php'))->up();
+        $employee = $this->user('agent', $this->a);
+        $client = Client::create(['full_name' => 'Historical client', 'status' => 'inactive',
+            'branch_id' => $this->branch->id, 'branch_group_id' => $this->a->id, 'responsible_agent_id' => $employee->id]);
+        $url = '/api/branch-groups/'.$this->a->id;
+        $this->patchJson($url, ['is_archived' => true])->assertOk()->assertJsonPath('is_archived', true);
+        $this->getJson('/api/branch-groups')->assertOk()->assertJsonMissing(['name' => 'A']);
+        $this->assertNull(BranchGroup::find($this->a->id));
+        $this->assertSame('A', $client->fresh()->branchGroup->name);
+        $this->assertSame('A', $employee->fresh()->branchGroup->name);
+        $this->assertDatabaseHas('clients', ['id' => $client->id, 'branch_group_id' => $this->a->id]);
+        $this->assertDatabaseHas('group_access_audit_logs', ['event' => 'branch_group_archived', 'subject_id' => $this->a->id]);
+        $this->getJson('/api/branch-groups?include_archived=1')->assertOk()->assertJsonFragment(['name' => 'A', 'is_archived' => true]);
+        $this->postJson($url.'/merge-preview', ['target_group_id' => $this->b->id])->assertUnprocessable();
+        $this->patchJson($url, ['is_archived' => false])->assertOk()->assertJsonPath('is_archived', false);
+        $this->getJson('/api/branch-groups')->assertOk()->assertJsonFragment(['name' => 'A']);
+        Sanctum::actingAs($employee);
+        $this->patchJson($url, ['is_archived' => true])->assertForbidden();
+        $this->getJson('/api/branch-groups?include_archived=1')->assertForbidden();
+    }
+
+    public function test_archive_migration_targets_only_verified_ba_pesh_group_without_deleting_data(): void
+    {
+        $this->a->update(['name' => 'Ба пеш']);
+        $employee = $this->user('agent', $this->a);
+        $migration = require database_path('migrations/2026_10_16_050000_add_branch_group_archive.php');
+        $migration->up();
+        $this->assertDatabaseHas('branch_groups', ['id' => $this->a->id, 'is_archived' => true]);
+        $this->assertDatabaseHas('branch_groups', ['id' => $this->b->id, 'is_archived' => false]);
+        $this->assertDatabaseHas('users', ['id' => $employee->id, 'branch_group_id' => $this->a->id]);
+    }
+
     private function user(string $role, ?BranchGroup $group = null): User
     {
         return User::create(['name' => $role, 'phone' => (string) random_int(900000000, 999999999),

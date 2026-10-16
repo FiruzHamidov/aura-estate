@@ -61,7 +61,7 @@ class BranchGroupController extends Controller
             abort_unless(app(\App\Support\RopGroupAccess::class)->allowsGroup($authUser, $branchGroup->id), 404, 'NOT_FOUND');
         }
 
-        $allowed = $this->visibleQuery($authUser)
+        $allowed = $this->visibleQuery($authUser)->withoutGlobalScope('active')
             // Authorization only needs the group id, not related directory counts.
             ->select('branch_groups.id')
             ->whereKey($branchGroup->id)
@@ -132,6 +132,7 @@ class BranchGroupController extends Controller
         $authUser = $this->authUser();
 
         $validated = $request->validate([
+            'include_archived' => 'sometimes|boolean',
             'search' => 'nullable|string',
             'name' => 'nullable|string',
             'branch_id' => 'nullable|integer|exists:branches,id',
@@ -143,6 +144,11 @@ class BranchGroupController extends Controller
         $query = ($authUser->hasPermission('branch_groups.labels.list') && !$authUser->hasPermission('branch_groups.scope.all') && !$authUser->hasPermission('branch_groups.scope.branch') && !$authUser->usesAssignedGroupScope())
             ? BranchGroup::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->select(['id', 'name', 'branch_id'])
             : $this->visibleQuery($authUser);
+
+        if ($request->boolean('include_archived')) {
+            $this->ensureManageable($authUser, !empty($validated['branch_id']) ? (int) $validated['branch_id'] : null);
+            $query->withoutGlobalScope('active');
+        }
 
         if (!empty($validated['search'])) {
             $query->where('name', 'like', '%' . trim($validated['search']) . '%');
@@ -236,7 +242,7 @@ class BranchGroupController extends Controller
     {
         return DB::transaction(function () use ($request, $branchGroup) {
             $authUser = User::query()->lockForUpdate()->findOrFail($this->authUser()->id);
-            $branchGroup = BranchGroup::query()->lockForUpdate()->findOrFail($branchGroup->id);
+            $branchGroup = BranchGroup::withoutGlobalScope('active')->lockForUpdate()->findOrFail($branchGroup->id);
             $this->ensureVisible($authUser, $branchGroup);
             $this->ensureManageable($authUser, branchGroup: $branchGroup);
 
@@ -257,6 +263,7 @@ class BranchGroupController extends Controller
                 ],
                 'description' => 'sometimes|nullable|string',
                 'contact_visibility_mode' => ['sometimes', Rule::in(BranchGroup::contactVisibilityModes())],
+                'is_archived' => 'sometimes|boolean',
             ]);
 
             $nextBranchId = array_key_exists('branch_id', $validated)
@@ -272,13 +279,19 @@ class BranchGroupController extends Controller
                 abort(422, 'Cannot change branch for a non-empty group.');
             }
 
-            $data = array_intersect_key($validated, array_flip(['name', 'description', 'contact_visibility_mode']));
+            $data = array_intersect_key($validated, array_flip(['name', 'description', 'contact_visibility_mode', 'is_archived']));
 
             if (array_key_exists('branch_id', $validated)) {
                 $data['branch_id'] = $nextBranchId;
             }
 
+            $wasArchived = (bool) $branchGroup->is_archived;
             $branchGroup->update($data);
+            if ($wasArchived !== (bool) $branchGroup->is_archived) {
+                app(\App\Services\GroupAccess\GroupAccessAudit::class)->record($authUser,
+                    $branchGroup->is_archived ? 'branch_group_archived' : 'branch_group_restored', 'branch_group', $branchGroup->id,
+                    ['is_archived' => $wasArchived], ['is_archived' => (bool) $branchGroup->is_archived]);
+            }
 
             return response()->json(
                 $branchGroup->fresh()->load(['branch', 'rops:id,name,branch_id'])->loadCount(['users', 'clients'])
@@ -290,7 +303,7 @@ class BranchGroupController extends Controller
     {
         return DB::transaction(function () use ($branchGroup) {
             $authUser = User::query()->lockForUpdate()->findOrFail($this->authUser()->id);
-            $branchGroup = BranchGroup::query()->lockForUpdate()->findOrFail($branchGroup->id);
+            $branchGroup = BranchGroup::withoutGlobalScope('active')->lockForUpdate()->findOrFail($branchGroup->id);
             $this->ensureVisible($authUser, $branchGroup);
             $this->ensureManageable($authUser, branchGroup: $branchGroup);
 

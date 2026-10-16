@@ -41,7 +41,7 @@ final class GroupRecordWriteLock
         if ((int) auth()->id() === (int) $actor->id) auth()->setUser($actor);
         $groupIds = array_filter([...$groupIds, ...$users->pluck('branch_group_id')->all()]);
         if ($groupIds !== []) {
-            BranchGroup::query()->whereIn('id', $groupIds)->orderBy('id')->lockForUpdate()->get();
+            BranchGroup::withoutGlobalScope('active')->whereIn('id', $groupIds)->orderBy('id')->lockForUpdate()->get();
         }
         $ordered = $records;
         uasort($ordered, fn (Model $a, Model $b) => [$a->getTable(), $a->getKey()] <=> [$b->getTable(), $b->getKey()]);

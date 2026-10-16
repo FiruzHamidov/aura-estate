@@ -12,7 +12,7 @@ final class HistoricalUserGroup
     public function at(User $user, CarbonImmutable $occurredAt): array
     {
         $snapshot = $this->snapshot($user, $occurredAt);
-        $group = isset($snapshot['branch_group_id']) ? BranchGroup::query()->find($snapshot['branch_group_id']) : null;
+        $group = isset($snapshot['branch_group_id']) ? BranchGroup::withoutGlobalScope('active')->find($snapshot['branch_group_id']) : null;
         if (! $group || (int) $group->branch_id !== (int) ($snapshot['branch_id'] ?? 0)) {
             return ['branch_id' => null, 'branch_group_id' => null];
         }

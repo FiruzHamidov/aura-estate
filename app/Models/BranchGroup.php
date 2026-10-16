@@ -9,6 +9,22 @@ class BranchGroup extends Model
 {
     use HasFactory;
 
+    protected static function booted(): void
+    {
+        static::addGlobalScope('active', function ($query) {
+            if (\Illuminate\Support\Facades\Schema::hasColumn('branch_groups', 'is_archived')) {
+                $query->where('branch_groups.is_archived', false);
+            }
+        });
+    }
+
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        return parent::resolveRouteBindingQuery($query, $value, $field)->withoutGlobalScope('active');
+    }
+
+    protected $casts = ['is_archived' => 'boolean'];
+
     public const CONTACT_VISIBILITY_GROUP_ONLY = 'group_only';
     public const CONTACT_VISIBILITY_BRANCH = 'branch';
 
@@ -16,6 +32,7 @@ class BranchGroup extends Model
         'branch_id',
         'name',
         'description',
+        'is_archived',
         'contact_visibility_mode',
     ];
 
