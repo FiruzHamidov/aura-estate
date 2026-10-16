@@ -89,12 +89,19 @@ final class AttendanceMappingController extends Controller
             $this->access->assertCanManageMappings($actor);
             $target = ($actor->usesAssignedGroupScope() ? $this->access->mappingUsersQuery($actor) : User::query())->lockForUpdate()->findOrFail($data['user_id']);
             $this->access->mappingDevicesQuery($actor)->lockForUpdate()->findOrFail($data['device_id']);
-            $this->participants->assertEligible($target);
-
             $mapping = AttendanceDeviceUser::query()
                 ->where('device_id', $data['device_id'])
                 ->where('device_user_id', $data['device_user_id'])
                 ->lockForUpdate()->first();
+            // Disabling an existing link must also work after its employee is dismissed.
+            // Creating, reassigning or enabling a link still requires an active employee.
+            $disablingExisting = $mapping !== null
+                && (int) $mapping->user_id === (int) $target->id
+                && array_key_exists('is_active', $data)
+                && ! (bool) $data['is_active'];
+            if (! $disablingExisting) {
+                $this->participants->assertEligible($target);
+            }
             if ($actor->usesAssignedGroupScope()) {
                 abort_if($mapping && (int) $mapping->user_id !== (int) $target->id, 403, 'Этот ZKTeco ID уже связан с другим сотрудником. Обратитесь к HR.');
                 abort_if(AttendanceEvent::query()->where('device_id', $data['device_id'])

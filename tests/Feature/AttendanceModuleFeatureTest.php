@@ -1560,6 +1560,29 @@ class AttendanceModuleFeatureTest extends TestCase
         ]);
     }
 
+    public function test_dismissed_employee_mapping_can_be_disabled_but_not_enabled(): void
+    {
+        $context = $this->context();
+        $device = $this->device('ZAM230-DISABLE', $context['branch'], $context['group']);
+        $mapping = $this->map($device, $context['agent']);
+        $this->postDevicePayload('/iclock/cdata?SN=ZAM230-DISABLE&table=ATTLOG',
+            $context['agent']->id."\t2026-08-16 09:00:00\t0\t15\t0")->assertOk();
+        $context['agent']->update(['status' => User::STATUS_INACTIVE]);
+        $this->postDevicePayload('/iclock/cdata?SN=ZAM230-DISABLE&table=ATTLOG',
+            $context['agent']->id."\t2026-08-17 09:00:00\t0\t15\t0")->assertOk();
+        Sanctum::actingAs($context['admin']);
+        $payload = ['device_id' => $device->id, 'device_user_id' => (string) $context['agent']->id,
+            'user_id' => $context['agent']->id, 'is_active' => false];
+        $this->putJson('/api/attendance/device-users', $payload)->assertOk()->assertJsonPath('data.is_active', false);
+        $this->assertDatabaseCount('attendance_events', 1);
+        $this->assertDatabaseHas('attendance_events', ['user_id' => $context['agent']->id]);
+        $this->assertDatabaseHas('attendance_raw_events', ['processing_status' => 'unmapped']);
+        $this->assertDatabaseHas('attendance_audit_logs', ['action' => 'attendance_mapping.updated']);
+        $this->putJson('/api/attendance/device-users', array_merge($payload, ['is_active' => true]))->assertStatus(422);
+        $this->putJson('/api/attendance/device-users', array_merge($payload, ['device_user_id' => '999']))->assertStatus(422);
+        $this->assertDatabaseHas('attendance_device_users', ['id' => $mapping->id, 'is_active' => false]);
+    }
+
     public function test_mapping_with_processed_history_cannot_be_silently_reassigned(): void
     {
         $context = $this->context();
