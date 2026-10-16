@@ -705,9 +705,16 @@ class PropertyController extends Controller
         $perPage = (int) $request->input('per_page', 20);
 
         $page = $query->latest()->paginate($perPage);
-        if ($compact) {
-            $page->through(fn (Property $property): array => $this->compactFeedProperty($property));
-        }
+        $page->getCollection()->load('agent');
+        $page->through(function (Property $property) use ($compact): array {
+            $responsible = $property->agent?->only(['id', 'name', 'photo']);
+            $property->unsetRelation('agent');
+            $payload = $compact ? $this->compactFeedProperty($property) : $property->toArray();
+            $payload['agent_id'] = $property->agent_id;
+            $payload['responsible_agent'] = $responsible;
+
+            return $payload;
+        });
 
         return response()->json($page);
     }

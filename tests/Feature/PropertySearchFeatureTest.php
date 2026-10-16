@@ -514,6 +514,23 @@ class PropertySearchFeatureTest extends TestCase
         $this->getJson('/api/properties?responsible_user_id=')->assertOk()->assertJsonPath('total', 4);
     }
 
+    public function test_public_cards_return_current_assignee_without_exposing_employee_fields(): void
+    {
+        $property = $this->createProperty(['created_by' => 999, 'agent_id' => $this->agent->id]);
+        foreach (['0', '1'] as $compact) {
+            $response = $this->getJson('/api/properties?compact='.$compact)->assertOk()
+                ->assertJsonPath('data.0.id', $property->id)
+                ->assertJsonPath('data.0.agent_id', $this->agent->id)
+                ->assertJsonPath('data.0.responsible_agent.name', $this->agent->name);
+            $contact = $response->json('data.0.responsible_agent');
+            $this->assertSame($this->agent->id, $contact['id']);
+            $this->assertEmpty(array_diff(array_keys($contact), ['id', 'name', 'photo']));
+            $this->assertArrayNotHasKey('agent', $response->json('data.0'));
+        }
+        $property->updateQuietly(['agent_id' => null]);
+        $this->getJson('/api/properties')->assertOk()->assertJsonPath('data.0.responsible_agent', null);
+    }
+
     private function createProperty(array $attributes = []): Property
     {
         $property = Property::create(array_merge([
