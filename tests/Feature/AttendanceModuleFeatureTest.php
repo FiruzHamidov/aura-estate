@@ -881,7 +881,9 @@ class AttendanceModuleFeatureTest extends TestCase
         Sanctum::actingAs($context['agent']);
         $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertForbidden();
         Sanctum::actingAs($context['rop']);
-        $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertOk()->assertJsonCount(2, 'data')
+            ->assertJsonPath('data.1.device_user_name', 'Фируз Ҳамидов')
+            ->assertJsonMissing(['device_user_name' => 'Другой сотрудник']);
     }
 
     public function test_terminal_profile_updates_validate_text_and_preserve_exact_ids(): void
@@ -2175,6 +2177,80 @@ class AttendanceModuleFeatureTest extends TestCase
         $zip->close();
         unlink($path);
         $this->travelBack();
+    }
+
+    public function test_rop_unmapped_events_use_mapping_terminal_scope_before_pagination(): void
+    {
+        $c = $this->context();
+        $otherGroup = BranchGroup::create(['branch_id' => $c['branch']->id, 'name' => 'Other group']);
+        $shared = $this->device('UNMAPPED-SHARED', $c['branch']);
+        $own = $this->device('UNMAPPED-OWN', $c['branch'], $c['group']);
+        $other = $this->device('UNMAPPED-OTHER-GROUP', $c['branch'], $otherGroup);
+        $foreign = $this->device('UNMAPPED-FOREIGN', $c['otherAgent']->branch);
+        $unassigned = $this->device('UNMAPPED-NO-BRANCH');
+        foreach ([$shared, $own, $other, $foreign, $unassigned] as $index => $device) {
+            $this->postDevicePayload('/iclock/cdata?SN='.$device->serial_number.'&table=ATTLOG',
+                "0096\t2026-08-17 09:0{$index}:00\t0\t15\t0")->assertOk();
+            $this->postDevicePayload('/iclock/cdata?SN='.$device->serial_number.'&table=USERINFO',
+                "PIN=0096\tName=".$device->name)->assertOk();
+        }
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $c['rop']->role->forceFill(['permissions' => ['attendance.mappings.manage', 'data.scope.assigned_groups']])->save();
+        Sanctum::actingAs($c['rop']->fresh());
+        foreach (['true', 'false'] as $grouped) {
+            $url = '/api/attendance/unmapped-events?grouped='.$grouped.'&per_page=1';
+            $response = $this->getJson($url)->assertOk()->assertJsonPath('total', 2)->assertJsonPath('last_page', 2)
+                ->assertJsonCount(1, 'data')->assertJsonPath('data.0.device_id', $own->id)
+                ->assertJsonPath('data.0.device_user_id', '0096')->assertJsonPath('data.0.device_user_name', $own->name);
+            foreach (['raw_payload', 'request_meta', 'source_ip', 'processing_error', 'device.last_ip', 'device.communication_key'] as $field) {
+                $response->assertJsonMissingPath('data.0.'.$field);
+            }
+            $this->getJson($url.'&page=2')->assertOk()->assertJsonPath('data.0.device_id', $shared->id);
+            foreach ([$other, $foreign, $unassigned] as $device) {
+                $this->getJson($url.'&device_id='.$device->id)->assertOk()->assertJsonPath('total', 0)->assertJsonCount(0, 'data');
+            }
+        }
+        $c['rop']->supervisedGroups()->detach();
+        $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertOk()
+            ->assertJsonCount(1, 'data')->assertJsonPath('data.0.device_id', $shared->id);
+        $c['rop']->update(['branch_id' => null]);
+        Sanctum::actingAs($c['rop']->fresh());
+        $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertOk()->assertJsonCount(0, 'data');
+        $c['rop']->role->forceFill(['permissions' => ['data.scope.assigned_groups']])->save();
+        Sanctum::actingAs($c['rop']->fresh());
+        $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertForbidden();
+        Sanctum::actingAs($c['hr']);
+        $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertOk()->assertJsonPath('total', 5);
+        $this->assertDatabaseCount('attendance_device_users', 0);
+    }
+
+    public function test_rop_can_link_visible_unmapped_events_only_to_active_team_employee(): void
+    {
+        $c = $this->context();
+        $device = $this->device('ROP-UNMAPPED-LINK', $c['branch']);
+        $this->postDevicePayload('/iclock/cdata?SN=ROP-UNMAPPED-LINK&table=ATTLOG', implode("\n", [
+            "0096\t2026-08-17 09:00:00\t0\t15\t0",
+            "0096\t2026-08-17 18:00:00\t1\t15\t0",
+        ]))->assertOk();
+        Sanctum::actingAs($c['rop']);
+        $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertOk()
+            ->assertJsonCount(1, 'data')->assertJsonPath('data.0.events_count', 2);
+        $data = ['device_id' => $device->id, 'device_user_id' => '0096', 'user_id' => $c['agent']->id];
+        $this->putJson('/api/attendance/device-users', [...$data, 'user_id' => $c['otherAgent']->id])->assertNotFound();
+        $otherGroup = BranchGroup::create(['branch_id' => $c['branch']->id, 'name' => 'Other team']);
+        $c['otherAgent']->update(['branch_id' => $c['branch']->id, 'branch_group_id' => $otherGroup->id]);
+        $this->putJson('/api/attendance/device-users', [...$data, 'user_id' => $c['otherAgent']->id])->assertNotFound();
+        $c['agent']->update(['status' => User::STATUS_INACTIVE]);
+        $this->putJson('/api/attendance/device-users', $data)->assertNotFound();
+        $this->assertDatabaseCount('attendance_device_users', 0);
+        $this->assertDatabaseCount('attendance_events', 0);
+        $c['agent']->update(['status' => User::STATUS_ACTIVE]);
+        $this->putJson('/api/attendance/device-users', $data)->assertOk()
+            ->assertJsonPath('data.device_user_id', '0096')->assertJsonPath('reprocessed.processed', 2);
+        $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertOk()->assertJsonPath('total', 0);
+        $this->assertSame(2, AttendanceEvent::query()->where('user_id', $c['agent']->id)->count());
+        $this->assertSame($c['group']->id, $c['agent']->fresh()->branch_group_id);
+        $this->assertSame([$c['group']->id], $c['rop']->supervisedGroups()->pluck('branch_groups.id')->all());
     }
 
     public function test_rop_links_only_team_users_and_cannot_take_another_users_terminal_id(): void
