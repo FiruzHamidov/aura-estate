@@ -24,6 +24,9 @@ final class AttendanceGroupScope
         }
         if (! $viewer->usesAssignedGroupScope()) return $query;
         $table = $query->getModel()->getTable();
+        // Historical group membership must not bring dismissed employees back into ROP attendance.
+        // Use employment status only: active employees may still have valid history in a former group.
+        $query->whereIn($table.'.user_id', app(AttendanceParticipantService::class)->query()->select('users.id'));
         if (in_array($table, ['attendance_events', 'attendance_daily_summaries'], true)) {
             if (\Schema::hasColumn($table, 'role_slug')) {
                 $query->whereIn($table.'.role_slug', \App\Models\Role::query()

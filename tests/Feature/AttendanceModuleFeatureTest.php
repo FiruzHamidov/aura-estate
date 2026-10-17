@@ -1534,6 +1534,92 @@ class AttendanceModuleFeatureTest extends TestCase
         ]);
     }
 
+    public function test_rop_dismissal_hides_current_and_historical_attendance_without_deleting_records(): void
+    {
+        (require database_path('migrations/2026_09_09_010000_add_attendance_historical_context.php'))->up();
+        $c = $this->context();
+        $this->travelTo(CarbonImmutable::parse('2026-08-19 12:00:00', 'Asia/Dushanbe'));
+        $device = $this->device('DISMISSAL-HISTORY', $c['branch'], $c['group']);
+        $snapshot = ['schedule' => [
+            '1' => ['start' => '09:00', 'end' => '18:00'],
+            '3' => ['start' => '09:00', 'end' => '18:00'],
+        ]];
+        foreach ([$c['agent'], $c['otherAgent'], $c['mop']] as $employee) {
+            foreach (['2026-08-17', '2026-08-19'] as $date) {
+                AttendanceDailySummary::create(['user_id' => $employee->id, 'branch_group_id' => $c['group']->id,
+                    'role_slug' => $employee->role->slug, 'schedule_snapshot' => $snapshot,
+                    'work_date' => $date, 'status' => 'late', 'late_minutes' => $employee->id === $c['mop']->id ? 7 : 91]);
+                AttendanceEvent::create(['user_id' => $employee->id, 'device_id' => $device->id,
+                    'branch_id' => $c['branch']->id, 'branch_group_id' => $c['group']->id, 'role_slug' => $employee->role->slug,
+                    'device_user_id' => (string) $employee->id, 'event_type' => 'check_in', 'occurred_at' => $date.'T04:07:00Z']);
+            }
+        }
+        Sanctum::actingAs($c['rop']);
+        $range = 'date_from=2026-08-17&date_to=2026-08-19';
+        $this->getJson('/api/attendance/matrix?'.$range)->assertOk()->assertJsonCount(3, 'data');
+        // One employee still has the current group, the other has only historical facts in it.
+        DB::table('users')->whereIn('id', [$c['agent']->id, $c['otherAgent']->id])->update(['status' => User::STATUS_INACTIVE]);
+        $before = [DB::table('users')->orderBy('id')->get()->toJson(), DB::table('rop_branch_groups')->get()->toJson(),
+            DB::table('attendance_daily_summaries')->orderBy('id')->get()->toJson(), DB::table('attendance_events')->orderBy('id')->get()->toJson()];
+        $this->getJson('/api/attendance/matrix?'.$range)->assertOk()->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.user.id', $c['mop']->id)->assertJsonPath('meta.pagination.total', 1)
+            ->assertJsonPath('meta.summary.active_users', 1)->assertJsonPath('meta.summary.checked_in_today', 1)
+            ->assertJsonPath('meta.summary.late_today', 1)->assertJsonPath('meta.summary.average_late_minutes', 7);
+        $this->getJson('/api/attendance/matrix?'.$range.'&view=branches')->assertOk()
+            ->assertJsonPath('data.0.days.2026-08-17.scheduled_users_count', 1)
+            ->assertJsonPath('data.0.days.2026-08-17.checked_in_count', 1);
+        $this->getJson('/api/attendance/presence')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.user.id', $c['mop']->id);
+        foreach (['daily', 'events'] as $endpoint) {
+            $this->getJson('/api/attendance/'.$endpoint.'?'.$range)->assertOk()->assertJsonCount(2, 'data')
+                ->assertJsonPath('data.0.user_id', $c['mop']->id)->assertJsonPath('data.1.user_id', $c['mop']->id);
+        }
+        foreach ([$c['agent'], $c['otherAgent']] as $employee) {
+            $matrix = $this->getJson('/api/attendance/matrix?'.$range.'&user_id='.$employee->id);
+            if ($employee->id === $c['agent']->id) $matrix->assertOk()->assertJsonCount(0, 'data');
+            else $matrix->assertForbidden();
+            $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&search='.$employee->id.'&branch_group_id='.$c['group']->id)
+                ->assertOk()->assertJsonCount(0, 'data');
+            $this->getJson('/api/attendance/users/'.$employee->id.'/days/2026-08-17')->assertNotFound();
+            $this->getJson('/api/attendance/users/'.$employee->id.'/daily?'.$range)->assertNotFound();
+            $events = $this->getJson('/api/attendance/events?'.$range.'&user_id='.$employee->id);
+            if ($employee->id === $c['agent']->id) $events->assertOk()->assertJsonCount(0, 'data');
+            else $events->assertForbidden();
+        }
+        $csv = $this->get('/api/attendance/export?'.$range)->assertOk()->streamedContent();
+        $xlsx = $this->get('/api/attendance/export?'.$range.'&format=xlsx')->assertOk();
+        $path = $xlsx->baseResponse->getFile()->getPathname();
+        $zip = new \ZipArchive;
+        $this->assertTrue($zip->open($path));
+        $sheets = $zip->getFromName('xl/worksheets/sheet1.xml').$zip->getFromName('xl/worksheets/sheet2.xml');
+        $zip->close();
+        @unlink($path);
+        $this->assertStringContainsString($c['mop']->name, $csv);
+        $this->assertStringContainsString($c['mop']->name, $sheets);
+        foreach ([$c['agent'], $c['otherAgent']] as $employee) {
+            $this->assertStringNotContainsString($employee->name, $csv.$sheets);
+        }
+        $this->assertSame($before, [DB::table('users')->orderBy('id')->get()->toJson(), DB::table('rop_branch_groups')->get()->toJson(),
+            DB::table('attendance_daily_summaries')->orderBy('id')->get()->toJson(), DB::table('attendance_events')->orderBy('id')->get()->toJson()]);
+        $this->travelBack();
+    }
+
+    public function test_rop_legacy_history_excludes_dismissed_users_and_retains_active_transferred_users(): void
+    {
+        $c = $this->context();
+        foreach ([$c['agent'], $c['otherAgent']] as $employee) {
+            AttendanceDailySummary::create(['user_id' => $employee->id, 'branch_group_id' => $c['group']->id,
+                'work_date' => '2026-08-17', 'status' => 'present']);
+        }
+        $c['agent']->update(['status' => User::STATUS_INACTIVE]);
+        Sanctum::actingAs($c['rop']);
+        $response = $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17')->assertOk();
+        $ids = collect($response->json('data'))->pluck('user.id')->all();
+        $this->assertNotContains($c['agent']->id, $ids);
+        $this->assertContains($c['otherAgent']->id, $ids);
+        $this->getJson('/api/attendance/users/'.$c['otherAgent']->id.'/days/2026-08-17')->assertOk();
+        $this->assertDatabaseCount('attendance_daily_summaries', 2);
+    }
+
     public function test_inactive_mapped_user_does_not_receive_new_attendance(): void
     {
         $context = $this->context();
