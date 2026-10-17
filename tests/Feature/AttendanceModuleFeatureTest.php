@@ -48,6 +48,7 @@ class AttendanceModuleFeatureTest extends TestCase
         (require database_path('migrations/2026_08_16_000006_create_attendance_global_schedules_table.php'))->up();
         (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
         (require database_path('migrations/2026_09_08_140000_add_attendance_context_groups.php'))->up();
+        (require database_path('migrations/2026_10_17_140000_create_attendance_device_user_profiles.php'))->up();
         config([
             'attendance.timezone' => 'Asia/Dushanbe',
             'attendance.duplicate_window_seconds' => 10,
@@ -222,7 +223,7 @@ class AttendanceModuleFeatureTest extends TestCase
             ->assertOk()
             ->assertHeader('Content-Type', 'text/plain; charset=UTF-8')
             ->assertSeeText('GET OPTION FROM: ZAM230-001')
-            ->assertSeeText('TransFlag=AttLog')
+            ->assertSeeText("TransFlag=TransData AttLog\tEnrollUser\tChgUser")
             ->assertDontSee('TimeZone=');
 
         $this->assertNotNull($device->fresh()->last_seen_at);
@@ -839,6 +840,90 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->deleteJson('/api/attendance/users/'.$context['agent']->id.'/days/2026-08-17/comment', ['version' => 1])->assertOk();
         $this->assertDatabaseMissing('attendance_daily_comments', ['user_id' => $context['agent']->id]);
         $this->assertDatabaseHas('attendance_audit_logs', ['action' => 'attendance_comment.deleted']);
+    }
+
+    public function test_terminal_names_enrich_unmapped_events_without_creating_employee_links(): void
+    {
+        $context = $this->context();
+        $device = $this->device('NAMES-A', $context['branch'], $context['group']);
+        $other = $this->device('NAMES-B');
+        foreach (['NAMES-A', 'NAMES-B'] as $serial) {
+            $this->postDevicePayload('/iclock/cdata?SN='.$serial.'&table=ATTLOG', "96\t2026-08-17 09:00:00\t0\t15\t0")->assertOk();
+        }
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-A&table=ATTLOG', "97\t2026-08-17 10:00:00\t0\t15\t0")->assertOk();
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-A&table=OPERLOG', implode("\n", [
+            "USER PIN=96\tName=Фируз Ҳамидов\tPasswd=private-password\tCard=private-card",
+            "FP PIN=96\tName=Wrong name\tTMP=private-template",
+            "FACE PIN=96\tTMP=private-face",
+            "USER PIN=98\tPri=0",
+            "USER PIN=\tName=Invalid",
+        ]))->assertOk()->assertContent('OK: 1');
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-B&table=USERINFO', "PIN=96\tName=Другой сотрудник")->assertOk()->assertContent('OK: 1');
+        // Repeated deliveries are idempotent, and a partial profile cannot erase a name.
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-A&table=OPERLOG', "USER PIN=96\tName=Фируз Ҳамидов\nUSER PIN=96\tPri=0")->assertOk();
+        $this->assertDatabaseCount('attendance_device_user_profiles', 2);
+        $this->assertDatabaseCount('attendance_device_users', 0);
+        $this->assertDatabaseCount('attendance_events', 0);
+        $this->assertDatabaseCount('attendance_ingest_requests', 3); // ATTLOG only.
+        $this->assertDatabaseHas('attendance_device_user_profiles', ['device_id' => $device->id, 'device_user_id' => '96', 'name' => 'Фируз Ҳамидов']);
+        $this->assertDatabaseHas('attendance_device_user_profiles', ['device_id' => $other->id, 'device_user_id' => '96', 'name' => 'Другой сотрудник']);
+
+        Sanctum::actingAs($context['hr']);
+        $this->getJson('/api/attendance/unmapped-events?grouped=true&device_id='.$device->id)
+            ->assertOk()->assertJsonCount(2, 'data')
+            ->assertJsonPath('data.0.device_user_name', null)
+            ->assertJsonPath('data.1.device_user_name', 'Фируз Ҳамидов')
+            ->assertJsonPath('data.1.events_count', 1);
+        $this->getJson('/api/attendance/unmapped-events?device_id='.$other->id)
+            ->assertOk()->assertJsonPath('data.0.device_user_name', 'Другой сотрудник');
+        $this->getJson('/api/attendance/unmapped-events?grouped=true&device_id='.$other->id)
+            ->assertOk()->assertJsonPath('data.0.device_user_name', 'Другой сотрудник');
+        Sanctum::actingAs($context['agent']);
+        $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertForbidden();
+        Sanctum::actingAs($context['rop']);
+        $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertOk()->assertJsonCount(0, 'data');
+    }
+
+    public function test_terminal_profile_updates_validate_text_and_preserve_exact_ids(): void
+    {
+        $device = $this->device('NAMES-VALIDATION');
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-VALIDATION&table=OPERLOG', "\xEF\xBB\xBFUSER PIN=0096\tName=Первое Имя\r\nUSER PIN=96\tName=Другое Имя")->assertContent('OK: 2');
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-VALIDATION&table=OPERLOG', "USER PIN=0096\tName=Новое Имя")->assertContent('OK: 1');
+        $this->assertDatabaseHas('attendance_device_user_profiles', ['device_id' => $device->id, 'device_user_id' => '0096', 'name' => 'Новое Имя']);
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-VALIDATION&table=OPERLOG', implode("\n", [
+            "USER PIN=0096\tName=bad\xFF",
+            "USER PIN=0096\tName=".str_repeat('я', 256),
+            "USER PIN=".str_repeat('9', 101)."\tName=Invalid",
+            "USER PIN=0096\tName=bad\x00name",
+        ]))->assertContent('OK: 0');
+        $this->assertDatabaseHas('attendance_device_user_profiles', ['device_user_id' => '0096', 'name' => 'Новое Имя']);
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-VALIDATION&table=OPERLOG', "USER PIN=0096\tName=\tPri=0")->assertContent('OK: 1');
+        $this->assertDatabaseHas('attendance_device_user_profiles', ['device_user_id' => '0096', 'name' => null]);
+        $this->assertDatabaseHas('attendance_device_user_profiles', ['device_user_id' => '96', 'name' => 'Другое Имя']);
+        $this->assertDatabaseCount('attendance_device_user_profiles', 2);
+        $this->assertDatabaseCount('attendance_ingest_requests', 0);
+    }
+
+    public function test_terminal_profile_sync_uses_authenticated_read_only_daily_query(): void
+    {
+        $this->travelTo(CarbonImmutable::parse('2026-10-17T12:00:00+05:00'));
+        $device = $this->device('NAMES-QUERY');
+        $device->update(['communication_key' => 'test-device-key']);
+        $this->get('/iclock/getrequest?SN=NAMES-QUERY')->assertForbidden();
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-QUERY&table=OPERLOG', "USER PIN=96\tName=Unauthorized")->assertForbidden();
+        $this->assertDatabaseCount('attendance_device_user_profiles', 0);
+        $url = '/iclock/getrequest?SN=NAMES-QUERY&PushCommKey=test-device-key';
+        $this->get($url)->assertOk()->assertContent('C:'.now()->timestamp.":DATA QUERY USERINFO\n");
+        $this->get($url)->assertOk()->assertContent('OK');
+        $this->travel(23)->hours();
+        $this->get($url)->assertContent('OK');
+        $this->travel(1)->hours();
+        $this->get($url)->assertContent('C:'.now()->timestamp.":DATA QUERY USERINFO\n");
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-QUERY&PushCommKey=test-device-key&table=OPERLOG', "USER PIN=96\tName=Полученное имя")->assertContent('OK: 1');
+        $this->assertDatabaseHas('attendance_device_user_profiles', ['device_id' => $device->id, 'name' => 'Полученное имя']);
+        $device->update(['is_active' => false]);
+        $this->get($url)->assertForbidden();
+        $this->travelBack();
     }
 
     public function test_hr_can_view_devices_manage_mappings_and_group_unmapped_events(): void

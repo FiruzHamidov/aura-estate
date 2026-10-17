@@ -104,7 +104,11 @@ final class AttendanceReportController extends Controller
             'grouped' => ['nullable', 'boolean'],
             'per_page' => ['nullable', 'integer', 'between:1,100'],
         ]);
-        $query = AttendanceRawEvent::query()->with('device')->where('processing_status', 'unmapped');
+        $deviceUserName = \App\Models\AttendanceDeviceUserProfile::query()->select('name')
+            ->whereColumn('attendance_device_user_profiles.device_id', 'attendance_raw_events.device_id')
+            ->whereColumn('attendance_device_user_profiles.device_user_id', 'attendance_raw_events.device_user_id');
+        $query = AttendanceRawEvent::query()->with('device')->where('processing_status', 'unmapped')
+            ->addSelect(['device_user_name' => $deviceUserName]);
         if (isset($validated['device_id'])) {
             $query->where('device_id', $validated['device_id']);
         }
@@ -114,6 +118,7 @@ final class AttendanceReportController extends Controller
                 ->where('processing_status', 'unmapped')
                 ->when(isset($validated['device_id']), fn ($events) => $events->where('device_id', $validated['device_id']))
                 ->selectRaw('device_id, device_user_id, MIN(occurred_at_utc) as first_occurred_at, MAX(occurred_at_utc) as last_occurred_at, COUNT(*) as events_count, MAX(verify_mode) as verify_mode')
+                ->addSelect(['device_user_name' => $deviceUserName])
                 ->groupBy('device_id', 'device_user_id')
                 ->orderByDesc('last_occurred_at')
                 ->paginate($validated['per_page'] ?? 50);
@@ -124,6 +129,7 @@ final class AttendanceReportController extends Controller
                 return [
                     'device_id' => (int) $row->device_id,
                     'device_user_id' => (string) $row->device_user_id,
+                    'device_user_name' => $row->device_user_name,
                     'first_occurred_at' => $row->first_occurred_at,
                     'last_occurred_at' => $row->last_occurred_at,
                     'events_count' => (int) $row->events_count,

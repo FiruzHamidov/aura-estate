@@ -3,13 +3,17 @@
 namespace App\Http\Controllers;
 
 use App\Models\AttendanceDevice;
+use App\Services\Attendance\AttendanceDeviceUserProfileService;
 use App\Services\Attendance\AttendanceIngestionService;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
 
 final class ZktecoAttendanceController extends Controller
 {
-    public function __construct(private readonly AttendanceIngestionService $ingestion) {}
+    public function __construct(
+        private readonly AttendanceIngestionService $ingestion,
+        private readonly AttendanceDeviceUserProfileService $profiles,
+    ) {}
 
     public function cdata(Request $request): Response
     {
@@ -28,6 +32,12 @@ final class ZktecoAttendanceController extends Controller
         }
 
         $table = strtoupper((string) $request->query('table', 'ATTLOG'));
+        if (in_array($table, ['OPERLOG', 'USERINFO'], true)) {
+            $this->ingestion->touch($device, $request->ip());
+            $accepted = $this->profiles->ingest($device, $payload, $table);
+
+            return $this->plain('OK: '.$accepted);
+        }
         if ($table !== 'ATTLOG') {
             $this->ingestion->touch($device, $request->ip());
 
@@ -50,7 +60,7 @@ final class ZktecoAttendanceController extends Controller
         $device = $this->resolveDevice($request);
         $this->ingestion->touch($device, $request->ip());
 
-        return $this->plain('OK');
+        return $this->plain($this->profiles->nextQuery($device) ?? 'OK');
     }
 
     public function deviceCommand(Request $request): Response
@@ -117,7 +127,7 @@ final class ZktecoAttendanceController extends Controller
             'ErrorDelay=60',
             'Delay=10',
             'TransInterval=1',
-            'TransFlag=AttLog',
+            "TransFlag=TransData AttLog\tEnrollUser\tChgUser",
             'Realtime=1',
             'Encrypt=0',
         ];
