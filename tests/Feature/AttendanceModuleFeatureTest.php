@@ -49,6 +49,7 @@ class AttendanceModuleFeatureTest extends TestCase
         (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
         (require database_path('migrations/2026_09_08_140000_add_attendance_context_groups.php'))->up();
         (require database_path('migrations/2026_10_17_140000_create_attendance_device_user_profiles.php'))->up();
+        (require database_path('migrations/2026_10_17_160000_create_attendance_discarded_events.php'))->up();
         config([
             'attendance.timezone' => 'Asia/Dushanbe',
             'attendance.duplicate_window_seconds' => 10,
@@ -422,6 +423,116 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->assertDatabaseCount('attendance_events', 2);
         $this->assertSame(1, AttendanceEvent::query()->where('is_duplicate', true)->count());
         $this->assertSame(1, AttendanceDailySummary::query()->firstOrFail()->events_count);
+    }
+
+    public function test_unmapped_group_deletion_preserves_history_links_and_new_arrivals_and_blocks_replays(): void
+    {
+        $c = $this->context();
+        $device = $this->device('DELETE-UNMAPPED', $c['branch'], $c['group']);
+        $otherDevice = $this->device('KEEP-UNMAPPED');
+        $mapping = AttendanceDeviceUser::create([
+            'device_id' => $device->id, 'device_user_id' => '0096', 'user_id' => $c['agent']->id, 'is_active' => true,
+        ]);
+        $url = '/iclock/cdata?SN=DELETE-UNMAPPED&table=ATTLOG';
+        $this->postDevicePayload($url, "0096\t2026-10-17 08:00:00\t0\t15\t0")->assertOk();
+        $history = AttendanceEvent::query()->firstOrFail();
+        $c['agent']->update(['status' => User::STATUS_INACTIVE]);
+        $payload = "0096\t2026-10-17 09:00:00\t0\t15\t0\n0096\t2026-10-17 10:00:00\t1\t15\t0";
+        $this->postDevicePayload($url, $payload)->assertOk();
+        $staleRaw = AttendanceRawEvent::query()->where('processing_status', 'unmapped')->firstOrFail();
+        $this->postDevicePayload($url, "96\t2026-10-17 09:00:00\t0\t15\t0")->assertOk();
+        $this->postDevicePayload('/iclock/cdata?SN=KEEP-UNMAPPED&table=ATTLOG', "0096\t2026-10-17 09:00:00\t0\t15\t0")->assertOk();
+
+        Sanctum::actingAs($c['hr']);
+        $group = collect($this->getJson('/api/attendance/unmapped-events?grouped=true&device_id='.$device->id)
+            ->assertOk()->json('data'))->firstWhere('device_user_id', '0096');
+        $this->assertSame(2, $group['events_count']);
+        $delete = ['device_id' => $device->id, 'device_user_id' => '0096', 'last_raw_event_id' => $group['last_raw_event_id']];
+        // This event arrived after the operator saw the row and must remain.
+        $this->postDevicePayload($url, "0096\t2026-10-17 11:00:00\t0\t15\t0")->assertOk();
+        $this->deleteJson('/api/attendance/unmapped-events', $delete)->assertOk()->assertJsonPath('deleted_count', 2);
+        $this->assertDatabaseMissing('attendance_raw_events', ['id' => $staleRaw->id]);
+        $this->assertDatabaseCount('attendance_discarded_events', 2);
+        $this->assertDatabaseHas('attendance_events', ['id' => $history->id, 'raw_event_id' => $history->raw_event_id]);
+        $this->assertDatabaseHas('attendance_device_users', ['id' => $mapping->id, 'is_active' => true]);
+        $this->assertDatabaseHas('attendance_raw_events', ['device_id' => $device->id, 'device_user_id' => '96', 'processing_status' => 'unmapped']);
+        $this->assertDatabaseHas('attendance_raw_events', ['device_id' => $otherDevice->id, 'device_user_id' => '0096', 'processing_status' => 'unmapped']);
+        $this->deleteJson('/api/attendance/unmapped-events', $delete)->assertOk()->assertJsonPath('deleted_count', 0);
+        $audit = \App\Models\AttendanceAuditLog::query()->where('action', 'attendance_unmapped_events.deleted')->sole();
+        $this->assertSame($c['hr']->id, $audit->actor_user_id);
+        $this->assertSame('0096', $audit->old_values['device_user_id']);
+        $this->assertSame(2, $audit->new_values['deleted_count']);
+        $this->assertSame('already_processed', app(AttendanceIngestionService::class)->reprocess($staleRaw));
+        (new ProcessAttendanceRawEvent($staleRaw->id))->handle(app(AttendanceIngestionService::class));
+
+        $this->postDevicePayload($url, $payload)->assertOk()->assertContent('OK: 2');
+        $this->assertSame(1, AttendanceRawEvent::query()->where('device_id', $device->id)->where('device_user_id', '0096')->where('processing_status', 'unmapped')->count());
+        $c['agent']->update(['status' => User::STATUS_ACTIVE]);
+        $this->putJson('/api/attendance/device-users', ['device_id' => $device->id, 'device_user_id' => '0096', 'user_id' => $c['agent']->id])
+            ->assertOk()->assertJsonPath('reprocessed.processed', 1);
+        $this->assertDatabaseCount('attendance_events', 2);
+
+        // Retention removes raw payloads, but deletion markers still prevent re-import.
+        $this->travel(91)->days();
+        Artisan::call('attendance:prune-raw');
+        $this->postDevicePayload($url, $payload)->assertOk();
+        $this->assertDatabaseCount('attendance_raw_events', 0);
+        $this->assertDatabaseCount('attendance_events', 2);
+        $this->assertDatabaseCount('attendance_discarded_events', 2);
+        $this->travelBack();
+    }
+
+    public function test_unmapped_deletion_requires_mapping_permission_without_group_scope_and_a_snapshot(): void
+    {
+        $c = $this->context();
+        $device = $this->device('DELETE-PERMISSION', $c['branch'], $c['group']);
+        $this->postDevicePayload('/iclock/cdata?SN=DELETE-PERMISSION&table=ATTLOG', "0096\t2026-10-17 09:00:00\t0\t15\t0")->assertOk();
+        $raw = AttendanceRawEvent::query()->firstOrFail();
+        $delete = ['device_id' => $device->id, 'device_user_id' => '0096', 'last_raw_event_id' => $raw->id];
+        foreach (['agent', 'rop', 'mop'] as $role) {
+            Sanctum::actingAs($c[$role]);
+            $this->deleteJson('/api/attendance/unmapped-events', $delete)->assertForbidden();
+        }
+        $this->assertDatabaseCount('attendance_raw_events', 1);
+        $this->assertDatabaseCount('attendance_discarded_events', 0);
+        Sanctum::actingAs($c['admin']);
+        $this->deleteJson('/api/attendance/unmapped-events', ['device_id' => $device->id, 'device_user_id' => '0096'])
+            ->assertUnprocessable()->assertJsonValidationErrors('last_raw_event_id', 'details.errors');
+        $this->deleteJson('/api/attendance/unmapped-events', [...$delete, 'last_raw_event_id' => 0])->assertUnprocessable();
+        $this->deleteJson('/api/attendance/unmapped-events', [...$delete, 'device_user_id' => '96'])
+            ->assertOk()->assertJsonPath('deleted_count', 0);
+        $this->deleteJson('/api/attendance/unmapped-events', $delete)->assertOk()->assertJsonPath('deleted_count', 1);
+    }
+
+    public function test_unmapped_deletion_removes_groups_across_multiple_database_chunks(): void
+    {
+        $c = $this->context();
+        $device = $this->device('DELETE-LARGE-GROUP');
+        $start = CarbonImmutable::parse('2026-10-17 09:00:00', 'Asia/Dushanbe');
+        $payload = implode("\n", array_map(fn ($offset) => "0096\t".$start->addSeconds($offset)->format('Y-m-d H:i:s')."\t0\t15\t0", range(0, 204)));
+        $this->postDevicePayload('/iclock/cdata?SN=DELETE-LARGE-GROUP&table=ATTLOG', $payload)->assertOk();
+        Sanctum::actingAs($c['admin']);
+        $this->deleteJson('/api/attendance/unmapped-events', [
+            'device_id' => $device->id, 'device_user_id' => '0096', 'last_raw_event_id' => AttendanceRawEvent::query()->max('id'),
+        ])->assertOk()->assertJsonPath('deleted_count', 205);
+        $this->assertDatabaseCount('attendance_raw_events', 0);
+        $this->assertDatabaseCount('attendance_discarded_events', 205);
+    }
+
+    public function test_unmapped_deletion_skips_events_linked_after_the_list_was_loaded(): void
+    {
+        $c = $this->context();
+        $device = $this->device('DELETE-LINKED');
+        $this->postDevicePayload('/iclock/cdata?SN=DELETE-LINKED&table=ATTLOG', "0096\t2026-10-17 09:00:00\t0\t15\t0")->assertOk();
+        $raw = AttendanceRawEvent::query()->firstOrFail();
+        Sanctum::actingAs($c['hr']);
+        $this->putJson('/api/attendance/device-users', ['device_id' => $device->id, 'device_user_id' => '0096', 'user_id' => $c['agent']->id])->assertOk();
+        $this->deleteJson('/api/attendance/unmapped-events', [
+            'device_id' => $device->id, 'device_user_id' => '0096', 'last_raw_event_id' => $raw->id,
+        ])->assertOk()->assertJsonPath('deleted_count', 0);
+        $this->assertDatabaseHas('attendance_raw_events', ['id' => $raw->id, 'processing_status' => 'processed']);
+        $this->assertDatabaseCount('attendance_events', 1);
+        $this->assertDatabaseCount('attendance_discarded_events', 0);
     }
 
     public function test_unmapped_event_is_reprocessed_when_admin_creates_mapping(): void

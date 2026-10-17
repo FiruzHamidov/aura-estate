@@ -142,6 +142,11 @@ final class AttendanceIngestionService
         ]));
 
         return DB::transaction(function () use ($device, $ingestRequest, $incoming, $requestMeta, $sourceIp, $local, $utc, $hash) {
+            AttendanceDevice::query()->whereKey($device->id)->lockForUpdate()->firstOrFail();
+            if (DB::table('attendance_discarded_events')->where('event_hash', $hash)->exists()) {
+                return ['outcome' => 'duplicates', 'raw_event_id' => null];
+            }
+
             $mapping = AttendanceDeviceUser::query()
                 ->with('user')
                 ->where('device_id', $device->id)

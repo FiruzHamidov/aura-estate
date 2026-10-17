@@ -116,7 +116,7 @@ final class AttendanceReportController extends Controller
 
         if (! empty($validated['grouped'])) {
             $grouped = (clone $query)
-                ->selectRaw('device_id, device_user_id, MIN(occurred_at_utc) as first_occurred_at, MAX(occurred_at_utc) as last_occurred_at, COUNT(*) as events_count, MAX(verify_mode) as verify_mode')
+                ->selectRaw('device_id, device_user_id, MAX(id) as last_raw_event_id, MIN(occurred_at_utc) as first_occurred_at, MAX(occurred_at_utc) as last_occurred_at, COUNT(*) as events_count, MAX(verify_mode) as verify_mode')
                 ->addSelect(['device_user_name' => $deviceUserName])
                 ->groupBy('device_id', 'device_user_id')
                 ->orderByDesc('last_occurred_at')->orderBy('device_id')->orderBy('device_user_id')
@@ -129,6 +129,7 @@ final class AttendanceReportController extends Controller
                     'device_id' => (int) $row->device_id,
                     'device_user_id' => (string) $row->device_user_id,
                     'device_user_name' => $row->device_user_name,
+                    'last_raw_event_id' => (int) $row->last_raw_event_id,
                     'first_occurred_at' => $row->first_occurred_at,
                     'last_occurred_at' => $row->last_occurred_at,
                     'events_count' => (int) $row->events_count,
