@@ -2,8 +2,10 @@
 
 namespace Tests\Feature;
 
-use App\Models\{AttendanceDailySummary, Branch, Role, User};
+use App\Models\{AttendanceDailySummary, AttendanceDevice, AttendanceEvent, Branch, Role, User};
+use Carbon\CarbonImmutable;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Laravel\Sanctum\Sanctum;
 
@@ -86,6 +88,88 @@ class SecurityAttendanceFeatureTest extends \Tests\TestCase
         $sb->update(['security_attendance_branch_ids' => []]);
         $this->getJson('/api/attendance/matrix?'.$range)->assertOk()->assertJsonCount(0, 'data');
         $this->getJson('/api/attendance/users/'.$one->id.'/days/2026-09-17')->assertForbidden();
+    }
+
+    public function test_security_excludes_dismissed_employees_from_attendance_and_preserves_history(): void
+    {
+        extract($this->securityFixture());
+        $this->travelTo(CarbonImmutable::parse('2026-09-17 12:00:00', 'Asia/Dushanbe'));
+        $sb->update(['security_attendance_branch_ids' => [$a->id, $b->id]]);
+        foreach ([$one, $two, $hidden] as $employee) {
+            $device = AttendanceDevice::create(['name' => 'Entry '.$employee->id, 'serial_number' => 'SECURITY-'.$employee->id,
+                'branch_id' => $employee->branch_id, 'timezone' => 'Asia/Dushanbe', 'is_active' => true]);
+            AttendanceDailySummary::create(['user_id' => $employee->id, 'work_date' => '2026-08-17',
+                'status' => 'late', 'late_minutes' => 5]);
+            foreach (['2026-08-17', '2026-09-17'] as $date) {
+                AttendanceEvent::create(['user_id' => $employee->id, 'device_id' => $device->id, 'branch_id' => $employee->branch_id,
+                    'device_user_id' => (string) $employee->id, 'event_type' => 'check_in', 'occurred_at' => $date.'T04:05:00Z']);
+            }
+        }
+        Sanctum::actingAs($sb);
+        $url = '/api/attendance/matrix?date_from=2026-09-17&date_to=2026-09-17';
+        $before = $this->getJson($url)->assertOk()->json('meta.summary.active_users');
+        $this->getJson($url.'&search=Employee')->assertOk()->assertJsonCount(2, 'data');
+        // Dismiss after the tab has already been loaded: the next request must use the new status.
+        DB::table('users')->where('id', $one->id)->update(['status' => User::STATUS_INACTIVE]);
+        $snapshot = collect(['users', 'attendance_daily_summaries', 'attendance_events'])
+            ->mapWithKeys(fn ($table) => [$table => DB::table($table)->orderBy('id')->get()->toJson()])->all();
+        $this->getJson($url)->assertOk()->assertJsonPath('meta.summary.active_users', $before - 1)
+            ->assertJsonPath('meta.summary.checked_in_today', 1)->assertJsonPath('meta.summary.late_today', 1);
+        foreach (['2026-08-17', '2026-09-17'] as $date) {
+            $range = 'date_from='.$date.'&date_to='.$date;
+            $this->getJson('/api/attendance/matrix?'.$range.'&search=Employee&per_page=1')->assertOk()
+                ->assertJsonCount(1, 'data')->assertJsonPath('data.0.user.id', $two->id)
+                ->assertJsonPath('meta.pagination.total', 1)->assertJsonPath('meta.pagination.last_page', 1);
+            $branches = $this->getJson('/api/attendance/matrix?'.$range.'&view=branches')->assertOk()->json('data');
+            $this->assertSame(1, collect($branches)->sum(fn ($row) => $row['days'][$date]['checked_in_count']));
+            foreach (['daily', 'events'] as $endpoint) {
+                $this->getJson('/api/attendance/'.$endpoint.'?'.$range)->assertOk()->assertJsonCount(1, 'data')
+                    ->assertJsonPath('data.0.user_id', $two->id);
+                $this->getJson('/api/attendance/'.$endpoint.'?'.$range.'&user_id='.$one->id)->assertOk()->assertJsonCount(0, 'data');
+            }
+            $this->getJson('/api/attendance/matrix?'.$range.'&user_id='.$one->id)->assertOk()->assertJsonCount(0, 'data');
+            $this->getJson('/api/attendance/users/'.$one->id.'/days/'.$date)->assertForbidden();
+            $this->getJson('/api/attendance/users/'.$one->id.'/daily?'.$range)->assertForbidden();
+            $this->getJson('/api/attendance/users/'.$two->id.'/days/'.$date)->assertOk();
+            $this->getJson('/api/attendance/users/'.$hidden->id.'/days/'.$date)->assertForbidden();
+            $csv = $this->get('/api/attendance/export?format=csv&'.$range)->assertOk()->streamedContent();
+            $xlsx = $this->get('/api/attendance/export?format=xlsx&'.$range)->assertOk();
+            $path = $xlsx->baseResponse->getFile()->getPathname();
+            $zip = new \ZipArchive;
+            $this->assertTrue($zip->open($path));
+            $sheet = $zip->getFromName('xl/worksheets/sheet1.xml');
+            $zip->close();
+            unlink($path);
+            foreach ([$csv, $sheet] as $output) {
+                $this->assertStringContainsString($two->name, $output);
+                $this->assertStringNotContainsString($one->name, $output);
+                $this->assertStringNotContainsString($hidden->name, $output);
+            }
+        }
+        foreach ($snapshot as $table => $rows) $this->assertSame($rows, DB::table($table)->orderBy('id')->get()->toJson());
+        $this->travelBack();
+    }
+
+    public function test_security_primary_branch_and_optional_presence_exclude_dismissed_employees(): void
+    {
+        extract($this->securityFixture());
+        DB::table('users')->where('id', $one->id)->update(['status' => User::STATUS_INACTIVE]);
+        Sanctum::actingAs($sb);
+        $this->getJson('/api/attendance/matrix?search=Employee')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/attendance/presence')->assertForbidden();
+        // A configured presence grant must retain the same employee/branch restrictions.
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $sb->role->forceFill(['permissions' => ['attendance.table.view', 'attendance.presence.view', 'attendance.scope.assigned_branches']])->save();
+        $sb->update(['security_attendance_branch_ids' => [$a->id, $b->id]]);
+        Sanctum::actingAs($sb->fresh());
+        $ids = collect($this->getJson('/api/attendance/presence')->assertOk()->json('data'))->pluck('user.id')->all();
+        $this->assertContains($two->id, $ids);
+        $this->assertNotContains($one->id, $ids);
+        $this->assertNotContains($hidden->id, $ids);
+        $sb->update(['security_attendance_branch_ids' => []]);
+        Sanctum::actingAs($sb->fresh());
+        $this->getJson('/api/attendance/presence')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/attendance/matrix')->assertOk()->assertJsonCount(0, 'data');
     }
 
     public function test_security_is_read_only_and_legacy_account_uses_primary_branch(): void

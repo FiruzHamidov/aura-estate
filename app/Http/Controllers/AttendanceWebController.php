@@ -13,6 +13,7 @@ use App\Models\User;
 use App\Services\Attendance\AttendanceAccessService;
 use App\Services\Attendance\AttendanceHolidayCalendar;
 use App\Services\Attendance\AttendanceScheduleResolver;
+use App\Services\Attendance\AttendancePresentation;
 use Carbon\CarbonImmutable;
 use Carbon\CarbonPeriod;
 use Illuminate\Database\Eloquent\Builder;
@@ -29,6 +30,7 @@ final class AttendanceWebController extends Controller
         private readonly \App\Services\Attendance\AttendanceGroupScope $groupScope,
         private readonly AttendanceHolidayCalendar $holidays,
         private readonly AttendanceScheduleResolver $scheduleResolver,
+        private readonly AttendancePresentation $presentation,
     ) {}
 
     public function access(Request $request)
@@ -160,15 +162,22 @@ final class AttendanceWebController extends Controller
             abort_unless($currentEmployee || $summary || $events->isNotEmpty() || $leave || $duty, 404, 'ROP_RECORD_NOT_ACCESSIBLE');
         }
 
+        $presentation = $this->presentation->forUsers($request->user(), collect([$user]), collect([$summary])->filter()->concat($events))->get($user->id);
+        $dayState = $this->presentation->dayState($request->user(), $presentation, $date, $summary, (bool) ($summary || $events->isNotEmpty() || $leave || $duty));
+        if ($request->user()->usesAssignedGroupScope() && $summary?->schedule_snapshot === null) {
+            $schedule = $dayState['schedule_known'] ? ($settings?->schedule ?? config('attendance.default_schedule', []))[(string) $day->dayOfWeekIso] ?? null : null;
+        }
+
         return response()->json(['data' => [
-            'user' => $this->userPayload($user),
+            'user' => $this->userPayload($user, $presentation),
+            ...$presentation,
             'work_date' => $date,
             'schedule' => is_array($schedule) ? [
                 'starts_at' => $schedule['start'] ?? null,
                 'ends_at' => $schedule['end'] ?? null,
                 'label' => isset($schedule['start'], $schedule['end']) ? $schedule['start'].'–'.$schedule['end'] : null,
             ] : null,
-            'summary' => $this->dayPayload($summary, $leave === null && $holiday === null && is_array($schedule), collect(), $comment, $leave, $holiday, $duty, $events),
+            'summary' => [...$this->dayPayload($summary, $leave === null && $holiday === null && is_array($schedule), collect(), $comment, $leave, $holiday, $duty, $events), ...$dayState],
             'events' => $events->map(fn (AttendanceEvent $event) => [
                 'id' => $event->id,
                 'occurred_at' => $event->occurred_at?->toISOString(),
@@ -310,7 +319,8 @@ final class AttendanceWebController extends Controller
             $late = $countableSummaries->where('status', 'late');
 
             return [
-                'user' => $this->userPayload($user),
+                'user' => $this->userPayload($user, $data['presentation']->get($user->id)),
+                ...$data['presentation']->get($user->id),
                 'totals' => [
                     'present' => $countableSummaries->where('status', 'present')->count(),
                     'late' => $late->count(),
@@ -327,9 +337,10 @@ final class AttendanceWebController extends Controller
 
                     $holiday = $data['holidays']->get($date);
 
-                    $workingDay = $this->isWorkingDay($data['schedules']->get($user->id), $date, $data['holidays'], $summary?->schedule_snapshot);
-                    if (request()->user()->usesAssignedGroupScope() && $summary?->schedule_snapshot === null) $workingDay = $summary !== null;
-                    return [$date => $this->dayPayload($summary, $leave === null && $workingDay, $methods, $comment, $leave, $holiday, $duty, $data['events']->get($user->id, collect())->get($date, collect()))];
+                    $events = $data['events']->get($user->id, collect())->get($date, collect());
+                    $dayState = $this->presentation->dayState(request()->user(), $data['presentation']->get($user->id), $date, $summary, (bool) ($summary || $events->isNotEmpty() || $leave || $duty));
+                    $workingDay = $dayState['schedule_known'] && $this->isWorkingDay($data['schedules']->get($user->id), $date, $data['holidays'], $summary?->schedule_snapshot);
+                    return [$date => [...$this->dayPayload($summary, $leave === null && $workingDay, $methods, $comment, $leave, $holiday, $duty, $events), ...$dayState]];
                 })->all(),
             ];
         });
@@ -345,20 +356,31 @@ final class AttendanceWebController extends Controller
             return [
                 'branch' => ['id' => $branch?->id ?? 0, 'name' => $branch?->name ?? 'Без филиала'],
                 'days' => $dates->mapWithKeys(function (string $date) use ($branchUsers, $data) {
-                    $scheduled = $branchUsers->filter(fn (User $user) => (! request()->user()->usesAssignedGroupScope() || $data['summaries']->get($user->id, collect())->has($date)) && $this->leaveForDate($data['leaves']->get($user->id, collect()), $date) === null
-                        && $this->isWorkingDay($data['schedules']->get($user->id), $date, $data['holidays']));
-                    $summaries = $scheduled->map(fn (User $user) => $data['summaries']->get($user->id, collect())->get($date))->filter();
+                    $states = $branchUsers->mapWithKeys(function (User $user) use ($data, $date) {
+                        $summary = $data['summaries']->get($user->id, collect())->get($date);
+                        return [$user->id => $this->presentation->dayState(request()->user(), $data['presentation']->get($user->id), $date, $summary, $summary !== null)];
+                    });
+                    $scheduled = $branchUsers->filter(function (User $user) use ($data, $date, $states) {
+                        $summary = $data['summaries']->get($user->id, collect())->get($date);
+                        return $states[$user->id]['schedule_known'] && $states[$user->id]['availability'] !== 'restricted'
+                            && $this->leaveForDate($data['leaves']->get($user->id, collect()), $date) === null
+                            && $this->isWorkingDay($data['schedules']->get($user->id), $date, $data['holidays'], $summary?->schedule_snapshot);
+                    });
+                    $unknownSchedule = $branchUsers->filter(fn (User $user) => ! $states[$user->id]['schedule_known'] && $states[$user->id]['availability'] !== 'restricted');
+                    // Real saved marks remain countable even when the old schedule was not saved.
+                    $summaries = $scheduled->concat($unknownSchedule)->map(fn (User $user) => $data['summaries']->get($user->id, collect())->get($date))->filter();
                     $checkedIn = $summaries->whereIn('status', ['present', 'late', 'incomplete'])->count();
                     $scheduledCount = $scheduled->count();
 
                     return [$date => [
                         'scheduled_users_count' => $scheduledCount,
+                        'unknown_schedule_users_count' => $unknownSchedule->count(),
                         'checked_in_count' => $checkedIn,
                         'present_count' => $summaries->where('status', 'present')->count(),
                         'late_count' => $summaries->where('status', 'late')->count(),
                         'absent_count' => $summaries->where('status', 'absent')->count(),
                         'incomplete_count' => $summaries->where('status', 'incomplete')->count(),
-                        'attendance_pct' => $scheduledCount > 0 ? round($checkedIn / $scheduledCount * 100, 1) : 0,
+                        'attendance_pct' => $unknownSchedule->isNotEmpty() ? null : ($scheduledCount > 0 ? round($checkedIn / $scheduledCount * 100, 1) : 0),
                     ]];
                 })->all(),
             ];
@@ -369,7 +391,7 @@ final class AttendanceWebController extends Controller
     {
         $ids = $users->pluck('id');
         if ($ids->isEmpty()) {
-            return ['summaries' => collect(), 'comments' => collect(), 'methods' => collect(), 'events' => collect(), 'schedules' => collect(), 'leaves' => collect(), 'duties' => collect(), 'holidays' => $this->holidays->between($from->toDateString(), $to->toDateString())];
+            return ['summaries' => collect(), 'comments' => collect(), 'methods' => collect(), 'events' => collect(), 'schedules' => collect(), 'leaves' => collect(), 'duties' => collect(), 'presentation' => collect(), 'holidays' => $this->holidays->between($from->toDateString(), $to->toDateString())];
         }
         $summaries = $this->facts(AttendanceDailySummary::class)->whereIn('user_id', $ids)
             ->whereBetween('work_date', [$from->toDateString(), $to->toDateString()])->get()
@@ -379,7 +401,7 @@ final class AttendanceWebController extends Controller
             ->groupBy('user_id')->map(fn (Collection $rows) => $rows->keyBy(fn ($row) => $row->work_date->toDateString()));
         $timezone = (string) config('attendance.timezone', 'Asia/Dushanbe');
         $events = $this->facts(AttendanceEvent::class)->whereIn('user_id', $ids)->whereBetween('occurred_at', [$from->utc(), $to->utc()])
-            ->get(['id', 'user_id', 'occurred_at', 'verification_method', 'event_type', 'is_duplicate'])->groupBy('user_id')
+            ->get(['id', 'user_id', 'branch_group_id', ...(\Schema::hasColumn('attendance_events', 'role_slug') ? ['role_slug'] : []), 'occurred_at', 'verification_method', 'event_type', 'is_duplicate'])->groupBy('user_id')
             ->map(fn (Collection $rows) => $rows->groupBy(fn ($event) => $event->occurred_at->copy()->setTimezone($timezone)->toDateString()));
         $methods = $events->map(fn (Collection $days) => $days->map(fn (Collection $rows) => $rows->pluck('verification_method')->unique()->values()));
         $schedules = AttendanceWorkSchedule::query()->whereIn('user_id', $ids)->get()->keyBy('user_id');
@@ -392,8 +414,9 @@ final class AttendanceWebController extends Controller
             ->whereDate('date_to', '>=', $from->toDateString())
             ->orderBy('date_from')->get()->groupBy('user_id');
         $holidays = $this->holidays->between($from->toDateString(), $to->toDateString());
+        $presentation = $this->presentation->forUsers(request()->user(), $users, $summaries->flatten(1)->concat($events->flatten(2)));
 
-        return compact('summaries', 'comments', 'methods', 'events', 'schedules', 'leaves', 'duties', 'holidays');
+        return compact('summaries', 'comments', 'methods', 'events', 'schedules', 'leaves', 'duties', 'holidays', 'presentation');
     }
 
     private function dayPayload(?AttendanceDailySummary $summary, bool $workingDay, Collection $methods, ?AttendanceDailyComment $comment, ?AttendanceLeave $leave = null, ?AttendanceHoliday $holiday = null, ?AttendanceDuty $duty = null, ?Collection $events = null): array
@@ -503,10 +526,10 @@ final class AttendanceWebController extends Controller
         ];
     }
 
-    private function userPayload(User $user): array
+    private function userPayload(User $user, ?array $presentation = null): array
     {
         $viewer = request()->user();
-        if ($viewer->usesAssignedGroupScope() && ! app(\App\Support\RopGroupAccess::class)->allows($viewer, $user)) {
+        if ($viewer->usesAssignedGroupScope() && (($presentation['employee_scope'] ?? null) === 'historical' || ! app(\App\Support\RopGroupAccess::class)->allows($viewer, $user))) {
             return $user->only(['id', 'name']);
         }
         return [
@@ -514,6 +537,7 @@ final class AttendanceWebController extends Controller
             'name' => $user->name,
             'photo' => $user->photo,
             'role' => $user->role?->slug,
+            'role_name' => $user->role?->name,
             'branch_id' => $user->branch_id,
             'branch_name' => $user->branch?->name,
             'branch_group_id' => $user->branch_group_id,

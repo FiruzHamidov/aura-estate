@@ -48,6 +48,7 @@ class AttendanceModuleFeatureTest extends TestCase
         (require database_path('migrations/2026_08_16_000006_create_attendance_global_schedules_table.php'))->up();
         (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
         (require database_path('migrations/2026_09_08_140000_add_attendance_context_groups.php'))->up();
+        (require database_path('migrations/2026_10_17_140000_create_attendance_device_user_profiles.php'))->up();
         config([
             'attendance.timezone' => 'Asia/Dushanbe',
             'attendance.duplicate_window_seconds' => 10,
@@ -222,7 +223,7 @@ class AttendanceModuleFeatureTest extends TestCase
             ->assertOk()
             ->assertHeader('Content-Type', 'text/plain; charset=UTF-8')
             ->assertSeeText('GET OPTION FROM: ZAM230-001')
-            ->assertSeeText('TransFlag=AttLog')
+            ->assertSeeText("TransFlag=TransData AttLog\tEnrollUser\tChgUser")
             ->assertDontSee('TimeZone=');
 
         $this->assertNotNull($device->fresh()->last_seen_at);
@@ -841,6 +842,92 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->assertDatabaseHas('attendance_audit_logs', ['action' => 'attendance_comment.deleted']);
     }
 
+    public function test_terminal_names_enrich_unmapped_events_without_creating_employee_links(): void
+    {
+        $context = $this->context();
+        $device = $this->device('NAMES-A', $context['branch'], $context['group']);
+        $other = $this->device('NAMES-B');
+        foreach (['NAMES-A', 'NAMES-B'] as $serial) {
+            $this->postDevicePayload('/iclock/cdata?SN='.$serial.'&table=ATTLOG', "96\t2026-08-17 09:00:00\t0\t15\t0")->assertOk();
+        }
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-A&table=ATTLOG', "97\t2026-08-17 10:00:00\t0\t15\t0")->assertOk();
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-A&table=OPERLOG', implode("\n", [
+            "USER PIN=96\tName=Фируз Ҳамидов\tPasswd=private-password\tCard=private-card",
+            "FP PIN=96\tName=Wrong name\tTMP=private-template",
+            "FACE PIN=96\tTMP=private-face",
+            "USER PIN=98\tPri=0",
+            "USER PIN=\tName=Invalid",
+        ]))->assertOk()->assertContent('OK: 1');
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-B&table=USERINFO', "PIN=96\tName=Другой сотрудник")->assertOk()->assertContent('OK: 1');
+        // Repeated deliveries are idempotent, and a partial profile cannot erase a name.
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-A&table=OPERLOG', "USER PIN=96\tName=Фируз Ҳамидов\nUSER PIN=96\tPri=0")->assertOk();
+        $this->assertDatabaseCount('attendance_device_user_profiles', 2);
+        $this->assertDatabaseCount('attendance_device_users', 0);
+        $this->assertDatabaseCount('attendance_events', 0);
+        $this->assertDatabaseCount('attendance_ingest_requests', 3); // ATTLOG only.
+        $this->assertDatabaseHas('attendance_device_user_profiles', ['device_id' => $device->id, 'device_user_id' => '96', 'name' => 'Фируз Ҳамидов']);
+        $this->assertDatabaseHas('attendance_device_user_profiles', ['device_id' => $other->id, 'device_user_id' => '96', 'name' => 'Другой сотрудник']);
+
+        Sanctum::actingAs($context['hr']);
+        $this->getJson('/api/attendance/unmapped-events?grouped=true&device_id='.$device->id)
+            ->assertOk()->assertJsonCount(2, 'data')
+            ->assertJsonPath('data.0.device_user_name', null)
+            ->assertJsonPath('data.1.device_user_name', 'Фируз Ҳамидов')
+            ->assertJsonPath('data.1.events_count', 1);
+        $this->getJson('/api/attendance/unmapped-events?device_id='.$other->id)
+            ->assertOk()->assertJsonPath('data.0.device_user_name', 'Другой сотрудник');
+        $this->getJson('/api/attendance/unmapped-events?grouped=true&device_id='.$other->id)
+            ->assertOk()->assertJsonPath('data.0.device_user_name', 'Другой сотрудник');
+        Sanctum::actingAs($context['agent']);
+        $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertForbidden();
+        Sanctum::actingAs($context['rop']);
+        $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertOk()->assertJsonCount(2, 'data')
+            ->assertJsonPath('data.1.device_user_name', 'Фируз Ҳамидов')
+            ->assertJsonMissing(['device_user_name' => 'Другой сотрудник']);
+    }
+
+    public function test_terminal_profile_updates_validate_text_and_preserve_exact_ids(): void
+    {
+        $device = $this->device('NAMES-VALIDATION');
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-VALIDATION&table=OPERLOG', "\xEF\xBB\xBFUSER PIN=0096\tName=Первое Имя\r\nUSER PIN=96\tName=Другое Имя")->assertContent('OK: 2');
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-VALIDATION&table=OPERLOG', "USER PIN=0096\tName=Новое Имя")->assertContent('OK: 1');
+        $this->assertDatabaseHas('attendance_device_user_profiles', ['device_id' => $device->id, 'device_user_id' => '0096', 'name' => 'Новое Имя']);
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-VALIDATION&table=OPERLOG', implode("\n", [
+            "USER PIN=0096\tName=bad\xFF",
+            "USER PIN=0096\tName=".str_repeat('я', 256),
+            "USER PIN=".str_repeat('9', 101)."\tName=Invalid",
+            "USER PIN=0096\tName=bad\x00name",
+        ]))->assertContent('OK: 0');
+        $this->assertDatabaseHas('attendance_device_user_profiles', ['device_user_id' => '0096', 'name' => 'Новое Имя']);
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-VALIDATION&table=OPERLOG', "USER PIN=0096\tName=\tPri=0")->assertContent('OK: 1');
+        $this->assertDatabaseHas('attendance_device_user_profiles', ['device_user_id' => '0096', 'name' => null]);
+        $this->assertDatabaseHas('attendance_device_user_profiles', ['device_user_id' => '96', 'name' => 'Другое Имя']);
+        $this->assertDatabaseCount('attendance_device_user_profiles', 2);
+        $this->assertDatabaseCount('attendance_ingest_requests', 0);
+    }
+
+    public function test_terminal_profile_sync_uses_authenticated_read_only_daily_query(): void
+    {
+        $this->travelTo(CarbonImmutable::parse('2026-10-17T12:00:00+05:00'));
+        $device = $this->device('NAMES-QUERY');
+        $device->update(['communication_key' => 'test-device-key']);
+        $this->get('/iclock/getrequest?SN=NAMES-QUERY')->assertForbidden();
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-QUERY&table=OPERLOG', "USER PIN=96\tName=Unauthorized")->assertForbidden();
+        $this->assertDatabaseCount('attendance_device_user_profiles', 0);
+        $url = '/iclock/getrequest?SN=NAMES-QUERY&PushCommKey=test-device-key';
+        $this->get($url)->assertOk()->assertContent('C:'.now()->timestamp.":DATA QUERY USERINFO\n");
+        $this->get($url)->assertOk()->assertContent('OK');
+        $this->travel(23)->hours();
+        $this->get($url)->assertContent('OK');
+        $this->travel(1)->hours();
+        $this->get($url)->assertContent('C:'.now()->timestamp.":DATA QUERY USERINFO\n");
+        $this->postDevicePayload('/iclock/cdata?SN=NAMES-QUERY&PushCommKey=test-device-key&table=OPERLOG', "USER PIN=96\tName=Полученное имя")->assertContent('OK: 1');
+        $this->assertDatabaseHas('attendance_device_user_profiles', ['device_id' => $device->id, 'name' => 'Полученное имя']);
+        $device->update(['is_active' => false]);
+        $this->get($url)->assertForbidden();
+        $this->travelBack();
+    }
+
     public function test_hr_can_view_devices_manage_mappings_and_group_unmapped_events(): void
     {
         $context = $this->context();
@@ -1449,6 +1536,92 @@ class AttendanceModuleFeatureTest extends TestCase
         ]);
     }
 
+    public function test_rop_dismissal_hides_current_and_historical_attendance_without_deleting_records(): void
+    {
+        (require database_path('migrations/2026_09_09_010000_add_attendance_historical_context.php'))->up();
+        $c = $this->context();
+        $this->travelTo(CarbonImmutable::parse('2026-08-19 12:00:00', 'Asia/Dushanbe'));
+        $device = $this->device('DISMISSAL-HISTORY', $c['branch'], $c['group']);
+        $snapshot = ['schedule' => [
+            '1' => ['start' => '09:00', 'end' => '18:00'],
+            '3' => ['start' => '09:00', 'end' => '18:00'],
+        ]];
+        foreach ([$c['agent'], $c['otherAgent'], $c['mop']] as $employee) {
+            foreach (['2026-08-17', '2026-08-19'] as $date) {
+                AttendanceDailySummary::create(['user_id' => $employee->id, 'branch_group_id' => $c['group']->id,
+                    'role_slug' => $employee->role->slug, 'schedule_snapshot' => $snapshot,
+                    'work_date' => $date, 'status' => 'late', 'late_minutes' => $employee->id === $c['mop']->id ? 7 : 91]);
+                AttendanceEvent::create(['user_id' => $employee->id, 'device_id' => $device->id,
+                    'branch_id' => $c['branch']->id, 'branch_group_id' => $c['group']->id, 'role_slug' => $employee->role->slug,
+                    'device_user_id' => (string) $employee->id, 'event_type' => 'check_in', 'occurred_at' => $date.'T04:07:00Z']);
+            }
+        }
+        Sanctum::actingAs($c['rop']);
+        $range = 'date_from=2026-08-17&date_to=2026-08-19';
+        $this->getJson('/api/attendance/matrix?'.$range)->assertOk()->assertJsonCount(3, 'data');
+        // One employee still has the current group, the other has only historical facts in it.
+        DB::table('users')->whereIn('id', [$c['agent']->id, $c['otherAgent']->id])->update(['status' => User::STATUS_INACTIVE]);
+        $before = [DB::table('users')->orderBy('id')->get()->toJson(), DB::table('rop_branch_groups')->get()->toJson(),
+            DB::table('attendance_daily_summaries')->orderBy('id')->get()->toJson(), DB::table('attendance_events')->orderBy('id')->get()->toJson()];
+        $this->getJson('/api/attendance/matrix?'.$range)->assertOk()->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.user.id', $c['mop']->id)->assertJsonPath('meta.pagination.total', 1)
+            ->assertJsonPath('meta.summary.active_users', 1)->assertJsonPath('meta.summary.checked_in_today', 1)
+            ->assertJsonPath('meta.summary.late_today', 1)->assertJsonPath('meta.summary.average_late_minutes', 7);
+        $this->getJson('/api/attendance/matrix?'.$range.'&view=branches')->assertOk()
+            ->assertJsonPath('data.0.days.2026-08-17.scheduled_users_count', 1)
+            ->assertJsonPath('data.0.days.2026-08-17.checked_in_count', 1);
+        $this->getJson('/api/attendance/presence')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.user.id', $c['mop']->id);
+        foreach (['daily', 'events'] as $endpoint) {
+            $this->getJson('/api/attendance/'.$endpoint.'?'.$range)->assertOk()->assertJsonCount(2, 'data')
+                ->assertJsonPath('data.0.user_id', $c['mop']->id)->assertJsonPath('data.1.user_id', $c['mop']->id);
+        }
+        foreach ([$c['agent'], $c['otherAgent']] as $employee) {
+            $matrix = $this->getJson('/api/attendance/matrix?'.$range.'&user_id='.$employee->id);
+            if ($employee->id === $c['agent']->id) $matrix->assertOk()->assertJsonCount(0, 'data');
+            else $matrix->assertForbidden();
+            $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17&search='.$employee->id.'&branch_group_id='.$c['group']->id)
+                ->assertOk()->assertJsonCount(0, 'data');
+            $this->getJson('/api/attendance/users/'.$employee->id.'/days/2026-08-17')->assertNotFound();
+            $this->getJson('/api/attendance/users/'.$employee->id.'/daily?'.$range)->assertNotFound();
+            $events = $this->getJson('/api/attendance/events?'.$range.'&user_id='.$employee->id);
+            if ($employee->id === $c['agent']->id) $events->assertOk()->assertJsonCount(0, 'data');
+            else $events->assertForbidden();
+        }
+        $csv = $this->get('/api/attendance/export?'.$range)->assertOk()->streamedContent();
+        $xlsx = $this->get('/api/attendance/export?'.$range.'&format=xlsx')->assertOk();
+        $path = $xlsx->baseResponse->getFile()->getPathname();
+        $zip = new \ZipArchive;
+        $this->assertTrue($zip->open($path));
+        $sheets = $zip->getFromName('xl/worksheets/sheet1.xml').$zip->getFromName('xl/worksheets/sheet2.xml');
+        $zip->close();
+        @unlink($path);
+        $this->assertStringContainsString($c['mop']->name, $csv);
+        $this->assertStringContainsString($c['mop']->name, $sheets);
+        foreach ([$c['agent'], $c['otherAgent']] as $employee) {
+            $this->assertStringNotContainsString($employee->name, $csv.$sheets);
+        }
+        $this->assertSame($before, [DB::table('users')->orderBy('id')->get()->toJson(), DB::table('rop_branch_groups')->get()->toJson(),
+            DB::table('attendance_daily_summaries')->orderBy('id')->get()->toJson(), DB::table('attendance_events')->orderBy('id')->get()->toJson()]);
+        $this->travelBack();
+    }
+
+    public function test_rop_legacy_history_excludes_dismissed_users_and_retains_active_transferred_users(): void
+    {
+        $c = $this->context();
+        foreach ([$c['agent'], $c['otherAgent']] as $employee) {
+            AttendanceDailySummary::create(['user_id' => $employee->id, 'branch_group_id' => $c['group']->id,
+                'work_date' => '2026-08-17', 'status' => 'present']);
+        }
+        $c['agent']->update(['status' => User::STATUS_INACTIVE]);
+        Sanctum::actingAs($c['rop']);
+        $response = $this->getJson('/api/attendance/matrix?date_from=2026-08-17&date_to=2026-08-17')->assertOk();
+        $ids = collect($response->json('data'))->pluck('user.id')->all();
+        $this->assertNotContains($c['agent']->id, $ids);
+        $this->assertContains($c['otherAgent']->id, $ids);
+        $this->getJson('/api/attendance/users/'.$c['otherAgent']->id.'/days/2026-08-17')->assertOk();
+        $this->assertDatabaseCount('attendance_daily_summaries', 2);
+    }
+
     public function test_inactive_mapped_user_does_not_receive_new_attendance(): void
     {
         $context = $this->context();
@@ -1778,6 +1951,91 @@ class AttendanceModuleFeatureTest extends TestCase
             'work_date' => '2026-08-17', 'branch_group_id' => $context['group']->id]);
     }
 
+    public function test_rop_history_has_record_labels_and_no_current_actions_or_false_weekends(): void
+    {
+        (require database_path('migrations/2026_09_09_010000_add_attendance_historical_context.php'))->up();
+        $context = $this->context();
+        $this->travelTo(CarbonImmutable::parse('2026-08-19 12:00:00', 'Asia/Dushanbe'));
+        $foreign = BranchGroup::create(['name' => 'Private current group', 'branch_id' => $context['branch']->id]);
+        $snapshot = ['schedule' => ['1' => ['start' => '09:00', 'end' => '18:00']]];
+        $employees = [$context['agent'], $context['otherAgent']];
+        foreach ($employees as $employee) {
+            AttendanceDailySummary::create(['user_id' => $employee->id, 'branch_group_id' => $context['group']->id,
+                'role_slug' => 'agent', 'schedule_snapshot' => $snapshot, 'work_date' => '2026-08-17', 'status' => 'late', 'late_minutes' => 7]);
+            AttendanceDailySummary::create(['user_id' => $employee->id, 'branch_group_id' => $foreign->id,
+                'role_slug' => 'agent', 'work_date' => '2026-08-18', 'status' => 'late', 'late_minutes' => 91]);
+            $employee->forceFill(['branch_id' => $context['branch']->id, 'branch_group_id' => $foreign->id])->save();
+        }
+        // The saved role is authoritative even after today's account role changes.
+        $employees[1]->forceFill(['role_id' => $context['hr']->role_id])->save();
+        $before = DB::table('users')->whereIn('id', collect($employees)->pluck('id')->push($context['rop']->id))->orderBy('id')->get()->toJson();
+        Sanctum::actingAs($context['rop']);
+        $range = 'date_from=2026-08-17&date_to=2026-08-19';
+        $response = $this->getJson('/api/attendance/matrix?'.$range)->assertOk();
+        foreach ($employees as $employee) {
+            $row = collect($response->json('data'))->firstWhere('user.id', $employee->id);
+            $this->assertSame(['id' => $employee->id, 'name' => $employee->name], $row['user']);
+            $this->assertSame('historical', $row['employee_scope']);
+            $this->assertSame('agent', $row['history_contexts'][0]['role']);
+            $this->assertSame($context['branch']->name, $row['history_contexts'][0]['branch_name']);
+            $this->assertSame($context['group']->name, $row['history_contexts'][0]['branch_group_name']);
+            $this->assertSame(['2026-08-17'], $row['history_contexts'][0]['dates']);
+            $this->assertSame([false, false, false, false], array_values($row['actions']));
+            $this->assertSame('available', $row['days']['2026-08-17']['availability']);
+            $this->assertTrue($row['days']['2026-08-17']['schedule_known']);
+            $this->assertTrue($row['days']['2026-08-17']['can_open']);
+            foreach (['2026-08-18', '2026-08-19'] as $date) {
+                $this->assertSame('restricted', $row['days'][$date]['availability']);
+                $this->assertFalse($row['days'][$date]['schedule_known']);
+                $this->assertFalse($row['days'][$date]['can_open']);
+                $this->getJson('/api/attendance/users/'.$employee->id.'/days/'.$date)->assertNotFound();
+            }
+            $this->getJson('/api/attendance/users/'.$employee->id.'/days/2026-08-17')->assertOk()
+                ->assertJsonPath('data.employee_scope', 'historical')
+                ->assertJsonPath('data.history_contexts.0.branch_group_name', $context['group']->name)
+                ->assertJsonPath('data.summary.schedule_known', true)
+                ->assertJsonPath('data.schedule.starts_at', '09:00');
+        }
+        $current = collect($response->json('data'))->firstWhere('user.id', $context['mop']->id);
+        $this->assertSame('current', $current['employee_scope']);
+        $this->assertSame('no_data', $current['days']['2026-08-17']['availability']);
+        $this->assertFalse($current['days']['2026-08-17']['schedule_known']);
+        $this->assertTrue($current['days']['2026-08-17']['can_open']);
+        $this->getJson('/api/attendance/users/'.$context['mop']->id.'/days/2026-08-17')->assertOk()
+            ->assertJsonPath('data.summary.schedule_known', false)->assertJsonPath('data.schedule', null);
+        $xlsx = $this->get('/api/attendance/export?'.$range.'&format=xlsx')->assertOk();
+        $zip = new \ZipArchive;
+        $path = $xlsx->baseResponse->getFile()->getPathname();
+        $this->assertTrue($zip->open($path));
+        $sheet = $zip->getFromName('xl/worksheets/sheet1.xml');
+        $details = $zip->getFromName('xl/worksheets/sheet2.xml');
+        $zip->close();
+        @unlink($path);
+        $this->assertStringContainsString('исторические записи', $sheet);
+        $this->assertStringContainsString($context['group']->name, $sheet);
+        $this->assertStringContainsString('Данные недоступны', $details);
+        $this->assertStringNotContainsString('Private current group', $sheet.$details);
+        $after = DB::table('users')->whereIn('id', collect($employees)->pluck('id')->push($context['rop']->id))->orderBy('id')->get()->toJson();
+        $this->assertSame($before, $after);
+        $this->travelBack();
+    }
+
+    public function test_branch_totals_keep_saved_marks_when_historical_schedule_is_unknown(): void
+    {
+        (require database_path('migrations/2026_09_09_010000_add_attendance_historical_context.php'))->up();
+        $context = $this->context();
+        AttendanceDailySummary::create(['user_id' => $context['agent']->id, 'branch_group_id' => $context['group']->id,
+            'role_slug' => 'agent', 'work_date' => '2026-08-17', 'status' => 'late', 'late_minutes' => 7]);
+        Sanctum::actingAs($context['rop']);
+        $this->getJson('/api/attendance/matrix?view=branches&date_from=2026-08-17&date_to=2026-08-17')->assertOk()
+            ->assertJsonPath('data.0.days.2026-08-17.scheduled_users_count', 0)
+            ->assertJsonPath('data.0.days.2026-08-17.checked_in_count', 1)
+            ->assertJsonPath('data.0.days.2026-08-17.late_count', 1)
+            ->assertJsonPath('data.0.days.2026-08-17.attendance_pct', null);
+        $this->getJson('/api/attendance/users/'.$context['agent']->id.'/days/2026-08-17')->assertOk()
+            ->assertJsonPath('data.summary.status', 'late')->assertJsonPath('data.summary.schedule_known', false);
+    }
+
     public function test_csv_export_rechecks_scope_before_sending_any_bytes(): void
     {
         $context = $this->context();
@@ -1919,6 +2177,80 @@ class AttendanceModuleFeatureTest extends TestCase
         $zip->close();
         unlink($path);
         $this->travelBack();
+    }
+
+    public function test_rop_unmapped_events_use_mapping_terminal_scope_before_pagination(): void
+    {
+        $c = $this->context();
+        $otherGroup = BranchGroup::create(['branch_id' => $c['branch']->id, 'name' => 'Other group']);
+        $shared = $this->device('UNMAPPED-SHARED', $c['branch']);
+        $own = $this->device('UNMAPPED-OWN', $c['branch'], $c['group']);
+        $other = $this->device('UNMAPPED-OTHER-GROUP', $c['branch'], $otherGroup);
+        $foreign = $this->device('UNMAPPED-FOREIGN', $c['otherAgent']->branch);
+        $unassigned = $this->device('UNMAPPED-NO-BRANCH');
+        foreach ([$shared, $own, $other, $foreign, $unassigned] as $index => $device) {
+            $this->postDevicePayload('/iclock/cdata?SN='.$device->serial_number.'&table=ATTLOG',
+                "0096\t2026-08-17 09:0{$index}:00\t0\t15\t0")->assertOk();
+            $this->postDevicePayload('/iclock/cdata?SN='.$device->serial_number.'&table=USERINFO',
+                "PIN=0096\tName=".$device->name)->assertOk();
+        }
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $c['rop']->role->forceFill(['permissions' => ['attendance.mappings.manage', 'data.scope.assigned_groups']])->save();
+        Sanctum::actingAs($c['rop']->fresh());
+        foreach (['true', 'false'] as $grouped) {
+            $url = '/api/attendance/unmapped-events?grouped='.$grouped.'&per_page=1';
+            $response = $this->getJson($url)->assertOk()->assertJsonPath('total', 2)->assertJsonPath('last_page', 2)
+                ->assertJsonCount(1, 'data')->assertJsonPath('data.0.device_id', $own->id)
+                ->assertJsonPath('data.0.device_user_id', '0096')->assertJsonPath('data.0.device_user_name', $own->name);
+            foreach (['raw_payload', 'request_meta', 'source_ip', 'processing_error', 'device.last_ip', 'device.communication_key'] as $field) {
+                $response->assertJsonMissingPath('data.0.'.$field);
+            }
+            $this->getJson($url.'&page=2')->assertOk()->assertJsonPath('data.0.device_id', $shared->id);
+            foreach ([$other, $foreign, $unassigned] as $device) {
+                $this->getJson($url.'&device_id='.$device->id)->assertOk()->assertJsonPath('total', 0)->assertJsonCount(0, 'data');
+            }
+        }
+        $c['rop']->supervisedGroups()->detach();
+        $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertOk()
+            ->assertJsonCount(1, 'data')->assertJsonPath('data.0.device_id', $shared->id);
+        $c['rop']->update(['branch_id' => null]);
+        Sanctum::actingAs($c['rop']->fresh());
+        $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertOk()->assertJsonCount(0, 'data');
+        $c['rop']->role->forceFill(['permissions' => ['data.scope.assigned_groups']])->save();
+        Sanctum::actingAs($c['rop']->fresh());
+        $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertForbidden();
+        Sanctum::actingAs($c['hr']);
+        $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertOk()->assertJsonPath('total', 5);
+        $this->assertDatabaseCount('attendance_device_users', 0);
+    }
+
+    public function test_rop_can_link_visible_unmapped_events_only_to_active_team_employee(): void
+    {
+        $c = $this->context();
+        $device = $this->device('ROP-UNMAPPED-LINK', $c['branch']);
+        $this->postDevicePayload('/iclock/cdata?SN=ROP-UNMAPPED-LINK&table=ATTLOG', implode("\n", [
+            "0096\t2026-08-17 09:00:00\t0\t15\t0",
+            "0096\t2026-08-17 18:00:00\t1\t15\t0",
+        ]))->assertOk();
+        Sanctum::actingAs($c['rop']);
+        $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertOk()
+            ->assertJsonCount(1, 'data')->assertJsonPath('data.0.events_count', 2);
+        $data = ['device_id' => $device->id, 'device_user_id' => '0096', 'user_id' => $c['agent']->id];
+        $this->putJson('/api/attendance/device-users', [...$data, 'user_id' => $c['otherAgent']->id])->assertNotFound();
+        $otherGroup = BranchGroup::create(['branch_id' => $c['branch']->id, 'name' => 'Other team']);
+        $c['otherAgent']->update(['branch_id' => $c['branch']->id, 'branch_group_id' => $otherGroup->id]);
+        $this->putJson('/api/attendance/device-users', [...$data, 'user_id' => $c['otherAgent']->id])->assertNotFound();
+        $c['agent']->update(['status' => User::STATUS_INACTIVE]);
+        $this->putJson('/api/attendance/device-users', $data)->assertNotFound();
+        $this->assertDatabaseCount('attendance_device_users', 0);
+        $this->assertDatabaseCount('attendance_events', 0);
+        $c['agent']->update(['status' => User::STATUS_ACTIVE]);
+        $this->putJson('/api/attendance/device-users', $data)->assertOk()
+            ->assertJsonPath('data.device_user_id', '0096')->assertJsonPath('reprocessed.processed', 2);
+        $this->getJson('/api/attendance/unmapped-events?grouped=true')->assertOk()->assertJsonPath('total', 0);
+        $this->assertSame(2, AttendanceEvent::query()->where('user_id', $c['agent']->id)->count());
+        $this->assertSame($c['group']->id, $c['agent']->fresh()->branch_group_id);
+        $this->assertSame([$c['group']->id], $c['rop']->supervisedGroups()->pluck('branch_groups.id')->all());
     }
 
     public function test_rop_links_only_team_users_and_cannot_take_another_users_terminal_id(): void

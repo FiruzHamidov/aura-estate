@@ -93,9 +93,6 @@ final class AttendanceReportController extends Controller
     public function unmapped(Request $request)
     {
         $this->access->assertCanManageMappings($request->user());
-        if ($request->user()->usesAssignedGroupScope()) {
-            return response()->json(['data' => [], 'total' => 0, 'current_page' => 1, 'last_page' => 1]);
-        }
         if ($request->has('grouped')) {
             $request->merge(['grouped' => $request->boolean('grouped')]);
         }
@@ -104,18 +101,25 @@ final class AttendanceReportController extends Controller
             'grouped' => ['nullable', 'boolean'],
             'per_page' => ['nullable', 'integer', 'between:1,100'],
         ]);
-        $query = AttendanceRawEvent::query()->with('device')->where('processing_status', 'unmapped');
+        $deviceUserName = \App\Models\AttendanceDeviceUserProfile::query()->select('name')
+            ->whereColumn('attendance_device_user_profiles.device_id', 'attendance_raw_events.device_id')
+            ->whereColumn('attendance_device_user_profiles.device_user_id', 'attendance_raw_events.device_user_id');
+        $query = AttendanceRawEvent::query()->where('processing_status', 'unmapped');
+        $isGroupScoped = $request->user()->usesAssignedGroupScope();
+        if ($isGroupScoped) {
+            // Unknown employee IDs can only be scoped by terminal until explicitly linked.
+            $query->whereIn('device_id', $this->access->mappingDevicesQuery($request->user())->select('id'));
+        }
         if (isset($validated['device_id'])) {
             $query->where('device_id', $validated['device_id']);
         }
 
         if (! empty($validated['grouped'])) {
-            $grouped = AttendanceRawEvent::query()
-                ->where('processing_status', 'unmapped')
-                ->when(isset($validated['device_id']), fn ($events) => $events->where('device_id', $validated['device_id']))
+            $grouped = (clone $query)
                 ->selectRaw('device_id, device_user_id, MIN(occurred_at_utc) as first_occurred_at, MAX(occurred_at_utc) as last_occurred_at, COUNT(*) as events_count, MAX(verify_mode) as verify_mode')
+                ->addSelect(['device_user_name' => $deviceUserName])
                 ->groupBy('device_id', 'device_user_id')
-                ->orderByDesc('last_occurred_at')
+                ->orderByDesc('last_occurred_at')->orderBy('device_id')->orderBy('device_user_id')
                 ->paginate($validated['per_page'] ?? 50);
             $devices = \App\Models\AttendanceDevice::query()->whereIn('id', $grouped->getCollection()->pluck('device_id'))->get()->keyBy('id');
             $grouped->getCollection()->transform(function ($row) use ($devices) {
@@ -124,6 +128,7 @@ final class AttendanceReportController extends Controller
                 return [
                     'device_id' => (int) $row->device_id,
                     'device_user_id' => (string) $row->device_user_id,
+                    'device_user_name' => $row->device_user_name,
                     'first_occurred_at' => $row->first_occurred_at,
                     'last_occurred_at' => $row->last_occurred_at,
                     'events_count' => (int) $row->events_count,
@@ -136,7 +141,15 @@ final class AttendanceReportController extends Controller
             return response()->json($grouped);
         }
 
-        return response()->json($query->orderByDesc('occurred_at_utc')->paginate($validated['per_page'] ?? 50));
+        if ($isGroupScoped) {
+            $query->select(['id', 'device_id', 'device_user_id', 'occurred_at_utc', 'verify_mode', 'processing_status'])
+                ->with('device:id,name,serial_number');
+        } else {
+            $query->with('device');
+        }
+
+        return response()->json($query->addSelect(['device_user_name' => $deviceUserName])
+            ->orderByDesc('occurred_at_utc')->orderByDesc('id')->paginate($validated['per_page'] ?? 50));
     }
 
     public function reprocess(Request $request)
