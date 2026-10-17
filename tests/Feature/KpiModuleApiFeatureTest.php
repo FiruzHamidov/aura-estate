@@ -162,13 +162,13 @@ class KpiModuleApiFeatureTest extends TestCase
             'branch_id' => $branch->id, 'branch_group_id' => null,
             'metric_key' => 'shows', 'daily_plan' => 777, 'weight' => 1]);
         $this->getJson('/api/kpi/daily/report?date='.$today.'&employee_id='.$agent->id)->assertOk()
-            ->assertJsonPath('metrics.objects.target_value', 5)
-            ->assertJsonPath('metrics.shows.target_value', null)
+            ->assertJsonPath('metrics.objects.target_value', round(5 / \Carbon\Carbon::parse($today)->daysInMonth, 4))
+            ->assertJsonPath('metrics.shows.target_value', 2)
             ->assertJsonPath('meta.debug.plan_resolution.metrics.objects.source_record_id', $groupPlan->id)
             ->assertJsonPath('meta.debug.plan_resolution.metrics.shows.source_record_id', null);
         $this->getJson('/api/daily-reports?report_date='.$today)->assertOk()
             ->assertJsonPath('data.0.metrics.objects.fact_value', 17)
-            ->assertJsonPath('data.0.metrics.objects.target_value', 5);
+            ->assertJsonPath('data.0.metrics.objects.target_value', round(5 / \Carbon\Carbon::parse($today)->daysInMonth, 4));
 
         $otherBranch = Branch::create(['name' => 'Other branch']);
         $otherGroup = BranchGroup::create(['name' => 'D', 'branch_id' => $otherBranch->id]);
@@ -222,16 +222,17 @@ class KpiModuleApiFeatureTest extends TestCase
         $admin = $this->getJson($url)->assertOk()->json('data.0');
         Sanctum::actingAs($users['rop']);
         $rop = $this->getJson($url)->assertOk()->assertJsonCount(1, 'data')->json('data.0');
-        $this->assertEquals(3, $rop['metrics']['calls']['final_value']);
+        // CRM facts on May 1 plus manual fallback on May 2–3; no period-wide replacement.
+        $this->assertEquals(23, $rop['metrics']['calls']['final_value']);
         $this->assertEquals(30, $rop['metrics']['calls']['manual_value']);
-        $this->assertEquals(3, $rop['metrics']['calls']['fact_value']);
+        $this->assertEquals(13, $rop['metrics']['calls']['fact_value']);
         $this->assertEquals(15, $rop['metrics']['ads']['final_value']);
         $this->assertEquals(3, $rop['metrics']['objects']['final_value']);
         $this->assertEquals($admin['metrics'], $rop['metrics']);
         $this->assertEquals($admin['clients'], $rop['clients']);
         $users['rop']->supervisedGroups()->attach($other->id);
         $this->getJson('/api/kpi/monthly?year=2026&month=5&v=2&agent_id='.$agent->id)
-            ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.metrics.calls.final_value', 3);
+            ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.metrics.calls.final_value', 23);
         $users['rop']->supervisedGroups()->detach();
         $this->getJson($url)->assertForbidden();
     }
@@ -249,7 +250,7 @@ class KpiModuleApiFeatureTest extends TestCase
         $type = CrmTaskType::create(['code' => 'CALL', 'name' => 'Call']);
         foreach (['A' => 1, 'B' => 2, 'C' => 3] as $name => $count) {
             $group = $groups[$name];
-            \DB::table('daily_reports')->insert(['user_id' => $agent->id, 'branch_group_id' => $group->id, 'role_slug' => 'agent', 'report_date' => '2026-05-01']);
+            \DB::table('daily_reports')->insert(['user_id' => $agent->id, 'branch_group_id' => $group->id, 'role_slug' => 'agent', 'report_date' => '2026-05-01', 'calls_count' => $count]);
             for ($i = 0; $i < $count; $i++) \DB::table('crm_tasks')->insert(['task_type_id' => $type->id, 'assignee_id' => $agent->id, 'creator_id' => $agent->id, 'branch_group_id' => $group->id, 'title' => 'Historical call', 'status' => 'done', 'completed_at' => '2026-05-01 10:00:00']);
             KpiPlan::create(['user_id' => $agent->id, 'role_slug' => 'agent', 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'metric_key' => 'calls', 'daily_plan' => $count * 10, 'effective_from' => '2026-01-01']);
         }
@@ -259,7 +260,7 @@ class KpiModuleApiFeatureTest extends TestCase
         foreach (['A' => 1, 'B' => 2] as $name => $count) {
             $row = $rows[$groups[$name]->id];
             $this->assertEquals($count, $row['metrics']['calls']['fact_value']);
-            $this->assertEquals(round($count * 10 * 7 / 30, 4), $row['metrics']['calls']['target_value']);
+            $this->assertEquals(round($count * 10 * (4 / 30 + 3 / 31), 4), $row['metrics']['calls']['target_value']);
             $this->assertSame($groups[$name]->id, $row['metrics']['calls']['plan_source'] === 'personal' ? $row['branch_group_id'] : null);
         }
         $this->getJson($url.'&branch_group_id='.$groups['A']->id)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.metrics.calls.fact_value', 1);
@@ -1171,6 +1172,8 @@ class KpiModuleApiFeatureTest extends TestCase
         $agent = User::create(['name' => 'Agent 1', 'phone' => '900000702', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
         $intern = User::create(['name' => 'Intern 1', 'phone' => '900000703', 'role_id' => $internRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
 
+        $emptyAgent = User::create(['name' => 'Agent without report', 'phone' => '900000704', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+
         DailyReport::create([
             'user_id' => $agent->id,
             'role_slug' => 'agent',
@@ -1195,10 +1198,10 @@ class KpiModuleApiFeatureTest extends TestCase
         $rows = collect((array) $response->json('data'))->keyBy('employee_id');
 
         $this->assertTrue($rows->has($agent->id), 'Agent row must exist in weekly scope.');
-        $this->assertTrue($rows->has($intern->id), 'Intern row must exist in weekly scope even without reports.');
+        $this->assertFalse($rows->has($intern->id), 'Presentation roles are filtered before pagination and totals.');
 
         $agentRow = (array) $rows->get($agent->id);
-        $internRow = (array) $rows->get($intern->id);
+        $internRow = (array) $rows->get($emptyAgent->id);
 
         $this->assertSame(2, (int) ($agentRow['submitted_days_count'] ?? -1));
         $this->assertSame(7, (int) ($agentRow['required_days_count'] ?? 0));
@@ -2922,7 +2925,7 @@ class KpiModuleApiFeatureTest extends TestCase
             ->assertJsonPath('code', 'KPI_VALIDATION_FAILED');
     }
 
-    public function test_weekly_daily_v2_returns_empty_rows_with_valid_pagination(): void
+    public function test_weekly_daily_v2_returns_zero_rows_for_visible_employees_without_reports(): void
     {
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
@@ -2936,9 +2939,10 @@ class KpiModuleApiFeatureTest extends TestCase
 
         $response = $this->getJson('/api/kpi/weekly-daily?v=2&day=2026-05-17&agent_id='.$agent->id)
             ->assertOk()
-            ->assertJsonPath('meta.pagination.total', 0);
+            ->assertJsonPath('meta.pagination.total', 1);
 
-        $this->assertSame([], (array) $response->json('data'));
+        $response->assertJsonPath('data.0.employee_id', $agent->id)
+            ->assertJsonPath('data.0.calls', 0)->assertJsonPath('data.0.kpi_percent', 0);
     }
 
     public function test_weekly_v2_day_filter_returns_row_for_agent_without_reports(): void

@@ -1,0 +1,359 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Http\Middleware\EnsureDailyReportSubmitted;
+use App\Models\Branch;
+use App\Models\BranchGroup;
+use App\Models\CrmTask;
+use App\Models\CrmTaskType;
+use App\Models\DailyReport;
+use App\Models\KpiEarlyRiskAlert;
+use App\Models\KpiPlan;
+use App\Models\Role;
+use App\Models\User;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Config;
+use Illuminate\Support\Facades\Schema;
+use Laravel\Sanctum\Sanctum;
+use PHPUnit\Framework\Attributes\DataProvider;
+use Tests\TestCase;
+
+class KpiConsistencyFeatureTest extends TestCase
+{
+    protected function setUp(): void
+    {
+        parent::setUp();
+        $this->withoutMiddleware(EnsureDailyReportSubmitted::class);
+
+        Schema::dropAllTables();
+        Schema::create('roles', fn (Blueprint $t) => [$t->id(), $t->string('name'), $t->string('slug')->unique(), $t->timestamps()]);
+        Schema::create('branches', fn (Blueprint $t) => [$t->id(), $t->string('name'), $t->timestamps()]);
+        Schema::create('branch_groups', fn (Blueprint $t) => [$t->id(), $t->unsignedBigInteger('branch_id'), $t->string('name'), $t->string('contact_visibility_mode')->default('group_only'), $t->timestamps()]);
+        Schema::create('users', function (Blueprint $t) {
+            $t->id(); $t->string('name'); $t->string('phone')->unique(); $t->unsignedBigInteger('role_id');
+            $t->unsignedBigInteger('branch_id')->nullable(); $t->unsignedBigInteger('branch_group_id')->nullable();
+            $t->string('status')->default('active'); $t->string('auth_method')->default('password'); $t->softDeletes(); $t->timestamps();
+        });
+        Schema::create('daily_reports', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('user_id'); $t->string('role_slug')->nullable(); $t->date('report_date');
+            $t->unsignedInteger('calls_count')->default(0); $t->unsignedInteger('ad_count')->default(0); $t->unsignedInteger('meetings_count')->default(0);
+            $t->unsignedInteger('shows_count')->default(0); $t->unsignedInteger('new_clients_count')->default(0); $t->unsignedInteger('new_properties_count')->default(0);
+            $t->unsignedInteger('deposits_count')->default(0); $t->unsignedInteger('deals_count')->default(0);
+            $t->text('comment')->nullable(); $t->text('plans_for_tomorrow')->nullable(); $t->timestamp('submitted_at')->nullable(); $t->timestamps();
+        });
+        Schema::create('crm_task_types', function (Blueprint $t) { $t->id(); $t->string('code', 64)->unique(); $t->string('name', 128); $t->string('group', 64)->default('kpi'); $t->boolean('is_kpi')->default(false); $t->boolean('is_active')->default(true); $t->timestamps(); });
+        Schema::create('crm_tasks', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('task_type_id'); $t->unsignedBigInteger('assignee_id'); $t->unsignedBigInteger('creator_id')->nullable();
+            $t->string('title', 255); $t->text('description')->nullable(); $t->string('status', 32)->default('new'); $t->string('result_code', 64)->nullable();
+            $t->string('related_entity_type', 32)->nullable(); $t->unsignedBigInteger('related_entity_id')->nullable();
+            $t->timestamp('due_at')->nullable(); $t->timestamp('completed_at')->nullable(); $t->string('source', 32)->default('manual'); $t->timestamps();
+        });
+
+        Schema::create('kpi_period_locks', function (Blueprint $t) { $t->id(); $t->string('period_type', 16); $t->string('period_key', 32); $t->unsignedBigInteger('branch_id')->nullable(); $t->unsignedBigInteger('branch_group_id')->nullable(); $t->unsignedBigInteger('locked_by'); $t->timestamp('locked_at'); $t->timestamps();});
+        Schema::create('kpi_adjustment_logs', function (Blueprint $t) { $t->id(); $t->string('period_type',16); $t->string('period_key',32); $t->unsignedBigInteger('entity_id')->nullable(); $t->string('field_name',64); $t->decimal('old_value',14,4)->nullable(); $t->decimal('new_value',14,4)->nullable(); $t->text('reason'); $t->unsignedBigInteger('changed_by'); $t->timestamp('changed_at'); $t->timestamps(); });
+
+        Schema::create('kpi_plans', function (Blueprint $t) {
+            $t->id();
+            $t->string('role_slug',64);
+            $t->unsignedBigInteger('user_id')->nullable();
+            $t->unsignedBigInteger('branch_id')->nullable();
+            $t->unsignedBigInteger('branch_group_id')->nullable();
+            $t->string('metric_key',64);
+            $t->decimal('daily_plan',14,4)->default(0);
+            $t->decimal('weight',8,4)->default(0);
+            $t->string('comment',500)->nullable();
+            $t->date('effective_from')->nullable();
+            $t->date('effective_to')->nullable();
+            $t->timestamps();
+        });
+        Schema::create('crm_audit_logs', function (Blueprint $t) {
+            $t->id();
+            $t->string('auditable_type');
+            $t->unsignedBigInteger('auditable_id');
+            $t->unsignedBigInteger('actor_id')->nullable();
+            $t->string('event', 100);
+            $t->json('old_values')->nullable();
+            $t->json('new_values')->nullable();
+            $t->json('context')->nullable();
+            $t->text('message')->nullable();
+            $t->timestamps();
+        });
+        Schema::create('kpi_integration_statuses', function (Blueprint $t) { $t->id(); $t->string('code',64)->unique(); $t->string('name',128); $t->string('status',32)->default('unknown'); $t->timestamp('last_checked_at')->nullable(); $t->json('details')->nullable(); $t->timestamps(); });
+        Schema::create('kpi_telegram_report_configs', function (Blueprint $t) { $t->id(); $t->boolean('daily_enabled')->default(false); $t->string('daily_time',5)->default('09:00'); $t->boolean('weekly_enabled')->default(true); $t->unsignedTinyInteger('weekly_day')->default(1); $t->string('weekly_time',5)->default('10:00'); $t->string('timezone',64)->default('Asia/Dushanbe'); $t->timestamps(); });
+        Schema::create('kpi_quality_issues', function (Blueprint $t) { $t->id(); $t->string('title',255); $t->string('severity',32)->default('medium'); $t->timestamp('detected_at')->nullable(); $t->string('status',32)->default('open'); $t->json('details')->nullable(); $t->timestamps(); });
+        Schema::create('kpi_early_risk_alerts', function (Blueprint $t) { $t->id(); $t->unsignedBigInteger('user_id')->nullable(); $t->date('alert_date'); $t->string('status',32)->default('acknowledged'); $t->string('message',500)->nullable(); $t->json('meta')->nullable(); $t->timestamps(); });
+        Schema::create('kpi_acceptance_runs', function (Blueprint $t) { $t->id(); $t->string('run_type',64)->default('daily'); $t->string('status',32)->default('success'); $t->timestamp('started_at')->nullable(); $t->timestamp('finished_at')->nullable(); $t->json('details')->nullable(); $t->timestamps();});
+        Schema::create('kpi_rop_plans', function (Blueprint $t) {
+            $t->id();
+            $t->string('role_slug', 64);
+            $t->unsignedBigInteger('branch_id')->nullable();
+            $t->unsignedBigInteger('branch_group_id')->nullable();
+            $t->string('month', 7);
+            $t->json('items');
+            $t->unsignedBigInteger('created_by')->nullable();
+            $t->unsignedBigInteger('updated_by')->nullable();
+            $t->timestamps();
+        });
+
+        Schema::create('personal_access_tokens', function (Blueprint $t) { $t->id(); $t->morphs('tokenable'); $t->string('name'); $t->string('token',64)->unique(); $t->text('abilities')->nullable(); $t->timestamp('last_used_at')->nullable(); $t->timestamp('expires_at')->nullable(); $t->timestamps(); });
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
+        (require database_path('migrations/2026_09_08_170000_add_kpi_alert_group.php'))->up();
+        (require database_path('migrations/2026_09_08_180000_add_kpi_diagnostic_groups.php'))->up();
+        (require database_path('migrations/2026_09_08_190000_add_kpi_adjustment_group.php'))->up();
+    }
+
+    private function fixture(string $name = 'Agent'): array
+    {
+        $adminRole = Role::firstOrCreate(['slug' => 'admin'], ['name' => 'Admin']);
+        $agentRole = Role::firstOrCreate(['slug' => 'agent'], ['name' => 'Agent']);
+        $branch = Branch::create(['name' => 'Main']);
+        $group = BranchGroup::create(['name' => 'G', 'branch_id' => $branch->id]);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900990001', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $agent = User::create(['name' => $name, 'phone' => '900990002', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($admin);
+        return [$admin, $agent, $branch, $group];
+    }
+
+    private function plan(User $agent, string $key, float $target, float $weight, string $from, ?string $to = null): void
+    {
+        KpiPlan::create(['user_id' => $agent->id, 'role_slug' => 'agent', 'branch_id' => $agent->branch_id,
+            'branch_group_id' => $agent->branch_group_id, 'metric_key' => $key, 'daily_plan' => $target,
+            'weight' => $weight, 'effective_from' => $from, 'effective_to' => $to]);
+    }
+
+    private function report(User $agent, string $date, array $values = []): DailyReport
+    {
+        return DailyReport::create($values + ['user_id' => $agent->id, 'branch_group_id' => $agent->branch_group_id, 'role_slug' => 'agent', 'report_date' => $date]);
+    }
+
+    private function completedCall(User $agent, string $date): void
+    {
+        $type = CrmTaskType::firstOrCreate(['code' => 'CALL'], ['name' => 'Call']);
+        CrmTask::create(['task_type_id' => $type->id, 'assignee_id' => $agent->id, 'title' => 'Call', 'status' => 'done', 'completed_at' => $date.' 10:00:00']);
+    }
+
+    public function test_mixed_sources_sum_daily_choices_and_include_days_without_reports(): void
+    {
+        [, $agent] = $this->fixture();
+        $this->report($agent, '2026-10-01', ['calls_count' => 30]);
+        $this->report($agent, '2026-10-02', ['calls_count' => 9]);
+        $this->completedCall($agent, '2026-10-02');
+        $this->completedCall($agent, '2026-10-03');
+        $response = $this->getJson('/api/kpi/monthly?v=2&year=2026&month=10&include_breakdown=1')->assertOk();
+        $response->assertJsonPath('data.0.metrics.calls.final_value', 32)
+            ->assertJsonPath('data.0.metrics.calls.fact_value', 2)
+            ->assertJsonPath('data.0.metrics.calls.manual_value', 39)
+            ->assertJsonPath('meta.totals.calls', 32)->assertJsonCount(3, 'data.0.breakdown_by_day');
+        $this->assertEquals(32, collect($response->json('data.0.breakdown_by_day'))->sum('metrics.calls.final_value'));
+    }
+
+    public function test_targets_follow_mid_month_and_cross_month_effective_plans(): void
+    {
+        [, $agent] = $this->fixture();
+        $this->plan($agent, 'calls', 300, .2, '2026-09-01', '2026-09-30');
+        $this->plan($agent, 'calls', 310, .2, '2026-10-01', '2026-10-15');
+        $this->plan($agent, 'calls', 620, .2, '2026-10-16', '2026-10-31');
+        $this->getJson('/api/kpi/daily?v=2&date=2026-10-20')->assertOk()->assertJsonPath('data.0.metrics.calls.target_value', 20);
+        $this->getJson('/api/kpi/monthly?v=2&year=2026&month=10')->assertOk()->assertJsonPath('data.0.metrics.calls.target_value', 470);
+        $this->getJson('/api/kpi/weekly?v=2&date_from=2026-09-01&date_to=2026-10-31')->assertOk()->assertJsonPath('data.0.metrics.calls.target_value', 770);
+    }
+
+    public function test_each_metric_inherits_target_and_weight_independently(): void
+    {
+        [, $agent, $branch, $group] = $this->fixture();
+        KpiPlan::create(['role_slug' => 'agent', 'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'metric_key' => 'objects', 'daily_plan' => 31, 'weight' => .2, 'effective_from' => '2026-10-01']);
+        KpiPlan::create(['role_slug' => 'agent', 'branch_id' => $branch->id, 'metric_key' => 'calls', 'daily_plan' => 310, 'weight' => .6, 'effective_from' => '2026-10-01']);
+        $response = $this->getJson('/api/kpi/daily?v=2&date=2026-10-10')->assertOk()
+            ->assertJsonPath('data.0.metrics.calls.target_value', 10)
+            ->assertJsonPath('data.0.metrics.calls.plan_source', 'common')
+            ->assertJsonPath('data.0.metrics.shows.target_value', 2);
+        $this->assertEqualsWithDelta(.6 / 1.4, $response->json('data.0.metrics.calls.weight_used'), .00001);
+        $this->assertEqualsWithDelta(1, collect($response->json('data.0.metrics'))->sum('weight_used'), .00001);
+    }
+
+    public function test_custom_weights_change_score_and_explicit_zero_weight_is_respected(): void
+    {
+        [, $agent] = $this->fixture();
+        foreach (['objects' => .0, 'shows' => .1, 'ads' => .1, 'calls' => .7, 'sales' => .1] as $key => $weight) {
+            $this->plan($agent, $key, 31, $weight, '2026-10-01');
+        }
+        $this->report($agent, '2026-10-10', ['calls_count' => 1]);
+        $this->getJson('/api/kpi/daily?v=2&date=2026-10-10')->assertOk()
+            ->assertJsonPath('data.0.metrics.calls.weight_used', .7)
+            ->assertJsonPath('data.0.metrics.objects.weight_used', 0)
+            ->assertJsonPath('data.0.kpi_percent', 70);
+    }
+
+    public function test_totals_and_monthly_ranking_are_global_and_roles_filter_before_pagination(): void
+    {
+        [, $weak, $branch, $group] = $this->fixture('A weak');
+        $strong = User::create(['name' => 'Z strong', 'phone' => '900990003', 'role_id' => $weak->role_id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $internRole = Role::create(['name' => 'Intern', 'slug' => 'intern']);
+        $intern = User::create(['name' => 'AAA hidden', 'phone' => '900990004', 'role_id' => $internRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        foreach ([$weak, $strong, $intern] as $index => $user) $this->report($user, '2026-10-10', ['calls_count' => [10, 100, 1000][$index]]);
+        $first = $this->getJson('/api/kpi/monthly?v=2&year=2026&month=10&per_page=1&page=1')->assertOk()
+            ->assertJsonPath('data.0.employee_id', $strong->id)->assertJsonPath('meta.pagination.total', 2)
+            ->assertJsonPath('meta.totals.calls', 110)->assertJsonPath('meta.totals.employees_count', 2);
+        $second = $this->getJson('/api/kpi/monthly?v=2&year=2026&month=10&per_page=1&page=2')->assertOk()
+            ->assertJsonPath('data.0.employee_id', $weak->id);
+        $this->assertSame($first->json('meta.totals'), $second->json('meta.totals'));
+        $this->getJson('/api/kpi/monthly?v=2&year=2026&month=10&roles[]=mop')->assertOk()
+            ->assertJsonPath('meta.pagination.total', 0)->assertJsonPath('meta.totals.calls', 0);
+    }
+
+    public function test_daily_report_daily_table_weekly_daily_and_dashboard_share_metrics(): void
+    {
+        [, $agent] = $this->fixture();
+        $this->report($agent, '2026-10-10', ['calls_count' => 30]);
+        $this->completedCall($agent, '2026-10-10');
+        $daily = $this->getJson('/api/kpi/daily?v=2&date=2026-10-10')->assertOk();
+        $weeklyDaily = $this->getJson('/api/kpi/weekly-daily?day=2026-10-10')->assertOk();
+        $dashboard = $this->getJson('/api/kpi/dashboard?date=2026-10-10')->assertOk();
+        $report = $this->getJson('/api/kpi/daily/report?date=2026-10-10&employee_id='.$agent->id)->assertOk();
+        foreach (['objects', 'shows', 'ads', 'calls', 'sales'] as $key) {
+            foreach (['final_value', 'target_value', 'weight_used'] as $field) {
+                $expected = $daily->json('data.0.metrics.'.$key.'.'.$field);
+                $this->assertEquals($expected, $weeklyDaily->json('data.0.metrics.'.$key.'.'.$field));
+                $this->assertEquals($expected, $dashboard->json('data.ranking.0.metrics.'.$key.'.'.$field));
+                $this->assertEquals($expected, $report->json('metrics.'.$key.'.'.$field));
+            }
+        }
+        $this->assertEquals($daily->json('meta.totals'), $dashboard->json('data.summary.totals'));
+    }
+
+    public function test_explicitly_finalized_report_keeps_the_same_snapshot_in_all_kpi_views(): void
+    {
+        [, $agent] = $this->fixture();
+        Schema::table('daily_reports', fn (Blueprint $table) => $table->boolean('is_finalized')->default(false));
+        $this->report($agent, '2026-10-10', ['new_properties_count' => 17, 'calls_count' => 30, 'is_finalized' => true]);
+        $this->completedCall($agent, '2026-10-10');
+        $this->getJson('/api/kpi/daily?v=2&date=2026-10-10')->assertOk()
+            ->assertJsonPath('data.0.metrics.objects.final_value', 17)->assertJsonPath('data.0.metrics.calls.final_value', 30);
+        $this->getJson('/api/kpi/monthly?v=2&year=2026&month=10')->assertOk()
+            ->assertJsonPath('data.0.metrics.objects.final_value', 17)->assertJsonPath('data.0.metrics.calls.final_value', 30);
+    }
+    public function test_global_totals_for_53_employees_keep_source_queries_bounded(): void
+    {
+        [, $agent, $branch, $group] = $this->fixture();
+        $url = '/api/kpi/monthly?v=2&year=2026&month=10&per_page=50';
+        $this->getJson($url)->assertOk();
+        \DB::enableQueryLog();
+        $this->getJson($url)->assertOk();
+        $baseline = count(\DB::getQueryLog());
+        \DB::disableQueryLog();
+        foreach (range(1, 52) as $index) {
+            $extra = User::create(['name' => 'Extra '.$index, 'phone' => '901'.str_pad((string) $index, 6, '0', STR_PAD_LEFT),
+                'role_id' => $agent->role_id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+            $this->report($extra, '2026-10-10', ['calls_count' => 1]);
+        }
+        \DB::flushQueryLog();
+        \DB::enableQueryLog();
+        $this->getJson($url)->assertOk()->assertJsonCount(50, 'data')
+            ->assertJsonPath('meta.pagination.total', 53)->assertJsonPath('meta.totals.calls', 52);
+        $queries = \DB::getQueryLog();
+        \DB::disableQueryLog();
+        $this->assertLessThanOrEqual($baseline + 10, count($queries), 'Global totals must preload sources/plans instead of querying per employee or day.');
+    }
+
+    public function test_all_period_includes_imported_old_facts_and_explicitly_reports_undated_sales(): void
+    {
+        [$admin, $agent] = $this->fixture();
+        Schema::create('properties', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('created_by')->nullable(); $table->unsignedBigInteger('agent_id')->nullable();
+            $table->unsignedBigInteger('sale_user_id')->nullable(); $table->string('moderation_status'); $table->timestamp('sold_at')->nullable(); $table->timestamps();
+        });
+        \DB::table('properties')->insert([
+            ['created_by' => $agent->id, 'agent_id' => $agent->id, 'sale_user_id' => $agent->id, 'moderation_status' => 'sold', 'sold_at' => '2024-01-02 23:30:00', 'created_at' => '2024-01-01 23:30:00'],
+            ['created_by' => $agent->id, 'agent_id' => $agent->id, 'sale_user_id' => $agent->id, 'moderation_status' => 'sold', 'sold_at' => null, 'created_at' => '2024-01-01 23:30:00'],
+        ]);
+        $this->getJson('/api/kpi/weekly?v=2&all_period=1&include_breakdown=1')->assertOk()
+            ->assertJsonPath('meta.date_from', '2024-01-01')->assertJsonPath('meta.totals.objects', 2)
+            ->assertJsonPath('meta.totals.sales', 2)->assertJsonPath('meta.quality.undated_sales_count', 1)
+            ->assertJsonCount(2, 'data.0.breakdown_by_day');
+        $this->getJson('/api/kpi/weekly?v=2&date_from=2024-01-01&date_to=2024-01-31')->assertOk()
+            ->assertJsonPath('meta.totals.sales', 1)->assertJsonPath('meta.quality.undated_sales_count', 0);
+        $this->getJson('/api/kpi/daily?v=2&date=2024-01-01')->assertOk()->assertJsonPath('meta.totals.objects', 2);
+        $this->getJson('/api/kpi/daily?v=2&date=2024-01-02')->assertOk()->assertJsonPath('meta.totals.sales', 1);
+    }
+
+    public function test_global_iso_week_lock_is_consistent_on_row_and_meta(): void
+    {
+        [$admin, $agent] = $this->fixture();
+        \App\Models\KpiPeriodLock::create(['period_type' => 'week', 'period_key' => '2026-W41', 'locked_by' => $admin->id, 'locked_at' => now()]);
+        foreach (['', '&branch_id='.$agent->branch_id.'&branch_group_id='.$agent->branch_group_id] as $scope) {
+            $this->getJson('/api/kpi/weekly?v=2&day=2026-10-10'.$scope)->assertOk()
+                ->assertJsonPath('meta.locked', true)->assertJsonPath('data.0.locked', true);
+        }
+    }
+    public function test_former_team_daily_and_monthly_rows_use_the_same_saved_facts(): void
+    {
+        [, $agent, $branch, $oldGroup] = $this->fixture();
+        $newGroup = BranchGroup::create(['name' => 'New group', 'branch_id' => $branch->id]);
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $rop = User::create(['name' => 'Old supervisor', 'phone' => '900990009', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $rop->supervisedGroups()->attach($oldGroup->id);
+        $this->report($agent, '2026-10-10', ['calls_count' => 8, 'new_properties_count' => 17]);
+        $agent->update(['branch_group_id' => $newGroup->id]);
+        $type = CrmTaskType::create(['code' => 'CALL', 'name' => 'Call']);
+        \DB::table('crm_tasks')->insert(['task_type_id' => $type->id, 'assignee_id' => $agent->id,
+            'branch_group_id' => $oldGroup->id, 'title' => 'Later CRM correction', 'status' => 'done', 'completed_at' => '2026-10-10 10:00:00']);
+        Sanctum::actingAs($rop);
+        foreach (['/api/kpi/daily?v=2&date=2026-10-10', '/api/kpi/monthly?v=2&year=2026&month=10'] as $url) {
+            $this->getJson($url.'&user_id='.$agent->id)->assertOk()->assertJsonCount(1, 'data')
+                ->assertJsonPath('data.0.metrics.calls.final_value', 8)
+                ->assertJsonPath('data.0.metrics.objects.final_value', 17);
+        }
+        $this->getJson('/api/kpi/daily/report?date=2026-10-10&employee_id='.$agent->id)->assertOk()
+            ->assertJsonPath('metrics.calls.final_value', 8)->assertJsonPath('metrics.objects.final_value', 17);
+    }
+    public function test_transferred_employee_uses_report_date_plan_context_in_every_daily_view(): void
+    {
+        [, $agent, $branch, $oldGroup] = $this->fixture();
+        $newGroup = BranchGroup::create(['name' => 'New', 'branch_id' => $branch->id]);
+        foreach ([[$oldGroup, 31], [$newGroup, 62]] as [$group, $target]) {
+            KpiPlan::create(['role_slug' => 'agent', 'branch_id' => $branch->id, 'branch_group_id' => $group->id,
+                'metric_key' => 'objects', 'daily_plan' => $target, 'weight' => .2, 'effective_from' => '2026-10-01']);
+        }
+        $this->report($agent, '2026-10-10', ['new_properties_count' => 17]);
+        $agent->update(['branch_group_id' => $newGroup->id]);
+        $this->getJson('/api/kpi/daily/report?date=2026-10-10&employee_id='.$agent->id)->assertOk()
+            ->assertJsonPath('metrics.objects.target_value', 1)->assertJsonPath('metrics.objects.final_value', 17);
+        $this->getJson('/api/kpi/daily/my-progress?date=2026-10-10&user_id='.$agent->id)->assertOk()
+            ->assertJsonPath('metrics.objects.target_value', 1)->assertJsonPath('metrics.objects.final_value', 17);
+        $this->getJson('/api/kpi/daily?v=2&date=2026-10-10&user_id='.$agent->id)->assertOk()
+            ->assertJsonPath('data.0.metrics.objects.target_value', 1)->assertJsonPath('data.0.metrics.objects.final_value', 17);
+        $this->getJson('/api/kpi/daily?v=2&date=2026-10-11&user_id='.$agent->id)->assertOk()
+            ->assertJsonPath('data.0.metrics.objects.target_value', 2);
+    }
+    public function test_daily_report_list_batches_live_sources_and_matches_single_day_metrics(): void
+    {
+        [, $agent] = $this->fixture();
+        $this->report($agent, '2026-10-01', ['calls_count' => 30]);
+        $url = '/api/daily-reports?per_page=50';
+        $this->getJson($url)->assertOk();
+        \DB::enableQueryLog();
+        $this->getJson($url)->assertOk();
+        $baseline = count(\DB::getQueryLog());
+        \DB::disableQueryLog();
+        for ($offset = 1; $offset < 50; $offset++) {
+            $date = \Carbon\Carbon::parse('2026-10-01')->subDays($offset)->toDateString();
+            $this->report($agent, $date, ['calls_count' => 9]);
+        }
+        $this->completedCall($agent, '2026-09-30');
+        \DB::flushQueryLog();
+        \DB::enableQueryLog();
+        $list = $this->getJson($url)->assertOk()->assertJsonCount(50, 'data');
+        $queryCount = count(\DB::getQueryLog());
+        \DB::disableQueryLog();
+        $this->assertLessThanOrEqual($baseline + 10, $queryCount, 'Daily report lists must preload live facts, scopes and plans.');
+        foreach (['2026-10-01', '2026-09-30', '2026-09-29'] as $date) {
+            $row = collect($list->json('data'))->firstWhere('report_date', $date);
+            $daily = $this->getJson('/api/kpi/daily?v=2&date='.$date.'&user_id='.$agent->id)->assertOk();
+            foreach (['objects', 'shows', 'ads', 'calls', 'sales'] as $metric) {
+                $this->assertEquals($daily->json('data.0.metrics.'.$metric.'.final_value'), $row['metrics'][$metric]['final_value']);
+                $this->assertEquals($daily->json('data.0.metrics.'.$metric.'.target_value'), $row['metrics'][$metric]['target_value']);
+            }
+        }
+    }
+}

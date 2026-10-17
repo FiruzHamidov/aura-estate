@@ -8,6 +8,25 @@ use Illuminate\Support\Facades\Schema;
 
 class SalesAttributionService
 {
+    /** Columns required to resolve the same seller in SQL and in PHP. */
+    public function sellerColumns(): array
+    {
+        return array_values(array_intersect(
+            ['sale_agent_id', 'sale_user_id', 'agent_id', 'created_by'],
+            Schema::getColumnListing('properties')
+        ));
+    }
+
+    public function primarySellerExpression(string $table = 'properties'): string
+    {
+        $candidates = array_map(
+            fn (string $column) => "CASE WHEN {$table}.{$column} > 0 THEN {$table}.{$column} END",
+            $this->sellerColumns()
+        );
+
+        return $candidates === [] ? 'NULL' : 'COALESCE('.implode(', ', [...$candidates, 'NULL']).')';
+    }
+
     /**
      * @param Collection<int, object> $properties
      * @param list<string> $splitStatuses

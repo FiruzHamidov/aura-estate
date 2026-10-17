@@ -591,19 +591,28 @@ class KpiModuleService
 
     public function dashboard(User $authUser, Carbon $date, array $filters): array
     {
-        $rows = $this->periodRows($authUser, 'day', $date->copy()->startOfDay(), $date->copy()->endOfDay(), $filters);
-
-        $ranking = $rows->sortByDesc(fn (array $row) => array_sum($row['metrics']))->values()->map(function (array $row, int $i) {
+        $response = $this->dailyRowsV2($authUser, $date, array_merge($filters, ['page' => 1, 'per_page' => PHP_INT_MAX]));
+        $rows = collect($response['data']);
+        $ranking = $rows->sortByDesc('kpi_percent')->values()->map(function (array $row, int $i) use ($authUser) {
             $row['rank'] = $i + 1;
+            $row['user'] = ['id' => $row['employee_id'], 'name' => $row['employee_name'],
+                ...($authUser->usesAssignedGroupScope() ? [] : ['role_slug' => $row['role']])];
             return $row;
         });
 
         return [
             'summary' => [
                 'date' => $date->toDateString(),
+                'report_date' => $date->toDateString(),
                 'rows_count' => $rows->count(),
+                'totals' => $response['meta']['totals'],
+                'total_objects' => $response['meta']['totals']['objects'],
+                'total_calls' => $response['meta']['totals']['calls'],
+                'total_sales' => $response['meta']['totals']['sales'],
+                'average_kpi_percent' => $response['meta']['totals']['average_kpi_percent'],
             ],
             'ranking' => $ranking,
+            'meta' => $response['meta'],
         ];
     }
 
@@ -627,7 +636,7 @@ class KpiModuleService
             $sourceCounts = $user ? $this->dailyReportService->autoMetrics($user, $date->toDateString()) : [];
 
             $row['source_counts'] = $sourceCounts;
-            $row['stored_metrics_total'] = array_sum($row['metrics']);
+            $row['stored_metrics_total'] = collect($row['metrics'])->sum(fn ($metric) => is_array($metric) ? (float) ($metric['final_value'] ?? 0) : (float) $metric);
             $row['source_metrics_total'] = array_sum($sourceCounts);
 
             return $row;
@@ -766,51 +775,12 @@ class KpiModuleService
             ->first();
 
         $auto = $this->dailyReportService->autoMetrics($targetUser, $date->toDateString());
-        $targetResolution = $this->resolvePeriodTargetMapForUser($targetUser, $date, (array) config('kpi.v2.targets', []));
-        $monthlyTargets = (array) ($targetResolution['targets'] ?? []);
-        $daysInMonth = max(1, (int) $date->daysInMonth);
-
-        $targetForDay = function (string $metricKey) use ($monthlyTargets, $daysInMonth): float {
-            $monthly = (float) ($monthlyTargets[$metricKey] ?? 0);
-            if ($metricKey === 'sales') {
-                return $monthly;
-            }
-
-            return $monthly / $daysInMonth;
-        };
-
-        $metrics = [
-            'objects' => $this->metricProgress(
-                (float) ($auto['new_properties_count'] ?? 0),
-                $targetForDay('objects')
-            ),
-            'shows' => $this->metricProgress(
-                (float) ($auto['shows_count'] ?? 0),
-                $targetForDay('shows')
-            ),
-            'ads' => $this->metricProgress(
-                (float) ($report?->ad_count ?? 0),
-                $targetForDay('ads')
-            ),
-            'calls' => $this->metricProgress(
-                (float) ($report?->calls_count ?? 0),
-                $targetForDay('calls')
-            ),
-            'sales' => $this->metricProgress(
-                (float) ($auto['sales_count'] ?? $auto['deals_count'] ?? 0),
-                $targetForDay('sales')
-            ),
-        ];
-
-        $overallProgressPct = round((float) collect($metrics)->avg('progress_pct'), 2);
-
+        $bundle = $this->canonicalDailyMetricsBundle($targetUser, $date->toDateString(), $report, $auto);
         return [
-            'date' => $date->toDateString(),
-            'timezone' => self::TZ,
-            'submitted_daily_report' => (bool) ($report?->submitted_at !== null),
-            'overall_progress_pct' => $overallProgressPct,
-            'status' => $this->statusForKpiPercent($overallProgressPct),
-            'metrics' => $metrics,
+            'date' => $date->toDateString(), 'timezone' => self::TZ,
+            'submitted_daily_report' => $report?->submitted_at !== null,
+            'overall_progress_pct' => $bundle['kpi_percent'], 'status' => $bundle['status'],
+            'metrics' => collect($bundle['metrics'])->map(fn (array $metric) => $metric + ['fact' => $metric['final_value'], 'target' => $metric['target_value']])->all(),
         ];
     }
 
@@ -1098,208 +1068,65 @@ class KpiModuleService
         $from = $this->rangeDateFromFilters($filters, $date->copy()->startOfDay());
         $to = $this->rangeDateToFilters($filters, $date->copy()->endOfDay());
 
-        return $this->buildScopedPeriodV2Response($authUser, $from, $to, $filters, 'day', false, false);
+        return $this->buildScopedPeriodV2Response($authUser, $from, $to, $filters, 'day', (bool) ($filters['include_breakdown'] ?? false), false);
     }
 
     public function earliestScopedUserDate(User $authUser, array $filters): Carbon
     {
-        $earliest = $this->weeklyUsersScopeQuery($authUser, $filters)->min('users.created_at');
-
-        return $earliest
-            ? Carbon::parse((string) $earliest, 'UTC')->setTimezone(self::TZ)->startOfDay()
-            : Carbon::now(self::TZ)->startOfDay();
+        $visibleRoles = app(KpiRoleCatalog::class)->reportPresentation($authUser)['visible_roles'];
+        if ($visibleRoles !== null) $filters['roles'] = isset($filters['roles']) ? array_values(array_intersect($filters['roles'], $visibleRoles)) : $visibleRoles;
+        $users = $this->weeklyUsersScopeQuery($authUser, $filters);
+        $ids = (clone $users)->pluck('users.id')->all();
+        $appTimezone = (string) config('app.timezone', self::TZ);
+        $dates = [Carbon::now(self::TZ)->startOfDay()];
+        $add = static function ($value, string $timezone) use (&$dates): void {
+            if ($value !== null) $dates[] = Carbon::parse((string) $value, $timezone)->setTimezone(self::TZ)->startOfDay();
+        };
+        $add((clone $users)->min('users.created_at'), $appTimezone);
+        $reports = DailyReport::query()->tap(fn ($query) => \App\Support\BranchVisibility::records($query));
+        $this->applyScope($reports, $authUser, $filters);
+        if (isset($filters['roles'])) $reports->whereIn('role_slug', $filters['roles']);
+        $add($reports->min('report_date'), self::TZ);
+        if ($ids !== []) {
+            if (Schema::hasTable('properties')) {
+                $properties = DB::table('properties')->tap(fn ($query) => \App\Support\BranchVisibility::records($query));
+                if (Schema::hasColumn('properties', 'created_by')) {
+                    $created = (clone $properties)->where(fn ($query) => $query->whereIn('created_by', $ids)
+                        ->orWhere(fn ($legacy) => $legacy->whereIn('agent_id', $ids)->where(fn ($missing) => $missing->whereNull('created_by')->orWhere('created_by', 0))));
+                    $add($created->min('created_at'), $appTimezone);
+                }
+                if (Schema::hasColumn('properties', 'sold_at')) {
+                    $seller = $this->salesAttributionService->primarySellerExpression();
+                    $add((clone $properties)->whereIn(DB::raw($seller), $ids)->where('moderation_status', 'sold')->min('sold_at'), $appTimezone);
+                }
+            }
+            if (Schema::hasTable('clients')) {
+                $add(DB::table('clients')->tap(fn ($query) => \App\Support\BranchVisibility::records($query))
+                    ->where(fn ($query) => $query->whereIn('created_by', $ids)
+                        ->orWhere(fn ($legacy) => $legacy->whereIn('responsible_agent_id', $ids)->where(fn ($missing) => $missing->whereNull('created_by')->orWhere('created_by', 0))))
+                    ->min('created_at'), $appTimezone);
+            }
+            if (Schema::hasTable('bookings')) {
+                $add(DB::table('bookings')->tap(fn ($query) => \App\Support\BranchVisibility::records($query))
+                    ->whereIn(\App\Support\BookingAttribution::column(), $ids)->min('start_time'), 'UTC');
+            }
+            if (Schema::hasTable('crm_tasks')) {
+                $add(DB::table('crm_tasks')->tap(fn ($query) => \App\Support\BranchVisibility::records($query))
+                    ->whereIn('assignee_id', $ids)->where('status', 'done')->min('completed_at'), 'UTC');
+            }
+        }
+        return collect($dates)->sort()->first();
     }
 
     public function periodRowsV2(User $authUser, string $periodType, Carbon $from, Carbon $to, array $filters): array
     {
-        $periodKey = match ($periodType) {
-            'week' => $from->format('o-\WW'),
-            'range' => 'all',
-            default => $from->format('Y-m'),
-        };
-
-        $withBreakdown = (bool) ($filters['include_breakdown'] ?? false);
-
-        return $this->buildV2Response($authUser, $periodType, $from, $to, $filters, $periodKey, $withBreakdown);
+        return $this->buildScopedPeriodV2Response($authUser, $from, $to, $filters, $periodType,
+            (bool) ($filters['include_breakdown'] ?? false), $periodType === 'week');
     }
 
     public function weeklyDailyRowsV2(User $authUser, Carbon $day, array $filters): array
     {
-        $from = $day->copy()->startOfDay();
-        $to = $day->copy()->endOfDay();
-        $withBreakdown = (bool) ($filters['include_breakdown'] ?? false);
-
-        return $this->buildV2Response($authUser, 'day', $from, $to, $filters, $from->toDateString(), $withBreakdown);
-    }
-
-    private function buildV2Response(
-        User $authUser,
-        string $periodType,
-        Carbon $from,
-        Carbon $to,
-        array $filters,
-        string $periodKey,
-        bool $withBreakdown
-    ): array {
-        if (in_array($periodType, ['week', 'month', 'range'], true)) {
-            return $this->buildScopedPeriodV2Response(
-                $authUser,
-                $from,
-                $to,
-                $filters,
-                $periodType,
-                $withBreakdown,
-                $periodType === 'week'
-            );
-        }
-
-        $query = DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
-            ->with(['user.role', 'user.branch', 'user.branchGroup', 'branchGroup.branch'])
-            ->whereDate('report_date', '>=', $from->toDateString())
-            ->whereDate('report_date', '<=', $to->toDateString());
-        $this->applyScope($query, $authUser, $filters);
-
-        $perPage = (int) ($filters['per_page'] ?? 50);
-        $page = max(1, (int) ($filters['page'] ?? 1));
-        $paginator = $query->orderBy('user_id')->paginate($perPage, ['*'], 'page', $page);
-
-        $mapping = (array) config('kpi.v2.metric_mapping', []);
-        $targetMap = (array) config('kpi.v2.targets', []);
-        $weightMap = (array) config('kpi.v2.weights', []);
-        $globalSourceError = false;
-
-        $data = collect($paginator->items())
-            ->groupBy(fn ($row) => $authUser->usesAssignedGroupScope() ? $row->user_id.'|'.$row->branch_group_id.'|'.$row->role_slug : $row->user_id)
-            ->map(function (Collection $rows) use ($authUser, $periodType, $from, $to, $mapping, $targetMap, $weightMap, $withBreakdown, &$globalSourceError) {
-                $first = $rows->first();
-                $user = $first?->user;
-                if ($authUser->usesAssignedGroupScope() && $user) {
-                    $user = clone $user;
-                    $user->branch_group_id = $first->branch_group_id;
-                    $user->branch_id = $authUser->branch_id;
-                    $user->setRelation('branchGroup', $first->branchGroup);
-                    $user->setRelation('branch', $first->branchGroup?->branch);
-                    $user->setRelation('role', new \App\Models\Role(['slug' => $first->role_slug]));
-                }
-                $autoByDate = [];
-                $sourceErrors = [];
-
-                foreach ($rows as $row) {
-                    try {
-                        $autoByDate[$row->report_date->toDateString()] = $this->dailyReportService->autoMetrics($user, $row->report_date->toDateString());
-                    } catch (Throwable) {
-                        $autoByDate[$row->report_date->toDateString()] = [];
-                        $sourceErrors[$row->report_date->toDateString()] = true;
-                    }
-                }
-
-                $daysInPeriod = max(1, $from->diffInDays($to) + 1);
-                $metrics = $this->buildMetricsForRows($rows, $autoByDate, $sourceErrors, $mapping, $targetMap, $periodType, $daysInPeriod, [], $from);
-                if (
-                    $periodType === 'day'
-                    && $user
-                    && in_array((string) ($metrics['sales']['plan_source'] ?? 'system'), ['personal', 'common'], true)
-                ) {
-                    $this->overrideDailySalesMetricWithMonthlyCompletion($metrics, $user, $from);
-                }
-                $score = $this->kpiScoreFromMetrics($metrics, $weightMap);
-                $kpiValue = $score['kpi_value'];
-                $kpiPercent = $score['kpi_percent'];
-                $status = $this->statusForKpiPercent($kpiPercent, $score);
-                $locked = $this->isPeriodLockedForUser($periodType, $from, $user, $rows->first()?->branch_group_id);
-                $rowSourceError = collect($metrics)->contains(fn (array $metric) => (bool) $metric['source_error']);
-                $globalSourceError = $globalSourceError || $rowSourceError;
-                $liveClients = Schema::hasTable('clients')
-                    ? (float) collect($autoByDate)->sum(
-                        fn (array $dayMetrics) => (float) ($dayMetrics['new_clients_count'] ?? 0)
-                    )
-                    : (float) $rows->sum('new_clients_count');
-
-                $payload = [
-                    'period_key' => $periodType === 'day' ? $from->toDateString() : ($periodType === 'week' ? $from->format('o-\WW') : $from->format('Y-m')),
-                    'employee_id' => $user?->id,
-                    'employee_name' => $user?->name,
-                    'agent_id' => $user?->role?->slug === 'agent' ? $user?->id : null,
-                    'agent_name' => $user?->role?->slug === 'agent' ? $user?->name : null,
-                    'mop_id' => $user?->role?->slug === 'mop' ? $user?->id : null,
-                    'mop_name' => $user?->role?->slug === 'mop' ? $user?->name : null,
-                    'group_id' => $user?->branch_group_id,
-                    'group_name' => $user?->branchGroup?->name,
-                    'branch_id' => $user?->branch_id,
-                    'branch_name' => $user?->branch?->name,
-                    'role' => (string) ($user?->role?->slug ?? ''),
-                    'metrics' => $metrics,
-                    'objects_raw' => (float) ($metrics['objects']['final_value'] ?? 0),
-                    'objects_display' => $this->displayNumber((float) ($metrics['objects']['final_value'] ?? 0)),
-                    'shows_raw' => (float) ($metrics['shows']['final_value'] ?? 0),
-                    'shows_display' => $this->displayNumber((float) ($metrics['shows']['final_value'] ?? 0)),
-                    'ads_raw' => (float) ($metrics['ads']['final_value'] ?? 0),
-                    'ads_display' => $this->displayNumber((float) ($metrics['ads']['final_value'] ?? 0)),
-                    'calls_raw' => (float) ($metrics['calls']['final_value'] ?? 0),
-                    'calls_display' => $this->displayNumber((float) ($metrics['calls']['final_value'] ?? 0)),
-                    'clients_raw' => $liveClients,
-                    'clients_display' => $this->displayNumber($liveClients),
-                    'sales_raw' => (float) ($metrics['sales']['final_value'] ?? 0),
-                    'sales_display' => $this->displayNumber((float) ($metrics['sales']['final_value'] ?? 0)),
-                    'sales_count_raw' => (float) ($metrics['sales']['final_value'] ?? 0),
-                    'sales_count_display' => $this->displayNumber((float) ($metrics['sales']['final_value'] ?? 0)),
-                    'objects' => (float) ($metrics['objects']['final_value'] ?? 0),
-                    'shows' => (float) ($metrics['shows']['final_value'] ?? 0),
-                    'ads' => (float) ($metrics['ads']['final_value'] ?? 0),
-                    'calls' => (float) ($metrics['calls']['final_value'] ?? 0),
-                    'clients' => $liveClients,
-                    'sales' => (float) ($metrics['sales']['final_value'] ?? 0),
-                    'kpi_value' => $kpiValue,
-                    'kpi_percent' => $kpiPercent,
-                    'overall_progress_pct' => $kpiPercent,
-                    'average_kpi_percent' => $kpiPercent,
-                    'status' => $status,
-                    'locked' => $locked,
-                    'kpi_trace' => $score['trace'],
-                ];
-
-                if ($withBreakdown) {
-                    $payload['breakdown_by_day'] = $this->breakdownByDay($rows, $mapping, $targetMap, $sourceErrors);
-                }
-
-                return $payload;
-            })
-            ->values();
-
-        $completeness = $this->completenessPct($data);
-        $qualityIssuesCount = Schema::hasTable('kpi_quality_issues')
-            ? KpiQualityIssue::query()
-                ->forRop($authUser, isset($filters['branch_group_id']) ? (int) $filters['branch_group_id'] : null)
-                ->where('status', 'open')
-                ->whereDate('detected_at', '>=', $from->toDateString())
-                ->whereDate('detected_at', '<=', $to->toDateString())
-                ->count()
-            : 0;
-
-        return [
-            'data' => $data,
-            'rows' => $data,
-            'meta' => [
-                'version' => '2',
-                'period_type' => $periodType,
-                'period_key' => $periodType === 'day' ? $from->toDateString() : null,
-                'date_from' => $from->toDateString(),
-                'date_to' => $to->toDateString(),
-                'locked' => $this->isPeriodLocked($periodType, $from, $filters),
-                'quality' => [
-                    'duplicate_check_passed' => true,
-                    'completeness_pct' => $completeness,
-                    'source_error' => $globalSourceError,
-                    'issues_count' => $qualityIssuesCount,
-                ],
-                'pagination' => [
-                    'page' => $paginator->currentPage(),
-                    'per_page' => $paginator->perPage(),
-                    'total' => $paginator->total(),
-                    'last_page' => $paginator->lastPage(),
-                ],
-            ],
-        ];
+        return $this->dailyRowsV2($authUser, $day, $filters);
     }
 
     private function buildScopedPeriodV2Response(
@@ -1311,14 +1138,26 @@ class KpiModuleService
         bool $withBreakdown,
         bool $includeWeeklyStats
     ): array {
+        $visibleRoles = app(KpiRoleCatalog::class)->reportPresentation($authUser)['visible_roles'];
+        if ($visibleRoles !== null) {
+            $filters['roles'] = isset($filters['roles']) ? array_values(array_intersect($filters['roles'], $visibleRoles)) : $visibleRoles;
+        }
         $perPage = (int) ($filters['per_page'] ?? 50);
         $page = max(1, (int) ($filters['page'] ?? 1));
 
-        $usersPaginator = ($authUser->usesAssignedGroupScope() ? $this->historicalKpiUsersQuery($authUser, $filters, $from, $to) : $this->weeklyUsersScopeQuery($authUser, $filters))
+        $allUsers = ($authUser->usesAssignedGroupScope() ? $this->historicalKpiUsersQuery($authUser, $filters, $from, $to) : $this->weeklyUsersScopeQuery($authUser, $filters))
             ->when(isset($filters['user_ids']), fn (Builder $query) => $query->whereIn('users.id', $filters['user_ids']))
             ->orderBy('users.name')
-            ->paginate($perPage, ['*'], 'page', $page);
-        $userIds = collect($usersPaginator->items())->pluck('id')->map(fn ($id) => (int) $id)->values();
+            ->orderBy('users.id')->get();
+        foreach ($allUsers as $user) {
+            if (array_key_exists('current_branch_group_id', $user->getAttributes())) {
+                $historicalGroup = $user->branch_group_id;
+                $user->branch_group_id = $user->current_branch_group_id;
+                $user->syncOriginalAttribute('branch_group_id');
+                $user->branch_group_id = $historicalGroup;
+            }
+        }
+        $userIds = $allUsers->pluck('id')->map(fn ($id) => (int) $id)->values();
 
         // Current team members have the same employee totals for every viewer.
         // Former members retain the restricted historical group context below.
@@ -1327,15 +1166,15 @@ class KpiModuleService
                 ->mapWithKeys(fn (User $user) => [$user->id.'|'.$user->branch_group_id.'|'.$user->role?->slug => (int) $user->id])->all()
             : [];
         $currentUserIds = array_values(array_unique(array_values($currentContexts)));
-        $currentReports = $currentUserIds === [] ? collect() : DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
+        $currentReports = $currentUserIds === [] ? collect() : DailyReport::query()->with(['branchGroup', 'historicalRole'])->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->whereIn('user_id', $currentUserIds)
             ->whereDate('report_date', '>=', $from->toDateString())
             ->whereDate('report_date', '<=', $to->toDateString())->get()->groupBy('user_id');
         $currentAutoMetrics = $this->preloadAutoMetricsByUserDate($currentUserIds, $from, $to, $authUser, false);
-        $currentSales = $this->preloadSalesCreditsByUserDate($currentUserIds, $from, $to, $authUser, false);
+        $currentSales = $this->preloadSalesCreditsByUserDate($currentUserIds, $from, $to, $authUser, false, (bool) ($filters['all_period'] ?? false));
 
         $reports = DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
-            ->with(['user.role', 'user.branch', 'user.branchGroup'])
+            ->with(['user.role', 'user.branch', 'user.branchGroup', 'branchGroup', 'historicalRole'])
             ->whereDate('report_date', '>=', $from->toDateString())
             ->whereDate('report_date', '<=', $to->toDateString())
             ->whereIn('user_id', $userIds->all())
@@ -1348,7 +1187,7 @@ class KpiModuleService
         // monthly page fan out into thousands of SQL statements.  Load each
         // source once for the whole page and aggregate it in memory.
         $autoMetricsByUserDate = $this->preloadAutoMetricsByUserDate($userIds->all(), $from, $to, $authUser);
-        $planResolutions = $this->preloadPeriodTargetMaps(collect($usersPaginator->items()), $from, (array) config('kpi.v2.targets', []));
+        $authorizedPlans = $this->loadCanonicalPlans($allUsers, $from, $to);
         $lockedScopes = $this->preloadLockedScopes($periodType, $from);
 
         $mapping = (array) config('kpi.v2.metric_mapping', []);
@@ -1360,9 +1199,10 @@ class KpiModuleService
         $debugFormulaTrace = (bool) ($filters['debug_kpi_trace'] ?? false);
         $traceId = (string) (request()->attributes->get('trace_id') ?? '');
         $planTraceRows = [];
-        $preloadedSalesByUserDate = $this->preloadSalesCreditsByUserDate($userIds->all(), $from, $to, $authUser);
+        $preloadedSalesByUserDate = $this->preloadSalesCreditsByUserDate($userIds->all(), $from, $to, $authUser, true, (bool) ($filters['all_period'] ?? false));
 
-        $data = collect($usersPaginator->items())->map(function (User $user) use ($currentContexts, $currentReports, $currentAutoMetrics, $currentSales, $authUser, $reports, $periodType, $from, $to, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, $preloadedSalesByUserDate, $autoMetricsByUserDate, $planResolutions, $lockedScopes, &$globalSourceError, &$planTraceRows) {
+        $hasClients = Schema::hasTable('clients');
+        $data = $allUsers->map(function (User $user) use ($hasClients, $currentContexts, $currentReports, $currentAutoMetrics, $currentSales, $authUser, $reports, $periodType, $from, $to, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, $preloadedSalesByUserDate, $autoMetricsByUserDate, $authorizedPlans, $lockedScopes, &$globalSourceError, &$planTraceRows) {
             $contextKey = $authUser->usesAssignedGroupScope() ? $user->id.'|'.$user->branch_group_id : $user->id;
             $rows = collect($reports->get($contextKey, collect()));
             if ($authUser->usesAssignedGroupScope()) $rows = $rows->where('role_slug', $user->role?->slug)->values();
@@ -1373,8 +1213,8 @@ class KpiModuleService
                 $autoByDate = $currentAutoMetrics[$user->id] ?? [];
             }
             $sourceErrors = [];
-            $targetResolution = $planResolutions[$user->id.'|'.$user->branch_group_id.'|'.$user->role?->slug] ?? $this->defaultPeriodTargetMap($defaultTargetMap, $from);
-            $targetMap = $targetResolution['targets'];
+            $targetResolution = $this->periodPlanResolution($user, $from, $to, $periodType, $authorizedPlans, $withBreakdown, $rows);
+            $targetMap = $targetResolution['monthly_targets'];
             $metricPlanSourceMap = $targetResolution['sources'];
             $metricPlanDailyMap = $targetResolution['plan_daily_values'];
             $metricPlanMetaMap = $targetResolution['plan_meta'];
@@ -1387,15 +1227,21 @@ class KpiModuleService
                 ]);
             }
 
-            $metrics = $this->buildMetricsForRows($rows, $autoByDate, $sourceErrors, $mapping, $targetMap, $periodType, $daysInPeriod, $metricPlanSourceMap, $from);
-            $score = $this->kpiScoreFromMetrics($metrics, $weightMap);
+            foreach ($rows as $report) {
+                $day = $report->report_date->toDateString();
+                $autoByDate[$day] = $this->canonicalDailyFacts($user, $day, $report, $autoByDate[$day] ?? []);
+            }
+            $metrics = $this->buildMetricsForRows($rows, $autoByDate, $sourceErrors, $mapping, $targetMap, $periodType, $daysInPeriod, $metricPlanSourceMap, $from, $targetResolution['targets']);
+            $score = $this->kpiScoreFromMetrics($metrics, $targetResolution['weights']);
             $kpiValue = $score['kpi_value'];
             $kpiPercent = $score['kpi_percent'];
             $status = $this->statusForKpiPercent($kpiPercent, $score);
-            $locked = isset($lockedScopes[(string) $user->branch_id.'|'.(string) $user->branch_group_id]);
+            $locked = $periodType === 'day'
+                ? $this->dailyReportService->isDateLocked($user, $from->toDateString())
+                : $this->lockedForContext($lockedScopes, $user);
             $rowSourceError = collect($metrics)->contains(fn (array $metric) => (bool) $metric['source_error']);
             $globalSourceError = $globalSourceError || $rowSourceError;
-            $liveClients = Schema::hasTable('clients')
+            $liveClients = $hasClients
                 ? (float) collect($autoByDate)->sum(
                     fn (array $dayMetrics) => (float) ($dayMetrics['new_clients_count'] ?? 0)
                 )
@@ -1465,6 +1311,7 @@ class KpiModuleService
                 'calls' => (float) ($metrics['calls']['final_value'] ?? 0),
                 'clients' => $liveClients,
                 'sales' => (float) ($metrics['sales']['final_value'] ?? 0),
+                'undated_sales_count' => (float) ($salesByDate['__undated__'] ?? 0),
                 'kpi_value' => $kpiValue,
                 'kpi_percent' => $kpiPercent,
                 'overall_progress_pct' => $kpiPercent,
@@ -1483,7 +1330,7 @@ class KpiModuleService
             }
 
             if ($withBreakdown) {
-                $payload['breakdown_by_day'] = $this->breakdownByDay($rows, $mapping, $targetMap, $sourceErrors);
+                $payload['breakdown_by_day'] = $this->breakdownByDay($rows, $mapping, $targetMap, $sourceErrors, $autoByDate, $targetResolution['by_date']);
             }
 
             return $payload;
@@ -1502,6 +1349,15 @@ class KpiModuleService
         if (in_array($periodType, ['month', 'range'], true)) {
             $data = $data->sortByDesc(fn (array $row) => (float) ($row['average_kpi_percent'] ?? 0))->values();
         }
+        $undatedSalesCount = (float) $data->sum('undated_sales_count');
+        $anyLocked = $data->contains(fn (array $row) => (bool) $row['locked'])
+            || $this->isPeriodLocked($periodType, $from, $filters);
+        $totalRows = $data->count();
+        $totals = collect(['objects', 'shows', 'ads', 'calls', 'sales', 'clients'])
+            ->mapWithKeys(fn ($key) => [$key => $this->normalizeNumber((float) $data->sum($key))])->all();
+        $totals['average_kpi_percent'] = round((float) ($data->avg('kpi_percent') ?? 0), 2);
+        $totals['employees_count'] = $data->pluck('employee_id')->unique()->count();
+        $data = $data->slice(($page - 1) * $perPage, $perPage)->values();
 
         if ($debugPlanTrace || $traceId !== '') {
             Log::info('kpi.v2.plan_source_trace', [
@@ -1535,6 +1391,7 @@ class KpiModuleService
             'rows' => $data,
             'meta' => [
                 'version' => '2',
+                'totals' => $totals,
                 'period_type' => $periodType,
                 'period_key' => match ($periodType) {
                     'day' => $from->toDateString(),
@@ -1543,18 +1400,19 @@ class KpiModuleService
                 },
                 'date_from' => $from->toDateString(),
                 'date_to' => $to->toDateString(),
-                'locked' => $this->isPeriodLocked($periodType, $from, $filters),
+                'locked' => $anyLocked,
                 'quality' => [
                     'duplicate_check_passed' => true,
                     'completeness_pct' => $completeness,
                     'source_error' => $globalSourceError,
                     'issues_count' => $qualityIssuesCount,
+                    'undated_sales_count' => $undatedSalesCount,
                 ],
                 'pagination' => [
-                    'page' => $usersPaginator->currentPage(),
-                    'per_page' => $usersPaginator->perPage(),
-                    'total' => $usersPaginator->total(),
-                    'last_page' => $usersPaginator->lastPage(),
+                    'page' => $page,
+                    'per_page' => $perPage,
+                    'total' => $totalRows,
+                    'last_page' => max(1, (int) ceil($totalRows / $perPage)),
                 ],
                 'debug' => $debugPlanTrace ? [
                     'trace_id' => $traceId !== '' ? $traceId : null,
@@ -1564,7 +1422,7 @@ class KpiModuleService
         ];
     }
 
-    private function preloadSalesCreditsByUserDate(array $userIds, Carbon $from, Carbon $to, User $authUser, bool $scopeRecords = true): array
+    private function preloadSalesCreditsByUserDate(array $userIds, Carbon $from, Carbon $to, User $authUser, bool $scopeRecords = true, bool $includeUndated = false): array
     {
         $historical = $scopeRecords && $authUser->usesAssignedGroupScope();
         $userIds = array_values(array_unique(array_map('intval', $userIds)));
@@ -1581,10 +1439,13 @@ class KpiModuleService
         $soldProperties = DB::table('properties')->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id'))
             ->select($select)
             ->where('moderation_status', 'sold')
-            ->whereBetween('sold_at', [
-                $from->copy()->startOfDay()->setTimezone('UTC')->toDateTimeString(),
-                $to->copy()->endOfDay()->setTimezone('UTC')->toDateTimeString(),
-            ])
+            ->where(function ($query) use ($from, $to, $includeUndated) {
+                $query->whereBetween('sold_at', [
+                    $from->copy()->startOfDay()->setTimezone((string) config('app.timezone', self::TZ))->toDateTimeString(),
+                    $to->copy()->endOfDay()->setTimezone((string) config('app.timezone', self::TZ))->toDateTimeString(),
+                ]);
+                if ($includeUndated) $query->orWhereNull('sold_at');
+            })
             ->get();
 
         if ($soldProperties->isEmpty()) {
@@ -1596,11 +1457,9 @@ class KpiModuleService
         $creditsByProperty = $this->salesAttributionService->creditsByProperty($soldProperties, ['sold']);
 
         foreach ($soldProperties as $property) {
-            $soldAt = $property->sold_at ? Carbon::parse((string) $property->sold_at, 'UTC')->setTimezone(self::TZ) : null;
-            if (! $soldAt) {
-                continue;
-            }
-            $dayKey = $soldAt->toDateString();
+            $soldAt = $property->sold_at ? Carbon::parse((string) $property->sold_at, (string) config('app.timezone', self::TZ))->setTimezone(self::TZ) : null;
+            if (! $soldAt && ! $includeUndated) continue;
+            $dayKey = $soldAt?->toDateString() ?? '__undated__';
             $propertyId = (int) ($property->id ?? 0);
             $credits = $creditsByProperty[$propertyId] ?? [];
             foreach ($credits as $agentId => $credit) {
@@ -1630,6 +1489,10 @@ class KpiModuleService
 
         $start = $from->copy()->startOfDay()->setTimezone('UTC')->toDateTimeString();
         $end = $to->copy()->endOfDay()->setTimezone('UTC')->toDateTimeString();
+        $appTimezone = (string) config('app.timezone', self::TZ);
+        $localStart = $from->copy()->startOfDay()->setTimezone($appTimezone)->toDateTimeString();
+        $localEnd = $to->copy()->endOfDay()->setTimezone($appTimezone)->toDateTimeString();
+        $appDate = static fn ($value): string => Carbon::parse((string) $value, $appTimezone)->setTimezone(self::TZ)->toDateString();
         $result = [];
         $put = static function (array &$target, int|string $userId, string $date, string $metric, float $value): void {
             $target[$userId][$date][$metric] = (float) ($target[$userId][$date][$metric] ?? 0) + $value;
@@ -1662,26 +1525,25 @@ class KpiModuleService
 
         if (Schema::hasTable('clients')) {
             foreach (DB::table('clients')->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'clients.branch_group_id'))->select(['created_by', 'responsible_agent_id', 'created_at'])
-                ->whereBetween('created_at', [$start, $end])
+                ->whereBetween('created_at', [$localStart, $localEnd])
                 ->where(function ($q) use ($userIds) {
-                    $q->whereIn('created_by', $userIds)->orWhereIn('responsible_agent_id', $userIds);
+                    $q->whereIn('created_by', $userIds)->orWhere(fn ($legacy) => $legacy
+                        ->whereIn('responsible_agent_id', $userIds)
+                        ->where(fn ($missing) => $missing->whereNull('created_by')->orWhere('created_by', 0)));
                 })->when($historical, fn ($q) => $q->addSelect('clients.branch_group_id'))->get() as $client) {
-                $clientUserIds = array_values(array_unique([
-                    (int) $client->created_by,
-                    (int) $client->responsible_agent_id,
-                ]));
+                $clientUserIds = [(int) $client->created_by > 0 ? (int) $client->created_by : (int) $client->responsible_agent_id];
                 foreach ($clientUserIds as $userId) {
                     if ($userId <= 0 || ! in_array($userId, $userIds, true)) {
                         continue;
                     }
-                    $put($result, $historical ? $userId.'|'.$client->branch_group_id : $userId, $localDate($client->created_at), 'new_clients_count', 1);
+                    $put($result, $historical ? $userId.'|'.$client->branch_group_id : $userId, $appDate($client->created_at), 'new_clients_count', 1);
                 }
             }
         }
 
         if (Schema::hasTable('properties')) {
             foreach (DB::table('properties')->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id'))->select(['created_by', 'agent_id', 'created_at'])
-                ->whereBetween('created_at', [$start, $end])
+                ->whereBetween('created_at', [$localStart, $localEnd])
                 ->where(function ($q) use ($userIds) {
                     $q->whereIn('created_by', $userIds)->orWhere(function ($legacy) use ($userIds) {
                         $legacy->whereIn('agent_id', $userIds)->where(function ($creatorMissing) {
@@ -1692,7 +1554,7 @@ class KpiModuleService
                 $creator = (int) $property->created_by;
                 $userId = $creator > 0 ? $creator : (int) $property->agent_id;
                 if ($userId > 0) {
-                    $put($result, $historical ? $userId.'|'.$property->branch_group_id : $userId, $localDate($property->created_at), 'new_properties_count', 1);
+                    $put($result, $historical ? $userId.'|'.$property->branch_group_id : $userId, $appDate($property->created_at), 'new_properties_count', 1);
                 }
             }
         }
@@ -1706,55 +1568,181 @@ class KpiModuleService
         return ['targets' => $targets, 'sources' => array_fill_keys(array_keys($targets), 'system'), 'plan_daily_values' => array_fill_keys(array_keys($targets), null), 'plan_meta' => array_fill_keys(array_keys($targets), null)];
     }
 
-    private function preloadPeriodTargetMaps(Collection $users, Carbon $date, array $defaultTargetMap): array
+    /** Resolve each metric independently, including its weight, at the date of the fact. */
+    private function dailyPlanResolution(User $user, Carbon $date, Collection $plans): array
     {
-        if ($users->isEmpty() || ! Schema::hasTable('kpi_plans')) {
-            return [];
+        $defaults = (array) config('kpi.v2.targets', []);
+        $weights = (array) config('kpi.v2.weights', []);
+        $resolution = $this->defaultPeriodTargetMap($defaults, $date);
+        $eligible = $plans->filter(function (KpiPlan $plan) use ($user, $date) {
+            $day = $date->toDateString();
+            if (($plan->effective_from && $plan->effective_from->toDateString() > $day)
+                || ($plan->effective_to && $plan->effective_to->toDateString() < $day)) return false;
+            if ($plan->user_id !== null) {
+                return (int) $plan->user_id === (int) $user->id
+                    && (! auth()->user()?->usesAssignedGroupScope()
+                        || ((int) $plan->branch_group_id === (int) $user->branch_group_id && $plan->role_slug === $user->role?->slug));
+            }
+            return $plan->role_slug === $user->role?->slug
+                && ($plan->branch_id === null || (int) $plan->branch_id === (int) $user->branch_id)
+                && ($plan->branch_group_id === null || (int) $plan->branch_group_id === (int) $user->branch_group_id);
+        })->sort(function (KpiPlan $a, KpiPlan $b) {
+            $priority = static fn (KpiPlan $plan) => $plan->user_id !== null ? 3 : ($plan->branch_group_id !== null ? 2 : ($plan->branch_id !== null ? 1 : 0));
+            return ($priority($b) <=> $priority($a)) ?: ($b->id <=> $a->id);
+        })->groupBy('metric_key');
+        foreach (array_keys($defaults) as $key) {
+            $plan = $eligible->get($key, collect())->first();
+            if (! $plan) continue;
+            $resolution['targets'][$key] = (float) $plan->daily_plan;
+            $resolution['sources'][$key] = $plan->user_id === null ? 'common' : 'personal';
+            $resolution['plan_daily_values'][$key] = (float) $plan->daily_plan;
+            $resolution['plan_meta'][$key] = ['plan_id' => (int) $plan->id, 'user_id' => $plan->user_id,
+                'branch_id' => $plan->branch_id, 'branch_group_id' => $plan->branch_group_id,
+                'effective_from' => optional($plan->effective_from)->toDateString(), 'effective_to' => optional($plan->effective_to)->toDateString()];
+            $weights[$key] = max(0.0, (float) $plan->weight);
         }
-        $userIds = $users->pluck('id')->map(fn ($id) => (int) $id)->all();
-        $plans = KpiPlan::query()->where(function ($q) use ($userIds) {
-            $q->whereIn('user_id', $userIds)->orWhereNull('user_id');
-        })->where(function ($q) use ($date) {
-            $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $date->toDateString());
-        })->where(function ($q) use ($date) {
-            $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $date->toDateString());
-        })->orderBy('id')->get();
+        $sum = array_sum($weights);
+        $resolution['weights'] = array_map(fn ($weight) => $sum > 0 ? $weight / $sum : 0.0, $weights);
+        return $resolution;
+    }
 
+    private function periodPlanResolution(User $user, Carbon $from, Carbon $to, string $periodType, Collection $plans, bool $withBreakdown = false, ?Collection $reports = null): array
+    {
+        $reportsByDate = ($reports ?? collect())->keyBy(fn (DailyReport $report) => $report->report_date->toDateString());
+        $contexts = $reportsByDate->map(fn (DailyReport $report) => $this->planContextForReport($user, $report));
+        $contexts->put('__current__', $user);
+        // Restrict the candidate set once per employee before iterating dates.
+        $plans = $plans->filter(fn (KpiPlan $plan) => $plan->user_id !== null
+            ? (int) $plan->user_id === (int) $user->id
+            : $contexts->contains(fn (User $context) => $plan->role_slug === $context->role?->slug
+                && ($plan->branch_id === null || (int) $plan->branch_id === (int) $context->branch_id)
+                && ($plan->branch_group_id === null || (int) $plan->branch_group_id === (int) $context->branch_group_id)));
+        $resolution = $this->dailyPlanResolution($contexts->get($from->toDateString(), $user), $from, $plans);
+        $resolution['monthly_targets'] = $resolution['targets'];
+        $resolution['targets'] = array_fill_keys(array_keys($resolution['targets']), 0.0);
+        $resolution['weights'] = array_fill_keys(array_keys($resolution['weights']), 0.0);
+        $resolution['by_date'] = [];
+        $days = 0;
+        for ($date = $from->copy()->startOfDay(); $date->lte($to); $date->addDay()) {
+            $daily = $this->dailyPlanResolution($contexts->get($date->toDateString(), $user), $date, $plans);
+            if ($withBreakdown) $resolution['by_date'][$date->toDateString()] = $daily;
+            foreach ($daily['targets'] as $key => $monthlyTarget) {
+                $resolution['targets'][$key] += $periodType === 'day' && $key === 'sales'
+                    ? $monthlyTarget : $monthlyTarget / $date->daysInMonth;
+                $resolution['weights'][$key] += $daily['weights'][$key] ?? 0.0;
+                if ($resolution['sources'][$key] !== $daily['sources'][$key]) $resolution['sources'][$key] = 'mixed';
+            }
+            $days++;
+        }
+        // A period uses the average of its normalized daily weights. Targets sum daily
+        // portions, so plan changes and weeks spanning months retain their effective dates.
+        $resolution['weights'] = array_map(fn ($weight) => round($weight / max(1, $days), 10), $resolution['weights']);
+        return $resolution;
+    }
+
+    private function loadCanonicalPlans(Collection $users, Carbon $from, Carbon $to): Collection
+    {
+        if ($users->isEmpty() || ! Schema::hasTable('kpi_plans')) return collect();
+        return KpiPlan::query()->tap(fn ($query) => $this->scopePlanQuery($query))
+            ->where(fn ($q) => $q->whereIn('user_id', $users->pluck('id'))->orWhereNull('user_id'))
+            ->where(fn ($q) => $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $to->toDateString()))
+            ->where(fn ($q) => $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $from->toDateString()))
+            ->get();
+    }
+
+    private function planContextForReport(User $user, ?DailyReport $report): User
+    {
+        if (! $report || $report->branch_group_id === null) return $user;
+        $report->loadMissing(['branchGroup', 'historicalRole']);
+        $context = clone $user;
+        $context->branch_group_id = $report->branch_group_id;
+        $context->branch_id = $report->branchGroup?->branch_id ?? $user->branch_id;
+        if ($report->historicalRole) {
+            $context->role_id = $report->historicalRole->id;
+            $context->setRelation('role', $report->historicalRole);
+        }
+        return $context;
+    }
+
+    /** Preload the same scoped automatic facts used by a single daily report. */
+    public function reportAutoMetrics(Collection $reports, User $actor): array
+    {
+        if ($reports->isEmpty()) return [];
+        (new EloquentCollection($reports->all()))->loadMissing(['user.role', 'branchGroup', 'historicalRole']);
+        $ids = $reports->pluck('user_id')->map(fn ($id) => (int) $id)->unique()->values()->all();
+        $from = Carbon::parse($reports->min(fn (DailyReport $report) => $report->report_date->toDateString()), self::TZ)->startOfDay();
+        $to = Carbon::parse($reports->max(fn (DailyReport $report) => $report->report_date->toDateString()), self::TZ)->endOfDay();
+        $facts = $this->preloadAutoMetricsByUserDate($ids, $from, $to, $actor);
+        $sales = $this->preloadSalesCreditsByUserDate($ids, $from, $to, $actor);
         $result = [];
-        foreach ($users as $user) {
-            $resolution = $this->defaultPeriodTargetMap($defaultTargetMap, $date);
-            $scopeCandidates = [[$user->branch_group_id, $user->branch_id], [null, $user->branch_id], [null, null]];
-            $common = collect();
-            foreach ($scopeCandidates as [$groupId, $branchId]) {
-                $candidate = $plans->filter(fn (KpiPlan $plan) => $plan->user_id === null
-                    && $plan->role_slug === ($user->role?->slug ?? '')
-                    && (int) ($plan->branch_group_id ?? 0) === (int) ($groupId ?? 0)
-                    && (int) ($plan->branch_id ?? 0) === (int) ($branchId ?? 0));
-                if ($candidate->isNotEmpty()) { $common = $candidate; break; }
-            }
-            $effective = $common->concat($plans->filter(fn (KpiPlan $plan) => (int) $plan->user_id === (int) $user->id
-                && (! auth()->user()?->usesAssignedGroupScope() || ((int) $plan->branch_group_id === (int) $user->branch_group_id && $plan->role_slug === $user->role?->slug))));
-            foreach ($effective as $plan) {
-                $key = (string) $plan->metric_key;
-                $resolution['targets'][$key] = (float) $plan->daily_plan;
-                $resolution['sources'][$key] = $plan->user_id === null ? 'common' : 'personal';
-                $resolution['plan_daily_values'][$key] = (float) $plan->daily_plan;
-                $resolution['plan_meta'][$key] = ['plan_id' => (int) $plan->id, 'user_id' => $plan->user_id ? (int) $plan->user_id : null, 'branch_id' => $plan->branch_id ? (int) $plan->branch_id : null, 'branch_group_id' => $plan->branch_group_id ? (int) $plan->branch_group_id : null, 'effective_from' => optional($plan->effective_from)->toDateString(), 'effective_to' => optional($plan->effective_to)->toDateString()];
-            }
-            $result[$user->id.'|'.$user->branch_group_id.'|'.$user->role?->slug] = $resolution;
+        foreach ($reports as $report) {
+            $group = $report->branch_group_id ?? $report->user?->branch_group_id;
+            $key = $actor->usesAssignedGroupScope() ? $report->user_id.'|'.$group : (int) $report->user_id;
+            $date = $report->report_date->toDateString();
+            $auto = $facts[$key][$date] ?? [];
+            $auto['sales_count'] = (float) ($sales[$key][$date] ?? 0);
+            $auto['deals_count'] = (int) floor($auto['sales_count']);
+            $result[(int) $report->id] = $auto;
         }
         return $result;
     }
 
+    /** Shared source policy for the daily report and all KPI aggregation routes. */
+    public function canonicalDailyFacts(User $user, string $date, ?DailyReport $report, array $live): array
+    {
+        if ($report && $this->dailyReportService->preservesSnapshot($user, $report, $date)) {
+            foreach (['calls_count', 'ad_count', 'shows_count', 'meetings_count', 'new_properties_count', 'new_clients_count'] as $column) {
+                $live[$column] = (float) ($report->{$column} ?? 0);
+            }
+            $live['sales_count'] = $this->dealMetricValue($report);
+            $live['deals_count'] = (int) floor($live['sales_count']);
+        }
+        return $live;
+    }
+
+    public function canonicalDailyMetricsBundle(User $user, string $date, ?DailyReport $report, array $auto, ?Collection $authorizedPlans = null): array
+    {
+        $user = $this->planContextForReport($user, $report);
+        $day = Carbon::parse($date, self::TZ)->startOfDay();
+        $plans = $authorizedPlans ?? $this->loadCanonicalPlans(collect([$user]), $day, $day);
+        $resolution = $this->dailyPlanResolution($user, $day, $plans);
+        $metrics = $this->buildMetricsForRows($report ? collect([$report]) : collect(),
+            [$date => $this->canonicalDailyFacts($user, $date, $report, $auto)], [],
+            (array) config('kpi.v2.metric_mapping', []), $resolution['targets'], 'day', 1, $resolution['sources'], $day);
+        $score = $this->kpiScoreFromMetrics($metrics, $resolution['weights']);
+        $debug = [];
+        foreach ($metrics as $key => &$metric) {
+            $metric['fact'] = $metric['final_value'];
+            $metric['target'] = $metric['target_value'];
+            $metric['monthly_target_value'] = $resolution['targets'][$key];
+            $debug[$key] = ['resolved_from' => $metric['plan_source'], 'target_value' => $metric['target_value'],
+                'source_record_id' => $resolution['plan_meta'][$key]['plan_id'] ?? null];
+        }
+        unset($metric);
+        return ['metrics' => $metrics, 'kpi_percent' => $score['kpi_percent'], 'kpi_trace' => $score['trace'],
+            'status' => $this->statusForKpiPercent($score['kpi_percent'], $score),
+            'plan_resolution_debug' => ['employee_id' => (int) $user->id, 'date' => $date, 'metrics' => $debug]];
+    }
+
     private function preloadLockedScopes(string $periodType, Carbon $periodStart): array
     {
-        if ($periodType === 'range') {
-            return [];
-        }
+        if ($periodType === 'range' || ! Schema::hasTable('kpi_period_locks')) return [];
+        $keys = match ($periodType) {
+            'month' => [$periodStart->format('Y-m')],
+            'week' => [$periodStart->format('o-\WW'), $periodStart->copy()->startOfWeek(Carbon::MONDAY)->toDateString()],
+            default => [$periodStart->toDateString()],
+        };
+        return KpiPeriodLock::query()->where('period_type', $periodType)->whereIn('period_key', $keys)
+            ->get(['branch_id', 'branch_group_id'])->toArray();
+    }
 
-        $periodKey = $periodType === 'month' ? $periodStart->format('Y-m') : $periodStart->toDateString();
-        return KpiPeriodLock::query()->where('period_type', $periodType)->where('period_key', $periodKey)->get()
-            ->mapWithKeys(fn (KpiPeriodLock $lock) => [(string) $lock->branch_id.'|'.(string) $lock->branch_group_id => true])->all();
+    private function lockedForContext(array $locks, User $user): bool
+    {
+        foreach ($locks as $lock) {
+            if (($lock['branch_id'] === null || (int) $lock['branch_id'] === (int) $user->branch_id)
+                && ($lock['branch_group_id'] === null || (int) $lock['branch_group_id'] === (int) $user->branch_group_id)) return true;
+        }
+        return false;
     }
 
     private function buildMetricsForRows(
@@ -1766,7 +1754,8 @@ class KpiModuleService
         string $periodType,
         ?int $daysInPeriodOverride = null,
         array $metricPlanSourceMap = [],
-        ?Carbon $targetReferenceDate = null
+        ?Carbon $targetReferenceDate = null,
+        ?array $resolvedTargets = null
     ): array {
         $metrics = [];
         $daysInPeriod = max(1, $daysInPeriodOverride ?? $rows->count());
@@ -1779,7 +1768,7 @@ class KpiModuleService
             $column = $this->resolveMetricSourceColumn((string) ($cfg['source_column'] ?? ''));
             $sourceType = (string) ($cfg['source_type'] ?? 'manual');
             $monthlyTarget = (float) ($targetMap[$metricKey] ?? 0);
-            $target = match ($periodType) {
+            $target = $resolvedTargets[$metricKey] ?? match ($periodType) {
                 'month' => $monthlyTarget,
                 'week', 'range' => ($monthlyTarget / $daysInMonth) * $daysInPeriod,
                 default => $metricKey === 'sales'
@@ -1828,9 +1817,16 @@ class KpiModuleService
                 // CRM facts can be configured as canonical while preserving the
                 // manual report as a fallback for periods without system facts.
                 $mixedStrategy = (string) ($cfg['mixed_strategy'] ?? 'manual_priority');
-                $finalValue = $mixedStrategy === 'system_priority'
-                    ? ($factValue > 0 ? $factValue : $manualValue)
-                    : ($manualValue > 0 ? $manualValue : $factValue);
+                $manualByDate = $rows->groupBy(fn (DailyReport $row) => $row->report_date->toDateString());
+                $dates = array_unique(array_merge(array_keys($autoByDate), $manualByDate->keys()->all()));
+                $finalValue = 0.0;
+                foreach ($dates as $date) {
+                    $system = empty($sourceErrors[$date]) ? (float) ($autoByDate[$date][$column] ?? 0) : 0.0;
+                    $manual = (float) ($manualByDate->get($date, collect())->sum($column));
+                    $finalValue += $mixedStrategy === 'system_priority'
+                        ? ($system > 0 ? $system : $manual)
+                        : ($manual > 0 ? $manual : $system);
+                }
                 $manualResult = $manualValue;
                 $source = 'mixed';
             } else {
@@ -1857,55 +1853,6 @@ class KpiModuleService
         return $metrics;
     }
 
-    private function resolvePeriodTargetMapForUser(User $user, Carbon $date, array $defaultTargetMap): array
-    {
-        $daysInMonth = max(1, $date->daysInMonth);
-        $targets = collect($defaultTargetMap)
-            ->mapWithKeys(fn ($value, $key) => [(string) $key => (float) $value * $daysInMonth])
-            ->all();
-        $sources = [];
-        $planDailyValues = [];
-        $planMeta = [];
-
-        try {
-            $effective = $this->plansForUser((int) $user->id, $date);
-            foreach ($effective as $item) {
-                $metricKey = (string) ($item['metric_key'] ?? '');
-                if ($metricKey === '') {
-                    continue;
-                }
-                $targets[$metricKey] = (float) ($item['daily_plan'] ?? ($targets[$metricKey] ?? 0));
-                $sources[$metricKey] = (string) ($item['plan_source'] ?? $item['source'] ?? 'common');
-                $planDailyValues[$metricKey] = $item['daily_plan'] ?? null;
-                $planMeta[$metricKey] = [
-                    'plan_id' => isset($item['id']) ? (int) $item['id'] : null,
-                    'user_id' => isset($item['user_id']) ? (int) $item['user_id'] : null,
-                    'branch_id' => isset($item['branch_id']) ? (int) $item['branch_id'] : null,
-                    'branch_group_id' => isset($item['branch_group_id']) ? (int) $item['branch_group_id'] : null,
-                    'effective_from' => $item['effective_from'] ?? null,
-                    'effective_to' => $item['effective_to'] ?? null,
-                ];
-            }
-        } catch (Throwable) {
-            // Fallback to default KPI targets when personal/common plan is unavailable.
-        }
-
-        foreach (array_keys($targets) as $metricKey) {
-            if (! isset($sources[$metricKey])) {
-                $sources[$metricKey] = 'system';
-                $planDailyValues[$metricKey] = null;
-                $planMeta[$metricKey] = null;
-            }
-        }
-
-        return [
-            'targets' => $targets,
-            'sources' => $sources,
-            'plan_daily_values' => $planDailyValues,
-            'plan_meta' => $planMeta,
-        ];
-    }
-
     private function historicalKpiUsersQuery(User $actor, array $filters, Carbon $from, Carbon $to): Builder
     {
         $current = $this->weeklyUsersScopeQuery($actor, $filters)->reorder()->select([
@@ -1915,6 +1862,7 @@ class KpiModuleService
             ->where('report_date', '>=', $from->toDateString())
             ->where('report_date', '<', $to->copy()->addDay()->toDateString());
         $this->applyScope($history, $actor, $filters);
+        if (isset($filters['roles'])) $history->whereIn('daily_reports.role_slug', $filters['roles']);
         foreach (['assignee_id', 'agent_id', 'mop_id'] as $key) {
             if (! empty($filters[$key])) $history->where('daily_reports.user_id', (int) $filters[$key]);
         }
@@ -1924,7 +1872,7 @@ class KpiModuleService
         $contexts = $current->union($history->select(['daily_reports.user_id', 'daily_reports.branch_group_id', 'historical_roles.id as role_id'])->toBase());
         return User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->joinSub($contexts, 'kpi_context', fn ($join) => $join->on('users.id', '=', 'kpi_context.user_id'))
             ->join('branch_groups as historical_groups', 'historical_groups.id', '=', 'kpi_context.branch_group_id')
-            ->select(['users.id', 'users.name', 'kpi_context.branch_group_id', 'kpi_context.role_id', 'historical_groups.branch_id'])
+            ->select(['users.id', 'users.name', 'kpi_context.branch_group_id', 'users.branch_group_id as current_branch_group_id', 'kpi_context.role_id', 'historical_groups.branch_id'])
             ->with(['role:id,slug', 'branch:id,name', 'branchGroup:id,branch_id,name']);
     }
 
@@ -1974,6 +1922,7 @@ class KpiModuleService
         if (! empty($filters['role'])) {
             $query->whereHas('role', fn (Builder $q) => $q->where('slug', (string) $filters['role']));
         }
+        if (isset($filters['roles'])) $query->whereHas('role', fn (Builder $q) => $q->whereIn('slug', $filters['roles']));
 
         $this->applyReadScope($query, $authUser, 'users');
 
@@ -2018,28 +1967,24 @@ class KpiModuleService
         ];
     }
 
-    private function breakdownByDay(Collection $rows, array $mapping, array $targetMap, array $sourceErrors): array
+    private function breakdownByDay(Collection $rows, array $mapping, array $targetMap, array $sourceErrors, ?array $preloaded = null, array $plansByDate = []): array
     {
-        return $rows
-            ->groupBy(fn (DailyReport $row) => $row->report_date->toDateString())
-            ->map(function (Collection $dayRows, string $day) use ($mapping, $targetMap, $sourceErrors) {
-                $autoByDate = [];
-                foreach ($dayRows as $row) {
-                    try {
-                        $autoByDate[$day] = $this->dailyReportService->autoMetrics($row->user, $day);
-                    } catch (Throwable) {
-                        $autoByDate[$day] = [];
-                    }
-                }
-
-                return [
-                    'date' => $day,
-                    'period_key' => $day,
-                    'metrics' => $this->buildMetricsForRows($dayRows, $autoByDate, $sourceErrors, $mapping, $targetMap, 'day'),
-                ];
-            })
-            ->values()
-            ->all();
+        $byDate = $rows->groupBy(fn (DailyReport $row) => $row->report_date->toDateString());
+        $dates = array_unique(array_merge($byDate->keys()->all(), array_values(array_filter(array_keys($preloaded ?? []), fn ($date) => $date !== '__undated__'))));
+        sort($dates);
+        return array_map(function (string $day) use ($byDate, $mapping, $targetMap, $sourceErrors, $preloaded, $plansByDate) {
+            $dayRows = $byDate->get($day, collect());
+            $auto = $preloaded[$day] ?? [];
+            if ($preloaded === null && $dayRows->isNotEmpty()) {
+                $report = $dayRows->first();
+                $auto = $this->canonicalDailyFacts($report->user, $day, $report, $this->dailyReportService->autoMetrics($report->user, $day));
+            }
+            $resolution = $plansByDate[$day] ?? null;
+            $metrics = $this->buildMetricsForRows($dayRows, [$day => $auto], $sourceErrors, $mapping,
+                $resolution['targets'] ?? $targetMap, 'day', 1, $resolution['sources'] ?? [], Carbon::parse($day, self::TZ));
+            $this->kpiScoreFromMetrics($metrics, $resolution['weights'] ?? (array) config('kpi.v2.weights', []));
+            return ['date' => $day, 'period_key' => $day, 'metrics' => $metrics];
+        }, $dates);
     }
 
     private function kpiScoreFromMetrics(array &$metrics, array $weightMap): array
@@ -2183,7 +2128,7 @@ class KpiModuleService
 
     private function isPeriodLocked(string $periodType, Carbon $periodStart, array $filters): bool
     {
-        if ($periodType === 'range') {
+        if ($periodType === 'range' || ! Schema::hasTable('kpi_period_locks')) {
             return false;
         }
 
@@ -2360,20 +2305,14 @@ class KpiModuleService
 
     private function resolveMetricSourceColumn(string $column): string
     {
-        if ($column === 'sales_count' && !Schema::hasColumn('daily_reports', 'sales_count')) {
-            return 'deals_count';
-        }
-
+        // Automatic facts always expose sales_count, even on a legacy report schema.
+        // Sales are system-only; no report column introspection is needed per employee.
         return $column;
     }
 
     private function dealMetricValue(DailyReport $row): float
     {
-        if (Schema::hasColumn('daily_reports', 'sales_count')) {
-            return (float) ($row->sales_count ?? 0);
-        }
-
-        return (float) ($row->deals_count ?? 0);
+        return (float) ($row->sales_count ?? $row->deals_count ?? 0);
     }
 
     private function applyTaskScope(Builder $query, User $authUser, array $filters): void
@@ -2535,6 +2474,8 @@ class KpiModuleService
             $scopes[] = ['branch_group_id' => null, 'branch_id' => null];
         }
 
+        $resolved = new EloquentCollection();
+        $keys = [];
         foreach ($scopes as $scope) {
             $q = (clone $queryBase);
             if ($scope['branch_group_id'] !== null) {
@@ -2549,13 +2490,15 @@ class KpiModuleService
                 $q->whereNull('branch_id');
             }
 
-            $rows = $q->orderBy('id')->get();
-            if ($rows->isNotEmpty()) {
-                return $rows;
+            foreach ($q->orderByDesc('id')->get() as $row) {
+                if (! isset($keys[$row->metric_key])) {
+                    $keys[$row->metric_key] = true;
+                    $resolved->push($row);
+                }
             }
         }
 
-        return new EloquentCollection();
+        return $resolved;
     }
 
     private function serializePlanRows(EloquentCollection $rows, string $source): Collection
@@ -2613,31 +2556,6 @@ class KpiModuleService
         $supports = Schema::hasTable('kpi_plans') && Schema::hasColumn('kpi_plans', 'plan_period');
 
         return $supports;
-    }
-
-    private function overrideDailySalesMetricWithMonthlyCompletion(array &$metrics, User $user, Carbon $date): void
-    {
-        if (! isset($metrics['sales'])) {
-            return;
-        }
-
-        $monthStart = $date->copy()->startOfMonth()->toDateString();
-        $monthEnd = $date->copy()->endOfMonth()->toDateString();
-
-        $query = DailyReport::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
-            ->where('user_id', (int) $user->id)
-            ->whereBetween('report_date', [$monthStart, $monthEnd]);
-
-        $salesFact = Schema::hasColumn('daily_reports', 'sales_count')
-            ? (float) $query->sum('sales_count')
-            : (float) $query->sum('deals_count');
-
-        $target = (float) ($metrics['sales']['target_value'] ?? 0);
-        $progress = $target > 0 ? round(($salesFact / $target) * 100, 2) : 0.0;
-
-        $metrics['sales']['fact_value'] = $this->normalizeNumber($salesFact);
-        $metrics['sales']['final_value'] = $this->normalizeNumber($salesFact);
-        $metrics['sales']['progress_pct'] = $progress;
     }
 
     private function ensurePlanScopeAccess(User $actor, User $target): void

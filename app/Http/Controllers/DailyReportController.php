@@ -4,7 +4,6 @@ namespace App\Http\Controllers;
 
 use App\Models\DailyReport;
 use App\Models\KpiPlan;
-use App\Models\KpiPeriodLock;
 use App\Models\User;
 use App\Models\UserDailyReportReminderSetting;
 use App\Services\DailyReportService;
@@ -21,6 +20,7 @@ use Illuminate\Validation\ValidationException;
 class DailyReportController extends Controller
 {
     private ?\Illuminate\Support\Collection $pagePlans = null;
+    private ?array $pageAutoMetrics = null;
 
     private const STRICT_KPI_KEYS = ['objects', 'shows', 'ads', 'calls', 'sales'];
 
@@ -144,6 +144,9 @@ class DailyReportController extends Controller
             ->map(fn (DailyReport $report) => [$this->reportContextUser($report->user, $report), $report->report_date->toDateString()])->all();
         $this->pagePlans = $this->loadReportPlans($contexts);
         try {
+            $liveReports = $paginator->getCollection()->filter(fn (DailyReport $report) => $report->user
+                && ! $this->preserveReportSnapshot($report->user, $report, $report->report_date->toDateString()));
+            $this->pageAutoMetrics = $this->kpiModuleService->reportAutoMetrics($liveReports, $this->authUser());
             $paginator->setCollection(
                 $paginator->getCollection()->map(function (DailyReport $report) {
                     return $this->serializeTeamReportRow($report);
@@ -151,6 +154,7 @@ class DailyReportController extends Controller
             );
         } finally {
             $this->pagePlans = null;
+            $this->pageAutoMetrics = null;
         }
 
     }
@@ -690,31 +694,7 @@ class DailyReportController extends Controller
 
     private function isDateLocked(User $user, string $date): bool
     {
-        if (! \Illuminate\Support\Facades\Schema::hasTable('kpi_period_locks')) {
-            return false;
-        }
-
-        $dayKey = Carbon::parse($date)->toDateString();
-        $weekKey = Carbon::parse($date)->startOfWeek(Carbon::MONDAY)->toDateString();
-        $monthKey = Carbon::parse($date)->format('Y-m');
-
-        return KpiPeriodLock::query()
-            ->where(function ($query) use ($dayKey, $weekKey, $monthKey) {
-                $query->where(function ($q) use ($dayKey) {
-                    $q->where('period_type', 'day')->where('period_key', $dayKey);
-                })->orWhere(function ($q) use ($weekKey) {
-                    $q->where('period_type', 'week')->where('period_key', $weekKey);
-                })->orWhere(function ($q) use ($monthKey) {
-                    $q->where('period_type', 'month')->where('period_key', $monthKey);
-                });
-            })
-            ->where(function ($query) use ($user) {
-                $query->whereNull('branch_id')->orWhere('branch_id', $user->branch_id);
-            })
-            ->where(function ($query) use ($user) {
-                $query->whereNull('branch_group_id')->orWhere('branch_group_id', $user->branch_group_id);
-            })
-            ->exists();
+        return $this->dailyReports->isDateLocked($user, $date);
     }
 
     private function ensureCanEditByPeriodRules(
@@ -784,8 +764,7 @@ class DailyReportController extends Controller
 
     private function preserveReportSnapshot(User $employee, ?DailyReport $report, string $date): bool
     {
-        return $report && ($date !== Carbon::now($this->timezone())->toDateString()
-            || (int) $report->branch_group_id !== (int) $employee->branch_group_id);
+        return $this->dailyReports->preservesSnapshot($employee, $report, $date);
     }
 
     private function reportContextUser(User $employee, ?DailyReport $report): User
@@ -889,23 +868,21 @@ class DailyReportController extends Controller
     private function buildMetricsPayloadBundle(User $user, string $reportDate, ?DailyReport $report, ?array $auto = null): array
     {
         $autoMetrics = $auto ?? $this->dailyReports->autoMetrics($user, $reportDate);
-        $planBundle = $this->resolvePlanMap($user, $reportDate);
-        $planMap = (array) ($planBundle['plans'] ?? []);
+        $bundle = $this->kpiModuleService->canonicalDailyMetricsBundle(
+            $user,
+            $reportDate,
+            $report,
+            $autoMetrics,
+            $this->pagePlans ?? $this->loadReportPlans([[$user, $reportDate]])
+        );
+        foreach ($bundle['metrics'] as &$metric) {
+            // Keep the legacy daily-report aliases while sharing KPI calculations.
+            $metric['fact'] = $metric['final_value'];
+            $metric['target'] = $metric['target_value'];
+        }
+        unset($metric);
 
-        return [
-            'metrics' => [
-                'objects' => $this->metricPayload((int) ($autoMetrics['new_properties_count'] ?? 0), $planMap['objects']['target_value'], 'system', $planMap['objects']['plan_source']),
-                'shows' => $this->metricPayload((int) ($autoMetrics['shows_count'] ?? 0), $planMap['shows']['target_value'], 'system', $planMap['shows']['plan_source']),
-                'ads' => $this->metricPayload((int) ($report?->ad_count ?? 0), $planMap['ads']['target_value'], 'manual', $planMap['ads']['plan_source']),
-                'calls' => $this->metricPayload((int) ($report?->calls_count ?? 0), $planMap['calls']['target_value'], 'manual', $planMap['calls']['plan_source']),
-                'sales' => $this->metricPayload((float) ($autoMetrics['sales_count'] ?? 0), $planMap['sales']['target_value'], 'system', $planMap['sales']['plan_source']),
-            ],
-            'plan_resolution_debug' => [
-                'employee_id' => (int) $user->id,
-                'date' => $reportDate,
-                'metrics' => (array) ($planBundle['debug_metrics'] ?? []),
-            ],
-        ];
+        return $bundle;
     }
 
     /** One authorized plan query for a page; each row is resolved against its own date/context below. */
@@ -944,71 +921,6 @@ class DailyReportController extends Controller
         return $query->orderByDesc('id')->get();
     }
 
-    private function resolvePlanMap(User $user, string $reportDate): array
-    {
-        $rop = $this->authUser()->usesAssignedGroupScope();
-        $plans = [
-            'objects' => ['target_value' => null, 'plan_source' => null, 'source_record_id' => null],
-            'shows' => ['target_value' => null, 'plan_source' => null, 'source_record_id' => null],
-            'ads' => ['target_value' => null, 'plan_source' => null, 'source_record_id' => null],
-            'calls' => ['target_value' => null, 'plan_source' => null, 'source_record_id' => null],
-            'sales' => ['target_value' => null, 'plan_source' => null, 'source_record_id' => null],
-        ];
-
-        if (\Illuminate\Support\Facades\Schema::hasTable('kpi_plans')) {
-            $user->loadMissing('role');
-            $roleSlug = (string) ($user->role?->slug ?? '');
-            $branchId = $user->branch_id ? (int) $user->branch_id : null;
-            $branchGroupId = $user->branch_group_id ? (int) $user->branch_group_id : null;
-
-            $rows = ($this->pagePlans ?? $this->loadReportPlans([[$user, $reportDate]]))
-                ->filter(function (KpiPlan $plan) use ($user, $reportDate, $roleSlug, $branchGroupId, $rop): bool {
-                    if (($plan->effective_from && $plan->effective_from->toDateString() > $reportDate)
-                        || ($plan->effective_to && $plan->effective_to->toDateString() < $reportDate)) return false;
-                    if ($rop && ((int) $plan->branch_group_id !== (int) $branchGroupId || $plan->role_slug !== $roleSlug)) return false;
-                    return $plan->user_id !== null ? (int) $plan->user_id === (int) $user->id : $plan->role_slug === $roleSlug;
-                })->groupBy('metric_key');
-
-            foreach (array_keys($plans) as $metricKey) {
-                $candidates = $rows->get($metricKey, collect());
-                $chosen = $candidates->first(fn (KpiPlan $plan) => (int) $plan->user_id === (int) $user->id);
-                $source = 'personal';
-                if (! $chosen) {
-                    $shared = $candidates->filter(fn (KpiPlan $plan) => $plan->user_id === null);
-                    $chosen = $branchGroupId !== null && $branchId !== null
-                        ? $shared->first(fn (KpiPlan $plan) => (int) $plan->branch_group_id === $branchGroupId && (int) $plan->branch_id === $branchId)
-                        : null;
-                    $chosen ??= $branchId !== null
-                        ? $shared->first(fn (KpiPlan $plan) => $plan->branch_group_id === null && (int) $plan->branch_id === $branchId)
-                        : null;
-                    $chosen ??= $shared->first(fn (KpiPlan $plan) => $plan->branch_group_id === null && $plan->branch_id === null);
-                    $source = $chosen && ($chosen->branch_id !== null || $chosen->branch_group_id !== null) ? 'rop' : 'common';
-                }
-                if ($chosen) {
-                    $plans[$metricKey] = [
-                        'target_value' => (float) $chosen->daily_plan,
-                        'plan_source' => $source,
-                        'source_record_id' => (int) $chosen->id,
-                    ];
-                }
-            }
-        }
-
-        $debugMetrics = [];
-        foreach ($plans as $metricKey => $metricPlan) {
-            $debugMetrics[$metricKey] = [
-                'resolved_from' => $metricPlan['plan_source'] ?? 'system',
-                'target_value' => $metricPlan['target_value'],
-                'source_record_id' => $metricPlan['source_record_id'] ?? null,
-            ];
-        }
-
-        return [
-            'plans' => $plans,
-            'debug_metrics' => $debugMetrics,
-        ];
-    }
-
     private function serializeTeamReportRow(DailyReport $report): array
     {
         $report->loadMissing(['user.role', 'user.branch', 'user.branchGroup']);
@@ -1023,7 +935,7 @@ class DailyReportController extends Controller
         $user = $user ? $this->reportContextUser($user, $report) : null;
         $autoMetrics = $preserveSnapshot
             ? $report->only(['calls_count', 'meetings_count', 'shows_count', 'new_clients_count', 'new_properties_count', 'deals_count', 'sales_count'])
-            : $this->dailyReports->autoMetrics($user, $reportDate);
+            : ($this->pageAutoMetrics[(int) $report->id] ?? $this->dailyReports->autoMetrics($user, $reportDate));
 
 
         return [
@@ -1071,8 +983,8 @@ class DailyReportController extends Controller
 
     /**
      * Server-authoritative workflow state for the self-service daily report UI.
-     * Manual fields are fixed on submit, while system metrics remain live until
-     * the selected local day ends.
+     * Manual fields are fixed on submit. System metrics follow CRM unless the
+     * report or period is explicitly frozen, or the employee changed teams.
      */
     private function myReportWorkflow(User $user, string $reportDate, ?DailyReport $report): array
     {
@@ -1082,14 +994,12 @@ class DailyReportController extends Controller
         $today = $now->copy()->startOfDay();
         [$hour, $minute] = $this->dailyReportSubmitStartTime();
         $submitAvailableAt = $day->copy()->setTime($hour, $minute);
-        $liveUntil = $day->copy()->endOfDay();
         $locked = $this->isDateLocked($user, $reportDate);
         $submitted = $report?->submitted_at !== null;
+        $preserveSnapshot = $this->preserveReportSnapshot($user, $report, $reportDate);
 
         if ($submitted) {
-            $state = $day->equalTo($today) && $now->lte($liveUntil)
-                ? 'submitted_live'
-                : 'finalized';
+            $state = $preserveSnapshot ? 'finalized' : 'submitted_live';
         } elseif ($day->lt($today) || ($day->equalTo($today) && $now->gte($submitAvailableAt))) {
             $state = 'ready_to_submit';
         } else {
@@ -1103,7 +1013,8 @@ class DailyReportController extends Controller
                 && ! $locked
                 && ($day->lt($today) || ($day->equalTo($today) && $now->gte($submitAvailableAt))),
             'submit_available_at' => $submitAvailableAt->toIso8601String(),
-            'auto_metrics_live_until' => $liveUntil->toIso8601String(),
+            // CRM facts remain live until an explicit freeze, not just midnight.
+            'auto_metrics_live_until' => null,
         ];
     }
 

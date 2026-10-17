@@ -147,7 +147,7 @@ class KpiReportFeatureTest extends TestCase
 
         $response = $this->getJson('/api/kpi/dashboard?period_type=day&date_from=2026-05-01&date_to=2026-05-01');
         $response->assertOk();
-        $this->assertCount(2, $response->json('data'));
+        $response->assertJsonStructure(['data' => ['summary' => ['totals'], 'ranking', 'meta']]);
     }
 
     public function test_rop_legacy_report_uses_historical_group_filters_and_minimal_employee_label(): void
@@ -192,10 +192,10 @@ class KpiReportFeatureTest extends TestCase
             $this->getJson($periodUrl.'&v=2&user_id='.$report->user_id.'&branch_group_id='.$a->id)
                 ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.calls', 30);
         }
-        $this->mock(\App\Services\DailyReportService::class, function ($mock) use ($a, $report) {
+        $this->partialMock(\App\Services\DailyReportService::class, function ($mock) use ($a, $report) {
             $mock->shouldReceive('autoMetrics')->once()->withArgs(fn ($context, $date) => (int) $context->id === (int) $report->user_id && (int) $context->branch_group_id === (int) $a->id && $date === '2026-05-01')->andReturn(['calls_count' => 30]);
         });
-        $this->getJson('/api/kpi/dashboard/debug?date=2026-05-01&role=agent&branch_group_id='.$a->id)
+        $this->getJson('/api/kpi/dashboard/debug?date=2026-05-01&role=agent&user_id='.$report->user_id.'&branch_group_id='.$a->id)
             ->assertOk()->assertJsonCount(1, 'data.ranking')->assertJsonPath('data.ranking.0.source_counts.calls_count', 30)
             ->assertJsonPath('data.ranking.0.branch_group_id', $a->id)->assertJsonMissingPath('data.ranking.0.user.role_slug');
         $rop->supervisedGroups()->detach();

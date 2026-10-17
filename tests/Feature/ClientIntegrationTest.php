@@ -1763,6 +1763,167 @@ class ClientIntegrationTest extends TestCase
         $this->assertSame($a->id, (int) $booking->fresh()->created_by);
     }
 
+    public static function reportSellerFallbackCases(): array
+    {
+        return [
+            'new seller overrides legacy seller' => [true, 'seller', 'creator', 'creator'],
+            'null new seller falls back to legacy seller' => [true, null, 'seller', 'creator'],
+            'zero new seller falls back to legacy seller' => [true, 0, 'seller', 'creator'],
+            'legacy seller falls back to assigned agent' => [false, null, null, 'seller'],
+            'zero legacy seller falls back to assigned agent' => [false, null, 0, 'seller'],
+            'missing sellers fall back to author' => [false, null, null, null],
+        ];
+    }
+
+    #[DataProvider('reportSellerFallbackCases')]
+    public function test_property_reports_use_the_same_primary_seller_for_filters_totals_and_details(
+        bool $newSellerColumn, string|int|null $saleAgent, string|int|null $saleUser, ?string $assignedAgent
+    ): void {
+        [$creator] = $this->seedClientContext(withProperty: false);
+        $seller = User::create(['name' => 'Primary seller', 'phone' => (string) ++$this->phoneCounter,
+            'role_id' => $creator->role_id, 'branch_id' => $creator->branch_id, 'status' => 'active']);
+        if ($newSellerColumn) {
+            Schema::table('properties', fn (Blueprint $table) => $table->unsignedBigInteger('sale_agent_id')->nullable());
+        }
+        $resolve = fn ($value) => match ($value) {
+            'creator' => $creator->id, 'seller' => $seller->id, default => $value,
+        };
+        $expected = $assignedAgent === null && $saleUser === null && $saleAgent === null ? $creator : $seller;
+        $propertyId = DB::table('properties')->insertGetId([
+            'title' => 'Primary seller regression', 'created_by' => $creator->id,
+            'agent_id' => $resolve($assignedAgent), 'sale_user_id' => $resolve($saleUser),
+            ...$newSellerColumn ? ['sale_agent_id' => $resolve($saleAgent)] : [],
+            'moderation_status' => 'sold', 'price' => 100, 'offer_type' => 'sale',
+            'created_at' => '2026-02-10 10:00:00', 'sold_at' => '2026-03-10 10:00:00',
+            'updated_at' => '2026-03-10 10:00:00',
+        ]);
+        Sanctum::actingAs($creator);
+        $period = '?date_from=2026-03-01&date_to=2026-03-31';
+        $filter = '&agent_id='.$expected->id;
+        $manager = $this->getJson('/api/reports/properties/manager-efficiency'.$period.$filter)->assertOk()->json();
+        $this->assertSame(1, collect($manager)->firstWhere('agent_id', $expected->id)['sold']);
+        $this->getJson('/api/reports/properties/monthly-comparison?month=2026-03'.$filter)->assertOk()
+            ->assertJsonPath('current_month.kpi.sold_by_agent_total', 1)
+            ->assertJsonPath('current_month.leaders.by_sold_agent.0.agent_id', $expected->id);
+        $this->getJson('/api/reports/agents/'.$expected->id.'/properties'.$period)->assertOk()
+            ->assertJsonPath('summary.total_properties', 1)->assertJsonPath('properties.0.id', $propertyId);
+        $aggregate = $this->getJson('/api/reports/agents/properties'.$period)->assertOk()->json();
+        $this->assertSame(1, collect($aggregate)->firstWhere('agent_id', $expected->id)['summary']['total_properties']);
+        $this->getJson('/api/reports/properties/agents-leaderboard'.$period.$filter)->assertOk()
+            ->assertJsonPath('0.sales_user_id', $expected->id)->assertJsonPath('0.sold_count', 1);
+        $this->getJson('/api/reports/agent/earnings'.$period.$filter)->assertOk()
+            ->assertJsonPath('sold_count', 1)->assertJsonPath('earnings', 3);
+    }
+
+    public function test_owner_sales_are_visible_in_monthly_reports_but_do_not_earn_agency_commission(): void
+    {
+        [$agent] = $this->seedClientContext(withProperty: false);
+        DB::table('properties')->insert([
+            'title' => 'Owner sold independently', 'created_by' => $agent->id, 'agent_id' => $agent->id,
+            'sale_user_id' => $agent->id, 'moderation_status' => 'sold_by_owner', 'offer_type' => 'sale',
+            'price' => 100, 'created_at' => '2026-02-10 10:00:00', 'sold_at' => '2026-03-10 10:00:00',
+            'updated_at' => '2026-03-10 10:00:00',
+        ]);
+        Sanctum::actingAs($agent);
+        $this->getJson('/api/reports/properties/monthly-comparison?month=2026-03')->assertOk()
+            ->assertJsonPath('current_month.kpi.sold_by_owner_total', 1)
+            ->assertJsonPath('current_month.kpi.closed_total', 1)
+            ->assertJsonPath('current_month.kpi.sold_by_agent_total', 0);
+        $this->getJson('/api/reports/agent/earnings?date_from=2026-03-01&date_to=2026-03-31')->assertOk()
+            ->assertJsonPath('closed_count', 0)->assertJsonPath('sold_by_owner_count', 0)
+            ->assertJsonPath('sum_price', 0)->assertJsonPath('earnings', 0);
+    }
+
+    public function test_report_client_registration_counts_author_once_with_legacy_responsible_fallback(): void
+    {
+        [$author, $client] = $this->seedClientContext(withProperty: false);
+        $responsible = User::create(['name' => 'Responsible agent', 'phone' => (string) ++$this->phoneCounter,
+            'role_id' => $author->role_id, 'branch_id' => $author->branch_id, 'status' => 'active']);
+        DB::table('clients')->where('id', $client->id)->update([
+            'responsible_agent_id' => $responsible->id, 'created_at' => '2026-03-10 10:00:00',
+        ]);
+        DB::table('clients')->insert([
+            'full_name' => 'Legacy registration', 'created_by' => null, 'responsible_agent_id' => $responsible->id,
+            'branch_id' => $author->branch_id, 'created_at' => '2026-03-10 10:00:00',
+        ]);
+        Sanctum::actingAs($author);
+        $period = '?date_from=2026-03-01&date_to=2026-03-31';
+        $rows = collect($this->getJson('/api/reports/properties/manager-efficiency'.$period)->assertOk()->json());
+        $this->assertSame(2, $rows->sum('unique_clients_count'));
+        $this->assertSame(1, $rows->firstWhere('agent_id', $author->id)['unique_clients_count']);
+        $this->assertSame(1, $rows->firstWhere('agent_id', $responsible->id)['unique_clients_count']);
+        $this->getJson('/api/reports/properties/manager-efficiency'.$period.'&agent_id='.$responsible->id)->assertOk()
+            ->assertJsonCount(1)->assertJsonPath('0.unique_clients_count', 1);
+    }
+
+    public function test_undated_sales_are_identified_in_all_time_report_without_inventing_a_period(): void
+    {
+        [$agent] = $this->seedClientContext(withProperty: false);
+        DB::table('properties')->insert([
+            'title' => 'Undated legacy sale', 'created_by' => $agent->id, 'agent_id' => $agent->id,
+            'sale_user_id' => $agent->id, 'moderation_status' => 'sold', 'price' => 100,
+            'created_at' => '2026-03-10 10:00:00', 'sold_at' => null,
+        ]);
+        Sanctum::actingAs($agent);
+        $this->getJson('/api/reports/properties/manager-efficiency?agent_id='.$agent->id)->assertOk()
+            ->assertJsonPath('0.sold', 1)->assertJsonPath('0.undated_sales_count', 1);
+        $rows = $this->getJson('/api/reports/properties/manager-efficiency?agent_id='.$agent->id
+            .'&date_from=2026-03-01&date_to=2026-03-31')->assertOk()->json();
+        $this->assertSame(0, collect($rows)->sum('sold'));
+        $this->assertDatabaseHas('properties', ['title' => 'Undated legacy sale', 'sold_at' => null]);
+    }
+
+    public function test_explicit_sales_branch_filter_uses_seller_without_widening_branch_access(): void
+    {
+        [$creator] = $this->seedClientContext(withProperty: false);
+        $sellerBranch = Branch::create(['name' => 'Seller branch']);
+        $seller = User::create(['name' => 'Other branch seller', 'phone' => (string) ++$this->phoneCounter,
+            'role_id' => $creator->role_id, 'branch_id' => $sellerBranch->id, 'status' => 'active']);
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $directorRole = Role::create(['name' => 'Director', 'slug' => 'branch_director']);
+        $admin = User::create(['name' => 'Admin', 'phone' => (string) ++$this->phoneCounter,
+            'role_id' => $adminRole->id, 'branch_id' => $creator->branch_id, 'status' => 'active']);
+        $director = User::create(['name' => 'Director', 'phone' => (string) ++$this->phoneCounter,
+            'role_id' => $directorRole->id, 'branch_id' => $sellerBranch->id, 'status' => 'active']);
+        DB::table('properties')->insert([
+            'title' => 'Cross branch sale', 'created_by' => $creator->id, 'agent_id' => $creator->id,
+            'branch_id' => $creator->branch_id, 'sale_user_id' => $seller->id, 'moderation_status' => 'sold',
+            'price' => 100, 'created_at' => '2026-02-10 10:00:00', 'sold_at' => '2026-03-10 10:00:00',
+        ]);
+        $query = '?date_from=2026-03-01&date_to=2026-03-31&branch_id='.$sellerBranch->id;
+        Sanctum::actingAs($admin);
+        $this->getJson('/api/reports/properties/manager-efficiency'.$query)->assertOk()
+            ->assertJsonCount(1)->assertJsonPath('0.agent_id', $seller->id)->assertJsonPath('0.sold', 1);
+        $this->getJson('/api/reports/properties/monthly-comparison?month=2026-03&branch_id='.$sellerBranch->id)->assertOk()
+            ->assertJsonPath('current_month.kpi.sold_by_agent_total', 1);
+        Sanctum::actingAs($director);
+        $rows = $this->getJson('/api/reports/properties/manager-efficiency'.$query)->assertOk()->json();
+        $this->assertSame(0, collect($rows)->sum('sold'));
+    }
+
+    public function test_legacy_objects_without_author_use_assigned_agent_consistently(): void
+    {
+        [$agent] = $this->seedClientContext(withProperty: false);
+        foreach ([null, 0] as $author) {
+            DB::table('properties')->insert([
+                'title' => 'Legacy object without author', 'created_by' => $author, 'agent_id' => $agent->id,
+                'moderation_status' => 'approved', 'price' => 100, 'offer_type' => 'sale',
+                'created_at' => '2026-03-10 10:00:00',
+            ]);
+        }
+        Sanctum::actingAs($agent);
+        $period = '?date_from=2026-03-01&date_to=2026-03-31';
+        $this->getJson('/api/reports/properties/manager-efficiency'.$period.'&agent_id='.$agent->id)->assertOk()
+            ->assertJsonCount(1)->assertJsonPath('0.total', 2)->assertJsonPath('0.approved', 2);
+        $this->getJson('/api/reports/properties/monthly-comparison?month=2026-03&agent_id='.$agent->id)->assertOk()
+            ->assertJsonPath('current_month.kpi.added_total', 2)
+            ->assertJsonPath('current_month.leaders.by_added.0.agent_id', $agent->id);
+        $this->getJson('/api/reports/agents/'.$agent->id.'/properties'.$period)->assertOk()
+            ->assertJsonPath('summary.total_properties', 2);
+        $this->getJson('/api/reports/agents/properties'.$period)->assertOk()
+            ->assertJsonCount(1)->assertJsonPath('0.agent_id', $agent->id)->assertJsonPath('0.summary.total_properties', 2);
+    }
+
     private function seedClientContext(bool $withProperty = true): array
     {
         $branch = Branch::create(['name' => 'Branch A']);

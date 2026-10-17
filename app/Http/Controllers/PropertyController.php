@@ -1542,6 +1542,20 @@ class PropertyController extends Controller
                     ->whereIn('properties.created_by', $responsibleIds)));
         }
 
+        // Report drilldowns follow the same attribution as the report totals:
+        // creator for open inventory, primary seller for closed inventory.
+        $reportEmployeeIds = array_values(array_filter(array_map('intval', $toArray($request->input('report_employee_id'))), fn ($id) => $id > 0));
+        $reportContext = $request->boolean('report_context') || $reportEmployeeIds !== [];
+        $reportOwnerExpression = null;
+        if ($reportContext) {
+            $seller = app(\App\Services\SalesAttributionService::class)->primarySellerExpression();
+            $creator = 'COALESCE(NULLIF(properties.created_by, 0), NULLIF(properties.agent_id, 0))';
+            $reportOwnerExpression = "CASE WHEN properties.moderation_status IN ('sold', 'rented', 'sold_by_owner') THEN {$seller} ELSE {$creator} END";
+            if ($reportEmployeeIds !== []) {
+                $query->whereIn(DB::raw($reportOwnerExpression), $reportEmployeeIds);
+            }
+        }
+
         if ($this->supportsPropertyTags()) {
             $rawTags = $request->input('tag_ids', $request->input('tags'));
             $tagIds = array_values(array_unique(array_filter(array_map('intval', $toArray($rawTags)))));
@@ -1557,7 +1571,15 @@ class PropertyController extends Controller
             ));
 
             if (! empty($branchIds)) {
-                $this->applyBranchIdFilter($query, $branchIds);
+                if ($reportContext) {
+                    // This refines the already authorized record query; mandatory
+                    // own/group/public access in scopePropertyList is unchanged.
+                    $query->whereIn(DB::raw($reportOwnerExpression), User::query()
+                        ->tap(fn ($users) => \App\Support\BranchVisibility::records($users))
+                        ->whereIn('branch_id', $branchIds)->select('id'));
+                } else {
+                    $this->applyBranchIdFilter($query, $branchIds);
+                }
             }
         }
 
@@ -1816,15 +1838,22 @@ class PropertyController extends Controller
             $request->input('priceTo')
         );
 
-        // Диапазон по датам (date_from, date_to) — фильтрация по created_at.
+        // Generic lists retain creation-date filtering. Report drilldowns use
+        // the event date of each status, matching PropertyReportController.
         // Формат ожидается YYYY-MM-DD или любой распознаваемый Carbon формát.
         if ($request->has('date_from') || $request->has('date_to')) {
             $from = $request->input('date_from');
             $to = $request->input('date_to');
+            $dateColumn = 'created_at';
+            if ($reportContext) {
+                $soldDate = Schema::hasColumn('properties', 'sold_at') ? 'properties.sold_at' : 'NULL';
+                $depositDate = Schema::hasColumn('properties', 'deposit_received_at') ? 'properties.deposit_received_at' : 'NULL';
+                $dateColumn = DB::raw("CASE WHEN properties.moderation_status IN ('sold', 'rented', 'sold_by_owner') THEN {$soldDate} WHEN properties.moderation_status = 'deposit' THEN {$depositDate} ELSE properties.created_at END");
+            }
 
             try {
                 if (! empty($from)) {
-                    $query->whereDate('created_at', '>=', \Carbon\Carbon::parse($from)->toDateString());
+                    $query->whereDate($dateColumn, '>=', \Carbon\Carbon::parse($from)->toDateString());
                 }
             } catch (\Exception $e) {
                 // При желании логировать ошибку или игнорировать неверный формат
@@ -1832,7 +1861,7 @@ class PropertyController extends Controller
 
             try {
                 if (! empty($to)) {
-                    $query->whereDate('created_at', '<=', \Carbon\Carbon::parse($to)->toDateString());
+                    $query->whereDate($dateColumn, '<=', \Carbon\Carbon::parse($to)->toDateString());
                 }
             } catch (\Exception $e) {
                 // При желании логировать ошибку или игнорировать неверный формат

@@ -174,6 +174,92 @@ class PropertyMyPropertiesBranchFilterTest extends TestCase
         }
     }
 
+    public function test_report_drilldown_uses_creator_for_open_and_primary_seller_for_closed_without_widening_scope(): void
+    {
+        Schema::table('properties', function (Blueprint $table) {
+            $table->unsignedBigInteger('sale_user_id')->nullable();
+            $table->unsignedBigInteger('sale_agent_id')->nullable();
+        });
+        $role = Role::create(['name' => 'Report reader', 'slug' => 'report_reader']);
+        $actor = User::create(['name' => 'Employee', 'phone' => 'report-reader', 'role_id' => $role->id,
+            'branch_id' => 2, 'branch_group_id' => 20]);
+        $type = PropertyType::create(['name' => 'Apartment']);
+        $status = PropertyStatus::create(['name' => 'Active']);
+        $make = function (array $extra) use ($type, $status) {
+            return \Illuminate\Support\Facades\DB::table('properties')->insertGetId(array_merge([
+                'title' => 'Report object', 'type_id' => $type->id, 'status_id' => $status->id,
+                'price' => 100000, 'created_by' => 999, 'agent_id' => 999,
+                'branch_id' => 2, 'branch_group_id' => 20, 'moderation_status' => 'approved',
+            ], $extra));
+        };
+        $created = $make(['created_by' => $actor->id]);
+        $legacyCreated = $make(['created_by' => 0, 'agent_id' => $actor->id]);
+        $sold = $make(['moderation_status' => 'sold', 'sale_agent_id' => $actor->id, 'sale_user_id' => 888]);
+        $legacySold = $make(['moderation_status' => 'rented', 'sale_user_id' => 0, 'agent_id' => $actor->id]);
+        $make(['created_by' => $actor->id, 'moderation_status' => 'sold', 'sale_user_id' => 888]);
+        $make(['agent_id' => $actor->id]);
+        $make(['moderation_status' => 'sold', 'sale_user_id' => $actor->id, 'branch_id' => 3, 'branch_group_id' => 30]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role->forceFill(['permissions' => ['properties.list.internal', 'properties.list.scope.group']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $response = $this->getJson('/api/my-properties?report_employee_id='.$actor->id)->assertOk();
+        $this->assertEqualsCanonicalizing([$created, $legacyCreated, $sold, $legacySold], array_column($response->json('data'), 'id'));
+        $this->getJson('/api/my-properties?report_employee_id='.$actor->id.'&moderation_status=sold')
+            ->assertOk()->assertJsonPath('total', 1)->assertJsonPath('data.0.id', $sold);
+    }
+
+    public function test_report_context_matches_event_dates_and_credited_branch_without_changing_generic_lists(): void
+    {
+        Schema::table('properties', function (Blueprint $table) {
+            $table->unsignedBigInteger('sale_user_id')->nullable();
+            $table->timestamp('sold_at')->nullable();
+            $table->timestamp('deposit_received_at')->nullable();
+        });
+        $allRole = Role::create(['name' => 'All reports', 'slug' => 'all_report_reader']);
+        $groupRole = Role::create(['name' => 'Group reports', 'slug' => 'group_report_reader']);
+        $creator = User::create(['name' => 'Creator A', 'phone' => 'report-creator', 'role_id' => $allRole->id,
+            'branch_id' => 2, 'branch_group_id' => 20]);
+        $seller = User::create(['name' => 'Seller B', 'phone' => 'report-seller', 'role_id' => $groupRole->id,
+            'branch_id' => 3, 'branch_group_id' => 30]);
+        $type = PropertyType::create(['name' => 'Apartment']);
+        $status = PropertyStatus::create(['name' => 'Active']);
+        $make = function (array $extra) use ($creator, $seller, $type, $status) {
+            return \Illuminate\Support\Facades\DB::table('properties')->insertGetId(array_merge([
+                'title' => 'Report event', 'type_id' => $type->id, 'status_id' => $status->id,
+                'price' => 100000, 'created_by' => $creator->id, 'agent_id' => $creator->id,
+                'branch_id' => 2, 'branch_group_id' => 20, 'moderation_status' => 'sold',
+                'sale_user_id' => $seller->id, 'created_at' => '2026-02-10 12:00:00',
+                'sold_at' => '2026-03-10 12:00:00',
+            ], $extra));
+        };
+        $soldInMarch = $make([]);
+        $make(['sold_at' => '2026-02-20 12:00:00', 'created_at' => '2026-03-10 12:00:00']);
+        $undated = $make(['sold_at' => null]);
+        $newInMarch = $make(['moderation_status' => 'approved', 'created_by' => $seller->id,
+            'agent_id' => $seller->id, 'branch_id' => 3, 'branch_group_id' => 30,
+            'created_at' => '2026-03-10 12:00:00', 'sold_at' => null]);
+        $depositInMarch = $make(['moderation_status' => 'deposit', 'created_by' => $seller->id,
+            'agent_id' => $seller->id, 'branch_id' => 3, 'branch_group_id' => 30,
+            'deposit_received_at' => '2026-03-10 12:00:00', 'sold_at' => null]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $allRole->forceFill(['permissions' => ['properties.list.internal', 'properties.list.scope.all']])->save();
+        $groupRole->forceFill(['permissions' => ['properties.list.internal', 'properties.list.scope.group']])->save();
+        Sanctum::actingAs($creator->fresh());
+        $period = '&branch_id=3&date_from=2026-03-01&date_to=2026-03-31';
+        foreach (['report_context=1', 'report_employee_id='.$seller->id] as $mode) {
+            $response = $this->getJson('/api/my-properties?'.$mode.$period)->assertOk();
+            $this->assertEqualsCanonicalizing([$soldInMarch, $newInMarch, $depositInMarch], array_column($response->json('data'), 'id'));
+        }
+        $generic = $this->getJson('/api/my-properties?branch_id=3&date_from=2026-03-01&date_to=2026-03-31')->assertOk();
+        $this->assertSame([$newInMarch], array_column($generic->json('data'), 'id'));
+        $allTime = $this->getJson('/api/my-properties?report_context=1&branch_id=3')->assertOk();
+        $this->assertContains($undated, array_column($allTime->json('data'), 'id'));
+        Sanctum::actingAs($seller->fresh());
+        $scoped = $this->getJson('/api/my-properties?report_context=1'.$period)->assertOk();
+        $this->assertEqualsCanonicalizing([$newInMarch, $depositInMarch], array_column($scoped->json('data'), 'id'));
+        $this->assertNotContains($soldInMarch, array_column($scoped->json('data'), 'id'));
+    }
+
     public function test_own_scope_includes_assigned_listings_and_excludes_unrelated_records(): void
     {
         $role = Role::create(['name' => 'Recipient', 'slug' => 'own_recipient']);
