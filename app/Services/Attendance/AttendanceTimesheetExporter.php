@@ -65,16 +65,6 @@ final class AttendanceTimesheetExporter
     {
         $dates = collect(CarbonPeriod::create($from->startOfDay(), $to->startOfDay()))
             ->map(fn ($date) => $date->toDateString());
-        if ($viewer?->usesAssignedGroupScope()) {
-            $groups = app(\App\Support\RopGroupAccess::class);
-            $users = $users->map(function ($user) use ($viewer, $groups) {
-                $copy = clone $user;
-                if (! $groups->allows($viewer, $user)) {
-                    foreach (['role', 'branch', 'branchGroup'] as $relation) $copy->setRelation($relation, null);
-                }
-                return $copy;
-            });
-        }
         $userIds = $users->pluck('id');
         $facts = fn (string $model) => $viewer ? app(AttendanceGroupScope::class)->apply($model::query(), $viewer) : $model::query();
         $summaries = $facts(AttendanceDailySummary::class)->whereIn('user_id', $userIds)
@@ -91,6 +81,8 @@ final class AttendanceTimesheetExporter
             ->get()->groupBy('user_id');
         $schedules = AttendanceWorkSchedule::query()->whereIn('user_id', $userIds)->get()->keyBy('user_id');
         $holidays = $this->holidayCalendar->between($from->toDateString(), $to->toDateString());
+        $presentations = $viewer ? app(AttendancePresentation::class)->forUsers($viewer, $users, $summaries->flatten(1))
+            : $users->mapWithKeys(fn ($user) => [$user->id => ['employee_scope' => 'current', 'history_contexts' => []]]);
 
         $files = [
             '[Content_Types].xml' => $this->contentTypesXml(),
@@ -100,8 +92,8 @@ final class AttendanceTimesheetExporter
             'xl/workbook.xml' => $this->workbookXml(),
             'xl/_rels/workbook.xml.rels' => $this->workbookRelationshipsXml(),
             'xl/styles.xml' => $this->stylesXml(),
-            'xl/worksheets/sheet1.xml' => $this->timesheetXml($users, $dates, $summaries, $leaves, $duties, $schedules, $holidays, $from, $to),
-            'xl/worksheets/sheet2.xml' => $this->detailsXml($users, $dates, $summaries, $comments, $leaves, $duties, $schedules, $holidays),
+            'xl/worksheets/sheet1.xml' => $this->timesheetXml($users, $dates, $summaries, $leaves, $duties, $schedules, $holidays, $from, $to, $presentations, $viewer),
+            'xl/worksheets/sheet2.xml' => $this->detailsXml($users, $dates, $summaries, $comments, $leaves, $duties, $schedules, $holidays, $presentations, $viewer),
             'xl/worksheets/sheet3.xml' => $this->legendXml(),
         ];
 
@@ -121,7 +113,7 @@ final class AttendanceTimesheetExporter
         return $path;
     }
 
-    private function timesheetXml(Collection $users, Collection $dates, Collection $summaries, Collection $leaves, Collection $duties, Collection $schedules, Collection $holidays, CarbonImmutable $from, CarbonImmutable $to): string
+    private function timesheetXml(Collection $users, Collection $dates, Collection $summaries, Collection $leaves, Collection $duties, Collection $schedules, Collection $holidays, CarbonImmutable $from, CarbonImmutable $to, Collection $presentations, ?\App\Models\User $viewer): string
     {
         $fixedHeaders = ['№', 'Aura ID', 'Сотрудник', 'Должность', 'Филиал', 'Группа'];
         $rows = [];
@@ -162,13 +154,15 @@ final class AttendanceTimesheetExporter
 
         foreach ($users->values() as $userIndex => $user) {
             $rowNumber = 7 + $userIndex;
+            $presentation = $presentations->get($user->id);
+            [$roleLabel, $branchLabel, $groupLabel] = app(AttendancePresentation::class)->labels($user, $presentation);
             $cells = [
                 $this->numberCell('A'.$rowNumber, $userIndex + 1, 6),
                 $this->numberCell('B'.$rowNumber, $user->id, 6),
-                $this->textCell('C'.$rowNumber, $user->name, 7),
-                $this->textCell('D'.$rowNumber, $user->role?->name ?? $user->role?->slug ?? '—', 7),
-                $this->textCell('E'.$rowNumber, $user->branch?->name ?? 'Без филиала', 7),
-                $this->textCell('F'.$rowNumber, $user->branchGroup?->name ?? 'Без группы', 7),
+                $this->textCell('C'.$rowNumber, $user->name.($presentation['employee_scope'] === 'historical' ? ' (исторические записи)' : ''), 7),
+                $this->textCell('D'.$rowNumber, $roleLabel, 7),
+                $this->textCell('E'.$rowNumber, $branchLabel, 7),
+                $this->textCell('F'.$rowNumber, $groupLabel, 7),
             ];
             $userSummaries = $summaries->get($user->id, collect());
             $userLeaves = $leaves->get($user->id, collect());
@@ -180,8 +174,10 @@ final class AttendanceTimesheetExporter
                 $summary = $userSummaries->get($date);
                 $leave = $this->leaveForDate($userLeaves, $date);
                 $duty = $this->dutyForDate($userDuties, $date);
-                $workingDay = $leave === null && $this->isWorkingDay($schedule, $date, $holidays, $summary?->schedule_snapshot);
-                [$code, $style] = $this->attendanceCode($summary?->status, $workingDay, $leave !== null, $duty !== null);
+                $state = $this->exportDayState($viewer, $presentation, $date, $summary, $leave !== null || $duty !== null);
+                $workingDay = $state['schedule_known'] ? $leave === null && $this->isWorkingDay($schedule, $date, $holidays, $summary?->schedule_snapshot) : $summary !== null;
+                [$code, $style] = $state['availability'] === 'restricted' ? ['—', 6]
+                    : $this->attendanceCode($summary?->status, $workingDay || ! $state['schedule_known'], $leave !== null, $duty !== null);
                 $workedHours = $summary?->worked_minutes !== null ? round($summary->worked_minutes / 60, 2) : null;
                 $cells[] = $this->textCell($this->columnName($columnIndex++).$rowNumber, $code, $style);
                 $cells[] = $workedHours !== null ? $this->numberCell($this->columnName($columnIndex++).$rowNumber, $workedHours, $style) : $this->textCell($this->columnName($columnIndex++).$rowNumber, '', $style);
@@ -208,13 +204,14 @@ final class AttendanceTimesheetExporter
         return $this->worksheet($columns.'<sheetData>'.implode('', $rows).'</sheetData>', $merges, 'G7');
     }
 
-    private function detailsXml(Collection $users, Collection $dates, Collection $summaries, Collection $comments, Collection $leaves, Collection $duties, Collection $schedules, Collection $holidays): string
+    private function detailsXml(Collection $users, Collection $dates, Collection $summaries, Collection $comments, Collection $leaves, Collection $duties, Collection $schedules, Collection $holidays, Collection $presentations, ?\App\Models\User $viewer): string
     {
         $headers = ['Дата', 'Aura ID', 'Сотрудник', 'Должность', 'Филиал', 'Группа', 'Код', 'Приход', 'Уход', 'Часов', 'Опоздание, мин', 'Статус', 'Комментарий HR'];
         $rows = [$this->row(1, collect($headers)->map(fn ($label, $index) => $this->textCell($this->columnName($index + 1).'1', $label, 4))->all(), 30)];
         $rowNumber = 2;
         $timezone = (string) config('attendance.timezone', 'Asia/Dushanbe');
         foreach ($users as $user) {
+            $presentation = $presentations->get($user->id);
             $userSummaries = $summaries->get($user->id, collect());
             $userComments = $comments->get($user->id, collect());
             $userLeaves = $leaves->get($user->id, collect());
@@ -224,17 +221,21 @@ final class AttendanceTimesheetExporter
                 $leave = $this->leaveForDate($userLeaves, $date);
                 $duty = $this->dutyForDate($userDuties, $date);
                 $holiday = $holidays->get($date);
-                $workingDay = $leave === null && $this->isWorkingDay($schedules->get($user->id), $date, $holidays, $summary?->schedule_snapshot);
-                [$code] = $this->attendanceCode($summary?->status, $workingDay, $leave !== null, $duty !== null);
+                $state = $this->exportDayState($viewer, $presentation, $date, $summary, $leave !== null || $duty !== null);
+                $workingDay = $state['schedule_known'] ? $leave === null && $this->isWorkingDay($schedules->get($user->id), $date, $holidays, $summary?->schedule_snapshot) : $summary !== null;
+                [$code] = $state['availability'] === 'restricted' ? ['—']
+                    : $this->attendanceCode($summary?->status, $workingDay || ! $state['schedule_known'], $leave !== null, $duty !== null);
                 $comment = $userComments->get($date)?->comment ?? $leave?->note ?? $duty?->note ?? '';
                 $detailStatus = $leave ? 'Отпуск'
                     : ($duty ? 'Дежурный'.(isset(self::STATUS_LABELS[$summary?->status]) ? ' · '.self::STATUS_LABELS[$summary->status] : '')
                     : ($holiday ? (in_array($summary?->status, ['present', 'late', 'incomplete'], true) ? 'Работа в праздничный день' : $holiday->name)
                         : (self::STATUS_LABELS[$summary?->status] ?? ($workingDay ? 'Нет данных' : 'Выходной'))));
+                if ($state['availability'] === 'restricted') $detailStatus = 'Данные недоступны';
+                elseif (! $state['schedule_known'] && ! $summary && ! $leave && ! $duty && ! $holiday) $detailStatus = 'Нет данных';
+                [$roleLabel, $branchLabel, $groupLabel] = app(AttendancePresentation::class)->labels($user, $presentation, $date, $viewer?->usesAssignedGroupScope() ?? false);
                 $values = [
                     CarbonImmutable::parse($date)->format('d.m.Y'), $user->id, $user->name,
-                    $user->role?->name ?? $user->role?->slug ?? '—', $user->branch?->name ?? 'Без филиала',
-                    $user->branchGroup?->name ?? 'Без группы', $code,
+                    $roleLabel, $branchLabel, $groupLabel, $code,
                     $summary?->first_in_at?->setTimezone($timezone)->format('H:i') ?? '',
                     $summary?->last_out_at?->setTimezone($timezone)->format('H:i') ?? '',
                     $summary?->worked_minutes !== null ? round($summary->worked_minutes / 60, 2) : '',
@@ -260,12 +261,18 @@ final class AttendanceTimesheetExporter
             $this->row(1, [$this->textCell('A1', 'Обозначения табеля', 1)]),
             $this->row(3, [$this->textCell('A3', 'Код', 4), $this->textCell('B3', 'Значение', 4)]),
         ];
-        foreach ([['Я', 'Явка (включая опоздание)'], ['Д', 'Назначенное дежурство'], ['РВ', 'Работа в выходной день'], ['НУ', 'Явка без отметки ухода'], ['НН', 'Неявка по невыясненной причине'], ['В', 'Выходной день'], ['ОТ', 'Ежегодный отпуск'], ['—', 'Будущий день или данных ещё нет']] as $index => $item) {
+        foreach ([['Я', 'Явка (включая опоздание)'], ['Д', 'Назначенное дежурство'], ['РВ', 'Работа в выходной день'], ['НУ', 'Явка без отметки ухода'], ['НН', 'Неявка по невыясненной причине'], ['В', 'Выходной день'], ['ОТ', 'Ежегодный отпуск'], ['—', 'Будущий день, нет данных или данные недоступны']] as $index => $item) {
             $row = $index + 4;
             $rows[] = $this->row($row, [$this->textCell('A'.$row, $item[0], 6), $this->textCell('B'.$row, $item[1], 7)], 24);
         }
 
         return $this->worksheet('<cols><col min="1" max="1" width="14" customWidth="1"/><col min="2" max="2" width="48" customWidth="1"/></cols><sheetData>'.implode('', $rows).'</sheetData>', ['A1:B1'], 'A4');
+    }
+
+    private function exportDayState(?\App\Models\User $viewer, array $presentation, string $date, ?AttendanceDailySummary $summary, bool $hasOtherFacts): array
+    {
+        return $viewer ? app(AttendancePresentation::class)->dayState($viewer, $presentation, $date, $summary, $summary !== null || $hasOtherFacts)
+            : ['schedule_known' => true, 'availability' => 'available'];
     }
 
     private function attendanceCode(?string $status, bool $workingDay, bool $leave, bool $duty = false): array

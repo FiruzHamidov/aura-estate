@@ -1778,6 +1778,91 @@ class AttendanceModuleFeatureTest extends TestCase
             'work_date' => '2026-08-17', 'branch_group_id' => $context['group']->id]);
     }
 
+    public function test_rop_history_has_record_labels_and_no_current_actions_or_false_weekends(): void
+    {
+        (require database_path('migrations/2026_09_09_010000_add_attendance_historical_context.php'))->up();
+        $context = $this->context();
+        $this->travelTo(CarbonImmutable::parse('2026-08-19 12:00:00', 'Asia/Dushanbe'));
+        $foreign = BranchGroup::create(['name' => 'Private current group', 'branch_id' => $context['branch']->id]);
+        $snapshot = ['schedule' => ['1' => ['start' => '09:00', 'end' => '18:00']]];
+        $employees = [$context['agent'], $context['otherAgent']];
+        foreach ($employees as $employee) {
+            AttendanceDailySummary::create(['user_id' => $employee->id, 'branch_group_id' => $context['group']->id,
+                'role_slug' => 'agent', 'schedule_snapshot' => $snapshot, 'work_date' => '2026-08-17', 'status' => 'late', 'late_minutes' => 7]);
+            AttendanceDailySummary::create(['user_id' => $employee->id, 'branch_group_id' => $foreign->id,
+                'role_slug' => 'agent', 'work_date' => '2026-08-18', 'status' => 'late', 'late_minutes' => 91]);
+            $employee->forceFill(['branch_id' => $context['branch']->id, 'branch_group_id' => $foreign->id])->save();
+        }
+        // The saved role is authoritative even after today's account role changes.
+        $employees[1]->forceFill(['role_id' => $context['hr']->role_id])->save();
+        $before = DB::table('users')->whereIn('id', collect($employees)->pluck('id')->push($context['rop']->id))->orderBy('id')->get()->toJson();
+        Sanctum::actingAs($context['rop']);
+        $range = 'date_from=2026-08-17&date_to=2026-08-19';
+        $response = $this->getJson('/api/attendance/matrix?'.$range)->assertOk();
+        foreach ($employees as $employee) {
+            $row = collect($response->json('data'))->firstWhere('user.id', $employee->id);
+            $this->assertSame(['id' => $employee->id, 'name' => $employee->name], $row['user']);
+            $this->assertSame('historical', $row['employee_scope']);
+            $this->assertSame('agent', $row['history_contexts'][0]['role']);
+            $this->assertSame($context['branch']->name, $row['history_contexts'][0]['branch_name']);
+            $this->assertSame($context['group']->name, $row['history_contexts'][0]['branch_group_name']);
+            $this->assertSame(['2026-08-17'], $row['history_contexts'][0]['dates']);
+            $this->assertSame([false, false, false, false], array_values($row['actions']));
+            $this->assertSame('available', $row['days']['2026-08-17']['availability']);
+            $this->assertTrue($row['days']['2026-08-17']['schedule_known']);
+            $this->assertTrue($row['days']['2026-08-17']['can_open']);
+            foreach (['2026-08-18', '2026-08-19'] as $date) {
+                $this->assertSame('restricted', $row['days'][$date]['availability']);
+                $this->assertFalse($row['days'][$date]['schedule_known']);
+                $this->assertFalse($row['days'][$date]['can_open']);
+                $this->getJson('/api/attendance/users/'.$employee->id.'/days/'.$date)->assertNotFound();
+            }
+            $this->getJson('/api/attendance/users/'.$employee->id.'/days/2026-08-17')->assertOk()
+                ->assertJsonPath('data.employee_scope', 'historical')
+                ->assertJsonPath('data.history_contexts.0.branch_group_name', $context['group']->name)
+                ->assertJsonPath('data.summary.schedule_known', true)
+                ->assertJsonPath('data.schedule.starts_at', '09:00');
+        }
+        $current = collect($response->json('data'))->firstWhere('user.id', $context['mop']->id);
+        $this->assertSame('current', $current['employee_scope']);
+        $this->assertSame('no_data', $current['days']['2026-08-17']['availability']);
+        $this->assertFalse($current['days']['2026-08-17']['schedule_known']);
+        $this->assertTrue($current['days']['2026-08-17']['can_open']);
+        $this->getJson('/api/attendance/users/'.$context['mop']->id.'/days/2026-08-17')->assertOk()
+            ->assertJsonPath('data.summary.schedule_known', false)->assertJsonPath('data.schedule', null);
+        $xlsx = $this->get('/api/attendance/export?'.$range.'&format=xlsx')->assertOk();
+        $zip = new \ZipArchive;
+        $path = $xlsx->baseResponse->getFile()->getPathname();
+        $this->assertTrue($zip->open($path));
+        $sheet = $zip->getFromName('xl/worksheets/sheet1.xml');
+        $details = $zip->getFromName('xl/worksheets/sheet2.xml');
+        $zip->close();
+        @unlink($path);
+        $this->assertStringContainsString('исторические записи', $sheet);
+        $this->assertStringContainsString($context['group']->name, $sheet);
+        $this->assertStringContainsString('Данные недоступны', $details);
+        $this->assertStringNotContainsString('Private current group', $sheet.$details);
+        $after = DB::table('users')->whereIn('id', collect($employees)->pluck('id')->push($context['rop']->id))->orderBy('id')->get()->toJson();
+        $this->assertSame($before, $after);
+        $this->travelBack();
+    }
+
+    public function test_branch_totals_keep_saved_marks_when_historical_schedule_is_unknown(): void
+    {
+        (require database_path('migrations/2026_09_09_010000_add_attendance_historical_context.php'))->up();
+        $context = $this->context();
+        AttendanceDailySummary::create(['user_id' => $context['agent']->id, 'branch_group_id' => $context['group']->id,
+            'role_slug' => 'agent', 'work_date' => '2026-08-17', 'status' => 'late', 'late_minutes' => 7]);
+        Sanctum::actingAs($context['rop']);
+        $this->getJson('/api/attendance/matrix?view=branches&date_from=2026-08-17&date_to=2026-08-17')->assertOk()
+            ->assertJsonPath('data.0.days.2026-08-17.scheduled_users_count', 0)
+            ->assertJsonPath('data.0.days.2026-08-17.checked_in_count', 1)
+            ->assertJsonPath('data.0.days.2026-08-17.late_count', 1)
+            ->assertJsonPath('data.0.days.2026-08-17.attendance_pct', null);
+        $this->getJson('/api/attendance/users/'.$context['agent']->id.'/days/2026-08-17')->assertOk()
+            ->assertJsonPath('data.summary.status', 'late')->assertJsonPath('data.summary.schedule_known', false);
+    }
+
     public function test_csv_export_rechecks_scope_before_sending_any_bytes(): void
     {
         $context = $this->context();
