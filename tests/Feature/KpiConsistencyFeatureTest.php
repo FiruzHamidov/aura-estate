@@ -103,6 +103,140 @@ class KpiConsistencyFeatureTest extends TestCase
         (require database_path('migrations/2026_09_08_190000_add_kpi_adjustment_group.php'))->up();
     }
 
+    private function employeeReportProperties(): void
+    {
+        Schema::create('properties', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('created_by')->nullable(); $table->unsignedBigInteger('agent_id')->nullable();
+            $table->unsignedBigInteger('sale_user_id')->nullable(); $table->unsignedBigInteger('sale_agent_id')->nullable();
+            $table->unsignedBigInteger('branch_group_id')->nullable(); $table->unsignedBigInteger('branch_id')->nullable();
+            $table->unsignedBigInteger('contract_type_id')->nullable(); $table->string('moderation_status');
+            $table->timestamp('sold_at')->nullable(); $table->timestamp('deposit_received_at')->nullable(); $table->timestamps();
+        });
+    }
+
+    public function test_unified_employee_report_counts_same_complete_rows_and_preserves_canonical_kpi(): void
+    {
+        [, $author, $branch, $group] = $this->fixture();
+        $seller = User::create(['name' => 'Seller', 'phone' => '900990003', 'role_id' => $author->role_id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $this->employeeReportProperties();
+        $this->report($author, '2026-10-10', ['calls_count' => 30]);
+        $this->report($author, '2026-10-11', ['calls_count' => 9]);
+        $this->completedCall($author, '2026-10-11');
+        foreach ([
+            ['moderation_status' => 'approved', 'contract_type_id' => 1],
+            ['moderation_status' => 'deleted', 'contract_type_id' => null],
+            ['moderation_status' => 'sold', 'sale_agent_id' => $seller->id, 'sold_at' => '2026-10-12 10:00:00', 'created_at' => '2026-08-01 10:00:00', 'contract_type_id' => 2],
+            ['moderation_status' => 'rented', 'sale_agent_id' => $seller->id, 'sold_at' => '2026-10-12 10:00:00', 'created_at' => '2026-08-01 10:00:00', 'contract_type_id' => 3],
+            ['moderation_status' => 'deposit', 'deposit_received_at' => '2026-10-12 10:00:00', 'created_at' => '2026-08-01 10:00:00', 'contract_type_id' => 1],
+            ['moderation_status' => 'sold', 'sale_agent_id' => $seller->id, 'sold_at' => null],
+        ] as $values) {
+            \DB::table('properties')->insert($values + ['created_by' => $author->id, 'agent_id' => $author->id,
+                'created_at' => '2026-10-10 10:00:00', 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        }
+        $url = '/api/reports/employees?date_from=2026-10-01&date_to=2026-10-31&interval=month';
+        $result = $this->getJson($url.'&per_page=1&page=2')->assertOk()->assertJsonCount(2, 'data')
+            ->assertJsonPath('meta.employees_count', 2)->assertJsonPath('totals.total_properties', 5)
+            ->assertJsonPath('totals.objects', 3)->assertJsonPath('totals.calls', 31)
+            ->assertJsonPath('totals.sales', 1)->assertJsonPath('totals.rented', 1)
+            ->assertJsonPath('totals.by_status.deleted', 1)->assertJsonPath('totals.contracts.unspecified', 1);
+        $canonical = $this->getJson('/api/kpi/monthly?v=2&year=2026&month=10')->assertOk();
+        foreach ($result->json('data') as $row) {
+            $expected = collect($canonical->json('data'))->firstWhere('employee_id', $row['employee_id']);
+            foreach (['objects', 'shows', 'clients', 'calls', 'ads', 'sales', 'kpi_percent'] as $key) $this->assertEquals($expected[$key], $row[$key]);
+            $this->assertSame($row['total_properties'], array_sum($row['by_status']));
+            $this->assertSame($row['total_properties'], array_sum($row['contracts']));
+        }
+        $this->getJson($url.'&agent_id='.$seller->id)->assertOk()->assertJsonCount(1, 'data')
+            ->assertJsonPath('totals.total_properties', 2)->assertJsonPath('totals.sales', 1)->assertJsonPath('totals.rented', 1);
+        $this->getJson($url.'&moderation_status=approved')->assertOk()
+            ->assertJsonPath('totals.total_properties', 1)->assertJsonPath('totals.sales', 1)->assertJsonPath('totals.calls', 31);
+        $this->getJson('/api/reports/employees')->assertOk()->assertJsonPath('totals.total_properties', 6)
+            ->assertJsonPath('totals.sales', 2)->assertJsonPath('meta.quality.undated_sales_count', 1);
+    }
+
+    public function test_unified_report_uses_dushanbe_boundaries_and_keeps_zero_activity_people(): void
+    {
+        [, $agent, $branch, $group] = $this->fixture();
+        Config::set('app.timezone', 'UTC');
+        $this->employeeReportProperties();
+        User::create(['name' => 'Zero', 'phone' => '900990003', 'role_id' => $agent->role_id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        foreach (['2026-09-30 18:59:59', '2026-09-30 19:00:00', '2026-10-31 18:59:59', '2026-10-31 19:00:00'] as $time) {
+            \DB::table('properties')->insert(['moderation_status' => 'approved', 'created_by' => $agent->id, 'agent_id' => $agent->id, 'created_at' => $time]);
+        }
+        $this->getJson('/api/reports/employees?date_from=2026-10-01&date_to=2026-10-31')->assertOk()
+            ->assertJsonCount(2, 'data')->assertJsonPath('totals.total_properties', 2)->assertJsonPath('totals.objects', 2);
+        $this->getJson('/api/reports/employees?date_from=2026-10-31&date_to=2026-10-01')->assertUnprocessable();
+    }
+
+    public function test_unified_report_merges_former_employee_contexts_without_repeating_targets(): void
+    {
+        [, $agent, $branch, $oldGroup] = $this->fixture();
+        $this->employeeReportProperties();
+        $secondGroup = BranchGroup::create(['name' => 'Second', 'branch_id' => $branch->id]);
+        $newGroup = BranchGroup::create(['name' => 'New', 'branch_id' => $branch->id]);
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $rop = User::create(['name' => 'Supervisor', 'phone' => '900990009', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $rop->supervisedGroups()->attach([$oldGroup->id, $secondGroup->id]);
+        $this->report($agent, '2026-10-10', ['calls_count' => 8]);
+        $agent->update(['branch_group_id' => $secondGroup->id]);
+        $this->report($agent, '2026-10-11', ['calls_count' => 9]);
+        $agent->update(['branch_group_id' => $newGroup->id]);
+        $this->report($agent, '2026-10-12', ['calls_count' => 100]);
+        Sanctum::actingAs($rop);
+        $result = $this->getJson('/api/reports/employees?date_from=2026-10-01&date_to=2026-10-31&interval=month&agent_id='.$agent->id)
+            ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.calls', 17)->assertJsonPath('totals.calls', 17);
+        $this->assertEquals(31 * config('kpi.v2.targets.calls'), $result->json('data.0.metrics.calls.target_value'));
+        $this->getJson('/api/reports/employees?date_from=2026-10-01&date_to=2026-10-31&interval=month&branch_group_id='.$oldGroup->id)
+            ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.calls', 8);
+        $this->getJson('/api/reports/employees?date_from=2026-10-01&date_to=2026-10-31&branch_group_id='.$newGroup->id)->assertForbidden();
+        $agent->update(['status' => 'inactive']);
+        $this->getJson('/api/reports/employees?date_from=2026-10-01&date_to=2026-10-31')->assertOk()->assertJsonCount(0, 'data');
+    }
+
+    public function test_unified_report_denies_unauthorized_reader_and_inactive_scope(): void
+    {
+        [, $agent] = $this->fixture();
+        $this->employeeReportProperties();
+        $role = Role::create(['name' => 'Client', 'slug' => 'client']);
+        $agent->update(['role_id' => $role->id]);
+        Sanctum::actingAs($agent->fresh());
+        $this->getJson('/api/reports/employees')->assertForbidden();
+    }
+
+    public function test_unified_report_respects_branch_hidden_and_inactive_scopes(): void
+    {
+        [$admin, $agent, $branch, $group] = $this->fixture();
+        $this->employeeReportProperties();
+        Schema::table('branches', fn (Blueprint $table) => $table->boolean('is_hidden')->default(false));
+        $foreign = Branch::create(['name' => 'Other']);
+        $hidden = Branch::create(['name' => 'Hidden']);
+        \DB::table('branches')->where('id', $hidden->id)->update(['is_hidden' => true]);
+        foreach ([[$foreign, 'active'], [$hidden, 'active'], [$branch, 'inactive']] as $index => [$location, $status]) {
+            User::create(['name' => 'Employee '.$index, 'phone' => '90099001'.$index, 'role_id' => $agent->role_id,
+                'branch_id' => $location->id, 'branch_group_id' => $location->id === $branch->id ? $group->id : null, 'status' => $status]);
+        }
+        $url = '/api/reports/employees?date_from=2026-10-01&date_to=2026-10-31';
+        $this->getJson($url)->assertOk()->assertJsonCount(2, 'data');
+        $this->getJson($url.'&include_inactive=1')->assertOk()->assertJsonCount(3, 'data');
+        $role = Role::create(['name' => 'Director', 'slug' => 'branch_director']);
+        $admin->update(['role_id' => $role->id]);
+        Sanctum::actingAs($admin->fresh());
+        $response = $this->getJson($url)->assertOk();
+        $this->assertEquals([$agent->id], collect($response->json('data'))->pluck('employee_id')->all());
+        $this->getJson($url.'&branch_id='.$foreign->id)->assertForbidden();
+    }
+
+    public function test_unified_report_does_not_include_people_without_targets_in_average(): void
+    {
+        [, $agent] = $this->fixture();
+        $this->employeeReportProperties();
+        Config::set('kpi.v2.targets', array_fill_keys(['objects', 'shows', 'ads', 'calls', 'sales'], 0));
+        $this->getJson('/api/reports/employees?date_from=2026-10-01&date_to=2026-10-31')->assertOk()
+            ->assertJsonPath('data.0.status', 'no_plan')->assertJsonPath('data.0.kpi_percent', null)
+            ->assertJsonPath('totals.kpi_percent', null)->assertJsonPath('meta.scored_employees_count', 0)
+            ->assertJsonPath('totals.calls', 0);
+    }
+
     private function fixture(string $name = 'Agent'): array
     {
         $adminRole = Role::firstOrCreate(['slug' => 'admin'], ['name' => 'Admin']);

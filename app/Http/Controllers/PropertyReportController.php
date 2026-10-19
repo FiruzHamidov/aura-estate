@@ -29,6 +29,140 @@ class PropertyReportController extends Controller
         abort_unless($actor?->hasPermission('property_reports.view'), 403, 'Forbidden');
     }
 
+    /** One complete, scoped dataset for the employee table and its export. */
+    public function employees(Request $request, \App\Services\KpiModuleService $kpi)
+    {
+        // Keep activity facts and property distributions in the same DB snapshot.
+        return DB::transaction(fn () => $this->employeeReportPayload($request, $kpi));
+    }
+
+    private function employeeReportPayload(Request $request, \App\Services\KpiModuleService $kpi)
+    {
+        $this->ensureReportsAllowed($request);
+        $this->validateReportScope($request);
+        $actor = $request->user();
+        abort_unless(collect(['all', 'branch', 'group'])->contains(fn ($scope) => $actor->hasPermission('property_reports.scope.'.$scope)), 403);
+        $filters = $request->validate([
+            'date_from' => 'nullable|date_format:Y-m-d|required_with:date_to',
+            'date_to' => 'nullable|date_format:Y-m-d|required_with:date_from|after_or_equal:date_from',
+            'interval' => 'nullable|in:day,week,month',
+            'agent_id' => 'nullable|integer|exists:users,id',
+            'branch_id' => 'nullable|integer|exists:branches,id',
+            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
+            'include_inactive' => 'nullable|boolean',
+            'sold_at_from' => 'nullable|date_format:Y-m-d',
+            'sold_at_to' => 'nullable|date_format:Y-m-d|after_or_equal:sold_at_from',
+        ]);
+        abort_if($request->boolean('include_inactive') && ! $actor->hasPermission('kpi.inactive.view'), 403);
+        if (! $actor->usesAssignedGroupScope()) {
+            $employees = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
+            $this->applyBranchAccessByUserColumn($request, $employees, 'users.id');
+            $filters['user_ids'] = $employees->pluck('users.id')->all();
+        }
+        $allPeriod = empty($filters['date_from']);
+        $from = $allPeriod ? $kpi->earliestScopedUserDate($actor, $filters)
+            : Carbon::parse($filters['date_from'], 'Asia/Dushanbe')->startOfDay();
+        $to = $allPeriod ? Carbon::now('Asia/Dushanbe')->endOfDay()
+            : Carbon::parse($filters['date_to'], 'Asia/Dushanbe')->endOfDay();
+        $period = $allPeriod ? 'range' : ($from->isSameDay($to) ? 'day' : (($filters['interval'] ?? '') === 'month' ? 'month' : 'week'));
+        // Internal options: HTTP pagination cannot truncate totals or Excel exports.
+        $payload = $kpi->periodRowsV2($actor, $period, $from, $to, array_merge($filters, [
+            'per_page' => PHP_INT_MAX, 'page' => 1, 'all_period' => $allPeriod,
+            'include_breakdown' => false, 'unified_employees' => true,
+        ]));
+        $rows = collect($payload['data']);
+        $ids = $rows->pluck('employee_id')->all();
+
+        $closed = ['sold', 'rented', 'sold_by_owner'];
+        $owner = "CASE WHEN properties.moderation_status IN ('sold','rented','sold_by_owner') THEN "
+            .$this->salesAttributionService->primarySellerExpression().' ELSE '.$this->propertyAuthorExpression().' END';
+        $propertyFilters = new Request($request->except([
+            'date_from', 'date_to', 'from', 'to', 'sold_at_from', 'sold_at_to',
+            'deposit_received_at_from', 'deposit_received_at_to', 'date_field',
+        ]));
+        $query = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
+        [$query] = $this->applyCommonFilters($propertyFilters, $query);
+        $query->whereIn(DB::raw($owner), $ids);
+        $storageZone = (string) config('app.timezone', 'Asia/Dushanbe');
+        $bounds = fn (Carbon $start, Carbon $end) => [
+            $start->copy()->startOfDay()->setTimezone($storageZone)->toDateTimeString(),
+            $end->copy()->endOfDay()->setTimezone($storageZone)->toDateTimeString(),
+        ];
+        $soldFrom = ! empty($filters['sold_at_from']) ? Carbon::parse($filters['sold_at_from'], 'Asia/Dushanbe') : $from;
+        $soldTo = ! empty($filters['sold_at_to']) ? Carbon::parse($filters['sold_at_to'], 'Asia/Dushanbe') : $to;
+        if (! $allPeriod || $request->filled('sold_at_from') || $request->filled('sold_at_to')) {
+            $query->where(function ($q) use ($closed, $allPeriod, $bounds, $from, $to, $soldFrom, $soldTo) {
+                $q->where(fn ($open) => $open->where(fn ($status) => $status->whereNotIn('moderation_status', [...$closed, 'deposit'])->orWhereNull('moderation_status'))
+                    ->when(! $allPeriod, fn ($dates) => $dates->whereBetween('created_at', $bounds($from, $to))))
+                    ->orWhere(fn ($sales) => $sales->whereIn('moderation_status', $closed)->whereBetween('sold_at', $bounds($soldFrom, $soldTo)))
+                    ->orWhere(fn ($deposit) => $deposit->where('moderation_status', 'deposit')
+                        ->when(! $allPeriod, fn ($dates) => $dates->whereBetween('deposit_received_at', $bounds($from, $to))));
+            });
+        }
+        $properties = $query->select(['id', 'moderation_status', 'contract_type_id', 'created_at', 'sold_at',
+            'deposit_received_at', ...$this->salesAttributionService->sellerColumns()])->get();
+        $byEmployee = $properties->groupBy(fn ($property) => in_array($property->moderation_status, $closed, true)
+            ? $this->salesAttributionService->primarySellerId($property)
+            : ((int) $property->created_by > 0 ? (int) $property->created_by : (int) $property->agent_id));
+        $statuses = ['draft', 'pending', 'approved', 'deposit', 'sold', 'rented', 'sold_by_owner', 'denied', 'rejected', 'deleted', 'unknown'];
+        $contracts = ['alternative', 'exclusive', 'none', 'unspecified'];
+        $rows = $rows->map(function (array $row) use ($byEmployee, $statuses, $contracts) {
+            $items = $byEmployee->get($row['employee_id'], collect());
+            $byStatus = array_fill_keys($statuses, 0);
+            $byContract = array_fill_keys($contracts, 0);
+            foreach ($items as $property) {
+                $status = $property->moderation_status ?: 'unknown';
+                $byStatus[$status] = ($byStatus[$status] ?? 0) + 1;
+                $contract = match ((int) $property->contract_type_id) {
+                    1 => 'alternative', 2 => 'exclusive', 3 => 'none', 0 => 'unspecified',
+                    default => 'contract_type_'.$property->contract_type_id,
+                };
+                $byContract[$contract] = ($byContract[$contract] ?? 0) + 1;
+            }
+            $row['total_properties'] = $items->count();
+            $row['approved'] = $byStatus['approved'];
+            $row['rented'] = $byStatus['rented'];
+            $row['sold_by_owner'] = $byStatus['sold_by_owner'];
+            $row['by_status'] = $byStatus;
+            $row['contracts'] = $byContract;
+            $row['properties'] = $items->map(fn ($p) => [
+                'id' => (int) $p->id, 'status' => $p->moderation_status ?: 'unknown',
+                'contract_type_id' => $p->contract_type_id,
+                'date' => (string) (in_array($p->moderation_status, ['sold', 'rented', 'sold_by_owner'], true)
+                    ? $p->sold_at : ($p->moderation_status === 'deposit' ? $p->deposit_received_at : $p->created_at)),
+            ])->values();
+            foreach ($row['metrics'] as $key => $metric) {
+                if ($metric['source_error'] ?? false) $row[$key] = null;
+            }
+            $hasPlan = collect($row['metrics'])->contains(fn ($m) => ($m['target_value'] ?? 0) > 0 && ($m['weight_used'] ?? 0) > 0);
+            $sourceError = collect($row['metrics'])->contains(fn ($m) => $m['source_error'] ?? false);
+            if (! $hasPlan || $sourceError) {
+                $row['kpi_percent'] = null;
+                $row['status'] = $sourceError ? 'source_error' : 'no_plan';
+            }
+            return $row;
+        })->values();
+        $totals = [];
+        foreach (['total_properties', 'objects', 'approved', 'shows', 'clients', 'calls', 'ads', 'sales', 'rented', 'sold_by_owner'] as $key) {
+            $totals[$key] = $rows->contains(fn ($row) => $row[$key] === null) ? null : $rows->sum($key);
+        }
+        foreach (['by_status', 'contracts'] as $key) {
+            $totals[$key] = array_fill_keys($key === 'by_status' ? $statuses : $contracts, 0);
+            foreach ($rows as $row) foreach ($row[$key] as $category => $count) {
+                $totals[$key][$category] = ($totals[$key][$category] ?? 0) + $count;
+            }
+        }
+        $scored = $rows->whereNotNull('kpi_percent');
+        $totals['kpi_percent'] = $scored->isEmpty() ? null : round($scored->avg('kpi_percent'), 2);
+        return response()->json(['data' => $rows, 'totals' => $totals, 'meta' => [
+            'date_from' => $allPeriod ? null : $from->toDateString(), 'date_to' => $allPeriod ? null : $to->toDateString(),
+            'timezone' => 'Asia/Dushanbe', 'generated_at' => Carbon::now('Asia/Dushanbe')->toIso8601String(),
+            'employees_count' => $rows->count(), 'scored_employees_count' => $scored->count(),
+            'quality' => $payload['meta']['quality'], 'sales_attribution' => 'primary_seller',
+            'property_filters' => $request->only(['offer_type', 'moderation_status', 'type_id', 'location_id', 'sold_at_from', 'sold_at_to']),
+        ]]);
+    }
+
     // --- Helper: нормализация входа (array или "1,2,3")
     private function toArray($value): array
     {
