@@ -8,6 +8,7 @@ use App\Models\ClientNeedStatus;
 use App\Models\PropertyType;
 use App\Models\RepairType;
 use App\Models\User;
+use App\Services\Crm\ClientNeedDealService;
 use App\Support\ClientAccess;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -18,7 +19,8 @@ use Illuminate\Validation\ValidationException;
 class ClientNeedController extends Controller
 {
     public function __construct(
-        private readonly ClientAccess $clientAccess
+        private readonly ClientAccess $clientAccess,
+        private readonly ClientNeedDealService $needDeals,
     ) {
     }
 
@@ -358,6 +360,8 @@ class ClientNeedController extends Controller
             $need = ClientNeed::create($validated);
             $this->syncPropertyTypes($need, $propertyTypeIds);
             $this->syncRepairTypes($need, $repairTypeIds);
+
+            $this->needDeals->ensureForNeed($need, $authUser);
 
             return response()->json($need->load($this->relations()), 201);
         });
