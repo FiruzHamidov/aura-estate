@@ -1712,7 +1712,7 @@ class PropertyController extends Controller
             'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
             'agent_id', 'listing_type', 'created_by', 'contract_type_id', 'document_type_id',
             'is_business_owner', 'is_full_apartment', 'is_for_aura', 'developer_id',
-            'heating_type_id', 'parking_type_id', 'construction_status',
+            'heating_type_id', 'parking_type_id', 'construction_status', 'renovation_permission_status',
             // при желании можно и lat/lng, но для карты они задаются bbox'ом
         ];
         foreach ($exactFields as $field) {
@@ -1978,9 +1978,10 @@ class PropertyController extends Controller
 
     /**
      * Query validation for list/map property filters.
-     * Returns 422 for unsupported construction_status values.
+     * Returns 422 for unsupported filter values.
      *
      * @queryParam construction_status string Filter by construction stage.
+     * @queryParam renovation_permission_status string Filter by renovation permission: allowed or not_allowed.
      * @queryParam document_type_ids array Multiple property document type IDs. Example: [1,3]
      * @queryParam document_type_id integer Single property document type ID. Example: 1
      * Allowed: under_construction, built, commissioned.
@@ -1990,6 +1991,7 @@ class PropertyController extends Controller
     {
         $validated = $request->validate([
             'construction_status' => ['sometimes', 'nullable', Rule::in(['under_construction', 'built', 'commissioned'])],
+            'renovation_permission_status' => ['sometimes', 'nullable', 'string', Rule::in(['allowed', 'not_allowed'])],
             'document_type_id' => ['sometimes', 'nullable', 'integer', 'exists:document_types,id'],
             'document_type_ids' => ['sometimes', 'nullable', 'array'],
             'document_type_ids.*' => ['integer', 'distinct', 'exists:document_types,id'],
@@ -2020,6 +2022,7 @@ class PropertyController extends Controller
             'compact' => ['sometimes', 'boolean'],
         ], [
             'construction_status.in' => 'Поле construction_status должно быть одним из значений: under_construction, built, commissioned.',
+            'renovation_permission_status.in' => 'Поле renovation_permission_status должно быть одним из значений: allowed, not_allowed.',
         ]);
 
         $this->validateRangeOrder($validated, [
