@@ -1147,6 +1147,7 @@ class KpiModuleService
 
         $allUsers = ($authUser->usesAssignedGroupScope() ? $this->historicalKpiUsersQuery($authUser, $filters, $from, $to) : $this->weeklyUsersScopeQuery($authUser, $filters))
             ->when(isset($filters['user_ids']), fn (Builder $query) => $query->whereIn('users.id', $filters['user_ids']))
+            ->when(($filters['unified_employees'] ?? false) && ! ($filters['include_inactive'] ?? false), fn (Builder $query) => $query->where('users.status', '!=', 'inactive'))
             ->orderBy('users.name')
             ->orderBy('users.id')->get();
         foreach ($allUsers as $user) {
@@ -1157,6 +1158,10 @@ class KpiModuleService
                 $user->branch_group_id = $historicalGroup;
             }
         }
+        // The general report has one row per person, even when a former employee
+        // has several authorized historical group/role contexts in this period.
+        $unifiedEmployees = (bool) ($filters['unified_employees'] ?? false);
+        if ($unifiedEmployees) $allUsers = $allUsers->unique('id')->values();
         $userIds = $allUsers->pluck('id')->map(fn ($id) => (int) $id)->values();
 
         // Current team members have the same employee totals for every viewer.
@@ -1179,8 +1184,11 @@ class KpiModuleService
             ->whereDate('report_date', '<=', $to->toDateString())
             ->whereIn('user_id', $userIds->all())
             ->when($authUser->usesAssignedGroupScope(), fn (Builder $q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'daily_reports.branch_group_id'))
+            ->when($unifiedEmployees && $authUser->usesAssignedGroupScope() && ! empty($filters['branch_group_id']),
+                fn (Builder $q) => $q->where('daily_reports.branch_group_id', $filters['branch_group_id']))
+            ->when($unifiedEmployees && isset($filters['roles']), fn (Builder $q) => $q->whereIn('role_slug', $filters['roles']))
             ->get()
-            ->groupBy(fn ($row) => $authUser->usesAssignedGroupScope() ? $row->user_id.'|'.$row->branch_group_id : $row->user_id);
+            ->groupBy(fn ($row) => $authUser->usesAssignedGroupScope() && ! $unifiedEmployees ? $row->user_id.'|'.$row->branch_group_id : $row->user_id);
 
         // Do not call DailyReportService::autoMetrics() for every user/day.  That
         // method issues several queries per invocation, which made a 50-user
@@ -1201,11 +1209,21 @@ class KpiModuleService
         $planTraceRows = [];
         $preloadedSalesByUserDate = $this->preloadSalesCreditsByUserDate($userIds->all(), $from, $to, $authUser, true, (bool) ($filters['all_period'] ?? false));
 
+        if ($unifiedEmployees && $authUser->usesAssignedGroupScope()) {
+            if (! empty($filters['branch_group_id'])) {
+                $inGroup = fn ($key) => (int) (explode('|', (string) $key)[1] ?? 0) === (int) $filters['branch_group_id'];
+                $autoMetricsByUserDate = array_filter($autoMetricsByUserDate, $inGroup, ARRAY_FILTER_USE_KEY);
+                $preloadedSalesByUserDate = array_filter($preloadedSalesByUserDate, $inGroup, ARRAY_FILTER_USE_KEY);
+            }
+            $autoMetricsByUserDate = $this->mergeEmployeeContexts($autoMetricsByUserDate);
+            $preloadedSalesByUserDate = $this->mergeEmployeeContexts($preloadedSalesByUserDate);
+        }
+
         $hasClients = Schema::hasTable('clients');
-        $data = $allUsers->map(function (User $user) use ($hasClients, $currentContexts, $currentReports, $currentAutoMetrics, $currentSales, $authUser, $reports, $periodType, $from, $to, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, $preloadedSalesByUserDate, $autoMetricsByUserDate, $authorizedPlans, $lockedScopes, &$globalSourceError, &$planTraceRows) {
-            $contextKey = $authUser->usesAssignedGroupScope() ? $user->id.'|'.$user->branch_group_id : $user->id;
+        $data = $allUsers->map(function (User $user) use ($unifiedEmployees, $hasClients, $currentContexts, $currentReports, $currentAutoMetrics, $currentSales, $authUser, $reports, $periodType, $from, $to, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, $preloadedSalesByUserDate, $autoMetricsByUserDate, $authorizedPlans, $lockedScopes, &$globalSourceError, &$planTraceRows) {
+            $contextKey = $authUser->usesAssignedGroupScope() && ! $unifiedEmployees ? $user->id.'|'.$user->branch_group_id : $user->id;
             $rows = collect($reports->get($contextKey, collect()));
-            if ($authUser->usesAssignedGroupScope()) $rows = $rows->where('role_slug', $user->role?->slug)->values();
+            if ($authUser->usesAssignedGroupScope() && ! $unifiedEmployees) $rows = $rows->where('role_slug', $user->role?->slug)->values();
             $autoByDate = $autoMetricsByUserDate[$contextKey] ?? [];
             $currentMember = isset($currentContexts[$user->id.'|'.$user->branch_group_id.'|'.$user->role?->slug]);
             if ($currentMember) {
@@ -1420,6 +1438,22 @@ class KpiModuleService
                 ] : null,
             ],
         ];
+    }
+
+    private function mergeEmployeeContexts(array $contexts): array
+    {
+        $result = [];
+        foreach ($contexts as $context => $dates) {
+            $id = (int) explode('|', (string) $context)[0];
+            foreach ($dates as $date => $value) {
+                if (is_array($value)) {
+                    foreach ($value as $key => $count) $result[$id][$date][$key] = ($result[$id][$date][$key] ?? 0) + $count;
+                } else {
+                    $result[$id][$date] = ($result[$id][$date] ?? 0) + $value;
+                }
+            }
+        }
+        return $result;
     }
 
     private function preloadSalesCreditsByUserDate(array $userIds, Carbon $from, Carbon $to, User $authUser, bool $scopeRecords = true, bool $includeUndated = false): array
