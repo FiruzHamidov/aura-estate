@@ -191,6 +191,11 @@ final class GroupRecordTransfer
                         abort_unless($task->branch_group_id === null || $this->access->allowsGroup($actor, (int) $task->branch_group_id), 403, 'RBAC_GROUP_SCOPE_VIOLATION');
                         abort_unless($task->assignee_id === null || (int) $task->assignee_id === $ungroupedEmployeeId, 403, 'FORBIDDEN_ACTION');
                     }
+                    if (Schema::hasTable('group_access_review_items')) {
+                        DB::table('group_access_review_items')->where('source_table', 'crm_tasks')
+                            ->where('source_id', $task->id)->where('reason', 'employee_transfer_dispute')
+                            ->whereNull('resolved_at')->update(['resolved_at' => now()]);
+                    }
                     $taskBefore = array_intersect_key((array) $task, $taskChanges);
                     if ((int) $task->branch_group_id === (int) $group->id && (int) $task->assignee_id === (int) $target->id) {
                         continue;
@@ -202,6 +207,11 @@ final class GroupRecordTransfer
             }
             $this->audit->record($actor, 'record_group_transferred', $record->getTable(), $record->id, $before, $changes, $data['reason']);
 
+            if (Schema::hasTable('group_access_review_items')) {
+                DB::table('group_access_review_items')->where('source_table', $record->getTable())
+                    ->where('source_id', $record->id)->where('reason', 'employee_transfer_dispute')
+                    ->whereNull('resolved_at')->update(['resolved_at' => now()]);
+            }
             return $record->fresh();
         });
     }

@@ -1484,6 +1484,84 @@ class RopGroupAssignmentsTest extends TestCase
         $this->assertTrue($organization->hasActiveRecords($employee->id));
     }
 
+    public function test_transfer_with_only_disputed_records_keeps_parent_and_tasks_and_rejects_stale_plan(): void
+    {
+        (require database_path('migrations/2026_09_09_030000_create_group_access_review_items.php'))->up();
+        Schema::create('crm_tasks', function (Blueprint $t) {
+            $t->id(); $t->string('title'); $t->unsignedBigInteger('assignee_id');
+            $t->unsignedBigInteger('branch_group_id')->nullable(); $t->string('status')->nullable();
+            $t->string('related_entity_type')->nullable(); $t->unsignedBigInteger('related_entity_id')->nullable();
+            $t->timestamp('completed_at')->nullable(); $t->timestamps();
+        });
+        $employee = $this->user('agent', $this->a);
+        $director = $this->user('branch_director', $this->a);
+        $otherBranch = Branch::create(['name' => 'Other']);
+        $foreign = BranchGroup::create(['name' => 'Foreign', 'branch_id' => $otherBranch->id]);
+        $client = Client::create(['full_name' => 'Client', 'status' => 'active', 'branch_id' => $this->branch->id,
+            'branch_group_id' => $this->a->id, 'responsible_agent_id' => $employee->id]);
+        DB::table('crm_tasks')->insert(['id' => 1, 'title' => 'Disputed task', 'assignee_id' => $employee->id,
+            'branch_group_id' => $foreign->id, 'related_entity_type' => 'client', 'related_entity_id' => $client->id]);
+        Sanctum::actingAs($director);
+        $url = '/api/users/'.$employee->id.'/group-transfer';
+        $preview = $this->getJson($url)->assertOk()->assertJsonCount(0, 'records')->assertJsonCount(2, 'deferred_records')->json();
+        $payload = ['branch_group_id' => $this->b->id, 'revision' => $preview['revision'], 'reason' => 'Team reassignment', 'records' => []];
+        DB::table('crm_tasks')->where('id', 1)->update(['title' => 'Changed']);
+        $this->postJson($url, $payload)->assertConflict();
+        $this->assertDatabaseCount('group_access_review_items', 0);
+        $payload['revision'] = $this->getJson($url)->assertOk()->json('revision');
+        $this->postJson($url, $payload)->assertOk()->assertJsonPath('deferred_records_count', 2);
+        $this->assertSame($this->b->id, $employee->fresh()->branch_group_id);
+        $this->assertSame($this->a->id, $client->fresh()->branch_group_id);
+        $this->assertDatabaseHas('crm_tasks', ['id' => 1, 'branch_group_id' => $foreign->id, 'assignee_id' => $employee->id]);
+        $this->assertDatabaseCount('group_access_review_items', 2);
+        Sanctum::actingAs($this->admin);
+        $recordUrl = '/api/group-transfers/clients/'.$client->id;
+        $revision = $this->getJson($recordUrl)->assertOk()->json('revision');
+        $this->postJson($recordUrl, ['branch_group_id' => $this->b->id, 'responsible_user_id' => $employee->id,
+            'revision' => $revision, 'reason' => 'Resolve parent and task'])->assertOk();
+        $this->assertDatabaseHas('crm_tasks', ['id' => 1, 'branch_group_id' => $this->b->id]);
+        $this->assertSame(0, DB::table('group_access_review_items')->whereNull('resolved_at')->count());
+    }
+
+    public function test_director_transfer_defers_foreign_records_and_admin_can_resolve_them(): void
+    {
+        (require database_path('migrations/2026_09_09_030000_create_group_access_review_items.php'))->up();
+        $employee = $this->user('agent', $this->a);
+        $director = $this->user('branch_director', $this->a);
+        $otherBranch = Branch::create(['name' => 'Other']);
+        $foreign = BranchGroup::create(['name' => 'Foreign', 'branch_id' => $otherBranch->id]);
+        $make = fn ($name, $status = 'active') => Client::create(['full_name' => $name, 'status' => $status,
+            'branch_id' => $this->branch->id, 'branch_group_id' => $this->a->id, 'responsible_agent_id' => $employee->id]);
+        $move = $make('Move'); $dispute = $make('Private foreign contact'); $history = $make('History', 'inactive');
+        DB::table('clients')->where('id', $dispute->id)->update(['branch_id' => $otherBranch->id, 'branch_group_id' => $foreign->id]);
+        $original = $dispute->fresh()->getAttributes();
+        Sanctum::actingAs($director);
+        $url = '/api/users/'.$employee->id.'/group-transfer';
+        $preview = $this->getJson($url)->assertOk()->assertJsonCount(1, 'records')->assertJsonCount(1, 'deferred_records')
+            ->assertJsonMissing(['title' => 'Private foreign contact'])->json();
+        $payload = ['branch_group_id' => $this->b->id, 'revision' => $preview['revision'], 'reason' => 'Team reassignment',
+            'records' => [['type' => 'clients', 'id' => $move->id, 'action' => 'move']]];
+        $tampered = $payload;
+        $tampered['records'][] = ['type' => 'clients', 'id' => $dispute->id, 'action' => 'move'];
+        $this->postJson($url, $tampered)->assertUnprocessable();
+        $this->postJson($url, $payload)->assertOk()->assertJsonPath('deferred_records_count', 1)->assertJsonPath('transferred_records', 1);
+        $this->assertSame($this->b->id, $employee->fresh()->branch_group_id);
+        $this->assertSame($this->b->id, $move->fresh()->branch_group_id);
+        $this->assertSame($original, $dispute->fresh()->getAttributes());
+        $this->assertSame($this->a->id, $history->fresh()->branch_group_id);
+        $this->getJson('/api/group-access/review?transfers_only=1')->assertOk()->assertJsonCount(0, 'data');
+        Sanctum::actingAs($this->admin);
+        $this->getJson('/api/group-access/review?transfers_only=1')->assertOk()->assertJsonCount(1, 'data');
+        app(\App\Services\GroupAccess\GroupAccessReviewQueue::class)->publish(['issues' => [], 'unclassified_history' => [], 'unclassified_attendance_context' => []]);
+        $this->getJson('/api/group-access/review?transfers_only=1')->assertOk()->assertJsonCount(1, 'data');
+        $recordUrl = '/api/group-transfers/clients/'.$dispute->id;
+        $record = $this->getJson($recordUrl)->assertOk()->json();
+        $this->postJson($recordUrl, ['branch_group_id' => $this->b->id, 'responsible_user_id' => $employee->id,
+            'revision' => $record['revision'], 'reason' => 'Admin resolved dispute'])->assertOk();
+        $this->getJson('/api/group-access/review?transfers_only=1')->assertOk()->assertJsonCount(0, 'data');
+        $this->assertSame($this->b->id, $dispute->fresh()->branch_group_id);
+    }
+
     public function test_employee_transfer_requires_all_active_records_and_preserves_inactive_history(): void
     {
         $employee = $this->user('agent', $this->a);
