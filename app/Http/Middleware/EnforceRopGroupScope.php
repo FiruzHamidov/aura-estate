@@ -106,6 +106,11 @@ final class EnforceRopGroupScope
                         && $this->access->hasVisibleTaskHistory($actor, (int) $id)) {
                         continue;
                     }
+                    if ($read && $key === 'agent_id' && request()->is('api/reports/employees')
+                        && $this->access->hasVisibleDailyReportHistory($actor, (int) $id)) {
+                        // The unified report still scopes historical facts to assigned groups.
+                        continue;
+                    }
                     if ($read && $key === 'user_id' && request()->is('api/daily-reports', 'api/kpi-reports', 'api/kpi/weekly', 'api/kpi/monthly', 'api/kpi/weekly-daily', 'api/kpi/daily', 'api/kpi/dashboard', 'api/kpi/dashboard/debug')
                         && $this->access->hasVisibleDailyReportHistory($actor, (int) $id)) {
                         continue;
