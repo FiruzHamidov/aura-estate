@@ -110,6 +110,7 @@ class Property extends Model
     ];
 
     protected $hidden = [
+        'non_client_views_count',
         'effective_price',
         'liquidity_score',
         'liquidity_category',

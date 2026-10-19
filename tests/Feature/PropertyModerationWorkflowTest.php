@@ -1491,6 +1491,7 @@ class PropertyModerationWorkflowTest extends TestCase
     {
         (require database_path('migrations/2026_10_10_080000_add_property_contact_counters.php'))->up();
         (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
+        (require database_path('migrations/2026_10_19_090000_add_non_client_property_views.php'))->up();
         Schema::table('properties', fn (Blueprint $table) => $table->unsignedInteger('views_count')->default(0));
         [$agent] = $this->users();
         $property = $this->publishedProperty($agent);
@@ -1513,6 +1514,7 @@ class PropertyModerationWorkflowTest extends TestCase
     {
         (require database_path('migrations/2026_10_10_080000_add_property_contact_counters.php'))->up();
         (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
+        (require database_path('migrations/2026_10_19_090000_add_non_client_property_views.php'))->up();
         Schema::table('properties', fn (Blueprint $table) => $table->unsignedInteger('views_count')->default(0));
         Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
         [$agent, $rop, $director] = $this->users();
@@ -1542,6 +1544,7 @@ class PropertyModerationWorkflowTest extends TestCase
     {
         (require database_path('migrations/2026_10_10_080000_add_property_contact_counters.php'))->up();
         (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
+        (require database_path('migrations/2026_10_19_090000_add_non_client_property_views.php'))->up();
         Schema::table('properties', fn (Blueprint $table) => $table->unsignedInteger('views_count')->default(0));
         [$agent, $rop] = $this->users();
         $first = $this->publishedProperty($agent);
@@ -1570,6 +1573,7 @@ class PropertyModerationWorkflowTest extends TestCase
     {
         (require database_path('migrations/2026_10_10_080000_add_property_contact_counters.php'))->up();
         (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
+        (require database_path('migrations/2026_10_19_090000_add_non_client_property_views.php'))->up();
         Schema::table('properties', fn (Blueprint $table) => $table->unsignedInteger('views_count')->default(0));
         [$agent, $admin] = $this->users();
         $role = Role::firstOrCreate(['slug' => 'admin'], ['name' => 'Admin']);
@@ -1608,6 +1612,7 @@ class PropertyModerationWorkflowTest extends TestCase
     {
         (require database_path('migrations/2026_10_10_080000_add_property_contact_counters.php'))->up();
         (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
+        (require database_path('migrations/2026_10_19_090000_add_non_client_property_views.php'))->up();
         Schema::table('properties', fn (Blueprint $table) => $table->unsignedInteger('views_count')->default(0));
         [$agent, $admin] = $this->users();
         $role = Role::firstOrCreate(['slug' => 'admin'], ['name' => 'Admin']);
@@ -1628,6 +1633,99 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->getJson($url.'?agent_id='.$other->id.'&branch_id=2&group_id=2')->assertOk()->assertJsonPath('data.0.id', $reassigned->id);
         $this->getJson($url.'?agent_id='.$other->id.'&branch_id=1')->assertOk()->assertJsonPath('total', 0);
         $this->getJson($url.'?agent_id=999999')->assertUnprocessable();
+    }
+
+    public function test_views_split_by_authenticated_role_keep_daily_deduplication_and_totals(): void
+    {
+        $this->travelTo(\Carbon\Carbon::parse('2026-10-19 10:00:00', 'Asia/Dushanbe'));
+        (require database_path('migrations/2026_10_10_080000_add_property_contact_counters.php'))->up();
+        (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
+        (require database_path('migrations/2026_10_19_090000_add_non_client_property_views.php'))->up();
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedInteger('views_count')->default(0));
+        Schema::create('personal_access_tokens', function (Blueprint $table) {
+            $table->id();
+            $table->morphs('tokenable');
+            $table->string('name');
+            $table->string('token', 64)->unique();
+            $table->text('abilities')->nullable();
+            $table->timestamp('last_used_at')->nullable();
+            $table->timestamp('expires_at')->nullable();
+            $table->timestamps();
+        });
+        [$agent] = $this->users();
+        $property = $this->publishedProperty($agent);
+        $before = $property->getRawOriginal('updated_at');
+        $url = "/api/properties/{$property->id}/view";
+        $this->postJson($url, ['non_client_views_count' => 999], ['User-Agent' => 'Guest'])->assertNoContent();
+        $this->postJson($url, [], ['User-Agent' => 'Guest'])->assertNoContent();
+        $expected = 0;
+        foreach (['client', 'agent', 'admin', 'external_agent', 'custom', null] as $index => $slug) {
+            $role = $slug ? Role::firstOrCreate(['slug' => $slug], ['name' => $slug]) : null;
+            $viewer = User::forceCreate(['name' => 'Viewer', 'phone' => '90100000'.$index, 'role_id' => $role?->id ?? 9999, 'branch_id' => 1]);
+            $token = $viewer->createToken('View test')->plainTextToken;
+            $headers = ['Authorization' => 'Bearer '.$token, 'User-Agent' => 'Viewer-'.$index];
+            app('auth')->forgetGuards();
+            $this->postJson($url, [], $headers)->assertNoContent();
+            $this->postJson($url, [], $headers)->assertNoContent();
+            if ($slug && $slug !== 'client') $expected++;
+            $this->assertEquals($index + 2, $property->fresh()->views_count);
+            $this->assertEquals($expected, $property->fresh()->non_client_views_count);
+        }
+        $this->assertDatabaseHas('property_analytics_daily', ['property_id' => $property->id, 'day' => '2026-10-19', 'views_count' => 7, 'non_client_views_count' => 4]);
+        $this->assertSame($before, $property->fresh()->getRawOriginal('updated_at'));
+        $this->assertArrayNotHasKey('non_client_views_count', $property->fresh()->toArray());
+        // A counted guest view is not counted again or retroactively reclassified after login.
+        app('auth')->forgetGuards();
+        $token = $agent->createToken('Agent view')->plainTextToken;
+        $headers = ['Authorization' => 'Bearer '.$token, 'User-Agent' => 'Guest'];
+        $this->postJson($url, [], $headers)->assertNoContent();
+        $this->assertEquals(4, $property->fresh()->non_client_views_count);
+        $this->travelTo(\Carbon\Carbon::parse('2026-10-19 20:00:00', 'UTC'));
+        $this->postJson($url, [], $headers)->assertNoContent();
+        $this->assertDatabaseHas('property_analytics_daily', ['property_id' => $property->id, 'day' => '2026-10-20', 'views_count' => 1, 'non_client_views_count' => 1]);
+        $this->assertEquals(8, $property->fresh()->views_count);
+        $this->assertEquals(5, $property->fresh()->non_client_views_count);
+        $this->postJson("/api/properties/{$property->id}/contact-click", ['action' => 'phone'], $headers)->assertNoContent();
+        $this->assertEquals(5, $property->fresh()->non_client_views_count);
+        $this->travelBack();
+    }
+
+    public function test_non_client_analytics_sort_period_scope_and_unknown_history(): void
+    {
+        $this->travelTo(\Carbon\Carbon::parse('2026-10-19 10:00:00', 'Asia/Dushanbe'));
+        (require database_path('migrations/2026_10_10_080000_add_property_contact_counters.php'))->up();
+        (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedInteger('views_count')->default(0));
+        [$agent, $admin] = $this->users();
+        $first = $this->publishedProperty($agent);
+        DB::table('properties')->where('id', $first->id)->update(['views_count' => 100]);
+        $migration = require database_path('migrations/2026_10_19_090000_add_non_client_property_views.php');
+        $migration->up();
+        $this->assertEquals(100, $first->fresh()->views_count);
+        $this->assertEquals(0, $first->fresh()->non_client_views_count);
+        $second = $this->publishedProperty($agent);
+        $foreign = $this->publishedProperty($agent, ['branch_id' => 2]);
+        foreach ([$first->id => 2, $second->id => 8, $foreign->id => 20] as $id => $count) {
+            DB::table('properties')->where('id', $id)->update(['non_client_views_count' => $count]);
+            DB::table('property_analytics_daily')->insert(['property_id' => $id, 'day' => '2026-10-19', 'views_count' => $count + 1, 'non_client_views_count' => $count]);
+        }
+        $role = Role::firstOrCreate(['slug' => 'admin'], ['name' => 'Admin']);
+        $admin->forceFill(['role_id' => $role->id])->save();
+        $this->actingAs($admin->fresh());
+        $url = '/api/marketing/property-contact-analytics?sort=non_client_views_count&branch_id=1';
+        foreach (['all', 'today', 'week', 'month', 'custom&date_from=2026-10-18&date_to=2026-10-19'] as $period) {
+            $this->getJson($url.'&period='.$period)->assertOk()->assertJsonPath('total', 2)
+                ->assertJsonPath('data.0.id', $second->id)->assertJsonPath('data.0.non_client_views_count', 8)
+                ->assertJsonPath('data.1.non_client_views_count', 2)
+                ->assertJsonPath('non_client_views_started_at', '2026-10-19T10:00:00+05:00');
+        }
+        $this->getJson($url.'&period=custom&date_from=2026-10-01&date_to=2026-10-18')->assertOk()
+            ->assertJsonPath('data.0.non_client_views_count', null)->assertJsonPath('data.0.views_count', 0);
+        $this->getJson($url.'&agent_id='.$agent->id.'&group_id=1')->assertOk()->assertJsonPath('data.0.non_client_views_count', 8);
+        $migration->down();
+        $this->assertFalse(Schema::hasColumn('properties', 'non_client_views_count'));
+        $this->assertEquals(100, $first->fresh()->views_count);
+        $this->travelBack();
     }
 
     private function detectedDuplicateFixture(): array

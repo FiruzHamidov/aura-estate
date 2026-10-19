@@ -2905,7 +2905,8 @@ class PropertyController extends Controller
 
     public function trackView(Request $request, Property $property)
     {
-        $this->moderation->publicOrFail($property, $this->propertyShowAuthUser($request));
+        $viewer = $this->propertyShowAuthUser($request);
+        $this->moderation->publicOrFail($property, $viewer);
         // Ключ "видел" = по объекту + IP + UA + текущая дата
         $fingerprint = sha1(
             ($request->ip() ?? '0.0.0.0').'|'.
@@ -2917,7 +2918,7 @@ class PropertyController extends Controller
         // Инкрементим только если ещё не считали сегодня
         if (Cache::add($cacheKey, 1, now('Asia/Dushanbe')->endOfDay())) {
             try {
-                app(\App\Services\PropertyAnalyticsRecorder::class)->record($property->id, 'views_count');
+                app(\App\Services\PropertyAnalyticsRecorder::class)->record($property->id, 'views_count', $viewer);
             } catch (\Throwable $error) {
                 Cache::forget($cacheKey);
                 throw $error;

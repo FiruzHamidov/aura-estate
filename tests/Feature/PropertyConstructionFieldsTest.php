@@ -203,6 +203,7 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->timestamps();
         });
         (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
+        (require database_path('migrations/2026_10_19_090000_add_non_client_property_views.php'))->up();
     }
 
     protected function tearDown(): void
