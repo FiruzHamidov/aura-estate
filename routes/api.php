@@ -223,6 +223,7 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         Route::delete('/users/{user}/days/{date}/comment', [AttendanceCommentController::class, 'destroy'])
             ->whereNumber('user')->where('date', '\\d{4}-\\d{2}-\\d{2}');
         Route::get('/unmapped-events', [AttendanceReportController::class, 'unmapped']);
+        Route::delete('/unmapped-events', [\App\Http\Controllers\AttendanceUnmappedEventController::class, 'destroy']);
         Route::post('/events/reprocess', [AttendanceReportController::class, 'reprocess']);
         Route::get('/export', [AttendanceReportController::class, 'export']);
         Route::get('/users/{user}/schedule', [AttendanceScheduleController::class, 'show'])->whereNumber('user');
