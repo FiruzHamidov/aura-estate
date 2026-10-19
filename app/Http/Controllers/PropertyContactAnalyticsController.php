@@ -23,7 +23,7 @@ class PropertyContactAnalyticsController extends Controller
     {
         abort_unless($request->user()?->hasPermission('properties.analytics.view'), 403);
         $data = $request->validate([
-            'sort' => ['sometimes', Rule::in(['views_count', 'phone_clicks', 'chat_clicks', 'whatsapp_clicks', 'total_clicks'])],
+            'sort' => ['sometimes', Rule::in(['views_count', 'non_client_views_count', 'phone_clicks', 'chat_clicks', 'whatsapp_clicks', 'total_clicks'])],
             'search' => ['nullable', 'string', 'max:150'],
             'period' => ['sometimes', Rule::in(['all', 'today', 'week', 'month', 'custom'])],
             'date_from' => ['required_if:period,custom', 'nullable', 'date_format:Y-m-d'],
@@ -48,14 +48,21 @@ class PropertyContactAnalyticsController extends Controller
         $isRop = $ropAccess->applies($actor);
         $query = DB::table('properties as p')->tap(fn ($q) => \App\Support\BranchVisibility::apply($q, 'p.branch_id'))->select(['p.id', 'p.title', 'p.address', 'p.moderation_status']);
         if ($isRop) $ropAccess->scope($query, $actor, 'p.branch_group_id', 'p.branch_id');
-        $columns = ['views_count', 'phone_clicks', 'chat_clicks', 'whatsapp_clicks'];
+        $coverage = DB::table('property_analytics_coverage')->where('id', 1)->first();
+        $nonClientStartedAt = $coverage?->non_client_views_started_at;
+        $hasNonClientCoverage = $nonClientStartedAt && (! $from || $to >= \Carbon\Carbon::parse($nonClientStartedAt)->timezone('Asia/Dushanbe')->toDateString());
+        $columns = ['views_count', 'non_client_views_count', 'phone_clicks', 'chat_clicks', 'whatsapp_clicks'];
         if ($from) {
             $daily = DB::table('property_analytics_daily')->select('property_id')->whereBetween('day', [$from, $to])->groupBy('property_id');
             foreach ($columns as $column) $daily->selectRaw("SUM($column) as $column");
             $query->leftJoinSub($daily, 'd', 'd.property_id', '=', 'p.id');
         }
         $prefix = $from ? 'd' : 'p';
-        foreach ($columns as $column) $query->selectRaw("COALESCE($prefix.$column, 0) as $column");
+        foreach ($columns as $column) {
+            $query->selectRaw($column === 'non_client_views_count' && ! $hasNonClientCoverage
+                ? 'NULL as non_client_views_count'
+                : "COALESCE($prefix.$column, 0) as $column");
+        }
         $query->selectRaw("(COALESCE($prefix.phone_clicks, 0) + COALESCE($prefix.chat_clicks, 0) + COALESCE($prefix.whatsapp_clicks, 0)) as total_clicks");
         if (! empty($data['branch_id'])) $query->where('p.branch_id', $data['branch_id']);
         if (! empty($data['group_id'])) $query->where('p.branch_group_id', $data['group_id']);
@@ -68,7 +75,8 @@ class PropertyContactAnalyticsController extends Controller
         }
         $result = $query->orderByDesc($data['sort'] ?? 'views_count')->orderByDesc('p.id')->paginate(25)->toArray();
         $result['filters'] = ['period' => $period, 'date_from' => $from, 'date_to' => $from ? $to : null, 'timezone' => 'Asia/Dushanbe'];
-        $result['tracking_started_at'] = DB::table('property_analytics_coverage')->where('id', 1)->value('started_at');
+        $result['tracking_started_at'] = $coverage?->started_at;
+        $result['non_client_views_started_at'] = $nonClientStartedAt;
         $result['branches'] = \App\Models\Branch::query()->select('id', 'name')->when($isRop, fn ($q) => $q->whereIn('id', DB::table('branch_groups')->whereIn('id', $ropAccess->groupsQuery($actor))->select('branch_id')))->orderBy('name')->get();
         $result['groups'] = DB::table('branch_groups')->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->select('id', 'name', 'branch_id')->when($isRop, fn ($q) => $q->whereIn('id', $ropAccess->groupsQuery($actor)))->orderBy('name')->get();
         // Options follow the same property ownership and organization scope as the rows.

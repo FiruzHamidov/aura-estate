@@ -4,10 +4,14 @@ namespace Tests\Feature;
 
 use App\Models\Branch;
 use App\Models\Client;
+use App\Models\ClientNeed;
 use App\Models\ClientType;
+use App\Models\Deal;
+use App\Models\DealPipeline;
 use App\Models\Role;
 use App\Models\Setting;
 use App\Models\User;
+use App\Services\Crm\ClientNeedDealService;
 use App\Support\ClientAccess;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
@@ -156,6 +160,20 @@ class ClientNeedFeatureTest extends TestCase
             $table->unique(['client_need_id', 'repair_type_id']);
         });
 
+        Schema::create('leads', fn (Blueprint $table) => $table->id());
+        Schema::create('properties', fn (Blueprint $table) => $table->id());
+        (require database_path('migrations/2026_03_07_121000_create_crm_deal_pipelines_table.php'))->up();
+        Schema::table('crm_deal_pipelines', function (Blueprint $table) {
+            $table->string('code')->nullable();
+            $table->string('type')->default('sales');
+        });
+        Schema::table('crm_deals', function (Blueprint $table) {
+            $table->foreignId('client_need_id')->nullable()->constrained('client_needs')->nullOnDelete();
+            $table->unsignedBigInteger('branch_group_id')->nullable();
+            $table->unsignedBigInteger('updated_by')->nullable();
+            $table->text('note')->nullable();
+        });
+
         Schema::create('personal_access_tokens', function (Blueprint $table) {
             $table->id();
             $table->morphs('tokenable');
@@ -283,6 +301,147 @@ class ClientNeedFeatureTest extends TestCase
             ->assertJsonPath('needs_count', 2)
             ->assertJsonPath('open_needs_count', 2)
             ->assertJsonCount(2, 'needs');
+    }
+
+    public function test_new_need_creates_one_linked_deal_in_main_pipeline_and_edits_do_not_duplicate_it(): void
+    {
+        [$agent, $client] = $this->seedClientContext();
+        Sanctum::actingAs($agent);
+
+        $needId = $this->postJson('/api/clients/'.$client->id.'/needs', [
+            'type_id' => 1,
+            'budget_total' => 150000,
+            'currency' => 'USD',
+            'comment' => 'Two rooms near the school',
+        ])->assertCreated()->json('id');
+
+        $deal = Deal::query()->sole();
+        $this->assertSame($client->id, $deal->client_id);
+        $this->assertSame($needId, $deal->client_need_id);
+        $this->assertSame($client->branch_id, $deal->branch_id);
+        $this->assertSame($client->branch_group_id, $deal->branch_group_id);
+        $this->assertSame($agent->id, $deal->created_by);
+        $this->assertSame($agent->id, $deal->responsible_agent_id);
+        $this->assertSame('default_sales', $deal->pipeline->slug);
+        $this->assertSame('new', $deal->stage->slug);
+        $this->assertSame('Покупка: Visible Client', $deal->title);
+        $this->assertEquals(150000, $deal->amount);
+        $this->assertSame('USD', $deal->currency);
+        $this->assertSame('Two rooms near the school', $deal->note);
+        $this->assertNull($deal->closed_at);
+        $this->assertDatabaseHas('crm_audit_logs', ['auditable_id' => $deal->id, 'event' => 'created_from_client_need']);
+
+        $retried = app(ClientNeedDealService::class)->ensureForNeed(ClientNeed::findOrFail($needId), $agent);
+        $this->assertSame($deal->id, $retried->id);
+        $this->patchJson('/api/client-needs/'.$needId, ['comment' => 'Updated'])->assertOk();
+        $this->assertDatabaseCount('crm_deals', 1);
+
+        $this->postJson('/api/clients/'.$client->id.'/needs', ['type_id' => 2])->assertCreated();
+        $this->assertDatabaseCount('crm_deals', 2);
+        $this->assertSame([1, 2], Deal::query()->orderBy('board_position')->pluck('board_position')->all());
+
+        $deal->delete();
+        $retried = app(ClientNeedDealService::class)->ensureForNeed(ClientNeed::findOrFail($needId), $agent);
+        $this->assertSame($deal->id, $retried->id);
+        $this->assertTrue($retried->trashed());
+        $this->assertDatabaseCount('crm_deals', 2);
+    }
+
+    public function test_need_authorization_controls_automation_without_granting_manual_crm_access(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        [$agent, $client] = $this->seedClientContext();
+        $agent->role->forceFill(['permissions' => ['clients.scope.all', 'client_needs.create']])->save();
+        Sanctum::actingAs($agent->fresh('role'));
+
+        $this->postJson('/api/clients/'.$client->id.'/needs', ['type_id' => 1])->assertCreated();
+        $this->assertDatabaseCount('crm_deals', 1);
+        $this->getJson('/api/deals')->assertForbidden();
+
+        $agent->role->forceFill(['permissions' => ['clients.scope.all']])->save();
+        Sanctum::actingAs($agent->fresh('role'));
+        $this->postJson('/api/clients/'.$client->id.'/needs', ['type_id' => 1])->assertForbidden();
+        $this->assertDatabaseCount('client_needs', 1);
+        $this->assertDatabaseCount('crm_deals', 1);
+    }
+
+    public function test_need_deal_uses_main_sales_pipeline_and_only_an_open_active_stage(): void
+    {
+        [$agent, $client] = $this->seedClientContext();
+        Sanctum::actingAs($agent);
+
+        foreach ([
+            ['slug' => 'branch_sales', 'branch_id' => $client->branch_id, 'type' => 'sales'],
+            ['slug' => 'hr', 'code' => DealPipeline::CODE_HR_RECRUITMENT, 'type' => 'sales'],
+            ['slug' => 'control', 'code' => DealPipeline::CODE_PROPERTY_CONTROL, 'type' => DealPipeline::TYPE_PROPERTY_CONTROL],
+        ] as $attributes) {
+            DealPipeline::create($attributes + ['name' => 'Other', 'is_default' => true, 'is_active' => true, 'sort_order' => 0]);
+        }
+        DB::table('crm_deal_stages')->where('slug', 'new')->update(['is_active' => false]);
+        DB::table('crm_deal_stages')->where('slug', 'won')->update(['is_default' => true, 'sort_order' => 0]);
+
+        $this->postJson('/api/clients/'.$client->id.'/needs', ['type_id' => 1])->assertCreated();
+        $deal = Deal::query()->sole();
+        $this->assertSame('default_sales', $deal->pipeline->slug);
+        $this->assertSame('in_progress', $deal->stage->slug);
+        $this->assertNull($deal->closed_at);
+    }
+
+    public function test_need_creation_rolls_back_when_main_pipeline_or_open_stage_is_unavailable(): void
+    {
+        [$agent, $client] = $this->seedClientContext();
+        Sanctum::actingAs($agent);
+
+        DB::table('crm_deal_pipelines')->update(['is_active' => false]);
+        $this->postJson('/api/clients/'.$client->id.'/needs', ['type_id' => 1])->assertUnprocessable();
+        $this->assertDatabaseCount('client_needs', 0);
+        $this->assertDatabaseCount('crm_deals', 0);
+
+        DB::table('crm_deal_pipelines')->update(['is_active' => true]);
+        DB::table('crm_deal_stages')->where('is_closed', false)->update(['is_active' => false]);
+        $this->postJson('/api/clients/'.$client->id.'/needs', ['type_id' => 1])->assertUnprocessable();
+        $this->assertDatabaseCount('client_needs', 0);
+        $this->assertDatabaseCount('crm_deals', 0);
+    }
+
+    public function test_retiring_investment_type_preserves_existing_needs_and_survives_reseeding(): void
+    {
+        [$agent, $client] = $this->seedClientContext();
+        Sanctum::actingAs($agent);
+
+        $needId = $this->postJson('/api/clients/'.$client->id.'/needs', [
+            'type_id' => 4,
+            'status_id' => 1,
+            'comment' => 'Existing investment need',
+        ])->assertCreated()->json('id');
+
+        (require database_path('migrations/2026_10_19_100000_deactivate_investment_client_need_type.php'))->up();
+
+        $types = collect($this->getJson('/api/client-need-types')->assertOk()->json());
+        $this->assertFalse($types->firstWhere('slug', 'invest')['is_active']);
+        $this->assertSame(['buy', 'rent', 'sell'], $types->where('is_active', true)->pluck('slug')->all());
+
+        $this->getJson('/api/client-needs/'.$needId)
+            ->assertOk()
+            ->assertJsonPath('type_id', 4)
+            ->assertJsonPath('type.name', 'Инвестиция');
+        $this->patchJson('/api/client-needs/'.$needId, ['comment' => 'Updated existing need'])
+            ->assertOk()
+            ->assertJsonPath('type_id', 4);
+
+        $this->seed(\Database\Seeders\ClientNeedTypeSeeder::class);
+        $this->assertDatabaseHas('client_need_types', ['id' => 4, 'slug' => 'invest', 'is_active' => false]);
+        $this->assertDatabaseHas('client_needs', ['id' => $needId, 'type_id' => 4]);
+    }
+
+    public function test_fresh_need_type_dictionary_does_not_offer_investment(): void
+    {
+        DB::table('client_need_types')->delete();
+        $this->seed(\Database\Seeders\ClientNeedTypeSeeder::class);
+
+        $types = collect($this->getJson('/api/client-need-types')->assertOk()->json());
+        $this->assertSame(['buy', 'rent', 'sell'], $types->where('is_active', true)->pluck('slug')->all());
+        $this->assertFalse($types->firstWhere('slug', 'invest')['is_active']);
     }
 
     public function test_need_closed_at_is_set_on_closed_status_and_cleared_on_reopen(): void
@@ -446,6 +605,12 @@ class ClientNeedFeatureTest extends TestCase
         $this->patchJson('/api/client-needs/'.$need, ['responsible_agent_id' => $rop->id])->assertForbidden();
         $this->assertDatabaseCount('client_needs', 1);
         $this->assertDatabaseHas('client_needs', ['id' => $need, 'created_by' => $rop->id, 'responsible_agent_id' => $agent->id]);
+        $this->assertDatabaseCount('crm_deals', 1);
+        $this->assertDatabaseHas('crm_deals', [
+            'client_need_id' => $need, 'client_id' => $client->id,
+            'created_by' => $rop->id, 'responsible_agent_id' => $agent->id,
+            'branch_id' => $branch->id, 'branch_group_id' => $a->id,
+        ]);
     }
 
     private function seedClientContext(): array

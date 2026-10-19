@@ -53,6 +53,13 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('repair_types', function (Blueprint $table) {
+            $table->id();
+            $table->string('name');
+            $table->string('slug')->nullable();
+            $table->timestamps();
+        });
+
         Schema::create('contract_types', function (Blueprint $table) {
             $table->id();
             $table->string('name');
@@ -203,6 +210,7 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->timestamps();
         });
         (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
+        (require database_path('migrations/2026_10_19_090000_add_non_client_property_views.php'))->up();
     }
 
     protected function tearDown(): void
@@ -1620,6 +1628,66 @@ class PropertyConstructionFieldsTest extends TestCase
         $response->assertStatus(422);
         $response->assertJsonPath('code', 'VALIDATION_ERROR')
             ->assertJsonValidationErrors(['construction_status'], 'details.errors');
+    }
+
+    public function test_public_renovation_permission_filter_matches_list_count_and_map(): void
+    {
+        \App\Models\RepairType::forceCreate(['id' => 6, 'name' => 'Новый ремонт']);
+        \App\Models\RepairType::forceCreate(['id' => 7, 'name' => 'Без ремонта / коробка']);
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create([
+            'name' => 'Agent User', 'phone' => '930000250',
+            'password' => bcrypt('password'), 'role_id' => $role->id, 'status' => 'active',
+        ]);
+        $type = \App\Models\PropertyType::create(['name' => 'New building', 'slug' => 'new-buildings']);
+        $otherType = \App\Models\PropertyType::create(['name' => 'House', 'slug' => 'houses']);
+        $properties = collect([
+            ['title' => 'Allowed shell'],
+            ['title' => 'Not allowed shell', 'renovation_permission_status' => 'not_allowed'],
+            ['title' => 'Unknown permission', 'renovation_permission_status' => null],
+            ['title' => 'Different type', 'type_id' => $otherType->id],
+            ['title' => 'Already renovated', 'repair_type_id' => 6],
+            ['title' => 'Rental', 'offer_type' => 'rent'],
+            ['title' => 'Promotion', 'listing_type' => 'vip'],
+            ['title' => 'Unapproved', 'moderation_status' => 'pending'],
+        ])->map(fn (array $attributes) => \App\Models\Property::create(array_merge([
+            'type_id' => $type->id, 'repair_type_id' => 7,
+            'price' => 100000, 'currency' => 'TJS', 'offer_type' => 'sale',
+            'listing_type' => 'regular', 'moderation_status' => 'approved',
+            'renovation_permission_status' => 'allowed',
+            'created_by' => $user->id, 'latitude' => 38.55, 'longitude' => 68.75,
+        ], $attributes)));
+
+        $filters = [
+            'type_id' => $type->id, 'repair_type_id' => 7,
+            'listing_type' => 'regular', 'offer_type' => 'sale',
+        ];
+        foreach (['allowed' => $properties[0]->id, 'not_allowed' => $properties[1]->id] as $permission => $id) {
+            $query = http_build_query($filters + ['renovation_permission_status' => $permission]);
+            $this->getJson('/api/properties?'.$query)
+                ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $id);
+            $this->getJson('/api/properties/count?'.$query)
+                ->assertOk()->assertExactJson(['count' => 1]);
+            $this->getJson('/api/properties/map?bbox=38.4,68.6,38.8,69.1&zoom=12&'.$query)
+                ->assertOk()->assertJsonCount(1, 'features')->assertJsonPath('features.0.properties.id', $id);
+        }
+
+        // The existing shell collection still includes unknown and disallowed permissions.
+        $this->getJson('/api/properties?'.http_build_query($filters))
+            ->assertOk()->assertJsonCount(3, 'data');
+    }
+
+    public function test_public_property_endpoints_reject_invalid_renovation_permission_filters(): void
+    {
+        foreach (['properties', 'properties/count', 'properties/map'] as $endpoint) {
+            foreach (['invalid', ['allowed']] as $value) {
+                $this->getJson('/api/'.$endpoint.'?'.http_build_query([
+                    'renovation_permission_status' => $value,
+                    'bbox' => '38.4,68.6,38.8,69.1', 'zoom' => 12,
+                ]))->assertStatus(422)
+                    ->assertJsonValidationErrors(['renovation_permission_status'], 'details.errors');
+            }
+        }
     }
 
     public function test_public_property_count_includes_only_approved_properties(): void

@@ -177,8 +177,8 @@ class DailyReportFrontendScenariosTest extends TestCase
         $this->assertNotNull($agentRow);
         $this->assertSame(9, (int) data_get($agentRow, 'metrics.ads.final_value'));
         $this->assertSame(11, (int) data_get($agentRow, 'metrics.calls.final_value'));
-        $this->assertSame(9, (int) data_get($agentRow, 'metrics.ads.fact_value'));
-        $this->assertSame(11, (int) data_get($agentRow, 'metrics.calls.fact_value'));
+        $this->assertSame(0, (int) data_get($agentRow, 'metrics.ads.fact_value'));
+        $this->assertSame(0, (int) data_get($agentRow, 'metrics.calls.fact_value'));
         $this->assertArrayHasKey('target_value', (array) data_get($agentRow, 'metrics.objects'));
         $this->assertArrayHasKey('plan_source', (array) data_get($agentRow, 'metrics.objects'));
         $this->assertArrayHasKey('target_value', (array) data_get($agentRow, 'metrics.sales'));
@@ -208,7 +208,7 @@ class DailyReportFrontendScenariosTest extends TestCase
             ->assertJsonPath('code', 'DAILY_REPORT_EDIT_FORBIDDEN');
     }
 
-    public function test_daily_reports_row_marks_missing_plan_with_null_source_and_target(): void
+    public function test_daily_reports_row_uses_system_fallback_plan_when_no_plan_is_set(): void
     {
         [$users] = $this->seedContext();
         Sanctum::actingAs($users['admin']);
@@ -221,10 +221,10 @@ class DailyReportFrontendScenariosTest extends TestCase
         $rows = collect($response->json('data'));
         $agentRow = $rows->firstWhere('user_id', $users['agentA']->id);
         $this->assertNotNull($agentRow);
-        $this->assertNull(data_get($agentRow, 'metrics.objects.target_value'));
-        $this->assertNull(data_get($agentRow, 'metrics.objects.plan_source'));
-        $this->assertNull(data_get($agentRow, 'metrics.sales.target_value'));
-        $this->assertNull(data_get($agentRow, 'metrics.sales.plan_source'));
+        $this->assertEquals(1, data_get($agentRow, 'metrics.objects.target_value'));
+        $this->assertSame('system', data_get($agentRow, 'metrics.objects.plan_source'));
+        $this->assertEquals(31, data_get($agentRow, 'metrics.sales.target_value'));
+        $this->assertSame('system', data_get($agentRow, 'metrics.sales.plan_source'));
     }
 
     public function test_my_and_scope_daily_report_resolve_personal_then_common_plan_and_expose_debug_meta(): void
@@ -269,26 +269,26 @@ class DailyReportFrontendScenariosTest extends TestCase
         Sanctum::actingAs($users['agentA']);
         $this->getJson('/api/kpi/daily/my-report?date=2026-05-01')
             ->assertOk()
-            ->assertJsonPath('metrics.objects.target_value', 9)
+            ->assertJsonPath('metrics.objects.target_value', round(9 / 31, 4))
             ->assertJsonPath('metrics.objects.plan_source', 'personal')
-            ->assertJsonPath('metrics.shows.target_value', 3)
-            ->assertJsonPath('metrics.shows.plan_source', 'rop')
-            ->assertJsonPath('metrics.ads.target_value', 15)
-            ->assertJsonPath('metrics.calls.target_value', 30)
+            ->assertJsonPath('metrics.shows.target_value', round(3 / 31, 4))
+            ->assertJsonPath('metrics.shows.plan_source', 'common')
+            ->assertJsonPath('metrics.ads.target_value', round(15 / 31, 4))
+            ->assertJsonPath('metrics.calls.target_value', round(30 / 31, 4))
             ->assertJsonPath('metrics.sales.target_value', 1)
             ->assertJsonPath('meta.debug.plan_resolution.employee_id', $users['agentA']->id)
             ->assertJsonPath('meta.debug.plan_resolution.date', '2026-05-01')
             ->assertJsonPath('meta.debug.plan_resolution.metrics.objects.resolved_from', 'personal')
-            ->assertJsonPath('meta.debug.plan_resolution.metrics.shows.resolved_from', 'rop');
+            ->assertJsonPath('meta.debug.plan_resolution.metrics.shows.resolved_from', 'common');
 
         Sanctum::actingAs($users['ropA']);
         \DB::enableQueryLog();
         \DB::flushQueryLog();
         $this->getJson('/api/kpi/daily/report?date=2026-05-01&employee_id='.$users['agentA']->id)
             ->assertOk()
-            ->assertJsonPath('metrics.objects.target_value', 9)
+            ->assertJsonPath('metrics.objects.target_value', round(9 / 31, 4))
             ->assertJsonPath('metrics.objects.plan_source', 'personal')
-            ->assertJsonPath('metrics.shows.target_value', 3)
+            ->assertJsonPath('metrics.shows.target_value', round(3 / 31, 4))
             ->assertJsonPath('meta.debug.plan_resolution.employee_id', $users['agentA']->id)
             ->assertJsonPath('meta.debug.plan_resolution.metrics.objects.resolved_from', 'personal');
         $planQueries = collect(\DB::getQueryLog())->filter(fn ($entry) => str_contains($entry['query'], 'from "kpi_plans"'));
@@ -296,7 +296,7 @@ class DailyReportFrontendScenariosTest extends TestCase
         $this->assertCount(1, $planQueries, 'All five metrics must share one plan SELECT.');
     }
 
-    public function test_my_daily_report_without_plan_returns_null_target_with_debug_meta(): void
+    public function test_my_daily_report_without_plan_uses_system_targets_with_debug_meta(): void
     {
         [$users] = $this->seedContext();
         \App\Models\KpiPlan::query()->delete();
@@ -304,15 +304,15 @@ class DailyReportFrontendScenariosTest extends TestCase
         Sanctum::actingAs($users['agentA']);
         $this->getJson('/api/kpi/daily/my-report?date=2026-05-01')
             ->assertOk()
-            ->assertJsonPath('metrics.objects.target_value', null)
-            ->assertJsonPath('metrics.shows.target_value', null)
-            ->assertJsonPath('metrics.ads.target_value', null)
-            ->assertJsonPath('metrics.calls.target_value', null)
-            ->assertJsonPath('metrics.sales.target_value', null)
+            ->assertJsonPath('metrics.objects.target_value', 1)
+            ->assertJsonPath('metrics.shows.target_value', 2)
+            ->assertJsonPath('metrics.ads.target_value', 20)
+            ->assertJsonPath('metrics.calls.target_value', 30)
+            ->assertJsonPath('metrics.sales.target_value', 31)
             ->assertJsonPath('meta.debug.plan_resolution.employee_id', $users['agentA']->id)
             ->assertJsonPath('meta.debug.plan_resolution.date', '2026-05-01')
             ->assertJsonPath('meta.debug.plan_resolution.metrics.objects.resolved_from', 'system')
-            ->assertJsonPath('meta.debug.plan_resolution.metrics.objects.target_value', null);
+            ->assertJsonPath('meta.debug.plan_resolution.metrics.objects.target_value', 1);
     }
 
     public function test_report_page_batches_plans_without_mixing_groups_roles_or_dates(): void
@@ -342,7 +342,7 @@ class DailyReportFrontendScenariosTest extends TestCase
 
         $rows = collect($response->json('data'))->keyBy('id');
         foreach ([$reports['agentA'] => 5, $reports['agentA2'] => 9, $reports['mopA1'] => 13, $nextDay->id => 7] as $id => $expected) {
-            $this->assertEquals($expected, data_get($rows->get($id), 'metrics.objects.target_value'));
+            $this->assertEquals(round($expected / 31, 4), data_get($rows->get($id), 'metrics.objects.target_value'));
         }
         // A fresh request must not reuse the previous page's authorized candidates.
         $users['ropA']->supervisedGroups()->detach($groups['groupA2']->id);

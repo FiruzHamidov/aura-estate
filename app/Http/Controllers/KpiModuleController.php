@@ -978,6 +978,8 @@ class KpiModuleController extends Controller
             'include_inactive' => 'nullable|boolean',
             'period_type' => ['nullable', Rule::in(['day', 'week', 'month'])],
             'role' => ['nullable', 'string', 'max:64'],
+            'roles' => 'sometimes|array|max:100',
+            'roles.*' => 'string|max:64',
             'assignee_id' => 'nullable|integer|exists:users,id',
             'user_id' => 'nullable|integer|exists:users,id',
             'mop_id' => 'nullable|integer|exists:users,id',

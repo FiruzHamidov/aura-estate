@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\DailyReport;
+use App\Models\KpiPeriodLock;
 use App\Models\KpiQualityIssue;
 use App\Models\User;
 use Carbon\Carbon;
@@ -11,6 +12,9 @@ use Illuminate\Support\Facades\Schema;
 
 class DailyReportService
 {
+    private ?\Illuminate\Support\Collection $periodLocks = null;
+    private ?\Illuminate\Http\Request $periodLockRequest = null;
+
     public function __construct(
         private readonly SalesAttributionService $salesAttributionService
     ) {
@@ -86,6 +90,47 @@ class DailyReportService
         return $this->missingReportDate($user) ?? Carbon::now($this->timezone())->toDateString();
     }
 
+    /** Only an explicit freeze or a changed team makes a saved report authoritative. */
+    public function preservesSnapshot(User $employee, ?DailyReport $report, string $date): bool
+    {
+        if (! $report) {
+            return false;
+        }
+
+        // A report-context clone retains the employee's current team in its original attributes.
+        $currentGroup = $employee->getRawOriginal('branch_group_id');
+        return (bool) $report->is_finalized
+            || ($report->branch_group_id !== null && (int) $report->branch_group_id !== (int) $currentGroup)
+            || $this->isDateLocked($employee, $date);
+    }
+
+    public function isDateLocked(User $user, string $date): bool
+    {
+        if ($this->periodLockRequest !== request()) {
+            $this->periodLockRequest = request();
+            $this->periodLocks = null;
+        }
+        if ($this->periodLocks === null) {
+            $this->periodLocks = Schema::hasTable('kpi_period_locks')
+                ? KpiPeriodLock::query()->get()
+                : collect();
+        }
+
+        $day = Carbon::parse($date, $this->timezone());
+        $keys = [
+            'day' => [$day->toDateString()],
+            // Accept old Monday-date keys as well as the canonical ISO week key.
+            'week' => [$day->format('o-\WW'), $day->copy()->startOfWeek(Carbon::MONDAY)->toDateString()],
+            'month' => [$day->format('Y-m')],
+        ];
+
+        return $this->periodLocks->contains(fn (KpiPeriodLock $lock) =>
+            in_array($lock->period_key, $keys[$lock->period_type] ?? [], true)
+            && ($lock->branch_id === null || (int) $lock->branch_id === (int) $user->branch_id)
+            && ($lock->branch_group_id === null || (int) $lock->branch_group_id === (int) $user->branch_group_id)
+        );
+    }
+
     public function autoMetrics(User $user, string $reportDate): array
     {
         [$startUtc, $endUtc] = $this->utcDayBounds($reportDate);
@@ -102,7 +147,7 @@ class DailyReportService
             'new_properties_count' => $this->countNewProperties($user, $startUtc, $endUtc),
             // Keep integer legacy deals_count for backward compatibility.
             'deals_count' => (int) floor($salesCount),
-            // Fractional sales KPI metric (1/N for N sale participants).
+            // One sale is credited to its primary seller.
             'sales_count' => $salesCount,
         ];
     }
@@ -120,6 +165,12 @@ class DailyReportService
             'employee_id' => (int) $user->id,
             'date' => $reportDate,
             'timezone' => $this->timezone(),
+            'storage_timezones' => [
+                'properties' => $this->timezone(),
+                'clients' => $this->timezone(),
+                'bookings' => 'UTC',
+                'crm_tasks' => 'UTC',
+            ],
             'period_bounds' => [
                 'local' => [
                     'start' => $localStart->toDateTimeString(),
@@ -243,24 +294,31 @@ class DailyReportService
             return 0;
         }
 
-        $query = DB::table('clients')->tap(fn ($query) => $this->scopeMetricQuery($query, 'clients', $user))
-            ->where(function ($query) use ($user) {
-                if (Schema::hasColumn('clients', 'created_by')) {
-                    $query->where('created_by', $user->id);
-                }
-
-                if (Schema::hasColumn('clients', 'responsible_agent_id')) {
-                    $query->orWhere('responsible_agent_id', $user->id);
-                }
-            });
-
-        if (! Schema::hasColumn('clients', 'created_by')
-            && ! Schema::hasColumn('clients', 'responsible_agent_id')) {
+        $hasCreator = Schema::hasColumn('clients', 'created_by');
+        $hasResponsible = Schema::hasColumn('clients', 'responsible_agent_id');
+        if (! $hasCreator && ! $hasResponsible) {
             return 0;
         }
 
+        // A newly registered client belongs to one creator. Reassignment must not
+        // duplicate that client in team totals or rewrite the creator's history.
+        $query = DB::table('clients')->tap(fn ($query) => $this->scopeMetricQuery($query, 'clients', $user))
+            ->where(function ($query) use ($user, $hasCreator, $hasResponsible) {
+                if ($hasCreator) {
+                    $query->where('created_by', $user->id);
+                }
+                if ($hasResponsible) {
+                    $query->orWhere(function ($fallback) use ($user, $hasCreator) {
+                        $fallback->where('responsible_agent_id', $user->id);
+                        if ($hasCreator) {
+                            $fallback->where(fn ($missing) => $missing->whereNull('created_by')->orWhere('created_by', 0));
+                        }
+                    });
+                }
+            });
+
         return (int) $query
-            ->whereBetween('created_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
+            ->whereBetween('created_at', $this->localStorageBounds($startUtc, $endUtc))
             ->count();
     }
 
@@ -307,7 +365,7 @@ class DailyReportService
                     });
                 }
             })
-            ->whereBetween('created_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
+            ->whereBetween('created_at', $this->localStorageBounds($startUtc, $endUtc))
             ->orderBy('id')
             ->pluck('id')
             ->map(fn ($id) => (int) $id)
@@ -340,7 +398,7 @@ class DailyReportService
         $soldProperties = DB::table('properties')->tap(fn ($query) => $this->scopeMetricQuery($query, 'properties', $user))
             ->select($select)
             ->where('moderation_status', 'sold')
-            ->whereBetween('sold_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
+            ->whereBetween('sold_at', $this->localStorageBounds($startUtc, $endUtc))
             ->get();
 
         if ($soldProperties->isEmpty()) {
@@ -372,6 +430,7 @@ class DailyReportService
 
     private function scopeMetricQuery(\Illuminate\Database\Query\Builder $query, string $table, User $context): void
     {
+        \App\Support\BranchVisibility::records($query, $table);
         $actor = auth()->user();
         $access = app(\App\Support\RopGroupAccess::class);
         if (! $access->applies($actor)) return;
@@ -393,6 +452,15 @@ class DailyReportService
         return [
             $start->copy()->setTimezone('UTC'),
             $end->copy()->setTimezone('UTC'),
+        ];
+    }
+
+    /** Property/client model writers persist application-local wall-clock timestamps. */
+    private function localStorageBounds(Carbon $startUtc, Carbon $endUtc): array
+    {
+        return [
+            $startUtc->copy()->setTimezone($this->timezone())->toDateTimeString(),
+            $endUtc->copy()->setTimezone($this->timezone())->toDateTimeString(),
         ];
     }
 

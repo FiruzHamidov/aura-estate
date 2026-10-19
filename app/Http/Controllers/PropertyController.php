@@ -1542,6 +1542,20 @@ class PropertyController extends Controller
                     ->whereIn('properties.created_by', $responsibleIds)));
         }
 
+        // Report drilldowns follow the same attribution as the report totals:
+        // creator for open inventory, primary seller for closed inventory.
+        $reportEmployeeIds = array_values(array_filter(array_map('intval', $toArray($request->input('report_employee_id'))), fn ($id) => $id > 0));
+        $reportContext = $request->boolean('report_context') || $reportEmployeeIds !== [];
+        $reportOwnerExpression = null;
+        if ($reportContext) {
+            $seller = app(\App\Services\SalesAttributionService::class)->primarySellerExpression();
+            $creator = 'COALESCE(NULLIF(properties.created_by, 0), NULLIF(properties.agent_id, 0))';
+            $reportOwnerExpression = "CASE WHEN properties.moderation_status IN ('sold', 'rented', 'sold_by_owner') THEN {$seller} ELSE {$creator} END";
+            if ($reportEmployeeIds !== []) {
+                $query->whereIn(DB::raw($reportOwnerExpression), $reportEmployeeIds);
+            }
+        }
+
         if ($this->supportsPropertyTags()) {
             $rawTags = $request->input('tag_ids', $request->input('tags'));
             $tagIds = array_values(array_unique(array_filter(array_map('intval', $toArray($rawTags)))));
@@ -1557,7 +1571,15 @@ class PropertyController extends Controller
             ));
 
             if (! empty($branchIds)) {
-                $this->applyBranchIdFilter($query, $branchIds);
+                if ($reportContext) {
+                    // This refines the already authorized record query; mandatory
+                    // own/group/public access in scopePropertyList is unchanged.
+                    $query->whereIn(DB::raw($reportOwnerExpression), User::query()
+                        ->tap(fn ($users) => \App\Support\BranchVisibility::records($users))
+                        ->whereIn('branch_id', $branchIds)->select('id'));
+                } else {
+                    $this->applyBranchIdFilter($query, $branchIds);
+                }
             }
         }
 
@@ -1690,7 +1712,7 @@ class PropertyController extends Controller
             'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
             'agent_id', 'listing_type', 'created_by', 'contract_type_id', 'document_type_id',
             'is_business_owner', 'is_full_apartment', 'is_for_aura', 'developer_id',
-            'heating_type_id', 'parking_type_id', 'construction_status',
+            'heating_type_id', 'parking_type_id', 'construction_status', 'renovation_permission_status',
             // при желании можно и lat/lng, но для карты они задаются bbox'ом
         ];
         foreach ($exactFields as $field) {
@@ -1816,15 +1838,22 @@ class PropertyController extends Controller
             $request->input('priceTo')
         );
 
-        // Диапазон по датам (date_from, date_to) — фильтрация по created_at.
+        // Generic lists retain creation-date filtering. Report drilldowns use
+        // the event date of each status, matching PropertyReportController.
         // Формат ожидается YYYY-MM-DD или любой распознаваемый Carbon формát.
         if ($request->has('date_from') || $request->has('date_to')) {
             $from = $request->input('date_from');
             $to = $request->input('date_to');
+            $dateColumn = 'created_at';
+            if ($reportContext) {
+                $soldDate = Schema::hasColumn('properties', 'sold_at') ? 'properties.sold_at' : 'NULL';
+                $depositDate = Schema::hasColumn('properties', 'deposit_received_at') ? 'properties.deposit_received_at' : 'NULL';
+                $dateColumn = DB::raw("CASE WHEN properties.moderation_status IN ('sold', 'rented', 'sold_by_owner') THEN {$soldDate} WHEN properties.moderation_status = 'deposit' THEN {$depositDate} ELSE properties.created_at END");
+            }
 
             try {
                 if (! empty($from)) {
-                    $query->whereDate('created_at', '>=', \Carbon\Carbon::parse($from)->toDateString());
+                    $query->whereDate($dateColumn, '>=', \Carbon\Carbon::parse($from)->toDateString());
                 }
             } catch (\Exception $e) {
                 // При желании логировать ошибку или игнорировать неверный формат
@@ -1832,7 +1861,7 @@ class PropertyController extends Controller
 
             try {
                 if (! empty($to)) {
-                    $query->whereDate('created_at', '<=', \Carbon\Carbon::parse($to)->toDateString());
+                    $query->whereDate($dateColumn, '<=', \Carbon\Carbon::parse($to)->toDateString());
                 }
             } catch (\Exception $e) {
                 // При желании логировать ошибку или игнорировать неверный формат
@@ -1949,9 +1978,10 @@ class PropertyController extends Controller
 
     /**
      * Query validation for list/map property filters.
-     * Returns 422 for unsupported construction_status values.
+     * Returns 422 for unsupported filter values.
      *
      * @queryParam construction_status string Filter by construction stage.
+     * @queryParam renovation_permission_status string Filter by renovation permission: allowed or not_allowed.
      * @queryParam document_type_ids array Multiple property document type IDs. Example: [1,3]
      * @queryParam document_type_id integer Single property document type ID. Example: 1
      * Allowed: under_construction, built, commissioned.
@@ -1961,6 +1991,7 @@ class PropertyController extends Controller
     {
         $validated = $request->validate([
             'construction_status' => ['sometimes', 'nullable', Rule::in(['under_construction', 'built', 'commissioned'])],
+            'renovation_permission_status' => ['sometimes', 'nullable', 'string', Rule::in(['allowed', 'not_allowed'])],
             'document_type_id' => ['sometimes', 'nullable', 'integer', 'exists:document_types,id'],
             'document_type_ids' => ['sometimes', 'nullable', 'array'],
             'document_type_ids.*' => ['integer', 'distinct', 'exists:document_types,id'],
@@ -1991,6 +2022,7 @@ class PropertyController extends Controller
             'compact' => ['sometimes', 'boolean'],
         ], [
             'construction_status.in' => 'Поле construction_status должно быть одним из значений: under_construction, built, commissioned.',
+            'renovation_permission_status.in' => 'Поле renovation_permission_status должно быть одним из значений: allowed, not_allowed.',
         ]);
 
         $this->validateRangeOrder($validated, [
@@ -2876,7 +2908,8 @@ class PropertyController extends Controller
 
     public function trackView(Request $request, Property $property)
     {
-        $this->moderation->publicOrFail($property, $this->propertyShowAuthUser($request));
+        $viewer = $this->propertyShowAuthUser($request);
+        $this->moderation->publicOrFail($property, $viewer);
         // Ключ "видел" = по объекту + IP + UA + текущая дата
         $fingerprint = sha1(
             ($request->ip() ?? '0.0.0.0').'|'.
@@ -2888,7 +2921,7 @@ class PropertyController extends Controller
         // Инкрементим только если ещё не считали сегодня
         if (Cache::add($cacheKey, 1, now('Asia/Dushanbe')->endOfDay())) {
             try {
-                app(\App\Services\PropertyAnalyticsRecorder::class)->record($property->id, 'views_count');
+                app(\App\Services\PropertyAnalyticsRecorder::class)->record($property->id, 'views_count', $viewer);
             } catch (\Throwable $error) {
                 Cache::forget($cacheKey);
                 throw $error;
