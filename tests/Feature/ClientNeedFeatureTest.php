@@ -285,6 +285,46 @@ class ClientNeedFeatureTest extends TestCase
             ->assertJsonCount(2, 'needs');
     }
 
+    public function test_retiring_investment_type_preserves_existing_needs_and_survives_reseeding(): void
+    {
+        [$agent, $client] = $this->seedClientContext();
+        Sanctum::actingAs($agent);
+
+        $needId = $this->postJson('/api/clients/'.$client->id.'/needs', [
+            'type_id' => 4,
+            'status_id' => 1,
+            'comment' => 'Existing investment need',
+        ])->assertCreated()->json('id');
+
+        (require database_path('migrations/2026_10_19_100000_deactivate_investment_client_need_type.php'))->up();
+
+        $types = collect($this->getJson('/api/client-need-types')->assertOk()->json());
+        $this->assertFalse($types->firstWhere('slug', 'invest')['is_active']);
+        $this->assertSame(['buy', 'rent', 'sell'], $types->where('is_active', true)->pluck('slug')->all());
+
+        $this->getJson('/api/client-needs/'.$needId)
+            ->assertOk()
+            ->assertJsonPath('type_id', 4)
+            ->assertJsonPath('type.name', 'Инвестиция');
+        $this->patchJson('/api/client-needs/'.$needId, ['comment' => 'Updated existing need'])
+            ->assertOk()
+            ->assertJsonPath('type_id', 4);
+
+        $this->seed(\Database\Seeders\ClientNeedTypeSeeder::class);
+        $this->assertDatabaseHas('client_need_types', ['id' => 4, 'slug' => 'invest', 'is_active' => false]);
+        $this->assertDatabaseHas('client_needs', ['id' => $needId, 'type_id' => 4]);
+    }
+
+    public function test_fresh_need_type_dictionary_does_not_offer_investment(): void
+    {
+        DB::table('client_need_types')->delete();
+        $this->seed(\Database\Seeders\ClientNeedTypeSeeder::class);
+
+        $types = collect($this->getJson('/api/client-need-types')->assertOk()->json());
+        $this->assertSame(['buy', 'rent', 'sell'], $types->where('is_active', true)->pluck('slug')->all());
+        $this->assertFalse($types->firstWhere('slug', 'invest')['is_active']);
+    }
+
     public function test_need_closed_at_is_set_on_closed_status_and_cleared_on_reopen(): void
     {
         [$agent, $client] = $this->seedClientContext();
