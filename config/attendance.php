@@ -18,7 +18,7 @@ return [
     'hr_report_roles' => ['hr', 'accountant', 'admin', 'superadmin', 'owner'],
     'all_branch_viewer_roles' => ['hr', 'accountant', 'admin', 'superadmin', 'owner'],
     'excluded_table_user_roles' => ['client', 'external_agent'],
-    'mapping_roles' => ['rop', 'hr', 'admin', 'superadmin', 'owner'],
+    'mapping_roles' => ['rop', 'branch_director', 'hr', 'admin', 'superadmin', 'owner'],
     'comment_roles' => ['hr', 'admin', 'superadmin', 'owner'],
     'schedule_roles' => ['hr', 'admin', 'superadmin', 'owner'],
     'leave_roles' => ['hr', 'admin', 'superadmin', 'owner'],
