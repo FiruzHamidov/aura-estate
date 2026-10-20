@@ -2536,6 +2536,183 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->putJson('/api/attendance/device-users', $payload)->assertForbidden();
     }
 
+    public function test_branch_director_sync_lists_only_own_branch_employees_terminals_and_links(): void
+    {
+        $c = $this->context();
+        $director = $this->branchDirector($c['branch']);
+        $own = $this->device('DIRECTOR-OWN', $c['branch'], $c['group']);
+        $shared = $this->device('DIRECTOR-SHARED', $c['branch']);
+        $foreign = $this->device('DIRECTOR-FOREIGN', $c['otherAgent']->branch);
+        $unassigned = $this->device('DIRECTOR-UNASSIGNED');
+        $ownLink = $this->map($own, $c['agent']);
+        $this->map($own, $c['otherAgent']);
+        $this->map($foreign, $c['agent']);
+        $this->map($foreign, $c['otherAgent']);
+        $this->map($unassigned, $c['agent']);
+        Sanctum::actingAs($director);
+        $this->getJson('/api/attendance/access')->assertOk()->assertJsonPath('permissions.can_manage_mappings', true)
+            ->assertJsonPath('permissions.can_view_devices', false)->assertJsonPath('permissions.can_manage_devices', false);
+        $this->getJson('/api/attendance/devices')->assertForbidden();
+        $this->getJson('/api/attendance/mapping-devices')->assertOk()->assertJsonCount(2, 'data')
+            ->assertJsonPath('data.0.id', $own->id)->assertJsonPath('data.1.id', $shared->id);
+        $this->getJson('/api/attendance/mapping-users?search='.$c['otherAgent']->id)->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/attendance/mapping-users?search='.$c['agent']->id)->assertOk()->assertJsonPath('data.0.id', $c['agent']->id);
+        $this->getJson('/api/attendance/device-users?per_page=1')->assertOk()->assertJsonPath('total', 1)
+            ->assertJsonPath('data.0.id', $ownLink->id);
+        $this->getJson('/api/attendance/device-users?user_id='.$c['otherAgent']->id)->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/attendance/device-users?device_id='.$foreign->id)->assertOk()->assertJsonCount(0, 'data');
+        // All groups in the branch are available, not only the director's own group.
+        $c['otherAgent']->update(['branch_id' => $c['branch']->id, 'branch_group_id' => null]);
+        $this->getJson('/api/attendance/mapping-users?search='.$c['otherAgent']->id)->assertOk()->assertJsonPath('data.0.id', $c['otherAgent']->id);
+    }
+
+    public function test_branch_director_can_sync_and_disable_local_links_but_cannot_modify_foreign_links(): void
+    {
+        $c = $this->context();
+        $director = $this->branchDirector($c['branch']);
+        $own = $this->device('DIRECTOR-LINK', $c['branch']);
+        $foreign = $this->device('DIRECTOR-OTHER', $c['otherAgent']->branch);
+        $unassigned = $this->device('DIRECTOR-NONE');
+        $foreignLink = $this->map($own, $c['otherAgent']);
+        $remoteLink = $this->map($foreign, $c['agent']);
+        $this->postDevicePayload('/iclock/cdata?SN=DIRECTOR-LINK&table=ATTLOG',
+            "0096\t2026-08-17 09:00:00\t0\t15\t0")->assertOk();
+        Sanctum::actingAs($director);
+        $payload = ['device_id' => $own->id, 'device_user_id' => '0096', 'user_id' => $c['agent']->id];
+        $this->putJson('/api/attendance/device-users', [...$payload, 'user_id' => $c['otherAgent']->id])->assertNotFound();
+        foreach ([$foreign, $unassigned] as $device) {
+            $this->putJson('/api/attendance/device-users', [...$payload, 'device_id' => $device->id])->assertNotFound();
+        }
+        $this->putJson('/api/attendance/device-users', [...$payload, 'device_user_id' => $foreignLink->device_user_id])->assertNotFound();
+        foreach ([$foreignLink, $remoteLink] as $link) {
+            $this->deleteJson('/api/attendance/device-users/'.$link->id)->assertNotFound();
+            $this->assertDatabaseHas('attendance_device_users', ['id' => $link->id, 'user_id' => $link->user_id, 'is_active' => true]);
+        }
+        $response = $this->putJson('/api/attendance/device-users', $payload)->assertOk()->assertJsonPath('reprocessed.processed', 1);
+        $localId = $response->json('data.id');
+        $c['agent']->update(['status' => User::STATUS_INACTIVE]);
+        $this->getJson('/api/attendance/device-users')->assertOk()->assertJsonPath('data.0.id', $localId);
+        $this->putJson('/api/attendance/device-users', [...$payload, 'is_active' => false])->assertOk();
+        $this->putJson('/api/attendance/device-users', [...$payload, 'is_active' => true])->assertUnprocessable();
+        $this->deleteJson('/api/attendance/device-users/'.$localId)->assertOk();
+        $this->assertDatabaseMissing('attendance_device_users', ['id' => $localId]);
+        $this->assertDatabaseHas('attendance_events', ['user_id' => $c['agent']->id, 'device_id' => $own->id]);
+    }
+
+    public function test_branch_director_cannot_reuse_terminal_id_with_another_employees_history(): void
+    {
+        $c = $this->context();
+        $director = $this->branchDirector($c['branch']);
+        $own = $this->device('DIRECTOR-HISTORY', $c['branch']);
+        $link = $this->map($own, $c['otherAgent']);
+        $this->postDevicePayload('/iclock/cdata?SN=DIRECTOR-HISTORY&table=ATTLOG',
+            $link->device_user_id."\t2026-08-17 09:00:00\t0\t15\t0")->assertOk();
+        $link->delete();
+        Sanctum::actingAs($director);
+        $this->putJson('/api/attendance/device-users', [
+            'device_id' => $own->id, 'device_user_id' => $link->device_user_id, 'user_id' => $c['agent']->id,
+        ])->assertForbidden();
+        $this->assertDatabaseCount('attendance_device_users', 0);
+        $this->assertDatabaseHas('attendance_events', ['user_id' => $c['otherAgent']->id]);
+    }
+
+    public function test_branch_director_unmapped_events_are_scoped_before_pagination_and_deletion(): void
+    {
+        $c = $this->context();
+        $director = $this->branchDirector($c['branch']);
+        $own = $this->device('DIRECTOR-RAW-OWN', $c['branch']);
+        $foreign = $this->device('DIRECTOR-RAW-FOREIGN', $c['otherAgent']->branch);
+        $unassigned = $this->device('DIRECTOR-RAW-NONE');
+        foreach ([$own, $foreign, $unassigned] as $device) {
+            $this->postDevicePayload('/iclock/cdata?SN='.$device->serial_number.'&table=ATTLOG',
+                "0096\t2026-08-17 09:00:00\t0\t15\t0")->assertOk();
+        }
+        Sanctum::actingAs($director);
+        foreach (['true', 'false'] as $grouped) {
+            $url = '/api/attendance/unmapped-events?grouped='.$grouped.'&per_page=1';
+            $this->getJson($url)->assertOk()->assertJsonPath('total', 1)->assertJsonPath('data.0.device_id', $own->id)
+                ->assertJsonMissingPath('data.0.raw_payload')->assertJsonMissingPath('data.0.device.communication_key');
+            $this->getJson($url.'&device_id='.$foreign->id)->assertOk()->assertJsonPath('total', 0);
+        }
+        foreach ([$foreign, $unassigned] as $device) {
+            $this->deleteJson('/api/attendance/unmapped-events', [
+                'device_id' => $device->id, 'device_user_id' => '0096', 'last_raw_event_id' => AttendanceRawEvent::max('id'),
+            ])->assertNotFound();
+        }
+        $this->deleteJson('/api/attendance/unmapped-events', [
+            'device_id' => $own->id, 'device_user_id' => '0096', 'last_raw_event_id' => AttendanceRawEvent::max('id'),
+        ])->assertOk()->assertJsonPath('deleted_count', 1);
+        $this->assertDatabaseCount('attendance_raw_events', 2);
+    }
+
+    public function test_branch_mapping_scope_is_independent_of_table_scope_and_revocation_fails_closed(): void
+    {
+        $c = $this->context();
+        $director = $this->branchDirector($c['branch']);
+        $own = $this->device('DIRECTOR-SCOPE', $c['branch']);
+        $foreign = $this->device('DIRECTOR-SCOPE-OTHER', $c['otherAgent']->branch);
+        $link = $this->map($own, $c['agent']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        // The restriction also works with custom role names and broader table visibility.
+        $director->role->forceFill(['slug' => 'custom_branch_sync', 'permissions' => [
+            'attendance.mappings.manage', 'attendance.mappings.scope.branch', 'attendance.all_branches.view',
+        ]])->save();
+        Sanctum::actingAs($director->fresh());
+        $this->getJson('/api/attendance/mapping-devices')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $own->id);
+        $this->getJson('/api/attendance/mapping-users?search='.$c['otherAgent']->id)->assertOk()->assertJsonCount(0, 'data');
+        $director->update(['branch_id' => null]);
+        Sanctum::actingAs($director->fresh());
+        foreach (['mapping-devices', 'mapping-users', 'device-users', 'unmapped-events'] as $endpoint) {
+            $this->getJson('/api/attendance/'.$endpoint)->assertOk()->assertJsonCount(0, 'data');
+        }
+        $payload = ['device_id' => $own->id, 'device_user_id' => '0096', 'user_id' => $c['agent']->id];
+        $this->putJson('/api/attendance/device-users', $payload)->assertNotFound();
+        $this->deleteJson('/api/attendance/device-users/'.$link->id)->assertNotFound();
+        $director->update(['branch_id' => $c['branch']->id]);
+        $director->role->forceFill(['permissions' => ['attendance.mappings.scope.branch']])->save();
+        Sanctum::actingAs($director->fresh());
+        $this->getJson('/api/attendance/access')->assertOk()->assertJsonPath('permissions.can_manage_mappings', false);
+        $this->getJson('/api/attendance/mapping-devices')->assertForbidden();
+        $this->putJson('/api/attendance/device-users', $payload)->assertForbidden();
+        // HR keeps its existing global mapping access.
+        Sanctum::actingAs($c['hr']->fresh());
+        $this->getJson('/api/attendance/mapping-devices')->assertOk()->assertJsonCount(2, 'data');
+        $this->putJson('/api/attendance/device-users', [...$payload, 'device_id' => $foreign->id, 'user_id' => $c['otherAgent']->id])->assertOk();
+    }
+
+    public function test_branch_director_sync_grant_migration_preserves_permissions_and_is_audited_and_idempotent(): void
+    {
+        $c = $this->context();
+        $director = $this->branchDirector($c['branch']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $before = ['attendance.table.view', 'attendance.scope.branch', 'roles.view'];
+        $director->role->forceFill(['permissions' => $before])->save();
+        $hrBefore = $c['hr']->fresh()->role->permissionKeys();
+        $migration = require database_path('migrations/2026_10_20_120000_enable_branch_director_attendance_sync.php');
+        $migration->up();
+        $expected = [...$before, 'attendance.mappings.manage', 'attendance.mappings.scope.branch'];
+        $this->assertSame($expected, $director->role->fresh()->permissionKeys());
+        $this->assertSame($hrBefore, $c['hr']->fresh()->role->permissionKeys());
+        $audit = DB::table('role_permission_audits')->sole();
+        $this->assertSame($before, json_decode($audit->before, true));
+        $this->assertSame($expected, json_decode($audit->after, true));
+        $this->assertSame(2, $director->role->fresh()->permissions_version);
+        $migration->up();
+        $this->assertDatabaseCount('role_permission_audits', 1);
+        $migration->down();
+        $this->assertSame($before, $director->role->fresh()->permissionKeys());
+        $this->assertSame(3, $director->role->fresh()->permissions_version);
+    }
+
+    private function branchDirector(Branch $branch): User
+    {
+        $role = Role::firstOrCreate(['slug' => 'branch_director'], ['name' => 'Директор филиала']);
+        return User::create([
+            'name' => 'Director', 'phone' => '992900000991', 'role_id' => $role->id,
+            'branch_id' => $branch->id, 'status' => User::STATUS_ACTIVE, 'auth_method' => 'password',
+        ]);
+    }
+
     public function test_rop_broad_attendance_grants_never_override_assigned_groups(): void
     {
         $c = $this->context();

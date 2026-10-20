@@ -41,9 +41,18 @@ final class AttendanceAccessService
         $this->assertPermission($user, 'attendance.mappings.manage', 'ATTENDANCE_MAPPING_FORBIDDEN', 'Нет права управлять сопоставлениями терминала.');
     }
 
-    public function mappingUsersQuery(User $viewer): Builder
+    public function hasRestrictedMappingScope(User $viewer): bool
     {
-        $query = $this->participants->query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
+        return $viewer->usesAssignedGroupScope() || $viewer->hasPermission('attendance.mappings.scope.branch');
+    }
+
+    public function mappingUsersQuery(User $viewer, bool $includeInactive = false): Builder
+    {
+        $query = ($includeInactive ? User::query() : $this->participants->query())
+            ->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
+        if ($viewer->hasPermission('attendance.mappings.scope.branch')) {
+            $query->where('users.branch_id', $viewer->branch_id ?? 0);
+        }
         if ($viewer->usesAssignedGroupScope()) {
             app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id');
             $query->whereHas('role', fn ($roles) => $roles->withPermission('attendance.subject.mapping_assigned_groups'));
@@ -54,6 +63,9 @@ final class AttendanceAccessService
     public function mappingDevicesQuery(User $viewer): Builder
     {
         $query = \App\Models\AttendanceDevice::query();
+        if ($viewer->hasPermission('attendance.mappings.scope.branch')) {
+            $query->where('branch_id', $viewer->branch_id ?? 0);
+        }
         if ($viewer->usesAssignedGroupScope()) {
             $query->where('branch_id', $viewer->branch_id ?? 0)->where(function ($devices) use ($viewer) {
                 $devices->whereNull('branch_group_id')->orWhereIn('branch_group_id', app(\App\Support\RopGroupAccess::class)->groupsQuery($viewer));

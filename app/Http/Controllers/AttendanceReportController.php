@@ -105,8 +105,8 @@ final class AttendanceReportController extends Controller
             ->whereColumn('attendance_device_user_profiles.device_id', 'attendance_raw_events.device_id')
             ->whereColumn('attendance_device_user_profiles.device_user_id', 'attendance_raw_events.device_user_id');
         $query = AttendanceRawEvent::query()->where('processing_status', 'unmapped');
-        $isGroupScoped = $request->user()->usesAssignedGroupScope();
-        if ($isGroupScoped) {
+        $isMappingScoped = $this->access->hasRestrictedMappingScope($request->user());
+        if ($isMappingScoped) {
             // Unknown employee IDs can only be scoped by terminal until explicitly linked.
             $query->whereIn('device_id', $this->access->mappingDevicesQuery($request->user())->select('id'));
         }
@@ -142,7 +142,7 @@ final class AttendanceReportController extends Controller
             return response()->json($grouped);
         }
 
-        if ($isGroupScoped) {
+        if ($isMappingScoped) {
             $query->select(['id', 'device_id', 'device_user_id', 'occurred_at_utc', 'verify_mode', 'processing_status'])
                 ->with('device:id,name,serial_number');
         } else {
