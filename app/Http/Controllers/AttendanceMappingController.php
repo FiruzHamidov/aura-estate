@@ -61,8 +61,8 @@ final class AttendanceMappingController extends Controller
             ->addSelect(['processed_events_count' => AttendanceEvent::query()->selectRaw('COUNT(*)')
                 ->whereColumn('attendance_events.device_id', 'attendance_device_users.device_id')
                 ->whereColumn('attendance_events.device_user_id', 'attendance_device_users.device_user_id')]);
-        if ($request->user()->usesAssignedGroupScope()) {
-            $query->whereIn('user_id', $this->access->mappingUsersQuery($request->user())->select('users.id'))
+        if ($this->access->hasRestrictedMappingScope($request->user())) {
+            $query->whereIn('user_id', $this->access->mappingUsersQuery($request->user(), ! $request->user()->usesAssignedGroupScope())->select('users.id'))
                 ->whereIn('device_id', $this->access->mappingDevicesQuery($request->user())->select('id'));
         }
         foreach (['device_id', 'user_id'] as $field) {
@@ -87,12 +87,21 @@ final class AttendanceMappingController extends Controller
         return \Illuminate\Support\Facades\DB::transaction(function () use ($request, $data) {
             $actor = User::query()->lockForUpdate()->findOrFail($request->user()->id);
             $this->access->assertCanManageMappings($actor);
-            $target = ($actor->usesAssignedGroupScope() ? $this->access->mappingUsersQuery($actor) : User::query())->lockForUpdate()->findOrFail($data['user_id']);
+            $restricted = $this->access->hasRestrictedMappingScope($actor);
+            $targets = $restricted
+                ? $this->access->mappingUsersQuery($actor, ! $actor->usesAssignedGroupScope())
+                : User::query();
+            $target = $targets->lockForUpdate()->findOrFail($data['user_id']);
             $this->access->mappingDevicesQuery($actor)->lockForUpdate()->findOrFail($data['device_id']);
             $mapping = AttendanceDeviceUser::query()
                 ->where('device_id', $data['device_id'])
                 ->where('device_user_id', $data['device_user_id'])
                 ->lockForUpdate()->first();
+            // A local terminal can still contain a link belonging to another branch.
+            if ($mapping && $restricted && ! $actor->usesAssignedGroupScope() && (int) $mapping->user_id !== (int) $target->id) {
+                $this->access->mappingUsersQuery($actor, ! $actor->usesAssignedGroupScope())
+                    ->lockForUpdate()->findOrFail($mapping->user_id);
+            }
             // Disabling an existing link must also work after its employee is dismissed.
             // Creating, reassigning or enabling a link still requires an active employee.
             $disablingExisting = $mapping !== null
@@ -104,6 +113,8 @@ final class AttendanceMappingController extends Controller
             }
             if ($actor->usesAssignedGroupScope()) {
                 abort_if($mapping && (int) $mapping->user_id !== (int) $target->id, 403, 'Этот ZKTeco ID уже связан с другим сотрудником. Обратитесь к HR.');
+            }
+            if ($restricted) {
                 abort_if(AttendanceEvent::query()->where('device_id', $data['device_id'])
                     ->where('device_user_id', $data['device_user_id'])->where('user_id', '!=', $target->id)->exists(),
                     403, 'У этого ZKTeco ID есть история другого сотрудника. Обратитесь к HR.');
@@ -157,6 +168,22 @@ final class AttendanceMappingController extends Controller
     {
         $this->access->assertCanManageMappings($request->user());
         abort_if($request->user()->usesAssignedGroupScope(), 403, 'Удалить связь может HR или администратор.');
+        return \Illuminate\Support\Facades\DB::transaction(function () use ($request, $mapping) {
+            $actor = User::query()->lockForUpdate()->findOrFail($request->user()->id);
+            $this->access->assertCanManageMappings($actor);
+            abort_if($actor->usesAssignedGroupScope(), 403, 'Удалить связь может HR или администратор.');
+            if ($this->access->hasRestrictedMappingScope($actor)) {
+                $this->access->mappingUsersQuery($actor, true)->lockForUpdate()->findOrFail($mapping->user_id);
+                $this->access->mappingDevicesQuery($actor)->lockForUpdate()->findOrFail($mapping->device_id);
+            }
+            $current = AttendanceDeviceUser::query()->lockForUpdate()->findOrFail($mapping->id);
+            abort_if($current->user_id !== $mapping->user_id || $current->device_id !== $mapping->device_id, 409, 'Сопоставление изменилось. Обновите страницу.');
+            return $this->deleteMapping($request, $current);
+        });
+    }
+
+    private function deleteMapping(Request $request, AttendanceDeviceUser $mapping)
+    {
         $old = $mapping->only([
             'device_id',
             'device_user_id',
