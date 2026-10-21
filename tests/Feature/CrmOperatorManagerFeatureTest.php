@@ -913,6 +913,119 @@ class CrmOperatorManagerFeatureTest extends TestCase
         $this->getJson('/api/crm/reports/performance?role_type=manager')->assertForbidden();
     }
 
+    public function test_rop_operator_report_limits_subjects_and_every_metric_to_assigned_groups(): void
+    {
+        [$rop, $branch, $otherBranch, $groups, $employees] = $this->groupReportFixture('operator');
+        foreach ([$groups[0], $groups[1], $groups[2], null, $groups[3]] as $index => $groupId) {
+            $lead = $this->createLead($index === 4 ? $otherBranch : $branch, $employees[0], $employees[0], 'Lead '.$index, nextFollowUpAt: now()->subDay());
+            $lead->forceFill(['branch_group_id' => $groupId, 'created_at' => now()->subHours(3), 'first_contacted_at' => now()->subMinutes($index < 2 ? 150 : 60)])->save();
+            CrmAuditLog::create([
+                'auditable_type' => Lead::class, 'auditable_id' => $lead->id, 'actor_id' => $employees[0]->id,
+                'event' => 'status_change', 'old_values' => ['status' => Lead::STATUS_NEW],
+                'new_values' => ['status' => Lead::STATUS_IN_PROGRESS],
+            ]);
+        }
+        Sanctum::actingAs($rop);
+        $url = '/api/crm/reports/performance?role_type=operator';
+        $response = $this->getJson($url)->assertOk()->assertJsonCount(2, 'data')->assertJsonCount(2, 'available_users')
+            ->assertJsonPath('summary.processed_leads_count', 2)
+            ->assertJsonPath('summary.advanced_status_count', 2)
+            ->assertJsonPath('summary.overdue_follow_up_count', 2);
+        $this->assertEquals(30, $response->json('summary.avg_minutes_to_first_processing'));
+        $this->getJson($url.'&responsible_user_id='.$employees[0]->id)->assertOk()->assertJsonCount(1, 'data')->assertJsonCount(2, 'available_users');
+        foreach (array_slice($employees, 2) as $outside) {
+            $this->getJson($url.'&responsible_user_id='.$outside->id)->assertForbidden();
+        }
+        $this->getJson($url.'&branch_id='.$otherBranch->id)->assertForbidden();
+        $this->getJson($url.'&branch_group_id='.$groups[2])->assertForbidden();
+        $this->getJson('/api/crm/reports/performance?role_type=manager&responsible_user_id='.$employees[0]->id)->assertForbidden();
+
+        // Assignment revocation affects both subjects and metrics on the next request.
+        \Illuminate\Support\Facades\DB::table('rop_branch_groups')->where('rop_id', $rop->id)->delete();
+        $this->getJson($url)->assertOk()->assertJsonCount(0, 'data')->assertJsonCount(0, 'available_users')->assertJsonPath('summary.processed_leads_count', 0);
+        $this->getJson($url.'&responsible_user_id='.$employees[0]->id)->assertForbidden();
+    }
+
+    public function test_rop_manager_report_scopes_deals_logs_and_contact_averages(): void
+    {
+        [$rop, $branch, $otherBranch, $groups, $employees] = $this->groupReportFixture('manager');
+        [$pipeline, $stage] = $this->createPipeline($branch, DealPipeline::CODE_PROPERTY_CONTROL, DealPipeline::TYPE_SALES, true);
+        foreach ([$groups[0], $groups[1], $groups[2], null, $groups[3]] as $index => $groupId) {
+            $deal = Deal::create([
+                'title' => 'Card '.$index, 'branch_id' => $index === 4 ? $otherBranch->id : $branch->id,
+                'branch_group_id' => $groupId, 'created_by' => $employees[0]->id, 'responsible_agent_id' => $employees[0]->id,
+                'pipeline_id' => $pipeline->id, 'stage_id' => $stage->id, 'created_at' => now()->subHours(3), 'next_activity_at' => now()->subDay(),
+            ]);
+            // Historical ungrouped records must stay excluded, even for an assigned employee.
+            Deal::whereKey($deal->id)->update(['branch_group_id' => $groupId, 'created_at' => now()->subHours(3)]);
+            foreach (['call', 'reactivated', 'owner_sold_confirmed'] as $event) {
+                CrmAuditLog::forceCreate([
+                    'auditable_type' => Deal::class, 'auditable_id' => $deal->id, 'actor_id' => $employees[0]->id,
+                    'event' => $event === 'call' ? 'call' : 'status_change',
+                    'new_values' => $event === 'call' ? ['result' => 'contacted'] : ['stage_slug' => $event],
+                    'created_at' => now()->subMinutes($index < 2 ? 150 : 60),
+                ]);
+            }
+        }
+        Sanctum::actingAs($rop);
+        $url = '/api/crm/reports/performance?role_type=manager';
+        $response = $this->getJson($url)->assertOk()->assertJsonCount(2, 'data')->assertJsonCount(2, 'available_users');
+        foreach (['taken_in_work_count', 'checked_cards_count', 'reached_owner_count', 'reactivated_count', 'owner_sold_confirmed_count', 'overdue_cards_count'] as $metric) {
+            $response->assertJsonPath('summary.'.$metric, 2);
+        }
+        $this->assertEquals(30, $response->json('summary.avg_minutes_to_first_contact'));
+        $this->getJson($url.'&responsible_user_id='.$employees[0]->id)->assertOk()->assertJsonCount(1, 'data');
+        $this->getJson($url.'&responsible_user_id='.$employees[2]->id)->assertForbidden();
+    }
+
+    public function test_group_report_permission_is_explicit_and_cannot_expand_to_all_branches(): void
+    {
+        [$rop, $branch, $otherBranch, $groups, $employees] = $this->groupReportFixture('operator');
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $role = $rop->role;
+        $url = '/api/crm/reports/performance?role_type=operator';
+        foreach (['crm_reports.scope.all', 'crm_reports.scope.branch'] as $permission) {
+            $role->forceFill(['permissions' => ['data.scope.assigned_groups', $permission]])->save();
+            Sanctum::actingAs($rop->fresh());
+            $this->getJson($url)->assertForbidden();
+        }
+        $role->forceFill(['slug' => 'custom_group_reader', 'permissions' => ['data.scope.assigned_groups', 'crm_reports.scope.assigned_groups', 'crm_reports.scope.all']])->save();
+        Sanctum::actingAs($rop->fresh());
+        $this->getJson($url)->assertOk()->assertJsonCount(2, 'data');
+        $this->getJson($url.'&responsible_user_id='.$employees[2]->id)->assertForbidden();
+        $this->getJson($url.'&branch_id='.$otherBranch->id)->assertForbidden();
+        $role->forceFill(['permissions' => ['crm_reports.scope.assigned_groups']])->save();
+        Sanctum::actingAs($rop->fresh());
+        $this->getJson($url)->assertForbidden();
+        $role->forceFill(['permissions' => []])->save();
+        Sanctum::actingAs($rop->fresh());
+        $this->getJson($url)->assertForbidden();
+    }
+
+    private function groupReportFixture(string $subject): array
+    {
+        $this->travelTo(\Carbon\Carbon::parse('2026-10-15 12:00:00'));
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
+        $branch = Branch::create(['name' => 'A']);
+        $otherBranch = Branch::create(['name' => 'B']);
+        $groups = [];
+        for ($index = 0; $index < 4; $index++) {
+            $groups[] = \App\Models\BranchGroup::create(['name' => 'Group '.$index, 'branch_id' => $index === 3 ? $otherBranch->id : $branch->id])->id;
+        }
+        $rop = $this->createUser(Role::create(['name' => 'ROP', 'slug' => 'rop']), $branch, 'ROP');
+        foreach (array_slice($groups, 0, 2) as $groupId) {
+            \Illuminate\Support\Facades\DB::table('rop_branch_groups')->insert(['rop_id' => $rop->id, 'branch_group_id' => $groupId]);
+        }
+        $role = Role::create(['name' => $subject, 'slug' => $subject]);
+        $employees = [];
+        foreach ([$groups[0], $groups[1], $groups[2], $groups[3], null] as $index => $groupId) {
+            $employee = $this->createUser($role, $index === 3 ? $otherBranch : $branch, 'Employee '.$index);
+            $employee->forceFill(['branch_group_id' => $groupId])->save();
+            $employees[] = $employee;
+        }
+        return [$rop, $branch, $otherBranch, $groups, $employees];
+    }
+
     private function createUser(Role $role, Branch $branch, string $name): User
     {
         return User::create([

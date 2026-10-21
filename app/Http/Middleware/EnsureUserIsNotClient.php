@@ -94,7 +94,7 @@ class EnsureUserIsNotClient
         }
 
         if ($request->is('api/crm/reports/performance')) {
-            foreach (['all', 'branch', 'own_operator', 'own_manager'] as $scope) {
+            foreach (['all', 'branch', 'assigned_groups', 'own_operator', 'own_manager'] as $scope) {
                 if ($user?->hasPermission('crm_reports.scope.'.$scope)) return $next($request);
             }
         }

@@ -7,7 +7,9 @@ use App\Models\Deal;
 use App\Models\DealPipeline;
 use App\Models\Lead;
 use App\Models\User;
+use App\Support\RopGroupAccess;
 use Carbon\Carbon;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
@@ -28,8 +30,10 @@ class CrmReportController extends Controller
 
     private function ensureReportsAllowed(User $authUser): void
     {
-        // This report measures operator/manager roles, outside a ROP's agent/MOP scope.
-        abort_if($authUser->usesAssignedGroupScope(), 403, 'FORBIDDEN_ACTION');
+        if ($authUser->usesAssignedGroupScope()) {
+            abort_unless($authUser->hasPermission('crm_reports.scope.assigned_groups'), 403, 'FORBIDDEN_ACTION');
+            return;
+        }
         abort_unless(collect(['all', 'branch', 'own_operator', 'own_manager'])->contains(fn ($scope) => $authUser->hasPermission('crm_reports.scope.'.$scope)), 403, 'Forbidden');
     }
 
@@ -50,12 +54,23 @@ class CrmReportController extends Controller
         [$from, $to] = $this->resolveDateRange($validated);
         $scope = $this->resolveScope($authUser, $validated);
 
-        $users = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
+        $usersQuery = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
+            ->tap(fn ($q) => $this->scopeAssignedGroups($q))
             ->with(['role', 'branch'])
             ->whereHas('role', fn ($query) => $query->withPermission('crm_reports.subject.'.$validated['role_type']))
             ->when($scope['branch_id'], fn ($query, $branchId) => $query->where('branch_id', $branchId))
+            ->orderBy('name');
+
+        // Report subjects have their own permissions, separate from CRM assignees.
+        $availableUsers = null;
+        if ($authUser->usesAssignedGroupScope()) {
+            if ($scope['responsible_user_id']) {
+                abort_unless((clone $usersQuery)->whereKey($scope['responsible_user_id'])->exists(), 403, 'RBAC_GROUP_SCOPE_VIOLATION');
+            }
+            $availableUsers = (clone $usersQuery)->withoutEagerLoads()->get(['id', 'name', 'branch_id']);
+        }
+        $users = $usersQuery
             ->when($scope['responsible_user_id'], fn ($query, $responsibleUserId) => $query->whereKey($responsibleUserId))
-            ->orderBy('name')
             ->get();
 
         $rows = $users->map(function (User $user) use ($validated, $from, $to, $scope) {
@@ -80,6 +95,7 @@ class CrmReportController extends Controller
                 'responsible_user_id' => $scope['responsible_user_id'],
             ],
             'data' => $rows,
+            'available_users' => $availableUsers,
             'summary' => $this->summary($rows, $validated['role_type']),
         ]);
     }
@@ -123,6 +139,16 @@ class CrmReportController extends Controller
 
     private function resolveScope(User $authUser, array $validated): array
     {
+        if ($authUser->usesAssignedGroupScope()) {
+            abort_unless($authUser->branch_id, 403, 'BRANCH_REQUIRED');
+            abort_if(! empty($validated['branch_id']) && (int) $validated['branch_id'] !== (int) $authUser->branch_id, 403, 'RBAC_GROUP_SCOPE_VIOLATION');
+
+            return [
+                'branch_id' => $authUser->branch_id,
+                'responsible_user_id' => $validated['responsible_user_id'] ?? null,
+            ];
+        }
+
         if ($authUser->hasPermission('crm_reports.scope.all')) {
             return [
                 'branch_id' => $validated['branch_id'] ?? null,
@@ -163,7 +189,7 @@ class CrmReportController extends Controller
 
     private function operatorMetrics(User $user, Carbon $from, Carbon $to, ?int $branchId): array
     {
-        $logs = $this->leadLogs($user->id, $from, $to);
+        $logs = $this->leadLogs($user->id, $from, $to, $branchId);
 
         return [
             'processed_leads_count' => $logs->pluck('auditable_id')->unique()->count(),
@@ -171,9 +197,8 @@ class CrmReportController extends Controller
                 ->where('event', 'status_change')
                 ->filter(fn (CrmAuditLog $log) => $this->isForwardLeadStatusMove($log))
                 ->count(),
-            'overdue_follow_up_count' => Lead::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
+            'overdue_follow_up_count' => $this->reportLeadsQuery($branchId)
                 ->where('responsible_agent_id', $user->id)
-                ->when($branchId, fn ($query, $value) => $query->where('branch_id', $value))
                 ->whereNotIn('status', Lead::closedStatuses())
                 ->whereNotNull('next_follow_up_at')
                 ->where('next_follow_up_at', '<', now())
@@ -258,9 +283,8 @@ class CrmReportController extends Controller
 
     private function averageLeadFirstProcessingMinutes(User $user, Carbon $from, Carbon $to, ?int $branchId): ?float
     {
-        $leads = Lead::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
+        $leads = $this->reportLeadsQuery($branchId)
             ->where('responsible_agent_id', $user->id)
-            ->when($branchId, fn ($query, $value) => $query->where('branch_id', $value))
             ->whereBetween('created_at', [$from, $to])
             ->get(['id', 'created_at', 'first_contacted_at']);
 
@@ -318,11 +342,11 @@ class CrmReportController extends Controller
         return $durations->isEmpty() ? null : round((float) $durations->avg(), 2);
     }
 
-    private function leadLogs(int $userId, Carbon $from, Carbon $to): Collection
+    private function leadLogs(int $userId, Carbon $from, Carbon $to, ?int $branchId): Collection
     {
         return CrmAuditLog::query()
             ->where('auditable_type', Lead::class)
-            ->whereIn('auditable_id', Lead::query()->withTrashed()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->select('id'))
+            ->whereIn('auditable_id', $this->reportLeadsQuery($branchId)->withTrashed()->select('id'))
             ->where('actor_id', $userId)
             ->whereBetween('created_at', [$from, $to])
             ->whereIn('event', self::REPORT_EVENTS)
@@ -349,7 +373,23 @@ class CrmReportController extends Controller
     private function propertyControlDealsQuery(?int $branchId)
     {
         return Deal::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
+            ->tap(fn ($q) => $this->scopeAssignedGroups($q))
             ->whereHas('pipeline', fn ($query) => $query->where('code', DealPipeline::CODE_PROPERTY_CONTROL))
+            ->when($branchId, fn ($query, $value) => $query->where('branch_id', $value));
+    }
+
+    private function scopeAssignedGroups(Builder $query): void
+    {
+        $actor = $this->authUser();
+        if ($actor->usesAssignedGroupScope()) {
+            app(RopGroupAccess::class)->scope($query, $actor, 'branch_group_id', 'branch_id');
+        }
+    }
+
+    private function reportLeadsQuery(?int $branchId): Builder
+    {
+        return Lead::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
+            ->tap(fn ($q) => $this->scopeAssignedGroups($q))
             ->when($branchId, fn ($query, $value) => $query->where('branch_id', $value));
     }
 

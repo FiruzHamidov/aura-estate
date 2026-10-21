@@ -50,6 +50,8 @@ final class EnforceRopGroupScope
             $filters = $request->all();
             if ($controller === 'App\\Http\\Controllers\\EmployeeGroupTransferController@store') unset($filters['branch_group_id']);
             if (in_array($controller, ['App\\Http\\Controllers\\AttendanceMappingController@upsert', 'App\\Http\\Controllers\\AttendanceMappingController@index'], true)) unset($filters['user_id']);
+            // The report checks operator/manager subjects against its scoped users query.
+            if ($controller === 'App\\Http\\Controllers\\CrmReportController@performance') unset($filters['responsible_user_id']);
             $this->validateFilters($filters, $actor, $request->isMethodSafe());
             return RopScopeResponse::headers($next($request), $request);
         };
