@@ -62,6 +62,26 @@ class RolePermissionsTest extends TestCase
         $this->assertSame([], $rop->fresh()->permissions);
     }
 
+    public function test_rop_report_grant_migration_is_scoped_audited_and_idempotent(): void
+    {
+        $rop = Role::where('slug', 'rop')->firstOrFail();
+        $rop->forceFill(['permissions' => ['data.scope.assigned_groups', 'crm_reports.scope.all', 'users.scope.branch']])->save();
+        $migration = require database_path('migrations/2026_10_21_120000_enable_rop_group_crm_reports.php');
+        $migration->up();
+        $this->assertSame(['data.scope.assigned_groups', 'users.scope.branch', 'crm_reports.scope.assigned_groups'], $rop->fresh()->permissions);
+        $version = $rop->fresh()->permissions_version;
+        $migration->up();
+        $this->assertSame($version, $rop->fresh()->permissions_version);
+        $this->assertDatabaseHas('role_permission_audits', ['role_id' => $rop->id, 'version' => $version]);
+        $rop->forceFill(['permissions' => []])->save();
+        $migration->up();
+        $this->assertSame([], $rop->fresh()->permissions);
+        $rop->forceFill(['permissions' => null])->save();
+        $migration->up();
+        $this->assertTrue($rop->fresh()->hasPermission('crm_reports.scope.assigned_groups'));
+        $this->assertNull($rop->fresh()->permissions);
+    }
+
     private function actor(string $slug): User
     {
         $user = User::create(['name' => $slug, 'role_id' => Role::where('slug', $slug)->firstOrFail()->id]);
