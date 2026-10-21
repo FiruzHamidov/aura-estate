@@ -114,19 +114,21 @@ class BranchGroupController extends Controller
 
     public function mergePreview(Request $request, BranchGroup $branchGroup)
     {
-        $data = $request->validate(['target_group_id' => 'required|integer|exists:branch_groups,id']);
+        $data = $request->validate(['target_group_id' => 'required|integer|exists:branch_groups,id',
+            'include_all_properties' => 'sometimes|boolean']);
         return response()->json(app(\App\Services\GroupAccess\BranchGroupMerge::class)->preview(
-            $this->authUser(), $branchGroup, BranchGroup::findOrFail($data['target_group_id'])));
+            $this->authUser(), $branchGroup, BranchGroup::findOrFail($data['target_group_id']),
+            (bool) ($data['include_all_properties'] ?? false)));
     }
 
     public function merge(Request $request, BranchGroup $branchGroup)
     {
         $data = $request->validate(['target_group_id' => 'required|integer|exists:branch_groups,id',
             'revision' => 'required|string|size:64', 'reason' => 'required|string|min:3|max:2000',
-            'archive_source' => 'sometimes|boolean']);
+            'archive_source' => 'sometimes|boolean', 'include_all_properties' => 'sometimes|boolean']);
         return response()->json(app(\App\Services\GroupAccess\BranchGroupMerge::class)->merge(
             $this->authUser(), $branchGroup, BranchGroup::findOrFail($data['target_group_id']), $data['revision'], trim($data['reason']),
-            (bool) ($data['archive_source'] ?? false)));
+            (bool) ($data['archive_source'] ?? false), (bool) ($data['include_all_properties'] ?? false)));
     }
 
     public function index(Request $request)
