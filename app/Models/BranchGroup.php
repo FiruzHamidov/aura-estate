@@ -28,6 +28,21 @@ class BranchGroup extends Model
     public const CONTACT_VISIBILITY_GROUP_ONLY = 'group_only';
     public const CONTACT_VISIBILITY_BRANCH = 'branch';
 
+    // Current ownership and historical snapshots both prevent physical deletion.
+    public const DATA_REFERENCES = [
+        'users' => 'Пользователи', 'clients' => 'Клиенты', 'properties' => 'Объекты недвижимости',
+        'leads' => 'Лиды', 'crm_deals' => 'Сделки', 'bookings' => 'Показы', 'crm_tasks' => 'Задачи CRM',
+        'daily_reports' => 'Ежедневные отчёты', 'attendance_daily_summaries' => 'История посещаемости',
+        'attendance_events' => 'События посещаемости', 'attendance_leaves' => 'Отсутствия',
+        'attendance_duties' => 'Дежурства', 'attendance_devices' => 'Устройства посещаемости',
+        'user_location_points' => 'История местоположений', 'external_property_requests' => 'Заявки внешних агентов',
+        'kpi_plans' => 'Планы KPI', 'kpi_rop_plans' => 'Планы РОП', 'kpi_period_locks' => 'Блокировки KPI',
+        'kpi_early_risk_alerts' => 'Предупреждения KPI', 'kpi_quality_issues' => 'Проверки качества KPI',
+        'kpi_acceptance_runs' => 'Приёмки KPI', 'kpi_adjustment_logs' => 'История корректировок KPI',
+        'rop_liquidity_results' => 'Результаты ликвидности', 'rop_liquidity_history' => 'История ликвидности',
+        'notifications' => 'Уведомления', 'selections' => 'Подборки', 'reels' => 'Reels',
+    ];
+
     protected $fillable = [
         'branch_id',
         'name',
@@ -59,14 +74,7 @@ class BranchGroup extends Model
 
     public function hasAssignedData(bool $lock = false): bool
     {
-        foreach ([
-            'users', 'clients', 'properties', 'leads', 'crm_deals', 'bookings', 'crm_tasks',
-            'daily_reports', 'attendance_daily_summaries', 'attendance_events', 'attendance_leaves',
-            'attendance_duties', 'attendance_devices', 'user_location_points', 'external_property_requests',
-            'kpi_plans', 'kpi_rop_plans', 'kpi_period_locks', 'kpi_early_risk_alerts',
-            'kpi_quality_issues', 'kpi_acceptance_runs', 'kpi_adjustment_logs',
-            'rop_liquidity_results', 'rop_liquidity_history', 'notifications', 'selections', 'reels',
-        ] as $table) {
+        foreach (array_keys(self::DATA_REFERENCES) as $table) {
             if (! \Illuminate\Support\Facades\Schema::hasColumn($table, 'branch_group_id')) continue;
             $query = \Illuminate\Support\Facades\DB::table($table)->where('branch_group_id', $this->id);
             // In MySQL REPEATABLE READ a plain exists() can retain the snapshot

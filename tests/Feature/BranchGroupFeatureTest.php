@@ -363,6 +363,48 @@ class BranchGroupFeatureTest extends TestCase
         $this->deleteJson('/api/branch-groups/'.$historical->id)->assertConflict();
     }
 
+    public function test_catalog_usage_counts_history_and_rop_assignments_and_prevents_generic_merge(): void
+    {
+        $branch = Branch::create(['name' => 'Office']);
+        $admin = $this->createUser(Role::create(['name' => 'Admin', 'slug' => 'admin']), $branch, 'Admin');
+        $source = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Source']);
+        $target = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Target']);
+        $admin->supervisedGroups()->attach($source->id);
+        Schema::create('notifications', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('branch_group_id')->constrained('branch_groups')->restrictOnDelete();
+        });
+        \DB::table('notifications')->insert(['branch_group_id' => $source->id]);
+        \DB::table('clients')->insert(['full_name' => 'Client', 'branch_group_id' => $source->id, 'branch_id' => $branch->id]);
+        Sanctum::actingAs($admin);
+        $url = '/api/admin/catalogs/branch-groups/'.$source->id;
+        $usage = $this->getJson($url.'/usage')->assertOk()
+            ->assertJsonPath('data.usage.total', 3)
+            ->assertJsonPath('data.can_delete_directly', false)
+            ->assertJsonPath('data.merge_allowed', false)
+            ->assertJsonPath('data.item.branch_id', $branch->id)->json('data.usage.breakdown');
+        $this->assertEqualsCanonicalizing(['clients', 'notifications', 'rop_branch_groups'], array_column($usage, 'entity'));
+        $this->postJson($url.'/merge', ['replacement_id' => $target->id, 'expected_usage_count' => 3])
+            ->assertConflict()->assertJsonPath('code', 'REFERENCE_GROUP_MERGE_REQUIRED');
+        $this->deleteJson($url)->assertConflict()->assertJsonPath('code', 'REFERENCE_CATALOG_IN_USE');
+        $this->assertDatabaseHas('branch_groups', ['id' => $source->id]);
+        $this->assertDatabaseHas('clients', ['branch_group_id' => $source->id]);
+        $this->assertDatabaseHas('notifications', ['branch_group_id' => $source->id]);
+        $this->assertDatabaseHas('rop_branch_groups', ['branch_group_id' => $source->id]);
+    }
+
+    public function test_generic_catalog_can_still_delete_a_truly_empty_group(): void
+    {
+        $branch = Branch::create(['name' => 'Office']);
+        $admin = $this->createUser(Role::create(['name' => 'Admin', 'slug' => 'admin']), $branch, 'Admin');
+        $group = BranchGroup::create(['branch_id' => $branch->id, 'name' => 'Empty']);
+        Sanctum::actingAs($admin);
+        $url = '/api/admin/catalogs/branch-groups/'.$group->id;
+        $this->getJson($url.'/usage')->assertOk()->assertJsonPath('data.can_delete_directly', true);
+        $this->deleteJson($url)->assertOk();
+        $this->assertDatabaseMissing('branch_groups', ['id' => $group->id]);
+    }
+
     public function test_custom_group_permissions_preserve_scope_and_separate_labels_from_management(): void
     {
         Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());

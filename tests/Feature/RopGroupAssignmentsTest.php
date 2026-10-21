@@ -61,6 +61,81 @@ class RopGroupAssignmentsTest extends TestCase
         Sanctum::actingAs($this->admin->fresh());
     }
 
+    public function test_group_merge_and_archive_preserves_historical_records_and_assignments(): void
+    {
+        $this->mergeRights();
+        (require database_path('migrations/2026_10_16_050000_add_branch_group_archive.php'))->up();
+        $agent = $this->user('agent', $this->a);
+        $inactive = $this->user('agent', $this->a); $inactive->update(['status' => 'inactive']);
+        $this->rop->supervisedGroups()->attach($this->a->id);
+        $make = fn ($status) => Client::create(['full_name' => 'Fixture', 'status' => $status,
+            'branch_id' => $this->branch->id, 'branch_group_id' => $this->a->id, 'responsible_agent_id' => $agent->id]);
+        $active = $make('active'); $history = $make('inactive');
+        foreach (['kpi_plans', 'kpi_rop_plans', 'notifications', 'attendance_daily_summaries'] as $table) {
+            Schema::create($table, function (Blueprint $t) {
+                $t->id(); $t->foreignId('branch_group_id')->constrained('branch_groups')->restrictOnDelete();
+            });
+            DB::table($table)->insert(['branch_group_id' => $this->a->id]);
+        }
+        $url = '/api/branch-groups/'.$this->a->id;
+        $preview = $this->postJson($url.'/merge-preview', ['target_group_id' => $this->b->id])->assertOk()->json();
+        $payload = ['target_group_id' => $this->b->id, 'revision' => $preview['revision'],
+            'reason' => 'Retire former group', 'archive_source' => true];
+        $this->postJson($url.'/merge', $payload)->assertOk()->assertJsonPath('source_archived', true);
+        $this->assertDatabaseHas('branch_groups', ['id' => $this->a->id, 'is_archived' => true]);
+        $this->assertDatabaseHas('branch_groups', ['id' => $this->b->id, 'is_archived' => false]);
+        $this->assertSame($this->b->id, $agent->fresh()->branch_group_id);
+        $this->assertSame($this->a->id, $inactive->fresh()->branch_group_id);
+        $this->assertSame($this->b->id, $active->fresh()->branch_group_id);
+        $this->assertSame($agent->id, $active->fresh()->responsible_agent_id);
+        $this->assertSame($this->a->id, $history->fresh()->branch_group_id);
+        foreach (['kpi_plans', 'kpi_rop_plans', 'notifications', 'attendance_daily_summaries'] as $table) {
+            $this->assertDatabaseHas($table, ['branch_group_id' => $this->a->id]);
+            $this->assertDatabaseCount($table, 1);
+        }
+        $this->assertDatabaseHas('rop_branch_groups', ['rop_id' => $this->rop->id, 'branch_group_id' => $this->a->id]);
+        $this->assertDatabaseHas('group_access_audit_logs', ['event' => 'branch_group_archived', 'subject_id' => $this->a->id]);
+        $this->getJson('/api/branch-groups')->assertOk()->assertJsonMissing(['name' => $this->a->name]);
+        $this->postJson($url.'/merge', $payload)->assertNotFound();
+    }
+
+    public function test_archive_only_merge_accepts_history_without_active_work_but_checks_revision(): void
+    {
+        $this->mergeRights();
+        (require database_path('migrations/2026_10_16_050000_add_branch_group_archive.php'))->up();
+        $this->rop->update(['status' => 'inactive']);
+        $url = '/api/branch-groups/'.$this->a->id;
+        $preview = $this->postJson($url.'/merge-preview', ['target_group_id' => $this->b->id])->assertOk()->json();
+        $payload = ['target_group_id' => $this->b->id, 'revision' => $preview['revision'], 'reason' => 'Retire inactive team'];
+        $this->postJson($url.'/merge', $payload)->assertUnprocessable();
+        $this->postJson($url.'/merge', [...$payload, 'archive_source' => true, 'revision' => str_repeat('0', 64)])->assertConflict();
+        $this->assertDatabaseHas('branch_groups', ['id' => $this->a->id, 'is_archived' => false]);
+        $this->postJson($url.'/merge', [...$payload, 'archive_source' => true])->assertOk();
+        $this->assertDatabaseHas('branch_groups', ['id' => $this->a->id, 'is_archived' => true]);
+        $this->assertSame($this->a->id, $this->rop->fresh()->branch_group_id);
+    }
+
+    public function test_archive_failure_rolls_back_group_transfer_and_audit(): void
+    {
+        $this->mergeRights();
+        (require database_path('migrations/2026_10_16_050000_add_branch_group_archive.php'))->up();
+        $agent = $this->user('agent', $this->a);
+        $url = '/api/branch-groups/'.$this->a->id;
+        $preview = $this->postJson($url.'/merge-preview', ['target_group_id' => $this->b->id])->assertOk()->json();
+        DB::unprepared("CREATE TRIGGER refuse_archive BEFORE UPDATE OF is_archived ON branch_groups WHEN NEW.is_archived = 1 BEGIN SELECT RAISE(ABORT, 'archive refused'); END");
+        $this->withoutExceptionHandling();
+        try {
+            $this->postJson($url.'/merge', ['target_group_id' => $this->b->id, 'revision' => $preview['revision'],
+                'reason' => 'Retire team atomically', 'archive_source' => true]);
+            $this->fail('The archive trigger must reject the transaction.');
+        } catch (\Illuminate\Database\QueryException $exception) {
+            $this->assertStringContainsString('archive refused', $exception->getMessage());
+        }
+        $this->assertSame($this->a->id, $agent->fresh()->branch_group_id);
+        $this->assertDatabaseHas('branch_groups', ['id' => $this->a->id, 'is_archived' => false]);
+        $this->assertDatabaseCount('group_access_audit_logs', 0);
+    }
+
     public function test_group_merge_preserves_history_owners_and_supervisor_assignments(): void
     {
         $this->mergeRights();

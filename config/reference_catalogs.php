@@ -92,16 +92,11 @@ return [
     'branch-groups' => [
         'table' => 'branch_groups',
         'label_columns' => ['name'],
-        'references' => [
-            ['key' => 'users', 'label' => 'Пользователи', 'table' => 'users', 'column' => 'branch_group_id'],
-            ['key' => 'clients', 'label' => 'Клиенты', 'table' => 'clients', 'column' => 'branch_group_id'],
-            ['key' => 'properties', 'label' => 'Объекты недвижимости', 'table' => 'properties', 'column' => 'branch_group_id'],
-            ['key' => 'external_property_requests', 'label' => 'Заявки внешних агентов', 'table' => 'external_property_requests', 'column' => 'branch_group_id'],
-            ['key' => 'kpi_plans', 'label' => 'Планы KPI', 'table' => 'kpi_plans', 'column' => 'branch_group_id'],
-            ['key' => 'kpi_rop_plans', 'label' => 'Планы РОП', 'table' => 'kpi_rop_plans', 'column' => 'branch_group_id'],
-            ['key' => 'kpi_period_locks', 'label' => 'Блокировки KPI', 'table' => 'kpi_period_locks', 'column' => 'branch_group_id'],
-            ['key' => 'user_location_points', 'label' => 'История местоположений', 'table' => 'user_location_points', 'column' => 'branch_group_id'],
-        ],
+        'references' => array_map(
+            fn (string $table, string $label) => ['key' => $table, 'label' => $label, 'table' => $table, 'column' => 'branch_group_id'],
+            array_keys(\App\Models\BranchGroup::DATA_REFERENCES + ['rop_branch_groups' => 'Закрепления РОП']),
+            array_values(\App\Models\BranchGroup::DATA_REFERENCES + ['rop_branch_groups' => 'Закрепления РОП']),
+        ),
     ],
     'roles' => [
         'table' => 'roles',
