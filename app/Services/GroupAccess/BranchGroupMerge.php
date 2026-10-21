@@ -150,9 +150,9 @@ final class BranchGroupMerge
         return $this->summary($source, $target, $this->inventory($source, $target));
     }
 
-    public function merge(User $actor, BranchGroup $source, BranchGroup $target, string $revision, string $reason): array
+    public function merge(User $actor, BranchGroup $source, BranchGroup $target, string $revision, string $reason, bool $archiveSource = false): array
     {
-        return DB::transaction(function () use ($actor, $source, $target, $revision, $reason) {
+        return DB::transaction(function () use ($actor, $source, $target, $revision, $reason, $archiveSource) {
             // Match the users → groups → records lock order of all ordinary writers.
             User::query()->where(fn ($q) => $q->where('branch_id', $source->branch_id)->orWhere('id', $actor->id))
                 ->orderBy('id')->lockForUpdate()->get();
@@ -164,7 +164,7 @@ final class BranchGroupMerge
             $inventory = $this->inventory($source, $target, true);
             abort_unless(hash_equals($inventory['revision'], $revision), 409, 'Состав групп изменился. Обновите предварительный план.');
             abort_if($inventory['blockers'] !== [], 422, 'Устраните препятствия из предварительного плана.');
-            abort_if($inventory['employees']->isEmpty() && $inventory['records'] === [], 422, 'Нет сотрудников или активных записей для переноса.');
+            abort_if(!$archiveSource && $inventory['employees']->isEmpty() && $inventory['records'] === [], 422, 'Нет сотрудников или активных записей для переноса.');
             $audit = app(GroupAccessAudit::class);
             foreach ($inventory['employees'] as $employee) {
                 DB::table('users')->where('id', $employee->id)->update(['branch_group_id' => $target->id,
@@ -180,6 +180,12 @@ final class BranchGroupMerge
             }
             $result = $this->summary($source, $target, $inventory);
             $audit->record($actor, 'branch_groups_merged', 'branch_group', $source->id, ['branch_group_id' => $source->id], $result, $reason);
+            if ($archiveSource) {
+                $source->update(['is_archived' => true]);
+                $audit->record($actor, 'branch_group_archived', 'branch_group', $source->id,
+                    ['is_archived' => false], ['is_archived' => true], $reason);
+            }
+            $result['source_archived'] = $archiveSource;
             return $result;
         }, 3);
     }

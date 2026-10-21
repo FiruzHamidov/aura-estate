@@ -26,7 +26,7 @@ final class GroupAccessReviewQueue
 
         return DB::transaction(function () use ($items) {
             $now = now();
-            DB::table('group_access_review_items')->whereNull('resolved_at')->update(['resolved_at' => $now]);
+            DB::table('group_access_review_items')->whereNull('resolved_at')->where('reason', '!=', 'employee_transfer_dispute')->update(['resolved_at' => $now]);
             foreach ($items as $item) {
                 $source = DB::table($item['table'])->find($item['id']);
                 if (! $source) continue;

@@ -43,13 +43,14 @@ class ReferenceCatalogService
         $definition = $this->definition($catalog);
         $source = $this->item($definition, $sourceId);
         $usage = $this->usageFor($definition, $sourceId);
-        $mergeAllowed = ! $this->isProtected($definition, $source);
+        $deletionAllowed = ! $this->isProtected($definition, $source);
+        $mergeAllowed = $deletionAllowed && $catalog !== 'branch-groups';
 
         return [
             'catalog' => $catalog,
             'item' => $this->serializeItem($definition, $source),
             'usage' => $usage,
-            'can_delete_directly' => $usage['total'] === 0 && $mergeAllowed,
+            'can_delete_directly' => $usage['total'] === 0 && $deletionAllowed,
             'replacement_required' => $usage['total'] > 0,
             'merge_allowed' => $mergeAllowed,
             'replacement_options' => $mergeAllowed
@@ -68,6 +69,10 @@ class ReferenceCatalogService
         ?string $userAgent,
     ): array {
         $this->assertCanManage($actor, $catalog);
+        if ($catalog === 'branch-groups') {
+            $this->deny('REFERENCE_GROUP_MERGE_REQUIRED',
+                'Используйте объединение с архивированием группы: сотрудники и текущая работа будут перенесены, а история сохранится в исходной группе.', 409);
+        }
         if ($sourceId === $replacementId) {
             $this->deny('REFERENCE_REPLACEMENT_SAME_AS_SOURCE', 'Нельзя заменить запись самой собой.', 422);
         }
@@ -371,6 +376,10 @@ class ReferenceCatalogService
         if (Schema::hasColumn($definition['table'], 'is_active')) {
             $columns[] = 'is_active';
         }
+        if ($definition['table'] === 'branch_groups') {
+            $columns[] = 'branch_id';
+            if (Schema::hasColumn('branch_groups', 'is_archived')) $columns[] = 'is_archived';
+        }
 
         return DB::table($definition['table'])
             ->select(array_values(array_unique($columns)))
@@ -391,6 +400,11 @@ class ReferenceCatalogService
             if (property_exists($item, $column)) {
                 $payload[$column] = $column === 'is_active' ? (bool) $item->{$column} : $item->{$column};
             }
+        }
+
+        if ($definition['table'] === 'branch_groups') {
+            $payload['branch_id'] = (int) $item->branch_id;
+            $payload['is_archived'] = (bool) ($item->is_archived ?? false);
         }
 
         return $payload;

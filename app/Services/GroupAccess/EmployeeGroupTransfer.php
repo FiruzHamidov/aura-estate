@@ -61,6 +61,78 @@ final class EmployeeGroupTransfer
         return $result;
     }
 
+    /** Classify before changing the employee; never grant access to disputed records. */
+    private function classify(User $actor, User $employee, array $inventory, bool $initialAssignment): array
+    {
+        if ($initialAssignment) {
+            foreach ($inventory as &$item) {
+                $this->records->authorize($actor, $this->records->model($item['type'], $item['id']), employeeTransfer: true, ungroupedEmployeeId: $employee->id);
+                $item['review_reason'] = null;
+            }
+            return $inventory;
+        }
+        foreach ($inventory as &$item) {
+            $record = $this->records->model($item['type'], $item['id']);
+            $branch = $record->getAttributes()['branch_id'] ?? null;
+            $groupBranch = DB::table('branch_groups')->where('id', $item['branch_group_id'] ?? 0)->value('branch_id');
+            $item['review_reason'] = null;
+            if (($branch && (int) $branch !== (int) $employee->branch_id)
+                || ($groupBranch && (int) $groupBranch !== (int) $employee->branch_id)) {
+                $item['review_reason'] = 'branch_conflict';
+                continue;
+            }
+            try {
+                $this->records->authorize($actor, $record, employeeTransfer: true, ungroupedEmployeeId: $initialAssignment ? $employee->id : null);
+            } catch (\Symfony\Component\HttpKernel\Exception\HttpExceptionInterface $error) {
+                if (! in_array($error->getStatusCode(), [403, 404], true)) throw $error;
+                $item['review_reason'] = 'outside_transfer_scope';
+            } catch (\Illuminate\Http\Exceptions\HttpResponseException $error) {
+                if (! in_array($error->getResponse()->getStatusCode(), [403, 404], true)) throw $error;
+                $item['review_reason'] = 'outside_transfer_scope';
+            }
+        }
+        unset($item);
+        // A task must stay with a parent that is not part of this transfer.
+        $movable = [];
+        foreach ($inventory as $item) if (! $item['review_reason']) {
+            $movable[(new (GroupRecordTransfer::MODELS[$item['type']]))->getTable().':'.$item['id']] = true;
+        }
+        foreach ($inventory as &$item) {
+            if ($item['type'] !== 'tasks' || $item['review_reason']) continue;
+            try {
+                $parent = app(TaskGroupOwnership::class)->parent($this->records->model('tasks', $item['id']));
+                if ($parent && ! isset($movable[$parent->getTable().':'.$parent->id])) $item['review_reason'] = 'parent_not_transferred';
+            } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $error) {
+                $item['review_reason'] = 'parent_not_transferred';
+            } catch (\Symfony\Component\HttpKernel\Exception\HttpExceptionInterface $error) {
+                if ($error->getStatusCode() !== 422) throw $error;
+                $item['review_reason'] = 'parent_not_transferred';
+            }
+        }
+        unset($item);
+        // Parent transfer cascades to tasks. Keep the parent too when a dependent task is disputed.
+        $parentsToKeep = [];
+        foreach ($inventory as $item) {
+            if ($item['type'] !== 'tasks' || ! $item['review_reason']) continue;
+            try {
+                $parent = app(TaskGroupOwnership::class)->parent($this->records->model('tasks', $item['id']));
+                if ($parent) $parentsToKeep[$parent->getTable().':'.$parent->id] = true;
+            } catch (\Illuminate\Database\Eloquent\ModelNotFoundException|\Symfony\Component\HttpKernel\Exception\HttpExceptionInterface $error) {
+                // Already classified above; an absent parent cannot be moved.
+            }
+        }
+        unset($item);
+        foreach ($inventory as &$item) {
+            $key = (new (GroupRecordTransfer::MODELS[$item['type']]))->getTable().':'.$item['id'];
+            if (isset($parentsToKeep[$key])) $item['review_reason'] = 'parent_not_transferred';
+            if ($item['type'] === 'tasks' && ! $item['review_reason']) {
+                $parent = app(TaskGroupOwnership::class)->parent($this->records->model('tasks', $item['id']));
+                if ($parent && isset($parentsToKeep[$parent->getTable().':'.$parent->id])) $item['review_reason'] = 'parent_not_transferred';
+            }
+        }
+        return $inventory;
+    }
+
     private function revision(User $employee, array $records): string
     {
         return hash('sha256', json_encode([$employee->only(['id', 'role_id', 'branch_id', 'branch_group_id', 'access_scope_version']), $records], JSON_THROW_ON_ERROR));
@@ -70,10 +142,12 @@ final class EmployeeGroupTransfer
     {
         $this->authorize($actor, $employee);
         $initialAssignment = app(\App\Support\RopGroupAccess::class)->canAssignUngroupedEmployee($actor, $employee);
-        $records = $this->inventory($employee);
-        foreach ($records as $item) $this->records->authorize($actor, $this->records->model($item['type'], $item['id']), employeeTransfer: true, ungroupedEmployeeId: $initialAssignment ? $employee->id : null);
+        $records = $this->classify($actor, $employee, $this->inventory($employee), $initialAssignment);
         return ['user_id' => $employee->id, 'branch_id' => $employee->branch_id,
-            'branch_group_id' => $employee->branch_group_id, 'records' => $records,
+            'branch_group_id' => $employee->branch_group_id,
+            'records' => array_values(array_filter($records, fn ($item) => ! $item['review_reason'])),
+            'deferred_records' => array_values(array_map(fn ($item) => array_intersect_key($item, array_flip(['type', 'id', 'review_reason'])),
+                array_filter($records, fn ($item) => $item['review_reason']))),
             'revision' => $this->revision($employee, $records)];
     }
 
@@ -101,8 +175,10 @@ final class EmployeeGroupTransfer
                 abort_if(! $initialAssignment && ! $employee->hasPermission('users.subject.group_transfer_across') && (int) $destination->id !== (int) $employee->branch_group_id, 403, 'Роль сотрудника не допускает перевод в другую группу этим руководителем.');
             }
             $sameGroup = (int) $destination->id === (int) $employee->branch_group_id;
-            $inventory = $this->inventory($employee, true);
+            $inventory = $this->classify($actor, $employee, $this->inventory($employee, true), $initialAssignment);
             abort_unless(hash_equals($this->revision($employee, $inventory), $data['revision']), 409, 'EMPLOYEE_TRANSFER_VERSION_CONFLICT');
+            $deferred = array_values(array_filter($inventory, fn ($item) => $item['review_reason']));
+            $inventory = array_values(array_filter($inventory, fn ($item) => ! $item['review_reason']));
             $plans = [];
             foreach ($data['records'] as $plan) {
                 $key = $plan['type'].':'.$plan['id'];
@@ -120,6 +196,13 @@ final class EmployeeGroupTransfer
             if ($initialAssignment) {
                 // Initial assignment never redistributes records to another employee.
                 abort_if(collect($plans)->contains(fn ($plan) => $plan['action'] !== 'move'), 422, 'COMPLETE_TRANSFER_PLAN_REQUIRED');
+            }
+            foreach ($deferred as $item) {
+                $table = (new (GroupRecordTransfer::MODELS[$item['type']]))->getTable();
+                DB::table('group_access_review_items')->updateOrInsert(
+                    ['source_table' => $table, 'source_id' => $item['id'], 'reason' => 'employee_transfer_dispute'],
+                    ['branch_id' => null, 'detected_at' => now(), 'resolved_at' => null],
+                );
             }
             $before = $employee->only(['role_id', 'branch_id', 'branch_group_id']);
             $employee->forceFill(['branch_id' => $destination->branch_id, 'branch_group_id' => $destination->id,
@@ -153,13 +236,14 @@ final class EmployeeGroupTransfer
             }
             // Includes records newly assigned by a concurrent writer before our final consistency check.
             foreach ($this->organization->activeQueries($employee->id) as $table => $query) {
-                abort_if($query->when(! $sameGroup, fn ($query) => $query->where(fn ($q) => $q->whereNull('branch_group_id')->orWhere('branch_group_id', '!=', $destination->id)))
+                $deferredIds = array_column(array_filter($deferred, fn ($item) => (new (GroupRecordTransfer::MODELS[$item['type']]))->getTable() === $table), 'id');
+                abort_if($query->whereNotIn('id', $deferredIds)->when(! $sameGroup, fn ($query) => $query->where(fn ($q) => $q->whereNull('branch_group_id')->orWhere('branch_group_id', '!=', $destination->id)))
                     ->lockForUpdate()->first(['id']) !== null, 409, 'EMPLOYEE_TRANSFER_RECORD_CONFLICT');
             }
             $after = $employee->only(['role_id', 'branch_id', 'branch_group_id']);
             $this->audit->record($actor, 'employee_group_transferred', 'user', $employee->id, $before,
-                [...$after, 'records' => $data['records']], $data['reason']);
-            return ['user_id' => $employee->id, ...$after, 'transferred_records' => count($inventory),
+                [...$after, 'records' => $data['records'], 'deferred_records' => $deferred], $data['reason']);
+            return ['user_id' => $employee->id, ...$after, 'transferred_records' => count($inventory), 'deferred_records_count' => count($deferred),
                 'version' => (int) $employee->access_scope_version];
         }, 3);
     }
