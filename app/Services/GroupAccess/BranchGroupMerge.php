@@ -7,7 +7,7 @@ use App\Observers\GroupOwnedRecordObserver;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
-/** Consolidate current work without rewriting historical group snapshots. */
+/** Consolidate work and optionally all properties without rewriting historical snapshots. */
 final class BranchGroupMerge
 {
     private const LABELS = ['properties' => 'Объект', 'clients' => 'Клиент', 'leads' => 'Лид',
@@ -26,7 +26,7 @@ final class BranchGroupMerge
         abort_unless((int) $source->branch_id === (int) $target->branch_id, 422, 'Объединять можно только группы одного филиала.');
     }
 
-    private function inventory(BranchGroup $source, BranchGroup $target, bool $lock = false): array
+    private function inventory(BranchGroup $source, BranchGroup $target, bool $lock = false, bool $includeAllProperties = false): array
     {
         $employees = User::query()->where('branch_group_id', $source->id)->where('status', User::STATUS_ACTIVE)
             ->whereNull('deleted_at')->orderBy('id')->when($lock, fn ($q) => $q->lockForUpdate())->get();
@@ -39,7 +39,7 @@ final class BranchGroupMerge
         // Unfinished control of historical properties stays with the property, even
         // when its responsible employee moves. Keep linked tasks there as well.
         $retainedControls = [];
-        if (Schema::hasColumn('crm_deals', 'control_kind') && Schema::hasTable('properties')) {
+        if (!$includeAllProperties && Schema::hasColumn('crm_deals', 'control_kind') && Schema::hasTable('properties')) {
             $historical = DB::table('properties')->where('branch_group_id', $source->id)
                 ->where(function ($query) {
                     $query->whereIn('moderation_status', UserOrganizationService::CLOSED_PROPERTY_STATUSES);
@@ -53,12 +53,21 @@ final class BranchGroupMerge
         foreach (app(UserOrganizationService::class)->activeQueries(null) as $table => $query) {
             $label = self::LABELS[$table];
             $field = GroupOwnedRecordObserver::RESPONSIBLES[$table];
+            // Retirement transfers the group's complete property inventory, including
+            // sold/archived/deleted rows. Other closed business records remain history.
+            if ($includeAllProperties && $table === 'properties') $query = DB::table('properties');
             if ($table === 'crm_deals' && Schema::hasColumn('crm_deal_pipelines', 'code')) {
                 // Recruitment is shared HR work and must never acquire a sales group.
                 $query->where(fn ($q) => $q->whereNull('pipeline_id')->orWhereNotIn('pipeline_id',
                     DB::table('crm_deal_pipelines')->select('id')->where('code', 'hr_recruitment')));
             }
-            $query->where(fn ($q) => $q->where('branch_group_id', $source->id)->orWhereIn($field, $ids));
+            if ($includeAllProperties) {
+                // Group consolidation must not pull an employee's unrelated work
+                // from another group just because the employee changes team.
+                $query->where('branch_group_id', $source->id);
+            } else {
+                $query->where(fn ($q) => $q->where('branch_group_id', $source->id)->orWhereIn($field, $ids));
+            }
             foreach ($query->orderBy('id')->when($lock, fn ($q) => $q->lockForUpdate())->get() as $row) {
                 if ($table === 'crm_deals' && in_array($row->id, $retainedControls, true)) continue;
                 if ($table === 'crm_tasks' && ($row->related_entity_type ?? null) === 'deal'
@@ -78,6 +87,7 @@ final class BranchGroupMerge
                 ->whereIn('primary_property_id', array_keys($records['properties']))->whereNull('closed_at');
             if (Schema::hasColumn('crm_deals', 'deleted_at')) $controls->whereNull('deleted_at');
             foreach ($controls->orderBy('id')->when($lock, fn ($q) => $q->lockForUpdate())->get() as $row) {
+                if ((int) $row->branch_group_id === (int) $target->id) continue;
                 $records['crm_deals'][$row->id] = (array) $row;
             }
         }
@@ -89,6 +99,7 @@ final class BranchGroupMerge
                 ->whereIn('related_entity_type', $types)->whereIn('related_entity_id', array_keys($records[$table]));
             if (Schema::hasColumn('crm_tasks', 'deleted_at')) $query->whereNull('deleted_at');
             foreach ($query->orderBy('id')->when($lock, fn ($q) => $q->lockForUpdate())->get() as $row) {
+                if ((int) $row->branch_group_id === (int) $target->id) continue;
                 $records['crm_tasks'][$row->id] = (array) $row;
             }
         }
@@ -100,6 +111,9 @@ final class BranchGroupMerge
         foreach ($records as $table => $rows) foreach ($rows as $row) {
             if (!empty($row['branch_group_id']) && !in_array((int) $row['branch_group_id'], [(int) $source->id, (int) $target->id], true)) $otherGroupCount++;
             $label = self::LABELS[$table];
+            if ($includeAllProperties && !empty($row['branch_group_id']) && (int) $row['branch_group_id'] !== (int) $source->id) {
+                $blockers[] = "{$label} #{$row['id']}: связанная запись относится к другой группе. Сначала исправьте её принадлежность.";
+            }
             $responsible = $row[GroupOwnedRecordObserver::RESPONSIBLES[$table]] ?? null;
             $owner = $responsible ? $owners->get($responsible) : null;
             if (isset($row['branch_id']) && (int) $row['branch_id'] !== (int) $source->branch_id) {
@@ -127,13 +141,16 @@ final class BranchGroupMerge
         // Group merge explicitly consolidates active work, preserving its assignees.
         // Existing group/assignee mismatches are disclosed, not silently reassigned.
         $warnings = [];
-        if ($otherGroupCount) $warnings[] = "Записи из других групп: {$otherGroupCount}. Они также перейдут в выбранную группу.";
+        if (!$includeAllProperties && $otherGroupCount) $warnings[] = "Записи из других групп: {$otherGroupCount}. Они также перейдут в выбранную группу.";
         if ($outsideTeamCount) $warnings[] = "Записи с ответственными вне объединяемой команды: {$outsideTeamCount}. Ответственные сохранятся; сотрудники других групп не переводятся.";
         foreach ($records as &$rows) ksort($rows);
         unset($rows);
         ksort($records);
-        $snapshot = [$source->getAttributes(), $target->getAttributes(), $employees->map->getAttributes()->all(), $records];
+        $snapshot = [$includeAllProperties, $source->getAttributes(), $target->getAttributes(), $employees->map->getAttributes()->all(), $records];
         return ['employees' => $employees, 'records' => $records, 'blockers' => array_values(array_unique($blockers)),
+            'include_all_properties' => $includeAllProperties,
+            'historical_properties' => count(array_filter($records['properties'] ?? [], fn ($row) =>
+                !empty($row['deleted_at']) || in_array($row['moderation_status'] ?? null, UserOrganizationService::CLOSED_PROPERTY_STATUSES, true))),
             'warnings' => $warnings, 'revision' => hash('sha256', json_encode($snapshot, JSON_THROW_ON_ERROR))];
     }
 
@@ -141,18 +158,19 @@ final class BranchGroupMerge
     {
         return ['source' => $source->only(['id', 'name', 'branch_id']), 'target' => $target->only(['id', 'name', 'branch_id']),
             'employees' => $inventory['employees']->map->only(['id', 'name'])->values()->all(),
+            'include_all_properties' => $inventory['include_all_properties'], 'historical_properties' => $inventory['historical_properties'],
             'counts' => array_map('count', $inventory['records']), 'warnings' => $inventory['warnings'], 'blockers' => $inventory['blockers'], 'revision' => $inventory['revision']];
     }
 
-    public function preview(User $actor, BranchGroup $source, BranchGroup $target): array
+    public function preview(User $actor, BranchGroup $source, BranchGroup $target, bool $includeAllProperties = false): array
     {
         $this->authorize($actor, $source, $target);
-        return $this->summary($source, $target, $this->inventory($source, $target));
+        return $this->summary($source, $target, $this->inventory($source, $target, includeAllProperties: $includeAllProperties));
     }
 
-    public function merge(User $actor, BranchGroup $source, BranchGroup $target, string $revision, string $reason, bool $archiveSource = false): array
+    public function merge(User $actor, BranchGroup $source, BranchGroup $target, string $revision, string $reason, bool $archiveSource = false, bool $includeAllProperties = false): array
     {
-        return DB::transaction(function () use ($actor, $source, $target, $revision, $reason, $archiveSource) {
+        return DB::transaction(function () use ($actor, $source, $target, $revision, $reason, $archiveSource, $includeAllProperties) {
             // Match the users → groups → records lock order of all ordinary writers.
             User::query()->where(fn ($q) => $q->where('branch_id', $source->branch_id)->orWhere('id', $actor->id))
                 ->orderBy('id')->lockForUpdate()->get();
@@ -161,7 +179,7 @@ final class BranchGroupMerge
             $source = $groups->get($source->id); $target = $groups->get($target->id);
             abort_unless($source && $target, 404);
             $this->authorize($actor, $source, $target);
-            $inventory = $this->inventory($source, $target, true);
+            $inventory = $this->inventory($source, $target, true, $includeAllProperties);
             abort_unless(hash_equals($inventory['revision'], $revision), 409, 'Состав групп изменился. Обновите предварительный план.');
             abort_if($inventory['blockers'] !== [], 422, 'Устраните препятствия из предварительного плана.');
             abort_if(!$archiveSource && $inventory['employees']->isEmpty() && $inventory['records'] === [], 422, 'Нет сотрудников или активных записей для переноса.');
