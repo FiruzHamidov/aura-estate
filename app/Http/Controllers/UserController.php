@@ -996,7 +996,13 @@ class UserController extends Controller
 
             }
 
+            // Every entry point, including legacy redistribution, must leave no
+            // active work behind before disabling access. Failure rolls back transfers.
+            abort_if(app(\App\Services\GroupAccess\UserOrganizationService::class)
+                ->hasActiveRecords($user->id, lock: true), 409, 'EMPLOYEE_TRANSFER_REQUIRED');
+
             // Увольняем пользователя: деактивация + отзыв всех токенов
+            $oldStatus = $user->status;
             $user->status = 'inactive';
             $user->remember_token = null;
             $user->password = Hash::make(Str::random(40));
@@ -1007,6 +1013,22 @@ class UserController extends Controller
             $user->telegram_linked_at = null;
             $user->save();
             $user->tokens()->delete();
+
+            app(AuditLogger::class)->log(
+                subject: $user,
+                actor: $authUser,
+                event: 'user_dismissed',
+                oldValues: ['status' => $oldStatus],
+                newValues: ['status' => $user->status],
+                message: 'Пользователь уволен, активные записи переданы',
+                context: [
+                    'dismissed_user_id' => $user->id,
+                    'dismissed_by_user_id' => $authUser->id,
+                    'dismissed_at' => now()->toIso8601String(),
+                    'reason' => $plan['reason'] ?? 'Увольнение сотрудника',
+                    'transfer_stats' => $transferStats,
+                ]
+            );
         });
 
         return response()->json(array_merge([

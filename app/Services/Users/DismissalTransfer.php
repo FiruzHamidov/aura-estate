@@ -8,6 +8,7 @@ use App\Models\DealStage;
 use App\Services\GroupAccess\TaskGroupOwnership;
 use App\Observers\GroupOwnedRecordObserver;
 use App\Support\RopGroupAccess;
+use App\Support\EmployeeDismissalAccess;
 use App\Services\GroupAccess\GroupAccessAudit;
 use App\Services\GroupAccess\GroupRecordTransfer;
 use App\Services\GroupAccess\UserOrganizationService;
@@ -95,6 +96,12 @@ final class DismissalTransfer
 
     private function eligible(User $actor, User $target, array $record): bool
     {
+        // Recheck the recipient boundary on apply, including same-group assignments
+        // of records imported from outside the manager's branch.
+        if (! $actor->hasPermission('users.dismissal.all_branches')
+            && (! $actor->branch_id || (int) $actor->branch_id !== (int) $target->branch_id)) {
+            return false;
+        }
         if ($actor->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->allows($actor, $target)) {
             return false;
         }
@@ -127,7 +134,6 @@ final class DismissalTransfer
 
     private function recordScopeError(User $actor, array $record): ?string
     {
-        if ($actor->usesAssignedGroupScope() && $actor->hasPermission('users.dismissal.employee_records')) return null;
         $sameBranch = $actor->branch_id && (int) $record['branch_id'] === (int) $actor->branch_id;
         if ($actor->usesAssignedGroupScope()
             && (! $sameBranch || ! app(RopGroupAccess::class)->allowsGroup($actor, $record['branch_group_id']))) {
@@ -139,8 +145,9 @@ final class DismissalTransfer
         return null;
     }
 
-    private function ensureRecordScope(User $actor, array $records): void
+    private function ensureRecordScope(User $actor, User $employee, array $records): void
     {
+        if (app(EmployeeDismissalAccess::class)->canTransferAllRecords($actor, $employee)) return;
         foreach ($records as $record) {
             $error = $this->recordScopeError($actor, $record);
             abort_if($error !== null, 403, $error ?? 'FORBIDDEN_ACTION');
@@ -151,7 +158,9 @@ final class DismissalTransfer
     {
         $inventory = $this->inventory($employee);
         // Preview only visible records; apply still requires the complete inventory in scope.
-        $records = array_values(array_filter($inventory, fn ($record) => $this->recordScopeError($actor, $record) === null));
+        $records = app(EmployeeDismissalAccess::class)->canTransferAllRecords($actor, $employee)
+            ? $inventory
+            : array_values(array_filter($inventory, fn ($record) => $this->recordScopeError($actor, $record) === null));
         $blockedCount = count($inventory) - count($records);
         $recipients = $this->recipients($actor, $employee);
         $parents = collect($records)->keyBy(fn ($r) => $r['type'].':'.$r['id']);
@@ -196,7 +205,7 @@ final class DismissalTransfer
         $groupIds = [...array_column($this->inventory($employee), 'branch_group_id'), ...$lockedUsers->pluck('branch_group_id')->all()];
         BranchGroup::query()->whereIn('id', array_filter($groupIds))->orderBy('id')->lockForUpdate()->get();
         $inventory = $this->inventory($employee, true);
-        $this->ensureRecordScope($actor, $inventory);
+        $this->ensureRecordScope($actor, $employee, $inventory);
         abort_unless(hash_equals($this->revision($employee, $inventory), $plan['revision']), 409, 'DISMISSAL_VERSION_CONFLICT');
         $assignments = [];
         $destinations = [];
@@ -253,7 +262,7 @@ final class DismissalTransfer
                 $transfer->transfer($actor, $record['type'], $record['id'], [
                     'branch_group_id' => $target->branch_group_id, 'responsible_user_id' => $target->id,
                     'revision' => $transfer->revision($model), 'reason' => $plan['reason'],
-                ], dismissalEmployee: $actor->usesAssignedGroupScope() && $actor->hasPermission('users.dismissal.employee_records') ? $employee : null);
+                ], dismissalEmployee: app(EmployeeDismissalAccess::class)->canTransferAllRecords($actor, $employee) ? $employee : null);
                 $counts[$record['type']]++;
                 continue;
             }

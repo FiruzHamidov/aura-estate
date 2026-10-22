@@ -99,6 +99,7 @@ class DismissalTransferTest extends TestCase
             $t->timestamps();
         });
         (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
+        (require database_path('migrations/2026_03_07_120100_create_crm_audit_logs_table.php'))->up();
         foreach (['admin', 'agent', 'mop', 'hr', 'branch_director', 'rop', 'intern'] as $role) {
             Role::create(['name' => $role, 'slug' => $role]);
         }
@@ -132,6 +133,64 @@ class DismissalTransferTest extends TestCase
         $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertOk();
         $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $this->first->id, 'created_by' => $this->employee->id]);
         $this->assertDatabaseHas('properties', ['id' => 3, 'agent_id' => $this->employee->id, 'moderation_status' => 'sold']);
+    }
+
+    public static function unclassifiedActiveStatuses(): array
+    {
+        return [['approved'], ['rejected'], ['denied']];
+    }
+
+    #[DataProvider('unclassifiedActiveStatuses')]
+    public function test_status_edit_cannot_skip_unclassified_author_owned_work(string $status): void
+    {
+        DB::table('clients')->update(['responsible_agent_id' => $this->first->id]);
+        DB::table('properties')->where('id', 2)->update(['agent_id' => $this->first->id]);
+        DB::table('properties')->where('id', 1)->update([
+            'agent_id' => null, 'branch_group_id' => null, 'moderation_status' => $status,
+        ]);
+        $token = $this->employee->createToken('before-status-edit');
+
+        $this->patchJson('/api/user/'.$this->employee->id, ['status' => 'inactive'])
+            ->assertConflict()->assertJsonPath('code', 'EMPLOYEE_TRANSFER_REQUIRED');
+
+        $this->assertSame('active', $this->employee->fresh()->status);
+        $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => null]);
+        $this->assertDatabaseHas('personal_access_tokens', ['id' => $token->accessToken->id]);
+        $this->assertDatabaseCount('crm_audit_logs', 0);
+    }
+
+    public function test_legacy_dismissal_rolls_back_if_unclassified_work_remains(): void
+    {
+        DB::table('clients')->update(['responsible_agent_id' => $this->first->id]);
+        DB::table('properties')->whereIn('id', [1, 2])->update(['branch_group_id' => null]);
+        DB::table('properties')->where('id', 2)->update(['agent_id' => null, 'moderation_status' => 'rejected']);
+        $token = $this->employee->createToken('before-legacy-dismissal');
+        $password = $this->employee->password;
+
+        $this->deleteJson('/api/user/'.$this->employee->id, ['agent_id' => $this->first->id])
+            ->assertConflict()->assertJsonPath('code', 'EMPLOYEE_TRANSFER_REQUIRED');
+
+        $this->assertSame('active', $this->employee->fresh()->status);
+        $this->assertSame($password, $this->employee->fresh()->password);
+        $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $this->employee->id, 'created_by' => $this->employee->id]);
+        $this->assertDatabaseHas('properties', ['id' => 2, 'agent_id' => null]);
+        $this->assertDatabaseHas('personal_access_tokens', ['id' => $token->accessToken->id]);
+        $this->assertDatabaseCount('crm_audit_logs', 0);
+    }
+
+    public function test_successful_dismissal_records_actor_and_transfer_counts_in_employee_history(): void
+    {
+        $this->deleteJson('/api/user/'.$this->employee->id, $this->plan())->assertOk();
+
+        $audit = \App\Models\CrmAuditLog::where('event', 'user_dismissed')->sole();
+        $this->assertSame($this->employee->getMorphClass(), $audit->auditable_type);
+        $this->assertSame($this->employee->id, $audit->auditable_id);
+        $this->assertSame($this->actor->id, $audit->actor_id);
+        $this->assertSame(['status' => 'active'], $audit->old_values);
+        $this->assertSame(['status' => 'inactive'], $audit->new_values);
+        $this->assertSame('Employee dismissal', $audit->context['reason']);
+        $this->assertSame(2, $audit->context['transfer_stats']['transferred_counts']['properties']);
+        $this->assertSame(1, $audit->context['transfer_stats']['transferred_counts']['clients']);
     }
 
     public function test_rop_employee_transfer_moves_properties_bookings_and_tasks_with_their_owner(): void
@@ -381,19 +440,32 @@ class DismissalTransferTest extends TestCase
         $this->postJson('/api/user/'.$this->employee->id.'/restore')->assertForbidden();
     }
 
-    public function test_rop_can_preview_and_transfer_own_employee_records_from_any_branch_with_dedicated_permission(): void
+    public static function employeeRecordManagers(): array
     {
-        $this->actingAsGroupRop();
+        return [['rop', 'agent'], ['branch_director', 'agent'], ['branch_director', 'rop']];
+    }
+
+    #[DataProvider('employeeRecordManagers')]
+    public function test_manager_can_transfer_all_own_employee_records_with_dedicated_permission(string $role, string $employeeRole): void
+    {
+        Sanctum::actingAs($role === 'rop' ? $this->actingAsGroupRop() : $this->person($role));
+        $this->employee->update(['role_id' => Role::where('slug', $employeeRole)->value('id')]);
         $otherBranch = Branch::create(['name' => 'Other branch']);
         $otherGroup = BranchGroup::create(['name' => 'Other group', 'branch_id' => $otherBranch->id]);
         DB::table('properties')->where('id', 1)->update(['agent_id' => null, 'branch_id' => $otherBranch->id, 'branch_group_id' => $otherGroup->id]);
-        DB::table('clients')->where('id', 1)->update(['branch_group_id' => null]);
+        DB::table('properties')->where('id', 2)->update(['branch_id' => null, 'branch_group_id' => null]);
+        DB::table('clients')->where('id', 1)->update(['branch_id' => $otherBranch->id, 'branch_group_id' => $otherGroup->id]);
+        DB::table('clients')->insert(['id' => 2, 'full_name' => 'Unclassified', 'responsible_agent_id' => $this->employee->id]);
+        DB::table('properties')->insert(['id' => 4, 'title' => 'Already transferred', 'moderation_status' => 'approved',
+            'created_by' => $this->employee->id, 'agent_id' => $this->second->id,
+            'branch_id' => $otherBranch->id, 'branch_group_id' => $otherGroup->id]);
         Schema::create('crm_deals', function (Blueprint $t) {
             $t->id(); $t->unsignedBigInteger('primary_property_id')->nullable(); $t->string('control_kind')->nullable(); $t->timestamp('closed_at')->nullable(); $t->softDeletes();
         });
         $preview = $this->preview();
         $this->assertTrue($preview['can_submit']);
         $this->assertSame(0, $preview['blocked_records_count']);
+        $this->assertCount(4, $preview['records']);
         $this->assertSame('active', $this->employee->fresh()->status);
         $records = array_map(fn ($r) => ['type' => $r['type'], 'id' => $r['id'],
             'responsible_user_id' => $this->first->id, 'destination_branch_group_id' => $this->group->id], $preview['records']);
@@ -401,20 +473,32 @@ class DismissalTransferTest extends TestCase
             'revision' => $preview['revision'], 'reason' => 'Reviewed employee handover', 'records' => $records,
         ]])->assertOk();
         $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $this->first->id, 'branch_group_id' => $this->group->id, 'branch_id' => $this->group->branch_id]);
+        $this->assertDatabaseHas('properties', ['id' => 2, 'agent_id' => $this->first->id, 'branch_group_id' => $this->group->id, 'branch_id' => $this->group->branch_id]);
         $this->assertDatabaseHas('clients', ['id' => 1, 'responsible_agent_id' => $this->first->id, 'branch_group_id' => $this->group->id]);
+        $this->assertDatabaseHas('clients', ['id' => 2, 'responsible_agent_id' => $this->first->id, 'branch_group_id' => $this->group->id]);
+        $this->assertDatabaseHas('client_needs', ['client_id' => 1, 'responsible_agent_id' => $this->first->id]);
         $this->assertDatabaseHas('properties', ['id' => 3, 'agent_id' => $this->employee->id, 'moderation_status' => 'sold']);
+        $this->assertDatabaseHas('properties', ['id' => 4, 'agent_id' => $this->second->id, 'branch_id' => $otherBranch->id]);
+        $this->assertSame('inactive', $this->employee->fresh()->status);
     }
 
-    public function test_extended_dismissal_permission_does_not_allow_regular_record_transfer_and_is_rechecked(): void
+    #[DataProvider('employeeRecordManagers')]
+    public function test_extended_dismissal_permission_does_not_allow_regular_record_transfer_and_is_rechecked(string $role, string $employeeRole): void
     {
-        $rop = $this->actingAsGroupRop();
-        DB::table('clients')->where('id', 1)->update(['branch_group_id' => null]);
+        $actor = $role === 'rop' ? $this->actingAsGroupRop() : $this->person($role);
+        Sanctum::actingAs($actor);
+        $this->employee->update(['role_id' => Role::where('slug', $employeeRole)->value('id')]);
+        $otherBranch = Branch::create(['name' => 'Other branch']);
+        DB::table('clients')->where('id', 1)->update(['branch_id' => $otherBranch->id, 'branch_group_id' => null]);
+        DB::table('properties')->where('id', 1)->update(['branch_id' => $otherBranch->id, 'branch_group_id' => null]);
         $plan = $this->plan();
-        try {
-            app(\App\Services\GroupAccess\GroupRecordTransfer::class)->preview($rop, 'clients', 1);
-            $this->fail('Ordinary transfer must retain group scope');
-        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
-            $this->assertContains($e->getStatusCode(), [403, 404]);
+        foreach (['clients', 'properties'] as $type) {
+            try {
+                app(\App\Services\GroupAccess\GroupRecordTransfer::class)->preview($actor, $type, 1);
+                $this->fail('Ordinary transfer must retain branch/group scope');
+            } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
+                $this->assertContains($e->getStatusCode(), [403, 404]);
+            }
         }
         $permissions = config('permissions');
         $permissions['users.dismissal.employee_records']['roles'] = [];
@@ -424,8 +508,11 @@ class DismissalTransferTest extends TestCase
         $this->assertDatabaseHas('clients', ['id' => 1, 'responsible_agent_id' => $this->employee->id, 'branch_group_id' => null]);
     }
 
-    public function test_director_cannot_transfer_a_record_outside_their_branch(): void
+    public function test_director_without_employee_records_permission_cannot_transfer_foreign_records(): void
     {
+        $permissions = config('permissions');
+        $permissions['users.dismissal.employee_records']['roles'] = ['rop'];
+        config(['permissions' => $permissions]);
         Sanctum::actingAs($this->person('branch_director'));
         $plan = $this->plan();
         $otherBranch = Branch::create(['name' => 'Other']);
@@ -530,6 +617,113 @@ class DismissalTransferTest extends TestCase
         $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertUnprocessable();
         $this->assertDatabaseHas('clients', ['id' => 1, 'responsible_agent_id' => $this->employee->id]);
         $this->assertDatabaseCount('group_access_audit_logs', 0);
+    }
+
+    public function test_director_cannot_assign_a_foreign_record_to_a_recipient_in_its_foreign_branch(): void
+    {
+        $outside = $this->crossBranchTarget();
+        Sanctum::actingAs($this->person('branch_director'));
+        DB::table('clients')->where('id', 1)->update(['branch_id' => $outside->branch_id, 'branch_group_id' => $outside->branch_group_id]);
+        $preview = $this->preview();
+        $this->assertTrue($preview['can_submit']);
+        $this->assertNotContains($outside->id, array_column($preview['recipients'], 'id'));
+        $client = collect($preview['records'])->firstWhere('type', 'clients');
+        $this->assertSame([$this->first->id, $this->second->id], $client['eligible_user_ids']);
+        $plan = $this->plan();
+        foreach ($plan['transfer_plan']['records'] as &$row) {
+            if ($row['type'] === 'clients') $row['responsible_user_id'] = $outside->id;
+        }
+        unset($row);
+        $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertUnprocessable();
+        $this->assertSame('active', $this->employee->fresh()->status);
+        $this->assertDatabaseHas('clients', ['id' => 1, 'responsible_agent_id' => $this->employee->id]);
+        $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $this->employee->id]);
+        $this->assertDatabaseCount('group_access_audit_logs', 0);
+    }
+
+    public static function changedDirectorParticipants(): array
+    {
+        return [['employee', 403], ['recipient', 422], ['director', 403]];
+    }
+
+    #[DataProvider('changedDirectorParticipants')]
+    public function test_director_rechecks_participant_branch_after_preview(string $participant, int $status): void
+    {
+        $actor = $this->person('branch_director');
+        Sanctum::actingAs($actor);
+        $plan = $this->plan();
+        $outside = $this->crossBranchTarget();
+        $user = match ($participant) { 'employee' => $this->employee, 'recipient' => $this->first, default => $actor };
+        DB::table('users')->where('id', $user->id)->update(['branch_id' => $outside->branch_id, 'branch_group_id' => $outside->branch_group_id]);
+        $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertStatus($status);
+        $this->assertSame('active', $this->employee->fresh()->status);
+        $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $this->employee->id]);
+        $this->assertDatabaseCount('group_access_audit_logs', 0);
+    }
+
+    public function test_director_cannot_preview_or_dismiss_a_foreign_employee(): void
+    {
+        $outside = $this->crossBranchTarget();
+        Sanctum::actingAs($this->person('branch_director'));
+        $this->getJson('/api/user/'.$outside->id.'/dismissal-preview')->assertForbidden();
+        $this->deleteJson('/api/user/'.$outside->id, ['distribute_to_agents' => true])->assertForbidden();
+        $this->assertSame('active', $outside->fresh()->status);
+    }
+
+    public function test_director_imports_foreign_leads_bookings_and_linked_tasks_during_dismissal(): void
+    {
+        $this->crossBranchTables();
+        $outside = $this->crossBranchTarget();
+        Sanctum::actingAs($this->person('branch_director'));
+        DB::table('properties')->where('id', 1)->update(['branch_id' => $outside->branch_id, 'branch_group_id' => $outside->branch_group_id]);
+        Schema::create('leads', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('responsible_agent_id'); $t->unsignedBigInteger('branch_id');
+            $t->unsignedBigInteger('branch_group_id'); $t->timestamp('closed_at')->nullable(); $t->timestamps();
+        });
+        Schema::create('bookings', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('agent_id'); $t->unsignedBigInteger('branch_group_id');
+            $t->timestamp('end_time'); $t->timestamps();
+        });
+        Schema::create('crm_tasks', function (Blueprint $t) {
+            $t->id(); $t->string('title'); $t->unsignedBigInteger('assignee_id'); $t->unsignedBigInteger('branch_group_id');
+            $t->string('related_entity_type')->nullable(); $t->unsignedBigInteger('related_entity_id')->nullable();
+            $t->string('status')->default('pending'); $t->timestamp('completed_at')->nullable(); $t->timestamps();
+        });
+        foreach ([1, 2] as $id) {
+            DB::table('leads')->insert(['id' => $id, 'responsible_agent_id' => $this->employee->id,
+                'branch_id' => $outside->branch_id, 'branch_group_id' => $outside->branch_group_id,
+                'closed_at' => $id === 2 ? now() : null]);
+            DB::table('bookings')->insert(['id' => $id, 'agent_id' => $this->employee->id,
+                'branch_group_id' => $outside->branch_group_id, 'end_time' => $id === 2 ? now()->subDay() : now()->addDay()]);
+            DB::table('crm_tasks')->insert(['id' => $id, 'title' => 'Property follow-up', 'assignee_id' => $this->employee->id,
+                'branch_group_id' => $outside->branch_group_id, 'related_entity_type' => 'property', 'related_entity_id' => 1,
+                'status' => $id === 2 ? 'done' : 'pending']);
+        }
+        DB::table('crm_tasks')->insert(['id' => 3, 'title' => 'Standalone', 'assignee_id' => $this->employee->id,
+            'branch_group_id' => $outside->branch_group_id]);
+        $token = $this->employee->createToken('before-dismissal');
+        $preview = $this->preview();
+        $this->assertTrue($preview['can_submit']);
+        $this->assertSame(0, $preview['blocked_records_count']);
+        $this->assertCount(7, $preview['records']);
+        foreach ($preview['records'] as $record) {
+            $this->assertContains($this->first->id, $record['eligible_user_ids']);
+            $this->assertNotContains($outside->id, $record['eligible_user_ids']);
+        }
+        $records = array_map(fn ($record) => ['type' => $record['type'], 'id' => $record['id'],
+            'responsible_user_id' => $this->first->id, 'destination_branch_group_id' => $this->group->id], $preview['records']);
+        $this->deleteJson('/api/user/'.$this->employee->id, ['transfer_plan' => [
+            'revision' => $preview['revision'], 'reason' => 'Complete branch employee handover', 'records' => $records,
+        ]])->assertOk()->assertJsonPath('transferred_counts.leads', 1)
+            ->assertJsonPath('transferred_counts.bookings', 1)->assertJsonPath('transferred_counts.tasks', 2);
+        foreach (['leads' => 'responsible_agent_id', 'bookings' => 'agent_id', 'crm_tasks' => 'assignee_id'] as $table => $responsible) {
+            $this->assertDatabaseHas($table, ['id' => 1, $responsible => $this->first->id, 'branch_group_id' => $this->group->id]);
+            $this->assertDatabaseHas($table, ['id' => 2, $responsible => $this->employee->id, 'branch_group_id' => $outside->branch_group_id]);
+        }
+        $this->assertDatabaseHas('crm_tasks', ['id' => 3, 'assignee_id' => $this->first->id, 'branch_group_id' => $this->group->id]);
+        $this->assertDatabaseHas('leads', ['id' => 1, 'branch_id' => $this->group->branch_id]);
+        $this->assertSame('inactive', $this->employee->fresh()->status);
+        $this->assertDatabaseMissing('personal_access_tokens', ['id' => $token->accessToken->id]);
     }
 
     private function crossBranchTables(): void
@@ -718,7 +912,13 @@ class DismissalTransferTest extends TestCase
         $this->assertDatabaseHas('users', ['id' => $this->employee->id, 'status' => 'inactive']);
     }
 
-    public function test_cross_branch_deal_preserves_matching_stage_and_rejects_missing_match(): void
+    public static function crossBranchDealManagers(): array
+    {
+        return [['admin'], ['branch_director']];
+    }
+
+    #[DataProvider('crossBranchDealManagers')]
+    public function test_cross_branch_deal_preserves_matching_stage_and_rejects_missing_match(string $role): void
     {
         Schema::create('crm_deal_pipelines', function (Blueprint $t) {
             $t->id(); $t->unsignedBigInteger('branch_id'); $t->string('slug'); $t->string('type'); $t->boolean('is_active')->default(true);
@@ -732,14 +932,17 @@ class DismissalTransferTest extends TestCase
             $t->unsignedBigInteger('branch_id'); $t->unsignedBigInteger('pipeline_id'); $t->unsignedBigInteger('stage_id');
             $t->timestamp('closed_at')->nullable(); $t->softDeletes(); $t->timestamps();
         });
-        $target = $this->crossBranchTarget();
+        $outside = $this->crossBranchTarget();
+        $sourceGroup = $role === 'branch_director' ? $outside->branchGroup : $this->group;
+        $target = $role === 'branch_director' ? $this->first : $outside;
+        Sanctum::actingAs($this->person($role));
         DB::table('crm_deal_pipelines')->insert([
-            ['id'=>1, 'branch_id'=>$this->group->branch_id, 'slug'=>'sales', 'type'=>'sales'],
+            ['id'=>1, 'branch_id'=>$sourceGroup->branch_id, 'slug'=>'sales', 'type'=>'sales'],
             ['id'=>2, 'branch_id'=>$target->branch_id, 'slug'=>'sales', 'type'=>'sales'],
         ]);
         DB::table('crm_deal_stages')->insert(['id'=>1, 'pipeline_id'=>1, 'slug'=>'negotiation']);
         DB::table('crm_deals')->insert(['id'=>1, 'responsible_agent_id'=>$this->employee->id,
-            'branch_group_id'=>$this->group->id, 'branch_id'=>$this->group->branch_id, 'pipeline_id'=>1, 'stage_id'=>1]);
+            'branch_group_id'=>$sourceGroup->id, 'branch_id'=>$sourceGroup->branch_id, 'pipeline_id'=>1, 'stage_id'=>1]);
         $deal = collect($this->preview()['records'])->firstWhere('type','deals');
         $this->assertNotContains($target->id, $deal['eligible_user_ids']);
         DB::table('crm_deal_stages')->insert(['id'=>2, 'pipeline_id'=>2, 'slug'=>'negotiation']);

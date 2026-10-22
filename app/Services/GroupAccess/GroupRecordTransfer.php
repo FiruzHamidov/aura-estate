@@ -5,7 +5,7 @@ namespace App\Services\GroupAccess;
 use App\Models\{Booking, BranchGroup, Client, CrmTask, Deal, DealStage, Lead, Property, User};
 use App\Observers\GroupOwnedRecordObserver;
 use App\Services\PropertyModeration\{PropertyModerationAccess, PropertyModerationService};
-use App\Support\{ClientAccess, DealAccess, LeadAccess, RopGroupAccess};
+use App\Support\{ClientAccess, DealAccess, EmployeeDismissalAccess, LeadAccess, RopGroupAccess};
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
@@ -98,14 +98,14 @@ final class GroupRecordTransfer
             if ($dismissalEmployee !== null) {
                 // Internal dismissal context only; ordinary record-transfer endpoints never pass it.
                 $dismissalEmployee = User::query()->lockForUpdate()->findOrFail($dismissalEmployee->id);
-                abort_unless($actor->usesAssignedGroupScope() && $actor->hasPermission('users.dismiss')
-                    && $actor->hasPermission('users.dismissal.employee_records') && $actor->hasPermission('users.dismissal.change_group')
-                    && $dismissalEmployee->id !== $actor->id && $dismissalEmployee->status === User::STATUS_ACTIVE
-                    && ! $dismissalEmployee->isDeletedAccount() && $dismissalEmployee->hasPermission('users.subject.team')
+                abort_unless(app(EmployeeDismissalAccess::class)->canTransferAllRecords($actor, $dismissalEmployee)
+                    && $actor->hasPermission('users.dismissal.change_group')
                     && in_array($type, ['properties', 'clients'], true)
                     && (int) ($record->getAttribute(GroupOwnedRecordObserver::RESPONSIBLES[$record->getTable()]) ?? ($record instanceof Property ? $record->created_by : null)) === (int) $dismissalEmployee->id,
                     403, 'FORBIDDEN_ACTION');
                 $this->access->ensureVisible($actor, $dismissalEmployee);
+                abort_unless($actor->hasPermission('users.dismissal.all_branches')
+                    || (int) $actor->branch_id === (int) $group->branch_id, 403, 'RBAC_GROUP_SCOPE_VIOLATION');
             } elseif (! $taskAlreadyMoved) $this->authorize($actor, $record, $employeeTransfer, $ungroupedEmployeeId);
             abort_unless(hash_equals($this->revision($record), $data['revision']), 409, 'RECORD_VERSION_CONFLICT');
             if ($actor->usesAssignedGroupScope()) {

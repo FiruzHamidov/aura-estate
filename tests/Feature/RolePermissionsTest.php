@@ -45,6 +45,49 @@ class RolePermissionsTest extends TestCase
         $this->assertFalse($rop->fresh()->hasPermission('users.dismissal.employee_records'));
     }
 
+    public function test_director_dismissal_migration_preserves_scope_and_is_audited_and_idempotent(): void
+    {
+        $director = Role::where('slug', 'branch_director')->firstOrFail();
+        $before = ['users.dismiss', 'users.scope.branch', 'users.manage_branch_roles', 'users.dismissal.change_group'];
+        $director->forceFill(['permissions' => $before])->save();
+        $otherRoles = Role::whereKeyNot($director->id)->get()->map->getAttributes()->all();
+        $migration = require database_path('migrations/2026_10_22_120000_allow_director_dismissal_employee_records.php');
+        $migration->up();
+        $after = [...$before, 'users.dismissal.employee_records'];
+        $this->assertSame($after, $director->fresh()->permissions);
+        $this->assertFalse($director->fresh()->hasPermission('users.dismissal.all_branches'));
+        $this->assertFalse($director->fresh()->hasPermission('records.transfer.all_branches'));
+        $version = $director->fresh()->permissions_version;
+        $this->assertSame($director->permissions_version + 1, $version);
+        $audit = DB::table('role_permission_audits')->where('role_id', $director->id)->sole();
+        $this->assertNull($audit->actor_id);
+        $this->assertSame($before, json_decode($audit->before, true));
+        $this->assertSame($after, json_decode($audit->after, true));
+        $this->assertSame($version, (int) $audit->version);
+        $migration->up();
+        $this->assertSame($version, $director->fresh()->permissions_version);
+        $this->assertDatabaseCount('role_permission_audits', 1);
+        $this->assertSame($otherRoles, Role::whereKeyNot($director->id)->get()->map->getAttributes()->all());
+    }
+
+    public function test_director_dismissal_migration_preserves_revoked_dismissal_and_null_defaults(): void
+    {
+        $director = Role::where('slug', 'branch_director')->firstOrFail();
+        $migration = require database_path('migrations/2026_10_22_120000_allow_director_dismissal_employee_records.php');
+        foreach ([[], ['users.scope.branch']] as $permissions) {
+            $director->forceFill(['permissions' => $permissions])->save();
+            $migration->up();
+            $this->assertSame($permissions, $director->fresh()->permissions);
+            $this->assertFalse($director->fresh()->hasPermission('users.dismissal.employee_records'));
+        }
+        $director->forceFill(['permissions' => null])->save();
+        $migration->up();
+        $this->assertNull($director->fresh()->permissions);
+        $this->assertTrue($director->fresh()->hasPermission('users.dismissal.employee_records'));
+        $this->assertFalse($director->fresh()->hasPermission('users.dismissal.all_branches'));
+        $this->assertDatabaseCount('role_permission_audits', 0);
+    }
+
     public function test_ungrouped_visibility_migration_keeps_assignment_separate_and_is_idempotent(): void
     {
         $rop = Role::where('slug', 'rop')->firstOrFail();

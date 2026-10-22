@@ -27,7 +27,7 @@ final class UserOrganizationService
             // Existing work still needs a handover even after recipient eligibility is revoked.
             if (($subject->isDirty('role_id') && ! $nextRole?->hasPermission('users.subject.record_recipient'))
                 || ($subject->isDirty('status') && $subject->status !== User::STATUS_ACTIVE)) {
-                abort_if($this->hasActiveRecords($subject->id, lock: true, classifiedOnly: true),
+                abort_if($this->hasActiveRecords($subject->id, lock: true),
                     409, 'EMPLOYEE_TRANSFER_REQUIRED');
             }
             $changed = $subject->isDirty(['role_id', 'branch_id', 'branch_group_id']);
