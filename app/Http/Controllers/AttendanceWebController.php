@@ -513,16 +513,14 @@ final class AttendanceWebController extends Controller
         $periodRows = $this->facts(AttendanceDailySummary::class)->whereIn('user_id', clone $visibleIds)
             ->whereBetween('work_date', [$from->toDateString(), $to->toDateString()]);
         foreach ([$todayRows, $periodRows] as $rows) {
-            $rows->whereNotExists(function ($query) {
-                $query->selectRaw('1')->from('attendance_leaves')
-                    ->whereColumn('attendance_leaves.user_id', 'attendance_daily_summaries.user_id')
-                    ->when(request()->user()->usesAssignedGroupScope(), fn ($leaves) => $leaves->whereColumn('attendance_leaves.branch_group_id', 'attendance_daily_summaries.branch_group_id'))
-                    ->whereColumn('attendance_leaves.date_from', '<=', 'attendance_daily_summaries.work_date')
-                    ->whereColumn('attendance_leaves.date_to', '>=', 'attendance_daily_summaries.work_date');
-            })->whereNotExists(function ($query) {
-                $query->selectRaw('1')->from('attendance_holidays')
-                    ->whereColumn('attendance_holidays.holiday_date', 'attendance_daily_summaries.work_date');
-            });
+            $rows->whereNotExists($this->facts(AttendanceLeave::class)->selectRaw('1')
+                ->whereColumn('attendance_leaves.user_id', 'attendance_daily_summaries.user_id')
+                ->whereColumn('attendance_leaves.date_from', '<=', 'attendance_daily_summaries.work_date')
+                ->whereColumn('attendance_leaves.date_to', '>=', 'attendance_daily_summaries.work_date'))
+                ->whereNotExists(function ($query) {
+                    $query->selectRaw('1')->from('attendance_holidays')
+                        ->whereColumn('attendance_holidays.holiday_date', 'attendance_daily_summaries.work_date');
+                });
         }
 
         return [

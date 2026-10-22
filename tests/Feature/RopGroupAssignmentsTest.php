@@ -1691,6 +1691,8 @@ class RopGroupAssignmentsTest extends TestCase
         $this->postJson($url.'/merge', ['target_group_id' => $this->b->id, 'revision' => $preview['revision'], 'reason' => 'Consolidate teams'])->assertOk();
         $receipt = DB::table('group_access_audit_logs')->where('subject_id', $agent->id)->where('event', 'user_group_merged')->first();
         $this->assertSame(['role_id' => $agent->role_id, 'branch_id' => $this->branch->id, 'branch_group_id' => $this->a->id], json_decode($receipt->old_values, true));
+        $this->rop->supervisedGroups()->sync([$this->b->id]);
+        $this->assertTrue(app(\App\Services\Attendance\AttendanceMergedHistory::class)->users($this->rop)->whereKey($agent->id)->exists());
         $resolver = app(\App\Services\GroupAccess\HistoricalUserGroup::class);
         $this->travelTo(now()->addDays(2));
         $agent = $agent->fresh();
