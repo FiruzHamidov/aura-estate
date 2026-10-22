@@ -6,7 +6,7 @@ use App\Models\{AttendanceDailySummary, AttendanceEvent, User};
 use App\Support\RopGroupAccess;
 use Illuminate\Database\Eloquent\Builder;
 
-/** Group of the fact, independent of the employee's current organizational assignment. */
+/** Recorded group scope, plus full history of employees explicitly merged into the current team. */
 final class AttendanceGroupScope
 {
     public function __construct(private readonly RopGroupAccess $groups) {}
@@ -27,6 +27,21 @@ final class AttendanceGroupScope
         // Historical group membership must not bring dismissed employees back into ROP attendance.
         // Use employment status only: active employees may still have valid history in a former group.
         $query->whereIn($table.'.user_id', app(AttendanceParticipantService::class)->query()->select('users.id'));
+        if ($table === 'attendance_daily_comments') {
+            return $query->whereExists($this->apply(AttendanceDailySummary::query(), $viewer)->selectRaw('1')
+                ->whereColumn('attendance_daily_summaries.user_id', 'attendance_daily_comments.user_id')
+                ->whereColumn('attendance_daily_summaries.work_date', 'attendance_daily_comments.work_date'));
+        }
+        return $query->where(function (Builder $visible) use ($viewer, $table) {
+            $visible->where(fn (Builder $recorded) => $this->recordedGroup($recorded, $viewer, $table));
+            if (in_array($table, ['attendance_events', 'attendance_daily_summaries', 'attendance_leaves', 'attendance_duties'], true)) {
+                $visible->orWhereIn($table.'.user_id', app(AttendanceMergedHistory::class)->users($viewer)->select('users.id'));
+            }
+        });
+    }
+
+    private function recordedGroup(Builder $query, User $viewer, string $table): Builder
+    {
         if (in_array($table, ['attendance_events', 'attendance_daily_summaries'], true)) {
             if (\Schema::hasColumn($table, 'role_slug')) {
                 $query->whereIn($table.'.role_slug', \App\Models\Role::query()
@@ -38,13 +53,8 @@ final class AttendanceGroupScope
                 if (request()->filled('role')) $query->whereHas('user.role', fn (Builder $roles) => $roles->where('slug', request()->input('role')));
             }
         }
-        if ($table !== 'attendance_daily_comments' && request()->filled('branch_group_id')) {
+        if (request()->filled('branch_group_id')) {
             $query->where($table.'.branch_group_id', request()->input('branch_group_id'));
-        }
-        if ($table === 'attendance_daily_comments') {
-            return $query->whereExists($this->apply(AttendanceDailySummary::query(), $viewer)->selectRaw('1')
-                ->whereColumn('attendance_daily_summaries.user_id', 'attendance_daily_comments.user_id')
-                ->whereColumn('attendance_daily_summaries.work_date', 'attendance_daily_comments.work_date'));
         }
         return $this->groups->scope($query, $viewer, $table.'.branch_group_id', $table === 'attendance_events' ? $table.'.branch_id' : null);
     }

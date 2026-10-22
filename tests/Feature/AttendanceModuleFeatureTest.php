@@ -2062,7 +2062,8 @@ class AttendanceModuleFeatureTest extends TestCase
         $eventBefore = $morning->fresh()->getRawOriginal();
         Sanctum::actingAs($c['rop']);
         $url = '/api/attendance/matrix?date_from=2026-08-16&date_to=2026-08-18';
-        $this->getJson($url)->assertOk()->assertJsonPath('data.0.days.2026-08-18.availability', 'no_data');
+        // Full history is readable from the merge receipt even before old event ownership is repaired.
+        $this->getJson($url)->assertOk()->assertJsonPath('data.0.days.2026-08-18.availability', 'available');
         $options = ['audit_id' => [(string) $audit]];
         $this->assertSame(0, Artisan::call('attendance:repair-group-merge', $options));
         $this->assertSame(3, json_decode(Artisan::output(), true)['events_to_change']);
@@ -2085,13 +2086,13 @@ class AttendanceModuleFeatureTest extends TestCase
             $this->assertSame($snapshot, AttendanceDailySummary::where('user_id', $user->id)->whereDate('work_date', '2026-08-18')->first()->schedule_snapshot);
             $this->getJson($url)->assertOk()->assertJsonPath('data.0.days.2026-08-18.events_count', 2)
                 ->assertJsonPath('data.0.days.2026-08-18.first_in_at', '2026-08-18T04:07:00.000000Z')
-                ->assertJsonPath('data.0.days.2026-08-17.events_count', 1)
-                ->assertJsonPath('data.0.days.2026-08-17.partial_events', [['id' => $boundary->id, 'event_type' => 'check_out', 'occurred_at' => '2026-08-17T07:00:00.000000Z']])
-                ->assertJsonPath('data.0.days.2026-08-17.status', null)
-                ->assertJsonPath('data.0.days.2026-08-16.availability', 'no_data');
-            $this->getJson('/api/attendance/users/'.$user->id.'/days/2026-08-17')->assertOk()->assertJsonCount(1, 'data.events')
-                ->assertJsonPath('data.summary.events_count', 1)
-                ->assertJsonPath('data.summary.partial_events.0.id', $boundary->id);
+                ->assertJsonPath('data.0.days.2026-08-17.events_count', 2)
+                ->assertJsonPath('data.0.days.2026-08-17.partial_events', [])
+                ->assertJsonPath('data.0.days.2026-08-17.status', 'present')
+                ->assertJsonPath('data.0.days.2026-08-16.availability', 'available');
+            $this->getJson('/api/attendance/users/'.$user->id.'/days/2026-08-17')->assertOk()->assertJsonCount(2, 'data.events')
+                ->assertJsonPath('data.summary.events_count', 2)
+                ->assertJsonPath('data.summary.partial_events', []);
             $auditCount = DB::table('attendance_audit_logs')->count();
             $this->assertSame(5, $auditCount);
             $this->assertSame(1, Artisan::call('attendance:repair-group-merge', [...$options, '--apply' => true, '--backup' => $path]));
@@ -2105,6 +2106,122 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->map($device, $user);
         $this->postDevicePayload('/iclock/cdata?SN=MERGE-REPAIR&table=ATTLOG', $user->id."\t2026-08-19 09:00:00\t0\t15\t0")->assertOk();
         $this->assertDatabaseHas('attendance_events', ['user_id' => $user->id, 'occurred_at' => '2026-08-19 04:00:00', 'branch_group_id' => $target->id, 'role_slug' => 'agent']);
+    }
+
+    public function test_merged_team_inherits_full_attendance_history_in_matrix_details_and_exports_without_rewriting_it(): void
+    {
+        (require database_path('migrations/2026_09_09_010000_add_attendance_historical_context.php'))->up();
+        (require database_path('migrations/2026_10_16_050000_add_branch_group_archive.php'))->up();
+        $this->travelTo(CarbonImmutable::parse('2026-08-19 12:00:00', 'Asia/Dushanbe'));
+        $c = $this->context(); $user = $c['agent'];
+        $source = BranchGroup::create(['name' => 'Archived source', 'branch_id' => $c['branch']->id, 'is_archived' => true]);
+        $device = $this->device('MERGED-HISTORY', $c['branch'], $c['group']);
+        $event = AttendanceEvent::create(['device_id' => $device->id, 'device_user_id' => (string) $user->id, 'user_id' => $user->id,
+            'branch_id' => null, 'branch_group_id' => null, 'role_slug' => null,
+            'occurred_at' => CarbonImmutable::parse('2026-08-01 09:07:00', 'Asia/Dushanbe')->utc(), 'event_type' => 'check_in']);
+        AttendanceDailySummary::create(['user_id' => $user->id, 'branch_group_id' => null, 'role_slug' => null,
+            'work_date' => '2026-08-01', 'first_in_at' => $event->occurred_at, 'status' => 'late', 'late_minutes' => 7, 'events_count' => 1]);
+        \App\Models\AttendanceDailyComment::create(['user_id' => $user->id, 'work_date' => '2026-08-01', 'comment' => 'MERGED_HISTORY_NOTE', 'created_by' => $c['hr']->id]);
+        AttendanceLeave::create(['user_id' => $user->id, 'branch_group_id' => $source->id, 'date_from' => '2026-08-02', 'date_to' => '2026-08-02', 'note' => 'MERGED_LEAVE']);
+        AttendanceDailySummary::create(['user_id' => $user->id, 'branch_group_id' => null, 'role_slug' => null,
+            'work_date' => '2026-08-02', 'status' => 'incomplete', 'late_minutes' => 99]);
+        AttendanceDuty::create(['user_id' => $user->id, 'branch_group_id' => $source->id, 'date_from' => '2026-08-03', 'date_to' => '2026-08-03', 'note' => 'MERGED_DUTY']);
+        AttendanceDailySummary::create(['user_id' => $c['mop']->id, 'branch_group_id' => $source->id, 'role_slug' => 'agent',
+            'work_date' => '2026-08-01', 'status' => 'late', 'late_minutes' => 99]);
+        \App\Models\AttendanceDailyComment::create(['user_id' => $c['mop']->id, 'work_date' => '2026-08-01', 'comment' => 'UNMERGED_PRIVATE_NOTE', 'created_by' => $c['hr']->id]);
+        $snapshot = fn () => collect(['attendance_events', 'attendance_daily_summaries', 'attendance_daily_comments', 'attendance_leaves', 'attendance_duties'])
+            ->mapWithKeys(fn ($table) => [$table => DB::table($table)->orderBy('id')->get()->toJson()])->all();
+        $before = $snapshot();
+        Sanctum::actingAs($c['rop']);
+        $range = 'date_from=2026-08-01&date_to=2026-08-03&user_id='.$user->id;
+        $this->getJson('/api/attendance/matrix?'.$range)->assertOk()->assertJsonPath('data.0.days.2026-08-01.availability', 'no_data');
+        foreach ([['user', 'user_group_merged'], ['users', 'group_consolidation_transfer']] as [$type, $name]) {
+            DB::table('group_access_audit_logs')->delete();
+            DB::table('group_access_audit_logs')->insert(['subject_type' => $type, 'subject_id' => $user->id, 'event' => $name,
+                'old_values' => json_encode(['branch_group_id' => $source->id]), 'new_values' => json_encode(['branch_group_id' => $c['group']->id]), 'created_at' => '2026-08-17 12:00:00']);
+            foreach (['', '&branch_group_id='.$c['group']->id.'&role=agent'] as $filter) {
+                $this->getJson('/api/attendance/matrix?'.$range.$filter)->assertOk()
+                    ->assertJsonPath('data.0.days.2026-08-01.availability', 'available')
+                    ->assertJsonPath('data.0.days.2026-08-01.events_count', 1)
+                    ->assertJsonPath('data.0.days.2026-08-01.first_in_at', '2026-08-01T04:07:00.000000Z')
+                    ->assertJsonPath('data.0.days.2026-08-01.late_minutes', 7)
+                    ->assertJsonPath('data.0.days.2026-08-01.comment_preview', 'MERGED_HISTORY_NOTE')
+                    ->assertJsonPath('data.0.days.2026-08-02.leave.note', 'MERGED_LEAVE')
+                    ->assertJsonPath('data.0.days.2026-08-03.duty.note', 'MERGED_DUTY')
+                    ->assertJsonPath('data.0.totals.late', 1)
+                    ->assertJsonPath('meta.summary.incomplete_days', 0)
+                    ->assertJsonPath('meta.summary.average_late_minutes', 7);
+            }
+            $this->getJson('/api/attendance/users/'.$user->id.'/days/2026-08-01')->assertOk()
+                ->assertJsonCount(1, 'data.events')->assertJsonPath('data.events.0.id', $event->id)
+                ->assertJsonPath('data.comment.comment', 'MERGED_HISTORY_NOTE');
+            $this->getJson('/api/attendance/users/'.$c['mop']->id.'/days/2026-08-01')->assertOk()
+                ->assertJsonPath('data.summary.availability', 'no_data')->assertJsonPath('data.comment', null);
+            $this->getJson('/api/attendance/users/'.$c['otherAgent']->id.'/days/2026-08-01')->assertNotFound();
+            $xlsx = $this->get('/api/attendance/export?'.$range.'&format=xlsx')->assertOk();
+            $zip = new \ZipArchive; $path = $xlsx->baseResponse->getFile()->getPathname();
+            $this->assertTrue($zip->open($path));
+            $details = $zip->getFromName('xl/worksheets/sheet2.xml'); $zip->close(); @unlink($path);
+            $this->assertStringContainsString('09:07', $details);
+            $this->assertStringContainsString('MERGED_HISTORY_NOTE', $details);
+            $this->assertStringNotContainsString('UNMERGED_PRIVATE_NOTE', $details);
+        }
+        $this->assertSame($before, $snapshot());
+        $c['rop']->supervisedGroups()->detach();
+        $this->getJson('/api/attendance/matrix?'.$range)->assertForbidden();
+        $this->getJson('/api/attendance/users/'.$user->id.'/days/2026-08-01')->assertNotFound();
+        $c['rop']->supervisedGroups()->sync([$c['group']->id]);
+        $user->update(['status' => 'inactive']);
+        $dismissed = $this->getJson('/api/attendance/matrix?date_from=2026-08-01&date_to=2026-08-03&view=users')->assertOk();
+        $this->assertNotContains($user->id, collect($dismissed->json('data'))->pluck('user.id')->all());
+        $this->travelBack();
+    }
+
+    public function test_only_current_valid_merge_membership_grants_inherited_attendance_history(): void
+    {
+        $this->travelTo(CarbonImmutable::parse('2026-08-19 12:00:00', 'Asia/Dushanbe'));
+        $c = $this->context(); $user = $c['agent'];
+        $source = BranchGroup::create(['name' => 'Source', 'branch_id' => $c['branch']->id]);
+        $target = $c['group'];
+        $audit = fn ($event, $type, $old, $new, $at = '2026-08-17 12:00:00') => DB::table('group_access_audit_logs')->insertGetId([
+            'subject_type' => $type, 'subject_id' => $user->id, 'event' => $event,
+            'old_values' => json_encode($old), 'new_values' => json_encode($new), 'created_at' => $at]);
+        $allowed = fn () => app(\App\Services\Attendance\AttendanceMergedHistory::class)->users($c['rop'])->whereKey($user->id)->exists();
+        foreach ([['employee_group_transferred','user'], ['user_organization_changed','user'], ['user_group_merged','users'], ['group_consolidation_transfer','user']] as [$name,$type]) {
+            DB::table('group_access_audit_logs')->delete();
+            $audit($name, $type, ['branch_group_id' => $source->id], ['branch_group_id' => $target->id]);
+            $this->assertFalse($allowed(), $name.' '.$type);
+        }
+        DB::table('group_access_audit_logs')->delete();
+        $audit('user_group_merged','user', ['branch_group_id' => $c['otherAgent']->branch_group_id], ['branch_group_id' => $target->id]);
+        $this->assertFalse($allowed(), 'Cross-branch receipt');
+        DB::table('group_access_audit_logs')->delete();
+        $audit('user_group_merged','user', ['branch_group_id' => $source->id], ['branch_group_id' => $target->id], '2026-08-20 12:00:00');
+        $this->assertFalse($allowed(), 'Future receipt');
+        DB::table('group_access_audit_logs')->delete();
+        $audit('user_group_merged','user', ['branch_group_id' => $source->id], ['branch_group_id' => $target->id]);
+        $this->assertTrue($allowed());
+        $audit('user_organization_changed','user', ['branch_id' => $c['branch']->id, 'branch_group_id' => $target->id, 'role_id' => 100],
+            ['branch_id' => $c['branch']->id, 'branch_group_id' => $target->id, 'role_id' => $user->role_id]);
+        $this->assertTrue($allowed(), 'Non-membership edit');
+        // Same-timestamp IDs determine order. A transfer away and back must not revive an old grant.
+        $audit('employee_group_transferred','user', ['branch_group_id' => $target->id], ['branch_group_id' => $source->id]);
+        $audit('employee_group_transferred','user', ['branch_group_id' => $source->id], ['branch_group_id' => $target->id]);
+        $this->assertFalse($allowed(), 'Ordinary return');
+        $audit('group_consolidation_transfer','users', ['branch_group_id' => $source->id], ['branch_group_id' => $target->id]);
+        $this->assertTrue($allowed(), 'New merge');
+        $user->update(['branch_group_id' => $source->id]);
+        $this->assertFalse($allowed(), 'Current membership no longer matches');
+        $user->update(['branch_group_id' => $target->id]);
+        $audit('user_organization_changed','user', ['branch_group_id' => $target->id], ['branch_group_id' => null]);
+        $this->assertFalse($allowed(), 'Null membership is also a change');
+        $next = BranchGroup::create(['name' => 'Next merged team', 'branch_id' => $c['branch']->id]);
+        $audit('user_group_merged','user', ['branch_group_id' => $target->id], ['branch_group_id' => $next->id]);
+        $user->update(['branch_group_id' => $next->id]);
+        $this->assertFalse($allowed(), 'Old ROP assignment cannot inherit the next merge');
+        $c['rop']->supervisedGroups()->sync([$next->id]);
+        $this->assertTrue($allowed(), 'Chained merge grants history to the receiving ROP');
+        $this->travelBack();
     }
 
     public function test_transfer_day_presents_only_visible_marks_without_guessing_or_changing_daily_totals(): void
