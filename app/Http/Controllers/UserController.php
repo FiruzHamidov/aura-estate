@@ -9,6 +9,7 @@ use App\Models\Role;
 use App\Models\User;
 use App\Services\Crm\AuditLogger;
 use App\Services\DailyReportService;
+use App\Services\Users\EmployeeRestoration;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -572,13 +573,42 @@ class UserController extends Controller
         ]);
 
         $logs = CrmAuditLog::query()
-            ->where('auditable_type', $user->getMorphClass())
-            ->where('auditable_id', $user->id)
+            ->where(function ($query) use ($user) {
+                $query->where(fn ($q) => $q->where('auditable_type', $user->getMorphClass())->where('auditable_id', $user->id))
+                    ->orWhere(fn ($q) => $q->where('auditable_type', (new Property)->getMorphClass())
+                        ->where('event', 'property_owner_transferred')->where('context->dismissed_user_id', $user->id));
+            })
             ->with(['actor:id,name,role_id,branch_id,branch_group_id', 'actor.role:id,name,slug'])
             ->orderByDesc('created_at')
             ->orderByDesc('id')
             ->paginate((int) ($validated['per_page'] ?? 10));
 
+        $propertyIds = $logs->getCollection()->flatMap(fn ($log) => $log->event === 'property_owner_transferred'
+            ? [$log->auditable_id] : array_column($log->context['property_handover'] ?? [], 'property_id'));
+        $visibleProperties = Property::whereIn('id', $propertyIds)
+            ->when(!$authUser->hasPermission('users.scope.all'), fn ($q) => $q->where('branch_id', $authUser->branch_id ?? 0))
+            ->pluck('id')->all();
+        $logs->getCollection()->each(function ($log) use ($visibleProperties) {
+            $context = $log->context ?? [];
+            if ($log->event === 'property_owner_transferred') {
+                $context['property_id'] = $log->auditable_id;
+                if (!in_array((int) $log->auditable_id, $visibleProperties, true)) {
+                    $log->old_values = null;
+                    $log->new_values = null;
+                    $context = ['property_id' => $log->auditable_id, 'details_unavailable' => true];
+                }
+            }
+            if (isset($context['property_handover'])) {
+                $context['property_handover'] = array_map(function ($item) use ($visibleProperties) {
+                    unset($item['post_revision']);
+                    if (!in_array((int) $item['property_id'], $visibleProperties, true)) {
+                        return ['property_id' => $item['property_id'], 'title' => 'Недоступное объявление'];
+                    }
+                    return $item;
+                }, $context['property_handover']);
+            }
+            $log->context = $context;
+        });
         app(\App\Services\GroupAccess\AuditSnapshotProjection::class)
             ->prepare($logs->getCollection(), $authUser);
 
@@ -860,6 +890,8 @@ class UserController extends Controller
                     && $target->hasPermission('users.subject.legacy_property_recipient'), 422, 'INVALID_TRANSFER_TARGET');
                 $this->ensureUserIsVisible($authUser, $target);
             }
+            abort_unless($user->status === User::STATUS_ACTIVE, 409, 'EMPLOYEE_ALREADY_INACTIVE');
+            $handover = app(EmployeeRestoration::class)->capture($user);
             if ($plan !== null) {
                 $counts = app(\App\Services\Users\DismissalTransfer::class)->apply($authUser, $user, $plan, $lockedUsers);
                 $transferStats['transferred_counts'] = $counts;
@@ -1027,6 +1059,7 @@ class UserController extends Controller
                     'dismissed_at' => now()->toIso8601String(),
                     'reason' => $plan['reason'] ?? 'Увольнение сотрудника',
                     'transfer_stats' => $transferStats,
+                    'property_handover' => app(EmployeeRestoration::class)->receipt($user, $handover),
                 ]
             );
         });
@@ -1037,53 +1070,57 @@ class UserController extends Controller
         ], $transferStats));
     }
 
-    public function restore(User $user)
+    private function authorizeRestoration(User $actor, User $employee): void
     {
-        return DB::transaction(function () use ($user) {
+        abort_if($actor->usesAssignedGroupScope() || $employee->isDeletedAccount(), 403, 'FORBIDDEN_ACTION');
+        $this->ensureUserIsVisible($actor, $employee, false);
+        $this->authorizeUserMutation($actor, $employee, 'restore');
+    }
+
+    public function restorationPreview(User $user, EmployeeRestoration $restoration)
+    {
+        $actor = $this->authUser();
+        $this->authorizeRestoration($actor, $user);
+        return response()->json($restoration->preview($actor, $user));
+    }
+
+    public function restore(Request $request, User $user)
+    {
+        $request->validate([
+            'return_plan' => 'sometimes|array:revision,property_ids,reason|required_array_keys:revision,property_ids,reason',
+            'return_plan.revision' => 'required_with:return_plan|string|size:64',
+            'return_plan.property_ids' => 'present_with:return_plan|array|max:1000',
+            'return_plan.property_ids.*' => 'integer|min:1|distinct',
+            'return_plan.reason' => 'required_with:return_plan|string|min:5|max:2000',
+        ]);
+        return DB::transaction(function () use ($request, $user) {
             $authUser = $this->authUser();
             $users = User::query()->whereIn('id', [$authUser->id, $user->id])->orderBy('id')->lockForUpdate()->get()->keyBy('id');
             $authUser = $users->get($authUser->id);
             $user = $users->get($user->id);
             abort_unless($authUser && $user, 404, 'NOT_FOUND');
-            $authRole = $this->roleSlug($authUser);
-            abort_if($authUser->usesAssignedGroupScope(), 403, 'FORBIDDEN_ACTION');
-
-            $canRestore = $authUser->hasPermission('users.restore');
-            abort_unless($canRestore, 403, 'Forbidden');
-            $this->ensureUserIsVisible($authUser, $user, false);
-
-            if ($authUser->hasPermission('users.scope.branch') && !$authUser->hasPermission('users.scope.all')) {
-                abort_unless((int) $user->branch_id === (int) $authUser->branch_id, 403, 'Forbidden');
-            }
-
-            if ($authUser->hasPermission('users.manage_hr_roles')) {
-                $this->ensureUserIsVisible($authUser, $user, false);
-                $this->authorizeUserMutation($authUser, $user, 'restore');
-            }
-
-            if ($user->status === User::STATUS_ACTIVE) {
-                return response()->json(['message' => 'Пользователь уже активен']);
-            }
-
+            $this->authorizeRestoration($authUser, $user);
             $oldStatus = $user->status;
-            $user->status = User::STATUS_ACTIVE;
-            $user->save();
-
-            app(AuditLogger::class)->log(
-                subject: $user,
-                actor: $authUser,
-                event: 'user_restored',
-                oldValues: ['status' => $oldStatus],
-                newValues: ['status' => $user->status],
-                message: 'Пользователь восстановлен',
-                context: [
-                    'restored_user_id' => $user->id,
-                    'restored_by_user_id' => $authUser->id,
-                    'restored_at' => now()->toIso8601String(),
-                ]
-            );
-
-            return response()->json(['message' => 'Пользователь восстановлен']);
+            $returned = 0;
+            if ($plan = $request->input('return_plan')) {
+                $returned = app(EmployeeRestoration::class)->returnProperties($authUser, $user, $plan);
+            }
+            if ($oldStatus === User::STATUS_ACTIVE && $returned === 0) {
+                return response()->json(['message' => 'Пользователь уже активен', 'returned_properties_count' => 0]);
+            }
+            if ($oldStatus !== User::STATUS_ACTIVE) {
+                $user->status = User::STATUS_ACTIVE;
+                $user->save();
+                app(AuditLogger::class)->log(
+                    subject: $user, actor: $authUser, event: 'user_restored',
+                    oldValues: ['status' => $oldStatus], newValues: ['status' => $user->status],
+                    message: 'Пользователь восстановлен',
+                    context: ['restored_user_id' => $user->id, 'restored_by_user_id' => $authUser->id,
+                        'restored_at' => now()->toIso8601String(), 'returned_properties_count' => $returned]
+                );
+            }
+            return response()->json(['message' => $oldStatus === User::STATUS_ACTIVE ? 'Объявления возвращены сотруднику' : 'Пользователь восстановлен',
+                'returned_properties_count' => $returned]);
         });
     }
 

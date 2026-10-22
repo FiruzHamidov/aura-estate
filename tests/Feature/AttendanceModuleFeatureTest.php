@@ -997,6 +997,38 @@ class AttendanceModuleFeatureTest extends TestCase
             ->assertJsonMissing(['device_user_name' => 'Другой сотрудник']);
     }
 
+    public function test_mapping_names_match_the_exact_terminal_and_pin_without_replacing_aura_identity(): void
+    {
+        $context = $this->context();
+        $device = $this->device('MAPPED-NAMES-A', $context['branch'], $context['group']);
+        $other = $this->device('MAPPED-NAMES-B');
+        $this->postDevicePayload('/iclock/cdata?SN=MAPPED-NAMES-A&table=USERINFO', "PIN=0096\tName=Имя с нулями\nPIN=96\tName=Имя без нулей")->assertOk();
+        $this->postDevicePayload('/iclock/cdata?SN=MAPPED-NAMES-B&table=USERINFO', "PIN=0096\tName=Другой терминал")->assertOk();
+        foreach ([[$device, '0096', true], [$device, '96', false], [$device, '97', true], [$other, '0096', true]] as [$terminal, $pin, $active]) {
+            AttendanceDeviceUser::create([
+                'device_id' => $terminal->id, 'device_user_id' => $pin,
+                'user_id' => $context['agent']->id, 'is_active' => $active,
+            ]);
+        }
+
+        Sanctum::actingAs($context['hr']);
+        $this->getJson('/api/attendance/device-users')->assertOk()->assertJsonCount(4, 'data')
+            ->assertJsonPath('data.0.device_user_name', 'Другой терминал')
+            ->assertJsonPath('data.1.device_user_name', null)
+            ->assertJsonPath('data.2.device_user_name', 'Имя без нулей')
+            ->assertJsonPath('data.2.is_active', false)
+            ->assertJsonPath('data.3.device_user_name', 'Имя с нулями')
+            ->assertJsonPath('data.3.device_user_id', '0096')
+            ->assertJsonPath('data.3.user.name', $context['agent']->name);
+        $this->getJson('/api/attendance/device-users?device_id='.$device->id.'&per_page=1')
+            ->assertOk()->assertJsonPath('total', 3)->assertJsonPath('data.0.device_user_name', null);
+        Sanctum::actingAs($context['rop']);
+        $this->getJson('/api/attendance/device-users')->assertOk()->assertJsonCount(3, 'data')
+            ->assertJsonMissing(['device_user_name' => 'Другой терминал']);
+        Sanctum::actingAs($context['agent']);
+        $this->getJson('/api/attendance/device-users')->assertForbidden();
+    }
+
     public function test_terminal_profile_updates_validate_text_and_preserve_exact_ids(): void
     {
         $device = $this->device('NAMES-VALIDATION');

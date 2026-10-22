@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\AttendanceDeviceUser;
+use App\Models\AttendanceDeviceUserProfile;
 use App\Models\AttendanceEvent;
 use App\Models\AttendanceRawEvent;
 use App\Models\User;
@@ -58,6 +59,9 @@ final class AttendanceMappingController extends Controller
             'per_page' => ['nullable', 'integer', 'between:1,100'],
         ]);
         $query = AttendanceDeviceUser::query()->with(['device.branch', 'user.role', 'user.branch', 'mappedBy:id,name'])
+            ->addSelect(['device_user_name' => AttendanceDeviceUserProfile::query()->select('name')
+                ->whereColumn('attendance_device_user_profiles.device_id', 'attendance_device_users.device_id')
+                ->whereColumn('attendance_device_user_profiles.device_user_id', 'attendance_device_users.device_user_id')])
             ->addSelect(['processed_events_count' => AttendanceEvent::query()->selectRaw('COUNT(*)')
                 ->whereColumn('attendance_events.device_id', 'attendance_device_users.device_id')
                 ->whereColumn('attendance_events.device_user_id', 'attendance_device_users.device_user_id')]);

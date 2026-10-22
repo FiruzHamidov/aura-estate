@@ -958,4 +958,205 @@ class DismissalTransferTest extends TestCase
             'branch_group_id'=>$target->branch_group_id, 'branch_id'=>$target->branch_id, 'pipeline_id'=>2, 'stage_id'=>2, 'closed_at'=>null]);
     }
 
+    private function dismissForRestoration(): void
+    {
+        (require database_path('migrations/2025_11_12_144557_create_property_logs_table.php'))->up();
+        Schema::create('crm_deals', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('primary_property_id')->nullable();
+            $t->unsignedBigInteger('responsible_agent_id')->nullable(); $t->unsignedBigInteger('branch_group_id')->nullable();
+            $t->string('control_kind')->nullable(); $t->timestamp('closed_at')->nullable(); $t->softDeletes(); $t->timestamps();
+        });
+        $this->deleteJson('/api/user/'.$this->employee->id, $this->plan())->assertOk();
+    }
+
+    private function restorationPreview(): array
+    {
+        return $this->getJson('/api/user/'.$this->employee->id.'/restoration-preview')->assertOk()->json();
+    }
+
+    private function restorationPlan(array $ids = [1]): array
+    {
+        return ['return_plan' => ['revision' => $this->restorationPreview()['revision'], 'property_ids' => $ids, 'reason' => 'Employee rehired, reviewed return']];
+    }
+
+    public function test_restoration_records_history_and_returns_only_selected_unchanged_properties(): void
+    {
+        $this->dismissForRestoration();
+        $preview = $this->restorationPreview();
+        $this->assertTrue($preview['has_snapshot']);
+        $this->assertCount(2, $preview['properties']);
+        $this->assertTrue($preview['properties'][0]['can_return']);
+        $audit = $this->getJson('/api/user/'.$this->employee->id.'/audit-logs')->assertOk()->json('data.0');
+        $this->assertSame('user_dismissed', $audit['event']);
+        $this->assertSame($this->actor->id, $audit['actor_id']);
+        $this->assertSame($this->first->name, $audit['context']['property_handover'][0]['recipient_name']);
+        $this->assertArrayNotHasKey('post_revision', $audit['context']['property_handover'][0]);
+        $this->postJson('/api/user/'.$this->employee->id.'/restore', $this->restorationPlan())->assertOk()->assertJsonPath('returned_properties_count', 1);
+        $this->assertDatabaseHas('users', ['id'=>$this->employee->id, 'status'=>'active']);
+        $this->assertDatabaseHas('properties', ['id'=>1, 'agent_id'=>$this->employee->id]);
+        $this->assertDatabaseHas('properties', ['id'=>2, 'agent_id'=>$this->second->id]);
+        $this->assertDatabaseHas('properties', ['id'=>3, 'agent_id'=>$this->employee->id, 'moderation_status'=>'sold']);
+        $this->assertDatabaseHas('crm_audit_logs', ['event'=>'employee_properties_returned', 'actor_id'=>$this->actor->id, 'auditable_id'=>$this->employee->id]);
+        $this->assertFalse($this->restorationPreview()['properties'][0]['can_return']);
+    }
+
+    public function test_access_only_restoration_preserves_assignments_and_can_return_later(): void
+    {
+        $this->dismissForRestoration();
+        $this->postJson('/api/user/'.$this->employee->id.'/restore')->assertOk()->assertJsonPath('returned_properties_count', 0);
+        $this->assertDatabaseHas('properties', ['id'=>1, 'agent_id'=>$this->first->id]);
+        $this->postJson('/api/user/'.$this->employee->id.'/restore', $this->restorationPlan())->assertOk()->assertJsonPath('returned_properties_count', 1);
+        $this->assertSame(1, DB::table('crm_audit_logs')->where('event', 'user_restored')->count());
+    }
+
+    public static function changedReturnProperties(): array
+    {
+        return [['title', 'Edited listing'], ['moderation_status', 'sold'], ['agent_id', 999]];
+    }
+
+    #[DataProvider('changedReturnProperties')]
+    public function test_changed_property_blocks_return_and_stale_preview_rolls_back_activation(string $field, mixed $value): void
+    {
+        $this->dismissForRestoration();
+        $plan = $this->restorationPlan([1,2]);
+        DB::table('properties')->where('id',2)->update([$field=>$value]);
+        $this->postJson('/api/user/'.$this->employee->id.'/restore', $plan)->assertConflict();
+        $this->assertDatabaseHas('users', ['id'=>$this->employee->id,'status'=>'inactive']);
+        $this->assertDatabaseHas('properties', ['id'=>1,'agent_id'=>$this->first->id]);
+        $preview = $this->restorationPreview();
+        $this->assertFalse($preview['properties'][1]['can_return']);
+        $this->postJson('/api/user/'.$this->employee->id.'/restore', $this->restorationPlan([2]))->assertUnprocessable();
+    }
+
+    public function test_related_work_created_after_dismissal_blocks_return(): void
+    {
+        $this->dismissForRestoration();
+        $plan = $this->restorationPlan();
+        DB::table('crm_deals')->insert(['primary_property_id'=>1, 'responsible_agent_id'=>$this->first->id]);
+        $this->assertFalse($this->restorationPreview()['properties'][0]['can_return']);
+        $this->postJson('/api/user/'.$this->employee->id.'/restore', $plan)->assertConflict();
+        $this->assertDatabaseHas('users', ['id'=>$this->employee->id,'status'=>'inactive']);
+    }
+
+    public function test_restoration_rejects_unrelated_and_duplicate_ids_and_replayed_plan(): void
+    {
+        $this->dismissForRestoration();
+        $this->postJson('/api/user/'.$this->employee->id.'/restore', $this->restorationPlan([3]))->assertUnprocessable();
+        $this->postJson('/api/user/'.$this->employee->id.'/restore', $this->restorationPlan([1,1]))->assertUnprocessable();
+        $plan = $this->restorationPlan();
+        $this->postJson('/api/user/'.$this->employee->id.'/restore', $plan)->assertOk();
+        $this->postJson('/api/user/'.$this->employee->id.'/restore', $plan)->assertConflict();
+        $this->assertSame(1, DB::table('crm_audit_logs')->where('event','employee_properties_returned')->count());
+    }
+
+    public function test_director_restoration_is_branch_scoped_and_rop_cannot_restore(): void
+    {
+        $this->dismissForRestoration();
+        Sanctum::actingAs($this->person('branch_director'));
+        $plan = $this->restorationPlan();
+        Sanctum::actingAs($this->person('rop'));
+        $this->getJson('/api/user/'.$this->employee->id.'/restoration-preview')->assertForbidden();
+        $this->postJson('/api/user/'.$this->employee->id.'/restore', $plan)->assertForbidden();
+        $director = $this->person('branch_director');
+        $director->update(['branch_id'=>Branch::create(['name'=>'Other branch'])->id]);
+        Sanctum::actingAs($director);
+        $this->getJson('/api/user/'.$this->employee->id.'/restoration-preview')->assertForbidden();
+        $this->postJson('/api/user/'.$this->employee->id.'/restore', $plan)->assertForbidden();
+        Sanctum::actingAs($this->person('branch_director'));
+        $this->postJson('/api/user/'.$this->employee->id.'/restore', $this->restorationPlan())->assertOk();
+    }
+
+    public function test_old_dismissal_without_snapshot_allows_access_only(): void
+    {
+        $this->employee->update(['status'=>'inactive']);
+        app(\App\Services\Crm\AuditLogger::class)->log(\App\Models\Property::find(1), $this->actor, 'property_owner_transferred',
+            newValues: ['agent_id'=>$this->first->id], context: ['dismissed_user_id'=>$this->employee->id]);
+        $legacy=$this->getJson('/api/user/'.$this->employee->id.'/audit-logs')->assertOk()->json('data.0');
+        $this->assertSame('property_owner_transferred',$legacy['event']);
+        $this->assertSame($this->actor->id,$legacy['actor_id']);
+        $preview=$this->restorationPreview();
+        $this->assertFalse($preview['has_snapshot']);
+        $this->assertFalse($preview['properties'][0]['can_return']);
+        $this->postJson('/api/user/'.$this->employee->id.'/restore', $this->restorationPlan())->assertUnprocessable();
+        $this->postJson('/api/user/'.$this->employee->id.'/restore')->assertOk();
+    }
+
+    public function test_new_dismissal_cycle_does_not_reuse_previous_return_receipt(): void
+    {
+        $this->dismissForRestoration();
+        $oldPlan=$this->restorationPlan();
+        $this->postJson('/api/user/'.$this->employee->id.'/restore', $oldPlan)->assertOk();
+        $this->deleteJson('/api/user/'.$this->employee->id, $this->plan())->assertOk();
+        $preview=$this->restorationPreview();
+        $this->assertCount(1,$preview['properties']);
+        $this->assertTrue($preview['properties'][0]['can_return']);
+        $this->postJson('/api/user/'.$this->employee->id.'/restore', $oldPlan)->assertConflict();
+        $this->postJson('/api/user/'.$this->employee->id.'/restore', $this->restorationPlan())->assertOk();
+    }
+
+    public function test_return_to_original_group_moves_linked_tasks_with_property(): void
+    {
+        Schema::create('crm_tasks', function (Blueprint $t) {
+            $t->id(); $t->string('title'); $t->unsignedBigInteger('assignee_id'); $t->unsignedBigInteger('branch_group_id');
+            $t->string('related_entity_type'); $t->unsignedBigInteger('related_entity_id'); $t->timestamp('completed_at')->nullable(); $t->timestamps();
+        });
+        $other = BranchGroup::create(['name'=>'Other group','branch_id'=>$this->group->branch_id]);
+        DB::table('users')->where('id',$this->first->id)->update(['branch_group_id'=>$other->id]);
+        DB::table('crm_tasks')->insert(['title'=>'Follow up','assignee_id'=>$this->first->id,'branch_group_id'=>$other->id,'related_entity_type'=>'property','related_entity_id'=>1]);
+        // Only the source record's group differs; reviewed dismissal takes it to the recipient's group.
+        DB::table('properties')->where('id',1)->update(['branch_group_id'=>$other->id]);
+        $this->dismissForRestoration();
+        $this->postJson('/api/user/'.$this->employee->id.'/restore',$this->restorationPlan())->assertOk();
+        $this->assertDatabaseHas('properties',['id'=>1,'agent_id'=>$this->employee->id,'branch_group_id'=>$this->group->id]);
+        $this->assertDatabaseHas('crm_tasks',['related_entity_id'=>1,'assignee_id'=>$this->employee->id,'branch_group_id'=>$this->group->id]);
+    }
+
+    public function test_return_permission_is_rechecked_and_hr_can_restore_access_only(): void
+    {
+        $this->dismissForRestoration();
+        $plan=$this->restorationPlan();
+        Sanctum::actingAs($this->person('hr'));
+        $this->assertFalse($this->restorationPreview()['properties'][0]['can_return']);
+        $this->postJson('/api/user/'.$this->employee->id.'/restore',$plan)->assertConflict();
+        $this->postJson('/api/user/'.$this->employee->id.'/restore')->assertOk();
+        $this->assertDatabaseHas('properties',['id'=>1,'agent_id'=>$this->first->id]);
+    }
+
+    public function test_director_history_hides_property_details_after_foreign_branch_transfer(): void
+    {
+        $this->dismissForRestoration();
+        DB::table('properties')->where('id',1)->update(['branch_id'=>Branch::create(['name'=>'Foreign'])->id]);
+        Sanctum::actingAs($this->person('branch_director'));
+        $row=$this->restorationPreview()['properties'][0];
+        $this->assertSame('Недоступное объявление',$row['title']);
+        $this->assertNull($row['recipient_name']);
+        $this->assertFalse($row['can_return']);
+        $audit=$this->getJson('/api/user/'.$this->employee->id.'/audit-logs')->assertOk()->json('data.0.context.property_handover.0');
+        $this->assertSame('Недоступное объявление',$audit['title']);
+        $this->assertArrayNotHasKey('recipient_name',$audit);
+    }
+
+    public function test_employee_role_or_group_change_prevents_automatic_return(): void
+    {
+        $this->dismissForRestoration();
+        DB::table('users')->where('id',$this->employee->id)->update(['branch_group_id'=>null]);
+        $this->assertFalse($this->restorationPreview()['properties'][0]['can_return']);
+        $this->postJson('/api/user/'.$this->employee->id.'/restore',$this->restorationPlan())->assertUnprocessable();
+    }
+
+    public function test_analytics_and_background_liquidity_do_not_invalidate_return(): void
+    {
+        Schema::table('properties', function (Blueprint $t) {
+            $t->integer('views_count')->default(0); $t->integer('phone_clicks')->default(0);
+            $t->integer('liquidity_score')->nullable(); $t->timestamp('liquidity_calculated_at')->nullable();
+        });
+        $this->dismissForRestoration();
+        $plan=$this->restorationPlan();
+        DB::table('properties')->where('id',1)->update(['views_count'=>10, 'phone_clicks'=>2, 'liquidity_score'=>80,
+            'liquidity_calculated_at'=>now()->addMinute(), 'updated_at'=>now()->addMinute()]);
+        $this->assertTrue($this->restorationPreview()['properties'][0]['can_return']);
+        $this->postJson('/api/user/'.$this->employee->id.'/restore',$plan)->assertOk();
+        $this->assertDatabaseHas('properties',['id'=>1,'views_count'=>10,'phone_clicks'=>2,'liquidity_score'=>80]);
+    }
+
 }
