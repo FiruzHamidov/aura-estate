@@ -421,6 +421,14 @@ final class AttendanceWebController extends Controller
 
     private function dayPayload(?AttendanceDailySummary $summary, bool $workingDay, Collection $methods, ?AttendanceDailyComment $comment, ?AttendanceLeave $leave = null, ?AttendanceHoliday $holiday = null, ?AttendanceDuty $duty = null, ?Collection $events = null): array
     {
+        // A transfer can leave the whole-day summary outside the viewer's scope.
+        // Present only already-authorized marks, without inferring a whole-day status.
+        $partialEvents = $summary === null ? ($events ?? collect())
+            ->filter(fn (AttendanceEvent $event) => ! $event->is_duplicate && $event->occurred_at !== null && ! $event->occurred_at->isFuture())
+            ->sortBy([['occurred_at', 'asc'], ['id', 'asc']])
+            ->map(fn (AttendanceEvent $event) => ['id' => $event->id, 'event_type' => $event->event_type,
+                'occurred_at' => $event->occurred_at->toISOString()])->values() : collect();
+
         return [
             'activity' => app(\App\Services\Attendance\AttendanceActivityService::class)->summarize($events ?? collect()),
             'status' => $summary?->status,
@@ -429,7 +437,8 @@ final class AttendanceWebController extends Controller
             'last_out_at' => $summary?->last_out_at?->toISOString(),
             'worked_minutes' => $summary?->worked_minutes,
             'late_minutes' => $summary?->late_minutes,
-            'events_count' => (int) ($summary?->events_count ?? 0),
+            'events_count' => (int) ($summary?->events_count ?? $partialEvents->count()),
+            'partial_events' => $partialEvents->all(),
             'verification_methods' => $methods->values(),
             'has_comment' => $comment !== null,
             'comment_preview' => $comment ? Str::limit($comment->comment, 120) : null,

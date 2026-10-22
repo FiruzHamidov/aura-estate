@@ -2085,8 +2085,13 @@ class AttendanceModuleFeatureTest extends TestCase
             $this->assertSame($snapshot, AttendanceDailySummary::where('user_id', $user->id)->whereDate('work_date', '2026-08-18')->first()->schedule_snapshot);
             $this->getJson($url)->assertOk()->assertJsonPath('data.0.days.2026-08-18.events_count', 2)
                 ->assertJsonPath('data.0.days.2026-08-18.first_in_at', '2026-08-18T04:07:00.000000Z')
+                ->assertJsonPath('data.0.days.2026-08-17.events_count', 1)
+                ->assertJsonPath('data.0.days.2026-08-17.partial_events', [['id' => $boundary->id, 'event_type' => 'check_out', 'occurred_at' => '2026-08-17T07:00:00.000000Z']])
+                ->assertJsonPath('data.0.days.2026-08-17.status', null)
                 ->assertJsonPath('data.0.days.2026-08-16.availability', 'no_data');
-            $this->getJson('/api/attendance/users/'.$user->id.'/days/2026-08-17')->assertOk()->assertJsonCount(1, 'data.events');
+            $this->getJson('/api/attendance/users/'.$user->id.'/days/2026-08-17')->assertOk()->assertJsonCount(1, 'data.events')
+                ->assertJsonPath('data.summary.events_count', 1)
+                ->assertJsonPath('data.summary.partial_events.0.id', $boundary->id);
             $auditCount = DB::table('attendance_audit_logs')->count();
             $this->assertSame(5, $auditCount);
             $this->assertSame(1, Artisan::call('attendance:repair-group-merge', [...$options, '--apply' => true, '--backup' => $path]));
@@ -2100,6 +2105,57 @@ class AttendanceModuleFeatureTest extends TestCase
         $this->map($device, $user);
         $this->postDevicePayload('/iclock/cdata?SN=MERGE-REPAIR&table=ATTLOG', $user->id."\t2026-08-19 09:00:00\t0\t15\t0")->assertOk();
         $this->assertDatabaseHas('attendance_events', ['user_id' => $user->id, 'occurred_at' => '2026-08-19 04:00:00', 'branch_group_id' => $target->id, 'role_slug' => 'agent']);
+    }
+
+    public function test_transfer_day_presents_only_visible_marks_without_guessing_or_changing_daily_totals(): void
+    {
+        (require database_path('migrations/2026_09_09_010000_add_attendance_historical_context.php'))->up();
+        $this->travelTo(CarbonImmutable::parse('2026-08-18 12:00:00', 'Asia/Dushanbe'));
+        $c = $this->context(); $user = $c['agent'];
+        $oldGroup = BranchGroup::create(['name' => 'Previous team', 'branch_id' => $c['branch']->id]);
+        $device = $this->device('TRANSFER-DAY', $c['branch'], $c['group']);
+        $make = fn ($time, $type, $group, $extra = []) => AttendanceEvent::create([
+            'device_id' => $device->id, 'device_user_id' => (string) $user->id, 'user_id' => $user->id,
+            'branch_id' => $c['branch']->id, 'branch_group_id' => $group->id, 'role_slug' => 'agent',
+            'occurred_at' => CarbonImmutable::parse($time, 'Asia/Dushanbe')->utc(), 'event_type' => $type,
+            ...$extra,
+        ]);
+        // Insert out of chronological order; neither duplicates nor foreign roles may enter the preview.
+        $departure = $make('2026-08-17 17:43:00', 'check_out', $c['group']);
+        $arrival = $make('2026-08-17 08:54:00', 'check_in', $oldGroup);
+        $visit = $make('2026-08-17 16:30:00', 'property_out', $c['group']);
+        $make('2026-08-17 17:43:05', 'check_out', $c['group'], ['is_duplicate' => true]);
+        $make('2026-08-17 16:00:00', 'check_in', $c['group'], ['role_slug' => 'admin']);
+        $make('2026-08-18 13:00:00', 'check_in', $c['group']);
+        $summary = app(\App\Services\Attendance\AttendanceSummaryService::class)->recompute($user, '2026-08-17');
+        $before = $summary->fresh()->getRawOriginal();
+        $eventsBefore = DB::table('attendance_events')->orderBy('id')->get()->toJson();
+        $expected = collect([$visit, $departure])->map(fn ($e) => ['id' => $e->id, 'event_type' => $e->event_type, 'occurred_at' => $e->occurred_at->toISOString()])->all();
+        Sanctum::actingAs($c['rop']);
+        $url = '/api/attendance/matrix?date_from=2026-08-16&date_to=2026-08-18&user_id='.$user->id;
+        foreach (['', '&branch_group_id='.$c['group']->id.'&role=agent'] as $filter) {
+            $this->getJson($url.$filter)->assertOk()
+                ->assertJsonPath('data.0.days.2026-08-17.partial_events', $expected)
+                ->assertJsonPath('data.0.days.2026-08-17.events_count', 2)
+                ->assertJsonPath('data.0.days.2026-08-17.availability', 'available')
+                ->assertJsonPath('data.0.days.2026-08-17.can_open', true)
+                ->assertJsonPath('data.0.days.2026-08-17.status', null)
+                ->assertJsonPath('data.0.days.2026-08-17.worked_minutes', null)
+                ->assertJsonPath('data.0.days.2026-08-17.late_minutes', null)
+                ->assertJsonPath('data.0.days.2026-08-17.first_in_at', null)
+                ->assertJsonPath('data.0.days.2026-08-16.events_count', 0)
+                ->assertJsonPath('data.0.days.2026-08-16.partial_events', [])
+                ->assertJsonPath('data.0.days.2026-08-18.partial_events', []);
+        }
+        $this->getJson('/api/attendance/users/'.$user->id.'/days/2026-08-17')->assertOk()
+            ->assertJsonPath('data.summary.partial_events', $expected)->assertJsonPath('data.summary.events_count', 2);
+        Sanctum::actingAs($c['admin']);
+        $this->getJson($url)->assertOk()->assertJsonPath('data.0.days.2026-08-17.partial_events', [])
+            ->assertJsonPath('data.0.days.2026-08-17.events_count', 4)
+            ->assertJsonPath('data.0.days.2026-08-17.first_in_at', $arrival->occurred_at->toISOString());
+        $this->assertSame($before, $summary->fresh()->getRawOriginal());
+        $this->assertSame($eventsBefore, DB::table('attendance_events')->orderBy('id')->get()->toJson());
+        $this->travelBack();
     }
 
     public function test_group_merge_repair_rolls_back_events_and_audit_if_day_rebuild_fails(): void
