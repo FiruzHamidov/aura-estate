@@ -185,9 +185,11 @@ final class BranchGroupMerge
             abort_if(!$archiveSource && $inventory['employees']->isEmpty() && $inventory['records'] === [], 422, 'Нет сотрудников или активных записей для переноса.');
             $audit = app(GroupAccessAudit::class);
             foreach ($inventory['employees'] as $employee) {
+                $before = $employee->only(['role_id', 'branch_id', 'branch_group_id']);
                 DB::table('users')->where('id', $employee->id)->update(['branch_group_id' => $target->id,
                     'access_scope_version' => DB::raw('access_scope_version + 1'), 'updated_at' => now()]);
-                $audit->record($actor, 'user_group_merged', 'user', $employee->id, ['branch_group_id' => $source->id], ['branch_group_id' => $target->id], $reason);
+                $audit->record($actor, 'user_group_merged', 'user', $employee->id, $before,
+                    [...$before, 'branch_group_id' => $target->id], $reason);
             }
             foreach ($inventory['records'] as $table => $rows) foreach ($rows as $id => $row) {
                 $changes = ['branch_group_id' => $target->id, 'updated_at' => now()];

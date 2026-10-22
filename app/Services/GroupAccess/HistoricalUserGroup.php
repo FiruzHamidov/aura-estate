@@ -30,17 +30,23 @@ final class HistoricalUserGroup
         $snapshot = null;
         $auditTime = $occurredAt->setTimezone(config('app.timezone'));
         if (Schema::hasTable('group_access_audit_logs')) {
-            $changes = DB::table('group_access_audit_logs')->where('subject_type', 'user')->where('subject_id', $user->id)
-                ->whereIn('event', ['user_organization_changed', 'employee_group_transferred']);
-            $before = (clone $changes)->where('created_at', '<=', $auditTime)->orderByDesc('created_at')->orderByDesc('id')->first();
-            if ($before) {
-                $snapshot = json_decode($before->new_values, true, flags: JSON_THROW_ON_ERROR);
-            } else {
+            $changes = DB::table('group_access_audit_logs')->where('subject_id', $user->id)
+                ->where(fn ($q) => $q->where(fn ($q) => $q->where('subject_type', 'user')
+                    ->whereIn('event', ['user_organization_changed', 'employee_group_transferred', 'user_group_merged']))
+                    ->orWhere(fn ($q) => $q->where('subject_type', 'users')->where('event', 'group_consolidation_transfer')));
+            $fields = array_flip(['branch_id', 'branch_group_id', 'role_id']);
+            // Older consolidation receipts contain only the group delta. Fill the
+            // missing fields from earlier receipts, preserving explicit nulls.
+            foreach ((clone $changes)->where('created_at', '<=', $auditTime)->orderByDesc('created_at')->orderByDesc('id')->cursor() as $before) {
+                $snapshot = ($snapshot ?? []) + array_intersect_key(json_decode($before->new_values, true, flags: JSON_THROW_ON_ERROR), $fields);
+                if (count($snapshot) === count($fields)) break;
+            }
+            if ($snapshot === null) {
                 $after = (clone $changes)->where('created_at', '>', $auditTime)->orderBy('created_at')->orderBy('id')->first();
                 // The first audit cannot establish an unlimited history before rollout.
                 if ($after && CarbonImmutable::parse($after->created_at, config('app.timezone'))->setTimezone('Asia/Dushanbe')->toDateString()
                     === $occurredAt->setTimezone('Asia/Dushanbe')->toDateString()) {
-                    $snapshot = json_decode($after->old_values, true, flags: JSON_THROW_ON_ERROR);
+                    $snapshot = array_intersect_key(json_decode($after->old_values, true, flags: JSON_THROW_ON_ERROR), $fields);
                 }
             }
         }

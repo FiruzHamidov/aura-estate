@@ -1681,6 +1681,50 @@ class RopGroupAssignmentsTest extends TestCase
         $this->assertFalse($access->allows($notification, $this->rop));
     }
 
+    public function test_group_merge_receipts_capture_complete_organization_for_delayed_attendance(): void
+    {
+        $this->mergeRights();
+        $this->travelTo(\Carbon\CarbonImmutable::parse('2026-08-17 12:00:00', 'Asia/Dushanbe'));
+        $agent = $this->user('agent', $this->a);
+        $url = '/api/branch-groups/'.$this->a->id;
+        $preview = $this->postJson($url.'/merge-preview', ['target_group_id' => $this->b->id])->assertOk()->json();
+        $this->postJson($url.'/merge', ['target_group_id' => $this->b->id, 'revision' => $preview['revision'], 'reason' => 'Consolidate teams'])->assertOk();
+        $receipt = DB::table('group_access_audit_logs')->where('subject_id', $agent->id)->where('event', 'user_group_merged')->first();
+        $this->assertSame(['role_id' => $agent->role_id, 'branch_id' => $this->branch->id, 'branch_group_id' => $this->a->id], json_decode($receipt->old_values, true));
+        $resolver = app(\App\Services\GroupAccess\HistoricalUserGroup::class);
+        $this->travelTo(now()->addDays(2));
+        $agent = $agent->fresh();
+        $this->assertSame($this->a->id, $resolver->at($agent, \Carbon\CarbonImmutable::parse('2026-08-17 11:59:59', 'Asia/Dushanbe'))['branch_group_id']);
+        $this->assertSame($this->b->id, $resolver->at($agent, \Carbon\CarbonImmutable::parse('2026-08-17 12:00:00', 'Asia/Dushanbe'))['branch_group_id']);
+        $this->assertSame('agent', $resolver->roleAt($agent, \Carbon\CarbonImmutable::parse('2026-08-18 09:00:00', 'Asia/Dushanbe')));
+        $this->assertNull($resolver->at($agent, \Carbon\CarbonImmutable::parse('2026-08-16 09:00:00', 'Asia/Dushanbe'))['branch_group_id']);
+    }
+
+    public function test_partial_group_merge_history_preserves_role_and_respects_later_transfers(): void
+    {
+        $user = $this->user('agent', $this->a);
+        $before = ['role_id' => $user->role_id, 'branch_id' => $this->branch->id, 'branch_group_id' => $this->a->id];
+        foreach ([
+            ['2026-08-16 08:00:00', 'user', 'user_organization_changed', $before],
+            ['2026-08-17 12:00:00', 'user', 'user_group_merged', ['branch_group_id' => $this->b->id]],
+            ['2026-08-18 12:00:00', 'users', 'group_consolidation_transfer', ['branch_group_id' => $this->c->id]],
+            ['2026-08-19 12:00:00', 'user', 'employee_group_transferred', [...$before, 'role_id' => null, 'branch_group_id' => null]],
+        ] as [$date, $type, $event, $after]) {
+            DB::table('group_access_audit_logs')->insert(['subject_type' => $type, 'subject_id' => $user->id, 'event' => $event,
+                'old_values' => json_encode($before), 'new_values' => json_encode($after), 'created_at' => $date]);
+        }
+        $resolver = app(\App\Services\GroupAccess\HistoricalUserGroup::class);
+        foreach ([['2026-08-17 11:59:59', $this->a->id], ['2026-08-17 12:00:00', $this->b->id], ['2026-08-18 13:00:00', $this->c->id]] as [$date, $group]) {
+            $at = \Carbon\CarbonImmutable::parse($date, config('app.timezone'));
+            $this->assertSame($group, $resolver->at($user, $at)['branch_group_id']);
+            $this->assertSame('agent', $resolver->roleAt($user, $at));
+        }
+        $later = \Carbon\CarbonImmutable::parse('2026-08-19 13:00:00', config('app.timezone'));
+        $this->assertNull($resolver->at($user, $later)['branch_group_id']);
+        $this->assertNull($resolver->roleAt($user, $later), 'An explicit null must not resurrect an older role.');
+        $this->assertNull($resolver->at($user, $later->subDays(5))['branch_group_id']);
+    }
+
     public function test_delayed_facts_use_audited_group_and_leave_unknown_history_unclassified(): void
     {
         $user = $this->user('agent', $this->b);

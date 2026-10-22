@@ -2028,6 +2028,110 @@ class AttendanceModuleFeatureTest extends TestCase
         ]);
     }
 
+    public function test_group_merge_repair_is_bounded_audited_idempotent_and_visible_to_the_new_rop(): void
+    {
+        (require database_path('migrations/2026_09_09_010000_add_attendance_historical_context.php'))->up();
+        $this->travelTo(CarbonImmutable::parse('2026-08-19 12:00:00', 'Asia/Dushanbe'));
+        $c = $this->context(); $user = $c['agent'];
+        $target = BranchGroup::create(['name' => 'Merged team', 'branch_id' => $c['branch']->id]);
+        $device = $this->device('MERGE-REPAIR', $c['branch'], $c['group']);
+        $before = ['branch_id' => $c['branch']->id, 'branch_group_id' => $c['group']->id, 'role_id' => $user->role_id];
+        DB::table('group_access_audit_logs')->insert(['subject_type' => 'user', 'subject_id' => $user->id, 'event' => 'user_organization_changed',
+            'old_values' => json_encode($before), 'new_values' => json_encode($before), 'created_at' => '2026-08-16 08:00:00']);
+        $audit = DB::table('group_access_audit_logs')->insertGetId(['subject_type' => 'users', 'subject_id' => $user->id, 'event' => 'group_consolidation_transfer',
+            'old_values' => json_encode(['branch_group_id' => $c['group']->id]), 'new_values' => json_encode(['branch_group_id' => $target->id]), 'created_at' => '2026-08-17 12:00:00']);
+        $user->update(['branch_group_id' => $target->id]);
+        $c['rop']->supervisedGroups()->sync([$target->id]);
+        $make = fn ($employee, $date, $type) => AttendanceEvent::create(['device_id' => $device->id, 'device_user_id' => (string) $employee->id,
+            'user_id' => $employee->id, 'branch_id' => $c['branch']->id, 'branch_group_id' => $c['group']->id, 'role_slug' => 'agent',
+            'occurred_at' => CarbonImmutable::parse($date, 'Asia/Dushanbe')->utc(), 'event_type' => $type, 'verification_method' => 'face']);
+        $old = $make($user, '2026-08-16 09:00:00', 'check_in');
+        $early = $make($user, '2026-08-17 09:00:00', 'check_in');
+        $boundary = $make($user, '2026-08-17 12:00:00', 'check_out');
+        $morning = $make($user, '2026-08-18 09:07:00', 'check_in');
+        $evening = $make($user, '2026-08-18 18:00:00', 'check_out');
+        $foreign = $make($c['mop'], '2026-08-18 09:00:00', 'check_in');
+        $future = $make($user, '2026-08-20 09:00:00', 'check_in');
+        $service = app(\App\Services\Attendance\AttendanceSummaryService::class);
+        $snapshot = ['timezone' => 'Asia/Dushanbe', 'schedule' => ['2' => ['start' => '09:00', 'end' => '18:00']], 'holidays' => []];
+        foreach (['2026-08-16', '2026-08-17', '2026-08-18'] as $date) {
+            AttendanceDailySummary::create(['user_id' => $user->id, 'work_date' => $date, 'schedule_snapshot' => $snapshot]);
+            $service->recompute($user, $date);
+        }
+        $previousDay = AttendanceDailySummary::where('user_id', $user->id)->whereDate('work_date', '2026-08-16')->first()->getRawOriginal();
+        $eventBefore = $morning->fresh()->getRawOriginal();
+        Sanctum::actingAs($c['rop']);
+        $url = '/api/attendance/matrix?date_from=2026-08-16&date_to=2026-08-18';
+        $this->getJson($url)->assertOk()->assertJsonPath('data.0.days.2026-08-18.availability', 'no_data');
+        $options = ['audit_id' => [(string) $audit]];
+        $this->assertSame(0, Artisan::call('attendance:repair-group-merge', $options));
+        $this->assertSame(3, json_decode(Artisan::output(), true)['events_to_change']);
+        $this->assertSame($eventBefore, $morning->fresh()->getRawOriginal());
+        $this->assertDatabaseCount('attendance_audit_logs', 0);
+        $this->assertSame(1, Artisan::call('attendance:repair-group-merge', [...$options, '--apply' => true]));
+        $path = sys_get_temp_dir().'/attendance-merge-'.bin2hex(random_bytes(8)).'.json';
+        $again = $path.'.again';
+        try {
+            $this->assertSame(0, Artisan::call('attendance:repair-group-merge', [...$options, '--apply' => true, '--backup' => $path]));
+            $this->assertSame(0600, fileperms($path) & 0777);
+            $backup = json_decode(file_get_contents($path), true);
+            $this->assertCount(3, $backup['events']);
+            $this->assertSame($eventBefore, collect($backup['events'])->firstWhere('id', $morning->id));
+            foreach ([$boundary, $morning, $evening] as $event) $this->assertSame($target->id, $event->fresh()->branch_group_id);
+            foreach ([$old, $early, $foreign, $future] as $event) $this->assertSame($c['group']->id, $event->fresh()->branch_group_id);
+            $this->assertSame($previousDay, AttendanceDailySummary::find($previousDay['id'])->getRawOriginal());
+            $this->assertDatabaseHas('attendance_daily_summaries', ['user_id' => $user->id, 'work_date' => '2026-08-17', 'branch_group_id' => null]);
+            $this->assertDatabaseHas('attendance_daily_summaries', ['user_id' => $user->id, 'work_date' => '2026-08-18', 'branch_group_id' => $target->id, 'role_slug' => 'agent', 'late_minutes' => 7]);
+            $this->assertSame($snapshot, AttendanceDailySummary::where('user_id', $user->id)->whereDate('work_date', '2026-08-18')->first()->schedule_snapshot);
+            $this->getJson($url)->assertOk()->assertJsonPath('data.0.days.2026-08-18.events_count', 2)
+                ->assertJsonPath('data.0.days.2026-08-18.first_in_at', '2026-08-18T04:07:00.000000Z')
+                ->assertJsonPath('data.0.days.2026-08-16.availability', 'no_data');
+            $this->getJson('/api/attendance/users/'.$user->id.'/days/2026-08-17')->assertOk()->assertJsonCount(1, 'data.events');
+            $auditCount = DB::table('attendance_audit_logs')->count();
+            $this->assertSame(5, $auditCount);
+            $this->assertSame(1, Artisan::call('attendance:repair-group-merge', [...$options, '--apply' => true, '--backup' => $path]));
+            $this->assertSame(0, Artisan::call('attendance:repair-group-merge', [...$options, '--apply' => true, '--backup' => $again]));
+            $result = json_decode(Artisan::output(), true);
+            $this->assertSame(0, $result['events_to_change']);
+            $this->assertSame(0, $result['summaries_changed']);
+            $this->assertSame($auditCount, DB::table('attendance_audit_logs')->count());
+        } finally { @unlink($path); @unlink($again); }
+        // New and delayed terminal deliveries use the same merge-aware history.
+        $this->map($device, $user);
+        $this->postDevicePayload('/iclock/cdata?SN=MERGE-REPAIR&table=ATTLOG', $user->id."\t2026-08-19 09:00:00\t0\t15\t0")->assertOk();
+        $this->assertDatabaseHas('attendance_events', ['user_id' => $user->id, 'occurred_at' => '2026-08-19 04:00:00', 'branch_group_id' => $target->id, 'role_slug' => 'agent']);
+    }
+
+    public function test_group_merge_repair_rolls_back_events_and_audit_if_day_rebuild_fails(): void
+    {
+        (require database_path('migrations/2026_09_09_010000_add_attendance_historical_context.php'))->up();
+        $this->travelTo(CarbonImmutable::parse('2026-08-18 12:00:00', 'Asia/Dushanbe'));
+        $c = $this->context(); $user = $c['agent'];
+        $target = BranchGroup::create(['name' => 'Merged team', 'branch_id' => $c['branch']->id]);
+        $before = ['branch_id' => $c['branch']->id, 'branch_group_id' => $c['group']->id, 'role_id' => $user->role_id];
+        $audit = DB::table('group_access_audit_logs')->insertGetId(['subject_type' => 'user', 'subject_id' => $user->id, 'event' => 'user_group_merged',
+            'old_values' => json_encode($before), 'new_values' => json_encode([...$before, 'branch_group_id' => $target->id]), 'created_at' => '2026-08-17 12:00:00']);
+        $device = $this->device('MERGE-ROLLBACK', $c['branch'], $c['group']);
+        $event = AttendanceEvent::create(['device_id' => $device->id, 'device_user_id' => (string) $user->id, 'user_id' => $user->id,
+            'branch_id' => $c['branch']->id, 'branch_group_id' => $c['group']->id, 'role_slug' => 'agent',
+            'occurred_at' => CarbonImmutable::parse('2026-08-17 13:00:00', 'Asia/Dushanbe')->utc(), 'event_type' => 'check_in']);
+        $original = $event->fresh()->getRawOriginal();
+        DB::unprepared("CREATE TRIGGER refuse_summary BEFORE INSERT ON attendance_daily_summaries BEGIN SELECT RAISE(ABORT, 'summary refused'); END");
+        $path = sys_get_temp_dir().'/attendance-merge-rollback-'.bin2hex(random_bytes(8)).'.json';
+        try {
+            try {
+                Artisan::call('attendance:repair-group-merge', ['audit_id' => [$audit], '--apply' => true, '--backup' => $path]);
+                $this->fail('Rebuilding the day must fail.');
+            } catch (\Illuminate\Database\QueryException $error) {
+                $this->assertStringContainsString('summary refused', $error->getMessage());
+            }
+            $this->assertFileExists($path);
+            $this->assertSame($original, $event->fresh()->getRawOriginal());
+            $this->assertDatabaseCount('attendance_daily_summaries', 0);
+            $this->assertDatabaseCount('attendance_audit_logs', 0);
+        } finally { @unlink($path); }
+    }
+
     public function test_saved_attendance_role_and_schedule_survive_employee_role_and_group_changes(): void
     {
         (require database_path('migrations/2026_09_09_010000_add_attendance_historical_context.php'))->up();
