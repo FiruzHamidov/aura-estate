@@ -99,6 +99,7 @@ class DismissalTransferTest extends TestCase
             $t->timestamps();
         });
         (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
+        (require database_path('migrations/2026_03_07_120100_create_crm_audit_logs_table.php'))->up();
         foreach (['admin', 'agent', 'mop', 'hr', 'branch_director', 'rop', 'intern'] as $role) {
             Role::create(['name' => $role, 'slug' => $role]);
         }
@@ -132,6 +133,64 @@ class DismissalTransferTest extends TestCase
         $this->deleteJson('/api/user/'.$this->employee->id, $plan)->assertOk();
         $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $this->first->id, 'created_by' => $this->employee->id]);
         $this->assertDatabaseHas('properties', ['id' => 3, 'agent_id' => $this->employee->id, 'moderation_status' => 'sold']);
+    }
+
+    public static function unclassifiedActiveStatuses(): array
+    {
+        return [['approved'], ['rejected'], ['denied']];
+    }
+
+    #[DataProvider('unclassifiedActiveStatuses')]
+    public function test_status_edit_cannot_skip_unclassified_author_owned_work(string $status): void
+    {
+        DB::table('clients')->update(['responsible_agent_id' => $this->first->id]);
+        DB::table('properties')->where('id', 2)->update(['agent_id' => $this->first->id]);
+        DB::table('properties')->where('id', 1)->update([
+            'agent_id' => null, 'branch_group_id' => null, 'moderation_status' => $status,
+        ]);
+        $token = $this->employee->createToken('before-status-edit');
+
+        $this->patchJson('/api/user/'.$this->employee->id, ['status' => 'inactive'])
+            ->assertConflict()->assertJsonPath('code', 'EMPLOYEE_TRANSFER_REQUIRED');
+
+        $this->assertSame('active', $this->employee->fresh()->status);
+        $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => null]);
+        $this->assertDatabaseHas('personal_access_tokens', ['id' => $token->accessToken->id]);
+        $this->assertDatabaseCount('crm_audit_logs', 0);
+    }
+
+    public function test_legacy_dismissal_rolls_back_if_unclassified_work_remains(): void
+    {
+        DB::table('clients')->update(['responsible_agent_id' => $this->first->id]);
+        DB::table('properties')->whereIn('id', [1, 2])->update(['branch_group_id' => null]);
+        DB::table('properties')->where('id', 2)->update(['agent_id' => null, 'moderation_status' => 'rejected']);
+        $token = $this->employee->createToken('before-legacy-dismissal');
+        $password = $this->employee->password;
+
+        $this->deleteJson('/api/user/'.$this->employee->id, ['agent_id' => $this->first->id])
+            ->assertConflict()->assertJsonPath('code', 'EMPLOYEE_TRANSFER_REQUIRED');
+
+        $this->assertSame('active', $this->employee->fresh()->status);
+        $this->assertSame($password, $this->employee->fresh()->password);
+        $this->assertDatabaseHas('properties', ['id' => 1, 'agent_id' => $this->employee->id, 'created_by' => $this->employee->id]);
+        $this->assertDatabaseHas('properties', ['id' => 2, 'agent_id' => null]);
+        $this->assertDatabaseHas('personal_access_tokens', ['id' => $token->accessToken->id]);
+        $this->assertDatabaseCount('crm_audit_logs', 0);
+    }
+
+    public function test_successful_dismissal_records_actor_and_transfer_counts_in_employee_history(): void
+    {
+        $this->deleteJson('/api/user/'.$this->employee->id, $this->plan())->assertOk();
+
+        $audit = \App\Models\CrmAuditLog::where('event', 'user_dismissed')->sole();
+        $this->assertSame($this->employee->getMorphClass(), $audit->auditable_type);
+        $this->assertSame($this->employee->id, $audit->auditable_id);
+        $this->assertSame($this->actor->id, $audit->actor_id);
+        $this->assertSame(['status' => 'active'], $audit->old_values);
+        $this->assertSame(['status' => 'inactive'], $audit->new_values);
+        $this->assertSame('Employee dismissal', $audit->context['reason']);
+        $this->assertSame(2, $audit->context['transfer_stats']['transferred_counts']['properties']);
+        $this->assertSame(1, $audit->context['transfer_stats']['transferred_counts']['clients']);
     }
 
     public function test_rop_employee_transfer_moves_properties_bookings_and_tasks_with_their_owner(): void

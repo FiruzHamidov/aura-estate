@@ -1817,7 +1817,7 @@ class UserAccessTest extends TestCase
         $this->assertDatabaseCount('crm_audit_logs', 0);
     }
 
-    public function test_destroy_user_transfers_only_approved_properties(): void
+    public function test_legacy_dismissal_requires_reviewed_plan_for_unapproved_active_properties(): void
     {
         $branch = Branch::create(['name' => 'Branch A']);
 
@@ -1875,7 +1875,7 @@ class UserAccessTest extends TestCase
             'updated_at' => now(),
         ]);
 
-        $closedByStatusPropertyId = DB::table('properties')->insertGetId([
+        $unapprovedPropertyId = DB::table('properties')->insertGetId([
             'title' => 'Not approved property',
             'status_id' => $soldStatusId,
             'moderation_status' => 'pending',
@@ -1899,17 +1899,27 @@ class UserAccessTest extends TestCase
 
         $this->deleteJson('/api/user/'.$dismissedAgent->id, [
             'agent_id' => $targetAgent->id,
-        ])->assertOk();
+        ])->assertConflict()->assertJsonPath('code', 'EMPLOYEE_TRANSFER_REQUIRED');
+        $this->assertSame('active', $dismissedAgent->fresh()->status);
+        $this->assertDatabaseHas('properties', ['id' => $openPropertyId, 'agent_id' => $dismissedAgent->id]);
+        $this->assertDatabaseCount('crm_audit_logs', 0);
+
+        $preview = $this->getJson('/api/user/'.$dismissedAgent->id.'/dismissal-preview')->assertOk()->json();
+        $this->deleteJson('/api/user/'.$dismissedAgent->id, ['transfer_plan' => [
+            'revision' => $preview['revision'], 'reason' => 'Transfer every active listing before dismissal',
+            'records' => array_map(fn ($record) => ['type' => $record['type'], 'id' => $record['id'],
+                'responsible_user_id' => $targetAgent->id], $preview['records']),
+        ]])->assertOk();
 
         $openProperty = DB::table('properties')->where('id', $openPropertyId)->first();
-        $closedByStatusProperty = DB::table('properties')->where('id', $closedByStatusPropertyId)->first();
+        $unapprovedProperty = DB::table('properties')->where('id', $unapprovedPropertyId)->first();
         $closedByModerationProperty = DB::table('properties')->where('id', $closedByModerationPropertyId)->first();
 
-        $this->assertSame($targetAgent->id, $openProperty->created_by);
+        $this->assertSame($dismissedAgent->id, $openProperty->created_by);
         $this->assertSame($targetAgent->id, $openProperty->agent_id);
 
-        $this->assertSame($dismissedAgent->id, $closedByStatusProperty->created_by);
-        $this->assertSame($dismissedAgent->id, $closedByStatusProperty->agent_id);
+        $this->assertSame($dismissedAgent->id, $unapprovedProperty->created_by);
+        $this->assertSame($targetAgent->id, $unapprovedProperty->agent_id);
 
         $this->assertSame($dismissedAgent->id, $closedByModerationProperty->created_by);
         $this->assertSame($dismissedAgent->id, $closedByModerationProperty->agent_id);
@@ -2002,7 +2012,7 @@ class UserAccessTest extends TestCase
             ]);
         }
 
-        // 4 опубликованных объекта уволенного + 1 неопубликованный (не должен переназначаться)
+        // Four active listings are distributed; closed history stays with its author.
         foreach (['D-1', 'D-2', 'D-3', 'D-4'] as $title) {
             DB::table('properties')->insert([
                 'title' => $title,
@@ -2015,10 +2025,10 @@ class UserAccessTest extends TestCase
             ]);
         }
 
-        $pendingId = DB::table('properties')->insertGetId([
-            'title' => 'D-pending',
+        $closedId = DB::table('properties')->insertGetId([
+            'title' => 'D-sold',
             'status_id' => $availableStatusId,
-            'moderation_status' => 'pending',
+            'moderation_status' => 'sold',
             'created_by' => $dismissedAgent->id,
             'agent_id' => $dismissedAgent->id,
             'created_at' => now(),
@@ -2042,9 +2052,9 @@ class UserAccessTest extends TestCase
         $this->assertSame(3, (int) ($counts[$agentB->id] ?? 0));
         $this->assertSame(3, (int) ($counts[$agentC->id] ?? 0));
 
-        $pendingProperty = DB::table('properties')->where('id', $pendingId)->first();
-        $this->assertSame($dismissedAgent->id, $pendingProperty->agent_id);
-        $this->assertSame($dismissedAgent->id, $pendingProperty->created_by);
+        $closedProperty = DB::table('properties')->where('id', $closedId)->first();
+        $this->assertSame($dismissedAgent->id, $closedProperty->agent_id);
+        $this->assertSame($dismissedAgent->id, $closedProperty->created_by);
     }
 
     public function test_deal_default_assignee_is_configurable_and_preserves_explicit_choice(): void
