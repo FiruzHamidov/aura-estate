@@ -1,6 +1,7 @@
 #!/usr/bin/env php
 <?php
 
+use App\Support\ReverbProbeResponse;
 use Illuminate\Contracts\Console\Kernel;
 
 require dirname(__DIR__).'/vendor/autoload.php';
@@ -38,10 +39,11 @@ $check((string) ($connection['secret'] ?? '') !== '', 'REVERB_APP_SECRET is requ
 $check((string) ($connection['app_id'] ?? '') !== '', 'REVERB_APP_ID is required.');
 $check(hash_equals($key, (string) ($application['key'] ?? '')), 'Broadcaster and Reverb application keys do not match.');
 $check(hash_equals((string) ($connection['app_id'] ?? ''), (string) ($application['app_id'] ?? '')), 'Broadcaster and Reverb application IDs do not match.');
-$check(in_array('https://aura.tj', $allowedOrigins, true), 'REVERB_ALLOWED_ORIGINS must include https://aura.tj.');
+$check(in_array('aura.tj', $allowedOrigins, true), 'REVERB_ALLOWED_ORIGINS must include the hostname aura.tj (without a scheme).');
 $check(! in_array('*', $allowedOrigins, true), 'Wildcard Reverb origins are forbidden.');
 $check((string) ($application['accept_client_events_from'] ?? 'none') === 'none', 'Client-originated Reverb events must be disabled.');
 $check((string) ($server['host'] ?? '') !== '' && (int) ($server['port'] ?? 0) > 0, 'The internal Reverb listener is not configured.');
+$check((string) ($server['host'] ?? '') === '127.0.0.1', 'Production Reverb must listen on loopback behind Nginx.');
 $check((int) ($server['port'] ?? 0) === 8080, 'The internal Reverb listener must use port 8080.');
 
 if ($expectEnabled) {
@@ -50,7 +52,7 @@ if ($expectEnabled) {
 }
 
 if ($failures === []) {
-    $handshake = static function (string $origin) use ($host, $port, $key, $server): int {
+    $handshake = static function (string $origin) use ($host, $port, $key, $server): string {
         $context = stream_context_create([
             'ssl' => [
                 'peer_name' => $host,
@@ -69,7 +71,7 @@ if ($failures === []) {
         );
 
         if (! is_resource($socket)) {
-            return 0;
+            return 'failed';
         }
 
         stream_set_timeout($socket, 8);
@@ -87,21 +89,16 @@ if ($failures === []) {
             ."Sec-WebSocket-Key: {$webSocketKey}\r\n"
             ."Sec-WebSocket-Version: 13\r\n\r\n";
         fwrite($socket, $request);
-        $statusLine = fgets($socket, 512);
+        $result = ReverbProbeResponse::read($socket, $webSocketKey);
         fclose($socket);
 
-        if (! is_string($statusLine)
-            || preg_match('/^HTTP\/\d(?:\.\d)?\s+(\d{3})\b/', trim($statusLine), $matches) !== 1) {
-            return 0;
-        }
-
-        return (int) $matches[1];
+        return $result;
     };
 
     $allowedStatus = $handshake('https://aura.tj');
     $deniedStatus = $handshake('https://not-allowed.invalid');
-    $check($allowedStatus === 101, 'The approved-origin WebSocket handshake did not return 101.');
-    $check($deniedStatus !== 0 && $deniedStatus !== 101, 'The foreign-origin WebSocket handshake was not rejected.');
+    $check($allowedStatus === 'connected', 'The approved-origin WebSocket did not establish a Pusher connection.');
+    $check($deniedStatus === 'origin_rejected', 'The foreign-origin WebSocket was not explicitly rejected.');
 }
 
 if ($failures !== []) {
