@@ -54,7 +54,7 @@ Realtime must remain disabled until every requirement below is present and check
 - `REVERB_ALLOWED_ORIGINS` containing only the existing approved frontend origins; do not use `*`
 - `REVERB_APP_ACCEPT_CLIENT_EVENTS_FROM=none`
 - TLS/WebSocket reverse proxy forwarding Upgrade/Connection headers to the Reverb listener
-- a supervised long-running `php artisan reverb:start --host=0.0.0.0 --port=8080` process, separate from the existing queue worker
+- a supervised long-running `php artisan reverb:start --host=127.0.0.1 --port=8080` process, separate from the existing queue worker; the listener is not exposed directly to the internet
 
 Recommended Supervisor program name for the deployment contract is `aura-estate-reverb`, running as `www-data` from `/var/www/aura-estate`, with `autostart=true`, `autorestart=true`, `stopasgroup=true`, and application log rotation. Deploys that change cached config must run `php artisan config:cache`, `php artisan route:cache`, `php artisan queue:restart`, and `php artisan reverb:restart`, then verify both Supervisor programs are RUNNING.
 
