@@ -369,6 +369,84 @@ class KpiConsistencyFeatureTest extends TestCase
         $this->getJson('/api/properties/count?report_context=1&branch_group_id='.$other->id)->assertOk()->assertJsonPath('count', 0);
     }
 
+    public static function bookingReportScopes(): iterable
+    {
+        foreach (['month' => ['2026-10-01', '2026-10-31'], 'week' => ['2026-10-12', '2026-10-18'],
+            'day' => ['2026-10-13', '2026-10-13'], 'next_week' => ['2026-10-19', '2026-10-25']] as $period => [$from, $to]) {
+            foreach (['all', 'branch_b', 'group_a', 'group_b'] as $scope) {
+                foreach ([false, true] as $inactive) foreach (['UTC', 'Asia/Dushanbe'] as $timezone) {
+                    yield "$period/$scope/".(int) $inactive."/$timezone" => [$from, $to, $scope, $inactive, $timezone];
+                }
+            }
+        }
+    }
+
+    #[DataProvider('bookingReportScopes')]
+    public function test_booking_list_matches_employee_shows_for_dates_groups_and_inactive_users(
+        string $from, string $to, string $scope, bool $inactive, string $timezone
+    ): void {
+        config(['app.timezone' => $timezone]);
+        [, $agent, $branch, $group] = $this->fixture();
+        $this->employeeReportProperties();
+        Schema::table('branches', fn (Blueprint $t) => $t->boolean('is_hidden')->default(false));
+        $branchB = Branch::create(['name' => 'B']);
+        $groupB = BranchGroup::create(['name' => 'B', 'branch_id' => $branchB->id]);
+        $hidden = Branch::create(['name' => 'Hidden', 'is_hidden' => true]);
+        $hiddenGroup = BranchGroup::create(['name' => 'Hidden', 'branch_id' => $hidden->id]);
+        $other = User::create(['name' => 'Other', 'phone' => '900990003', 'role_id' => $agent->role_id,
+            'branch_id' => $branchB->id, 'branch_group_id' => $groupB->id]);
+        $former = User::create(['name' => 'Former', 'phone' => '900990004', 'role_id' => $agent->role_id,
+            'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'inactive']);
+        Schema::create('bookings', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('property_id')->nullable(); $t->unsignedBigInteger('agent_id');
+            $t->unsignedBigInteger('created_by'); $t->unsignedBigInteger('branch_group_id')->nullable();
+            $t->unsignedBigInteger('crm_client_id')->nullable(); $t->dateTime('start_time'); $t->dateTime('end_time'); $t->timestamps();
+        });
+        foreach ([$agent, $other, $former] as $author) {
+            foreach (['2026-09-30 18:59:59', '2026-09-30 19:00:00', '2026-10-12 18:59:59',
+                '2026-10-12 19:00:00', '2026-10-13 18:59:59', '2026-10-13 19:00:00',
+                '2026-10-19 09:00:00', '2026-10-25 18:59:59', '2026-10-25 19:00:00',
+                '2026-10-31 18:59:59', '2026-10-31 19:00:00'] as $time) {
+                // Attribution and inactive status must follow the author, not the assigned agent.
+                \DB::table('bookings')->insert(['agent_id' => $former->id, 'created_by' => $author->id,
+                    'branch_group_id' => $author->branch_group_id, 'start_time' => $time, 'end_time' => $time]);
+            }
+        }
+        \DB::table('bookings')->insert(['agent_id' => $agent->id, 'created_by' => $agent->id,
+            'branch_group_id' => $hiddenGroup->id, 'start_time' => '2026-10-13 10:00:00', 'end_time' => '2026-10-13 11:00:00']);
+        $filters = ['date_from' => $from, 'date_to' => $to, 'include_inactive' => (int) $inactive] + match ($scope) {
+            'branch_b' => ['branch_id' => $branchB->id],
+            'group_a' => ['branch_id' => $branch->id, 'branch_group_id' => $group->id],
+            'group_b' => ['branch_id' => $branchB->id, 'branch_group_id' => $groupB->id],
+            default => [],
+        };
+        $report = $this->getJson('/api/reports/employees?'.http_build_query($filters))->assertOk()->json();
+        $list = $this->getJson('/api/bookings?'.http_build_query($filters + ['attribution' => 'author', 'per_page' => 100]))->assertOk()->json();
+        $expectedPerPerson = $from === '2026-10-01' ? 9 : ($from === '2026-10-12' ? 4 : 2);
+        $expectedPeople = $scope === 'all' ? ($inactive ? 3 : 2) : ($scope === 'group_a' && $inactive ? 2 : 1);
+        $this->assertSame($expectedPerPerson * $expectedPeople, $list['total']);
+        $this->assertEquals($list['total'], $report['totals']['shows']);
+        foreach ($report['data'] as $row) {
+            $employeeList = $this->getJson('/api/bookings?'.http_build_query($filters + [
+                'attribution' => 'author', 'agent_id' => $row['employee_id'], 'per_page' => 100,
+            ]))->assertOk()->json();
+            $this->assertEquals($row['shows'], $employeeList['total']);
+            $this->assertSame($expectedPerPerson, $employeeList['total']);
+        }
+        if ($scope === 'all' && $from === '2026-10-01') {
+            $ids = [];
+            for ($page = 1; $page <= (int) ceil($list['total'] / 4); $page++) {
+                $batch = $this->getJson('/api/bookings?'.http_build_query($filters + ['attribution' => 'author', 'per_page' => 4, 'page' => $page]))->assertOk();
+                array_push($ids, ...array_column($batch->json('data'), 'id'));
+            }
+            $this->assertSame(array_column($list['data'], 'id'), $ids);
+            $this->assertCount($list['total'], array_unique($ids));
+            $sameTime = collect($list['data'])->groupBy('start_time')->first(fn ($rows) => $rows->count() > 1)->pluck('id')->all();
+            $descending = $sameTime; rsort($descending);
+            $this->assertSame($descending, $sameTime);
+        }
+    }
+
     private function fixture(string $name = 'Agent'): array
     {
         $adminRole = Role::firstOrCreate(['slug' => 'admin'], ['name' => 'Admin']);
