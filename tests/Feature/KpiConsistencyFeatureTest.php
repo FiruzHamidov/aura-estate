@@ -109,7 +109,8 @@ class KpiConsistencyFeatureTest extends TestCase
             $table->id(); $table->unsignedBigInteger('created_by')->nullable(); $table->unsignedBigInteger('agent_id')->nullable();
             $table->unsignedBigInteger('sale_user_id')->nullable(); $table->unsignedBigInteger('sale_agent_id')->nullable();
             $table->unsignedBigInteger('branch_group_id')->nullable(); $table->unsignedBigInteger('branch_id')->nullable();
-            $table->unsignedBigInteger('contract_type_id')->nullable(); $table->string('moderation_status');
+            $table->unsignedBigInteger('contract_type_id')->nullable(); $table->string('moderation_status')->nullable();
+            $table->string('offer_type')->default('sale'); $table->integer('rooms')->nullable();
             $table->timestamp('sold_at')->nullable(); $table->timestamp('deposit_received_at')->nullable(); $table->timestamps();
         });
     }
@@ -149,7 +150,7 @@ class KpiConsistencyFeatureTest extends TestCase
         $this->getJson($url.'&agent_id='.$seller->id)->assertOk()->assertJsonCount(1, 'data')
             ->assertJsonPath('totals.total_properties', 2)->assertJsonPath('totals.sales', 1)->assertJsonPath('totals.rented', 1);
         $this->getJson($url.'&moderation_status=approved')->assertOk()
-            ->assertJsonPath('totals.total_properties', 1)->assertJsonPath('totals.sales', 1)->assertJsonPath('totals.calls', 31);
+            ->assertJsonPath('totals.total_properties', 1)->assertJsonPath('totals.sales', 0)->assertJsonPath('totals.calls', 31);
         $this->getJson('/api/reports/employees')->assertOk()->assertJsonPath('totals.total_properties', 6)
             ->assertJsonPath('totals.sales', 2)->assertJsonPath('meta.quality.undated_sales_count', 1);
     }
@@ -235,6 +236,137 @@ class KpiConsistencyFeatureTest extends TestCase
             ->assertJsonPath('data.0.status', 'no_plan')->assertJsonPath('data.0.kpi_percent', null)
             ->assertJsonPath('totals.kpi_percent', null)->assertJsonPath('meta.scored_employees_count', 0)
             ->assertJsonPath('totals.calls', 0);
+    }
+
+    public static function alignedReportCases(): array
+    {
+        $cases = [];
+        foreach (['day', 'week', 'next_week', 'month', 'all'] as $period) {
+            foreach (['all', 'first', 'second'] as $group) {
+                foreach ([false, true] as $inactive) {
+                    foreach (['Asia/Dushanbe', 'UTC'] as $timezone) {
+                        $cases[$period.'-'.$group.'-'.(int) $inactive.'-'.$timezone] = [$period, $group, $inactive, $timezone];
+                    }
+                }
+            }
+        }
+        return $cases;
+    }
+
+    #[DataProvider('alignedReportCases')]
+    public function test_cards_employees_and_drilldown_share_dates_groups_and_inactive_filter(string $period, string $groupFilter, bool $inactive, string $timezone): void
+    {
+        [$admin, $agent, $branch, $group] = $this->fixture();
+        Config::set('app.timezone', $timezone);
+        $this->employeeReportProperties();
+        $other = BranchGroup::create(['name' => 'Other group', 'branch_id' => $branch->id]);
+        $former = User::create(['name' => 'Former', 'phone' => '900990099', 'role_id' => $agent->role_id,
+            'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'status' => 'inactive']);
+        $admin->update(['name' => 'Office']); // A real owner outside the KPI subject roster.
+        $storage = fn ($time) => \Illuminate\Support\Carbon::parse($time, 'Asia/Dushanbe')->setTimezone($timezone)->toDateTimeString();
+        $records = [
+            1 => ['approved', $agent->id, $group->id, '2026-10-17 00:00:00'],
+            2 => ['sold', $agent->id, $group->id, '2026-10-20 12:00:00'],
+            3 => ['sold', $agent->id, $other->id, '2026-10-20 12:00:00'],
+            4 => ['approved', $former->id, $group->id, '2026-10-17 12:00:00'],
+            5 => ['rented', $former->id, $group->id, '2026-10-20 12:00:00'],
+            6 => ['sold_by_owner', $admin->id, $group->id, '2026-10-20 12:00:00'],
+            7 => ['deposit', $agent->id, $group->id, '2026-10-20 12:00:00'],
+            8 => ['deleted', $agent->id, $group->id, '2026-10-17 12:00:00'],
+            10 => [null, $agent->id, $group->id, '2026-10-17 12:00:00'],
+            11 => ['sold', null, $group->id, '2026-10-20 12:00:00'],
+            12 => ['approved', $agent->id, $group->id, '2026-10-16 23:59:59'],
+            13 => ['approved', $agent->id, $group->id, '2026-10-24 23:59:59'],
+            14 => ['approved', $agent->id, $group->id, '2026-10-25 00:00:00'],
+        ];
+        foreach ($records as $id => [$status, $owner, $groupId, $event]) {
+            $closed = in_array($status, ['sold', 'rented', 'sold_by_owner'], true);
+            \DB::table('properties')->insert(['id' => $id, 'moderation_status' => $status,
+                'created_by' => $owner, 'agent_id' => $owner, 'sale_agent_id' => $closed ? $owner : null,
+                'branch_id' => $branch->id, 'branch_group_id' => $groupId, 'rooms' => 2,
+                'created_at' => $storage($closed || $status === 'deposit' ? '2026-09-01 12:00:00' : $event),
+                'sold_at' => $closed ? $storage($event) : null,
+                'deposit_received_at' => $status === 'deposit' ? $storage($event) : null]);
+        }
+        $expected = match ($period) {
+            'day' => [1, 4, 8, 10],
+            'week' => [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 13],
+            'next_week' => [2, 3, 5, 6, 7, 11, 13, 14],
+            default => array_keys($records),
+        };
+        if (! $inactive) $expected = array_values(array_diff($expected, [4, 5]));
+        if ($groupFilter === 'first') $expected = array_values(array_diff($expected, [3]));
+        if ($groupFilter === 'second') $expected = array_values(array_intersect($expected, [3]));
+        $query = ['include_inactive' => (int) $inactive];
+        if ($period !== 'all') {
+            [$query['date_from'], $query['date_to']] = match ($period) {
+                'month' => ['2026-10-01', '2026-10-31'],
+                'day' => ['2026-10-17', '2026-10-17'], 'week' => ['2026-10-17', '2026-10-24'],
+                default => ['2026-10-19', '2026-10-25'],
+            };
+        }
+        if ($groupFilter !== 'all') $query['branch_group_id'] = $groupFilter === 'first' ? $group->id : $other->id;
+        $queryString = '?'.http_build_query($query);
+        $report = $this->getJson('/api/reports/employees'.$queryString)->assertOk()
+            ->assertJsonPath('totals.total_properties', count($expected))->json();
+        $this->getJson('/api/reports/properties/summary'.$queryString)->assertOk()->assertExactJson($report['summary']);
+        $this->getJson('/api/properties/count'.$queryString.'&report_context=1')->assertOk()->assertJsonPath('count', count($expected));
+        $this->assertSame(count($expected), $report['summary']['total']);
+        $this->assertSame(count($expected), array_sum(array_column($report['rooms'], 'cnt')));
+        $this->assertEqualsCanonicalizing($expected, collect($report['data'])->pluck('properties')->flatten(1)->pluck('id')->all());
+        foreach ($report['data'] as $row) {
+            $this->assertSame($row['total_properties'], count($row['properties']));
+            $this->assertSame($row['total_properties'], array_sum($row['by_status']));
+            $this->assertSame($row['sales'], $row['by_status']['sold']);
+            if ($row['employee_id'] === $admin->id || $row['employee_id'] === 0) $this->assertNull($row['kpi_percent']);
+        }
+        foreach (['unknown', 'deposit', 'deleted', 'sold', 'rented', 'sold_by_owner', 'approved'] as $status) {
+            $this->getJson('/api/properties/count'.$queryString.'&report_context=1&moderation_status='.$status)
+                ->assertOk()->assertJsonPath('count', $report['totals']['by_status'][$status]);
+        }
+    }
+
+    public function test_report_branch_owner_and_explicit_sale_dates_match_details(): void
+    {
+        [, $author, $branch, $group] = $this->fixture();
+        $this->employeeReportProperties();
+        $otherBranch = Branch::create(['name' => 'Other']);
+        $seller = User::create(['name' => 'Seller', 'phone' => '900990003', 'role_id' => $author->role_id,
+            'branch_id' => $otherBranch->id]);
+        foreach (['2026-10-17 23:59:59', '2026-10-18 00:00:00', '2026-10-23 23:59:59', '2026-10-24 00:00:00'] as $id => $soldAt) {
+            \DB::table('properties')->insert(['id' => $id + 1, 'created_by' => $author->id, 'sale_agent_id' => $seller->id,
+                'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'moderation_status' => 'sold',
+                'created_at' => '2026-09-01 12:00:00', 'sold_at' => $soldAt]);
+        }
+        $range = '?date_from=2026-10-01&date_to=2026-10-31&sold_at_from=2026-10-18&sold_at_to=2026-10-23';
+        foreach (['&branch_id='.$otherBranch->id => 2, '&branch_id='.$branch->id => 0,
+            '&agent_id='.$seller->id => 2, '&agent_id='.$author->id => 0] as $filter => $count) {
+            $this->getJson('/api/reports/employees'.$range.$filter)->assertOk()
+                ->assertJsonPath('summary.total', $count)->assertJsonPath('totals.sales', $count);
+            $this->getJson('/api/properties/count'.$range.$filter.'&report_context=1')->assertOk()->assertJsonPath('count', $count);
+        }
+    }
+
+    public function test_group_scoped_drilldown_includes_deleted_and_unknown_but_excludes_foreign_group(): void
+    {
+        [$actor, $agent, $branch, $group] = $this->fixture();
+        $this->employeeReportProperties();
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $actor->role->forceFill(['permissions' => ['property_reports.view', 'property_reports.scope.group',
+            'properties.list.scope.group', 'properties.internal.read']])->save();
+        $other = BranchGroup::create(['name' => 'Other', 'branch_id' => $branch->id]);
+        foreach ([['deleted', $group->id], [null, $group->id], ['approved', $other->id]] as [$status, $groupId]) {
+            \DB::table('properties')->insert(['created_by' => $agent->id, 'agent_id' => $agent->id,
+                'branch_id' => $branch->id, 'branch_group_id' => $groupId, 'moderation_status' => $status,
+                'created_at' => '2026-10-20 12:00:00']);
+        }
+        Sanctum::actingAs($actor->fresh());
+        $this->getJson('/api/reports/employees')->assertOk()->assertJsonPath('summary.total', 2)->assertJsonPath('totals.total_properties', 2)
+            ->assertJsonPath('totals.kpi_percent', null)->assertJsonPath('totals.calls', null);
+        $this->getJson('/api/properties/count?report_context=1')->assertOk()->assertJsonPath('count', 2);
+        $this->getJson('/api/properties/count')->assertOk()->assertJsonPath('count', 0);
+        $this->getJson('/api/properties/count?report_context=1&moderation_status=__no_match__')->assertOk()->assertJsonPath('count', 0);
+        $this->getJson('/api/properties/count?report_context=1&branch_group_id='.$other->id)->assertOk()->assertJsonPath('count', 0);
     }
 
     private function fixture(string $name = 'Agent'): array
