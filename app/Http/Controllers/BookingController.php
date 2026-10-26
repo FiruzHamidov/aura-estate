@@ -98,11 +98,12 @@ class BookingController extends Controller
             return null;
         }
 
-        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)) {
-            $value .= $boundary === 'start' ? ' 00:00:00' : ' 23:59:59';
-        }
-
         try {
+            if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)) {
+                // Date-only report filters are business days in Dushanbe, just as in KPI.
+                $date = Carbon::parse($value, 'Asia/Dushanbe');
+                return ($boundary === 'start' ? $date->startOfDay() : $date->endOfDay())->utc()->toDateTimeString();
+            }
             return $this->parseInputDateTimeToUtc($value)->toDateTimeString();
         } catch (\Throwable $e) {
             \Log::warning('Failed to parse booking date filter', [
@@ -406,6 +407,7 @@ class BookingController extends Controller
         $validated = $request->validate([
             'agent_id' => 'nullable|integer',
             'attribution' => 'nullable|in:agent,author',
+            'include_inactive' => 'nullable|boolean',
             'branch_id' => 'nullable',
             'branch_group_id' => 'nullable',
             'date_from' => 'nullable|string',
@@ -418,7 +420,16 @@ class BookingController extends Controller
 
         $employeeColumn = $request->input('attribution') === 'author'
             ? \App\Support\BookingAttribution::column() : 'agent_id';
-        $q = Booking::query()->with(['property', 'agent', 'client.type', 'creator:id,name']);
+        $q = Booking::query()->tap(fn ($query) => \App\Support\BranchVisibility::records($query))
+            ->with(['property', 'agent', 'client.type', 'creator:id,name']);
+        // Report filters follow the employee whose activity is being counted.
+        // Keep callers without this option compatible (e.g. the booking calendar).
+        if ($request->has('include_inactive')) {
+            abort_if($request->boolean('include_inactive') && ! $request->user()?->hasPermission('kpi.inactive.view'), 403);
+            if (! $request->boolean('include_inactive')) {
+                $q->whereIn($employeeColumn, User::query()->where('status', '!=', 'inactive')->select('id'));
+            }
+        }
 
         // from / to: convert to UTC for DB comparison
         $fromRaw = $request->input('from') ?? $request->input('date_from');
@@ -444,6 +455,7 @@ class BookingController extends Controller
         $this->applyBranchAccessForAgents($request, $q, $employeeColumn);
 
         $bookings = $q->orderByDesc('start_time')
+            ->orderByDesc('bookings.id')
             ->paginate((int) ($validated['per_page'] ?? 20))
             ->withQueryString();
 
