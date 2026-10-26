@@ -3,11 +3,9 @@
 namespace App\Http\Controllers;
 
 use App\Models\Booking;
-use App\Models\BranchGroup;
 use App\Models\Property;
 use App\Models\User;
 use App\Services\SalesAttributionService;
-use App\Support\RbacBranchScope;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -16,17 +14,10 @@ use Illuminate\Support\Facades\Schema;
 class PropertyReportController extends Controller
 {
     public function __construct(
-        private readonly RbacBranchScope $branchScope,
-        private readonly SalesAttributionService $salesAttributionService
+        private readonly SalesAttributionService $salesAttributionService,
+        private readonly \App\Services\PropertyReportQuery $reportQuery
     )
     {
-    }
-
-    private function ensureReportsAllowed(Request $request): void
-    {
-        $actor = $request->user() ?? auth()->user();
-        $actor?->loadMissing('role');
-        abort_unless($actor?->hasPermission('property_reports.view'), 403, 'Forbidden');
     }
 
     /** One complete, scoped dataset for the employee table and its export. */
@@ -38,8 +29,8 @@ class PropertyReportController extends Controller
 
     private function employeeReportPayload(Request $request, \App\Services\KpiModuleService $kpi)
     {
-        $this->ensureReportsAllowed($request);
-        $this->validateReportScope($request);
+        $this->reportQuery->ensureReportsAllowed($request);
+        $this->reportQuery->validateReportScope($request);
         $actor = $request->user();
         abort_unless(collect(['all', 'branch', 'group'])->contains(fn ($scope) => $actor->hasPermission('property_reports.scope.'.$scope)), 403);
         $filters = $request->validate([
@@ -56,57 +47,43 @@ class PropertyReportController extends Controller
         abort_if($request->boolean('include_inactive') && ! $actor->hasPermission('kpi.inactive.view'), 403);
         if (! $actor->usesAssignedGroupScope()) {
             $employees = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
-            $this->applyBranchAccessByUserColumn($request, $employees, 'users.id');
+            $this->reportQuery->applyBranchAccessByUserColumn($request, $employees, 'users.id');
             $filters['user_ids'] = $employees->pluck('users.id')->all();
         }
+        $properties = $this->reportQuery->records($request);
+        $byEmployee = $properties->groupBy(fn ($property) => $this->reportQuery->ownerId($property));
+        $filters['inventory_owner_ids'] = $byEmployee->keys()->all();
+        $filters['unified_employees'] = true;
         $allPeriod = empty($filters['date_from']);
-        $from = $allPeriod ? $kpi->earliestScopedUserDate($actor, $filters)
+        $canReadKpi = $actor->hasPermission('kpi.reports.view');
+        $from = $allPeriod ? ($canReadKpi ? $kpi->earliestScopedUserDate($actor, $filters) : Carbon::now('Asia/Dushanbe')->startOfDay())
             : Carbon::parse($filters['date_from'], 'Asia/Dushanbe')->startOfDay();
         $to = $allPeriod ? Carbon::now('Asia/Dushanbe')->endOfDay()
             : Carbon::parse($filters['date_to'], 'Asia/Dushanbe')->endOfDay();
         $period = $allPeriod ? 'range' : ($from->isSameDay($to) ? 'day' : (($filters['interval'] ?? '') === 'month' ? 'month' : 'week'));
         // Internal options: HTTP pagination cannot truncate totals or Excel exports.
-        $payload = $kpi->periodRowsV2($actor, $period, $from, $to, array_merge($filters, [
+        $payload = $canReadKpi ? $kpi->periodRowsV2($actor, $period, $from, $to, array_merge($filters, [
             'per_page' => PHP_INT_MAX, 'page' => 1, 'all_period' => $allPeriod,
-            'include_breakdown' => false, 'unified_employees' => true,
-        ]));
+            'include_breakdown' => false,
+        ])) : ['data' => [], 'meta' => ['quality' => []]];
         $rows = collect($payload['data']);
-        $ids = $rows->pluck('employee_id')->all();
 
-        $closed = ['sold', 'rented', 'sold_by_owner'];
-        $owner = "CASE WHEN properties.moderation_status IN ('sold','rented','sold_by_owner') THEN "
-            .$this->salesAttributionService->primarySellerExpression().' ELSE '.$this->propertyAuthorExpression().' END';
-        $propertyFilters = new Request($request->except([
-            'date_from', 'date_to', 'from', 'to', 'sold_at_from', 'sold_at_to',
-            'deposit_received_at_from', 'deposit_received_at_to', 'date_field',
-        ]));
-        $query = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
-        [$query] = $this->applyCommonFilters($propertyFilters, $query);
-        $query->whereIn(DB::raw($owner), $ids);
-        $storageZone = (string) config('app.timezone', 'Asia/Dushanbe');
-        $bounds = fn (Carbon $start, Carbon $end) => [
-            $start->copy()->startOfDay()->setTimezone($storageZone)->toDateTimeString(),
-            $end->copy()->endOfDay()->setTimezone($storageZone)->toDateTimeString(),
-        ];
-        $soldFrom = ! empty($filters['sold_at_from']) ? Carbon::parse($filters['sold_at_from'], 'Asia/Dushanbe') : $from;
-        $soldTo = ! empty($filters['sold_at_to']) ? Carbon::parse($filters['sold_at_to'], 'Asia/Dushanbe') : $to;
-        if (! $allPeriod || $request->filled('sold_at_from') || $request->filled('sold_at_to')) {
-            $query->where(function ($q) use ($closed, $allPeriod, $bounds, $from, $to, $soldFrom, $soldTo) {
-                $q->where(fn ($open) => $open->where(fn ($status) => $status->whereNotIn('moderation_status', [...$closed, 'deposit'])->orWhereNull('moderation_status'))
-                    ->when(! $allPeriod, fn ($dates) => $dates->whereBetween('created_at', $bounds($from, $to))))
-                    ->orWhere(fn ($sales) => $sales->whereIn('moderation_status', $closed)->whereBetween('sold_at', $bounds($soldFrom, $soldTo)))
-                    ->orWhere(fn ($deposit) => $deposit->where('moderation_status', 'deposit')
-                        ->when(! $allPeriod, fn ($dates) => $dates->whereBetween('deposit_received_at', $bounds($from, $to))));
-            });
+        // The inventory may belong to an office account or a former group member
+        // outside the KPI roster. Keep those objects visible in their own row.
+        $missingIds = $byEmployee->keys()->diff($rows->pluck('employee_id'));
+        $owners = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
+            ->with(['branch:id,name', 'role'])->whereIn('id', $byEmployee->keys())->get()->keyBy('id');
+        foreach ($missingIds as $id) {
+            $owner = $owners->get($id);
+            $rows->push([
+                'employee_id' => (int) $id, 'employee_name' => $owner?->name ?? 'Сотрудник не указан',
+                'branch_name' => $owner?->branch?->name, 'metrics' => [], 'kpi_percent' => null, 'status' => 'no_plan',
+                'objects' => null, 'shows' => null, 'clients' => null, 'calls' => null, 'ads' => null, 'sales' => 0,
+            ]);
         }
-        $properties = $query->select(['id', 'moderation_status', 'contract_type_id', 'created_at', 'sold_at',
-            'deposit_received_at', ...$this->salesAttributionService->sellerColumns()])->get();
-        $byEmployee = $properties->groupBy(fn ($property) => in_array($property->moderation_status, $closed, true)
-            ? $this->salesAttributionService->primarySellerId($property)
-            : ((int) $property->created_by > 0 ? (int) $property->created_by : (int) $property->agent_id));
         $statuses = ['draft', 'pending', 'approved', 'deposit', 'sold', 'rented', 'sold_by_owner', 'denied', 'rejected', 'deleted', 'unknown'];
         $contracts = ['alternative', 'exclusive', 'none', 'unspecified'];
-        $rows = $rows->map(function (array $row) use ($byEmployee, $statuses, $contracts) {
+        $rows = $rows->map(function (array $row) use ($byEmployee, $statuses, $contracts, $owners) {
             $items = $byEmployee->get($row['employee_id'], collect());
             $byStatus = array_fill_keys($statuses, 0);
             $byContract = array_fill_keys($contracts, 0);
@@ -121,6 +98,7 @@ class PropertyReportController extends Controller
             }
             $row['total_properties'] = $items->count();
             $row['approved'] = $byStatus['approved'];
+            $row['sales'] = $byStatus['sold'];
             $row['rented'] = $byStatus['rented'];
             $row['sold_by_owner'] = $byStatus['sold_by_owner'];
             $row['by_status'] = $byStatus;
@@ -132,7 +110,11 @@ class PropertyReportController extends Controller
                     ? $p->sold_at : ($p->moderation_status === 'deposit' ? $p->deposit_received_at : $p->created_at)),
             ])->values();
             foreach ($row['metrics'] as $key => $metric) {
-                if ($metric['source_error'] ?? false) $row[$key] = null;
+                if (($metric['source_error'] ?? false) && $key !== 'sales') $row[$key] = null;
+            }
+            if (($owner = $owners->get($row['employee_id'])) && ! $owner->hasPermission('kpi.subject.period_reports')) {
+                foreach ($row['metrics'] as &$metric) { $metric['target_value'] = 0; $metric['weight_used'] = 0; }
+                unset($metric);
             }
             $hasPlan = collect($row['metrics'])->contains(fn ($m) => ($m['target_value'] ?? 0) > 0 && ($m['weight_used'] ?? 0) > 0);
             $sourceError = collect($row['metrics'])->contains(fn ($m) => $m['source_error'] ?? false);
@@ -154,7 +136,8 @@ class PropertyReportController extends Controller
         }
         $scored = $rows->whereNotNull('kpi_percent');
         $totals['kpi_percent'] = $scored->isEmpty() ? null : round($scored->avg('kpi_percent'), 2);
-        return response()->json(['data' => $rows, 'totals' => $totals, 'meta' => [
+        return response()->json(['data' => $rows, 'totals' => $totals,
+            'summary' => $this->reportQuery->summary($properties), 'rooms' => $this->reportQuery->rooms($properties), 'meta' => [
             'date_from' => $allPeriod ? null : $from->toDateString(), 'date_to' => $allPeriod ? null : $to->toDateString(),
             'timezone' => 'Asia/Dushanbe', 'generated_at' => Carbon::now('Asia/Dushanbe')->toIso8601String(),
             'employees_count' => $rows->count(), 'scored_employees_count' => $scored->count(),
@@ -169,209 +152,6 @@ class PropertyReportController extends Controller
         if ($value === null || $value === '') return [];
         if (is_array($value)) return array_values(array_filter($value, fn($v) => $v !== '' && $v !== null));
         return array_values(array_filter(array_map('trim', explode(',', $value)), fn($v) => $v !== ''));
-    }
-
-    private function applyBranchAccessFilter(Request $request, $query, string $creatorColumn = 'created_by', ?string $reportOwnerExpression = null): void
-    {
-        $this->validateReportScope($request);
-
-        $authUser = auth()->user();
-        $authUser?->loadMissing('role');
-        $roleSlug = $authUser->role->slug ?? null;
-        if (! collect(['all', 'branch', 'group'])->contains(fn ($scope) => $authUser?->hasPermission('property_reports.scope.'.$scope))) {
-            $query->whereRaw('1 = 0');
-            return;
-        }
-        if ($authUser?->usesAssignedGroupScope()) {
-            $access = app(\App\Support\RopGroupAccess::class);
-            $isBooking = $query->getModel() instanceof Booking;
-            $groupColumn = $isBooking ? 'bookings.branch_group_id' : 'properties.branch_group_id';
-            $access->scope($query, $authUser, $groupColumn, $isBooking ? null : 'properties.branch_id');
-            if ($request->filled('branch_group_id')) {
-                $query->whereIn($groupColumn, $this->toArray($request->input('branch_group_id')));
-            }
-            if ($isBooking && $request->hasAny([
-                'type_id', 'status_id', 'location_id', 'repair_type_id', 'currency', 'offer_type',
-                'listing_type', 'contract_type_id', 'moderation_status', 'district',
-                'sold_at_from', 'sold_at_to', 'deposit_received_at_from', 'deposit_received_at_to',
-                'priceFrom', 'priceTo', 'roomsFrom', 'roomsTo', 'total_areaFrom', 'total_areaTo',
-                'living_areaFrom', 'living_areaTo', 'floorFrom', 'floorTo', 'total_floorsFrom',
-                'total_floorsTo', 'year_builtFrom', 'year_builtTo',
-            ])) {
-                // Filtering by a related property's private attributes must not reveal a foreign property.
-                $query->whereIn('properties.id', $access->scope(Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q)), $authUser,
-                    'properties.branch_group_id', 'properties.branch_id')->select('properties.id'));
-            }
-            return;
-        }
-
-
-        if ($query->getModel() instanceof Booking) {
-            $this->applyBranchAccessByUserColumn($request, $query, $creatorColumn);
-            return;
-        }
-
-        if ($request->filled('branch_group_id')) {
-            $branchGroupIds = array_values(array_filter(
-                array_map('intval', $this->toArray($request->input('branch_group_id')))
-            ));
-
-            if (!empty($branchGroupIds)) {
-                $this->applyPropertyBranchGroupFilter($query, $branchGroupIds);
-            }
-        }
-
-        // Явный фильтр по филиалу для админских/общих отчётов
-        if ($request->filled('branch_id')) {
-            $branchIds = $this->toArray($request->input('branch_id'));
-            if (!empty($branchIds)) {
-                // An explicit report filter follows the credited employee. The
-                // mandatory record access restrictions below remain independent.
-                $query->whereIn($reportOwnerExpression ? DB::raw($reportOwnerExpression) : $creatorColumn,
-                    User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->whereIn('branch_id', $branchIds)->select('id'));
-            }
-        }
-
-        // Принудительное ограничение для branch-scoped ролей: только свой филиал
-        if ($authUser?->hasPermission('property_reports.scope.branch')) {
-            if (empty($authUser->branch_id)) {
-                $query->whereRaw('1 = 0');
-                return;
-            }
-
-            $query->whereIn($creatorColumn, User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->where('branch_id', $authUser->branch_id)->select('id'));
-        }
-
-        if ($authUser?->hasPermission('property_reports.scope.group')) {
-            if (empty($authUser->branch_group_id)) {
-                $query->whereRaw('1 = 0');
-                return;
-            }
-
-            $this->applyPropertyBranchGroupFilter($query, [(int) $authUser->branch_group_id]);
-        }
-    }
-
-    private function applyBranchAccessByUserColumn(Request $request, $query, string|\Illuminate\Database\Query\Expression $userColumn): void
-    {
-        $this->validateReportScope($request);
-
-        $authUser = auth()->user();
-        $authUser?->loadMissing('role');
-        $roleSlug = $authUser->role->slug ?? null;
-        if (! collect(['all', 'branch', 'group'])->contains(fn ($scope) => $authUser?->hasPermission('property_reports.scope.'.$scope))) {
-            $query->whereRaw('1 = 0');
-            return;
-        }
-        if ($authUser?->usesAssignedGroupScope()) {
-            $table = $query instanceof \Illuminate\Database\Eloquent\Builder ? $query->getModel()->getTable() : $query->from;
-            abort_unless(in_array($table, ['users', 'clients', 'bookings'], true), 403, 'GROUP_SCOPE_UNAVAILABLE');
-            app(\App\Support\RopGroupAccess::class)->scope($query, $authUser, $table.'.branch_group_id', $table === 'bookings' ? null : $table.'.branch_id');
-            if ($table === 'users') {
-                $query->whereIn('users.id', app(\App\Support\RopGroupAccess::class)->employees($authUser)->select('users.id'));
-            }
-            if ($request->filled('branch_group_id')) {
-                $query->whereIn($table.'.branch_group_id', $this->toArray($request->input('branch_group_id')));
-            }
-            return;
-        }
-
-
-        if ($request->filled('branch_group_id')) {
-            $branchGroupIds = $this->toArray($request->input('branch_group_id'));
-            if (!empty($branchGroupIds)) {
-                if (!Schema::hasColumn('users', 'branch_group_id')) {
-                    $query->whereRaw('1 = 0');
-                    return;
-                }
-
-                $query->whereIn($userColumn, User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->whereIn('branch_group_id', $branchGroupIds)->select('id'));
-            }
-        }
-
-        if ($request->filled('branch_id')) {
-            $branchIds = $this->toArray($request->input('branch_id'));
-            if (!empty($branchIds)) {
-                $query->whereIn($userColumn, User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->whereIn('branch_id', $branchIds)->select('id'));
-            }
-        }
-
-        if ($authUser?->hasPermission('property_reports.scope.branch')) {
-            if (empty($authUser->branch_id)) {
-                $query->whereRaw('1 = 0');
-                return;
-            }
-
-            $query->whereIn($userColumn, User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->where('branch_id', $authUser->branch_id)->select('id'));
-        }
-
-        if ($authUser?->hasPermission('property_reports.scope.group')) {
-            if (empty($authUser->branch_group_id)) {
-                $query->whereRaw('1 = 0');
-                return;
-            }
-
-            if (!Schema::hasColumn('users', 'branch_group_id')) {
-                $query->whereRaw('1 = 0');
-                return;
-            }
-
-            $query->whereIn($userColumn, User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->where('branch_group_id', $authUser->branch_group_id)->select('id'));
-        }
-    }
-
-    private function applyPropertyBranchGroupFilter($query, array $branchGroupIds): void
-    {
-        $branchGroupIds = array_values(array_filter(array_map('intval', $branchGroupIds)));
-
-        if (empty($branchGroupIds) || !Schema::hasColumn('users', 'branch_group_id')) {
-            $query->whereRaw('1 = 0');
-            return;
-        }
-
-        $query->where(function ($branchGroupQuery) use ($branchGroupIds) {
-            $hasPropertyBranchGroupId = Schema::hasColumn('properties', 'branch_group_id');
-
-            if ($hasPropertyBranchGroupId) {
-                $branchGroupQuery->whereIn('properties.branch_group_id', $branchGroupIds);
-            }
-
-            $branchGroupQuery->orWhere(function ($agentQuery) use ($branchGroupIds, $hasPropertyBranchGroupId) {
-                if ($hasPropertyBranchGroupId) {
-                    $agentQuery->whereNull('properties.branch_group_id');
-                }
-
-                $agentQuery
-                    ->whereNotNull('properties.agent_id')
-                    ->whereIn('properties.agent_id', User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
-                        ->whereIn('branch_group_id', $branchGroupIds)
-                        ->select('id'));
-            });
-
-            $branchGroupQuery->orWhere(function ($creatorQuery) use ($branchGroupIds, $hasPropertyBranchGroupId) {
-                if ($hasPropertyBranchGroupId) {
-                    $creatorQuery->whereNull('properties.branch_group_id');
-                }
-
-                $creatorQuery
-                    ->whereNotNull('properties.created_by')
-                    ->where(function ($agentFallbackQuery) {
-                        $agentFallbackQuery
-                            ->whereNull('properties.agent_id')
-                            ->orWhereNotIn('properties.agent_id', User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
-                                ->whereNotNull('branch_group_id')
-                                ->select('id'));
-                    })
-                    ->whereIn('properties.created_by', User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
-                        ->whereIn('branch_group_id', $branchGroupIds)
-                        ->select('id'));
-            });
-        });
-    }
-
-    private function propertyAuthorExpression(): string
-    {
-        return 'COALESCE(NULLIF(properties.created_by, 0), NULLIF(properties.agent_id, 0))';
     }
 
     private function monthRange(Request $request): array
@@ -394,15 +174,15 @@ class PropertyReportController extends Controller
 
     private function buildMonthSnapshot(Request $request, Carbon $start, Carbon $end): array
     {
-        $this->ensureReportsAllowed($request);
+        $this->reportQuery->ensureReportsAllowed($request);
 
         $soldStatuses = ['sold', 'rented', 'sold_by_owner'];
         $salesUserExpr = $this->salesAttributionService->primarySellerExpression();
-        $authorExpr = $this->propertyAuthorExpression();
+        $authorExpr = $this->reportQuery->propertyAuthorExpression();
 
         $addedQ = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->whereBetween('created_at', [$start, $end]);
-        $this->applyBranchAccessFilter($request, $addedQ, 'created_by', $authorExpr);
+        $this->reportQuery->applyBranchAccessFilter($request, $addedQ, 'created_by', $authorExpr);
         if ($request->filled('agent_id')) {
             $addedQ->whereIn(DB::raw($authorExpr), array_map('intval', $this->toArray($request->input('agent_id'))));
         }
@@ -410,7 +190,7 @@ class PropertyReportController extends Controller
         $closedQ = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->whereIn('moderation_status', $soldStatuses)
             ->whereBetween('sold_at', [$start, $end]);
-        $this->applyBranchAccessFilter($request, $closedQ, 'created_by', $salesUserExpr);
+        $this->reportQuery->applyBranchAccessFilter($request, $closedQ, 'created_by', $salesUserExpr);
         if ($request->filled('agent_id')) {
             $agentIds = $this->toArray($request->input('agent_id'));
             $closedQ->whereIn(DB::raw($salesUserExpr), array_map('intval', $agentIds));
@@ -419,7 +199,7 @@ class PropertyReportController extends Controller
         $depositQ = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->where('moderation_status', 'deposit')
             ->whereBetween('deposit_received_at', [$start, $end]);
-        $this->applyBranchAccessFilter($request, $depositQ, 'created_by', $authorExpr);
+        $this->reportQuery->applyBranchAccessFilter($request, $depositQ, 'created_by', $authorExpr);
         if ($request->filled('agent_id')) {
             $depositQ->whereIn(DB::raw($authorExpr), array_map('intval', $this->toArray($request->input('agent_id'))));
         }
@@ -428,7 +208,7 @@ class PropertyReportController extends Controller
             ->leftJoin('properties', 'properties.id', '=', 'bookings.property_id')
             ->whereBetween('bookings.start_time', [$start->copy()->utc(), $end->copy()->utc()]);
 
-        $this->applyBranchAccessByUserColumn($request, $showsQ, \App\Support\BookingAttribution::column());
+        $this->reportQuery->applyBranchAccessByUserColumn($request, $showsQ, \App\Support\BookingAttribution::column());
 
         if ($request->filled('agent_id')) {
             $showsQ->whereIn(\App\Support\BookingAttribution::column(), $this->toArray($request->input('agent_id')));
@@ -626,197 +406,6 @@ class PropertyReportController extends Controller
      *   автоматически используется sold_at для корректной отчётности.
      * - Поддерживает фильтрацию по agent_id.
      */
-    private function applyCommonFilters(Request $request, $query, string $creatorColumn = 'created_by')
-    {
-        $this->ensureReportsAllowed($request);
-        $this->validateReportScope($request);
-
-        // Диапазон дат и поле даты
-        // created_at | updated_at | sold_at
-        $dateField = $request->input('date_field', null);
-
-        // Если не указано поле даты и фильтруем по закрытым статусам — используем sold_at
-        if ($dateField === null) {
-            $statusVals = $this->toArray($request->input('moderation_status'));
-            $closed = ['sold', 'rented', 'sold_by_owner'];
-            $dateField = array_intersect($statusVals, $closed) ? 'sold_at' : 'created_at';
-        }
-
-        $allowedDateFields = [
-            'created_at',
-            'updated_at',
-            'sold_at',
-            'deposit_received_at',
-            'bookings.created_at',
-            'properties.created_at',
-        ];
-
-        if (!in_array($dateField, $allowedDateFields, true)) {
-            $dateField = 'created_at';
-        }
-        $qualifiedDateField = str_contains($dateField, '.') ? $dateField : 'properties.'.$dateField;
-
-        $dateFrom = $request->input('date_from'); // '2025-01-01'
-        $dateTo   = $request->input('date_to');   // '2025-01-31'
-
-        $soldFrom = $request->input('sold_at_from');
-        $soldTo   = $request->input('sold_at_to');
-        if ($dateFrom) $query->whereDate($qualifiedDateField, '>=', $dateFrom);
-        if ($dateTo)   $query->whereDate($qualifiedDateField, '<=', $dateTo);
-
-        if ($soldFrom || $soldTo) {
-//            $query->whereIn('moderation_status', ['sold','rented','sold_by_owner']);
-
-            if ($soldFrom) $query->whereDate('properties.sold_at', '>=', $soldFrom);
-            if ($soldTo)   $query->whereDate('properties.sold_at', '<=', $soldTo);
-        }
-
-        $depositFrom = $request->input('deposit_received_at_from');
-        $depositTo   = $request->input('deposit_received_at_to');
-        if ($depositFrom) {
-            $query->whereDate('properties.deposit_received_at', '>=', $depositFrom);
-        }
-        if ($depositTo) {
-            $query->whereDate('properties.deposit_received_at', '<=', $depositTo);
-        }
-
-        // Мультиселекты (включая agent_id для отчётов по агентам)
-        $multiFields = [
-            'type_id', 'status_id', 'location_id', 'repair_type_id',
-            'currency', 'offer_type', 'listing_type', 'contract_type_id',
-            'created_by', 'moderation_status', 'district'
-        ];
-        foreach ($multiFields as $f) {
-            if ($request->has($f)) {
-                $vals = $this->toArray($request->input($f));
-                if (!empty($vals)) {
-                    $column = $f === 'created_by' ? $creatorColumn : $f;
-                    $query->whereIn($column, $vals);
-                }
-            }
-        }
-
-        // Фильтр по агенту:
-        // - для закрытых сделок используем единый приоритет продавца SalesAttributionService
-        // - для остальных случаев сравниваем по целевой creator-колонке
-        if ($request->filled('agent_id')) {
-            $agentIds = array_map('intval', $this->toArray($request->input('agent_id')));
-            if (!empty($agentIds)) {
-                $closedStatuses = ['sold', 'rented', 'sold_by_owner'];
-                $statusVals = $this->toArray($request->input('moderation_status'));
-                $isSalesColumn = in_array($creatorColumn, ['sale_user_id', 'sale_agent_id'], true);
-
-                $qualifiedCreatorColumn = in_array($creatorColumn, ['created_by', 'properties.created_by'], true)
-                    ? DB::raw($this->propertyAuthorExpression())
-                    : (str_contains($creatorColumn, '.') ? $creatorColumn : 'properties.'.$creatorColumn);
-                $salesUserExpression = $this->salesAttributionService->primarySellerExpression();
-                $applySalesFilter = fn ($salesFilter) => $salesFilter->whereIn(DB::raw($salesUserExpression), $agentIds);
-
-                $containsClosed = $statusVals === [] || array_intersect($statusVals, $closedStatuses) !== [];
-                $containsOpen = $statusVals === [] || array_diff($statusVals, $closedStatuses) !== [];
-
-                if (str_starts_with($creatorColumn, 'bookings.')) {
-                    $query->whereIn($creatorColumn, $agentIds);
-                } elseif ($isSalesColumn || ($containsClosed && !$containsOpen)) {
-                    $query->where($applySalesFilter);
-                } elseif ($containsClosed && $containsOpen) {
-                    $query->where(function ($mixedAgentFilter) use ($agentIds, $closedStatuses, $qualifiedCreatorColumn, $applySalesFilter) {
-                        $mixedAgentFilter
-                            ->where(function ($openAgentFilter) use ($agentIds, $closedStatuses, $qualifiedCreatorColumn) {
-                                $openAgentFilter->whereNotIn('properties.moderation_status', $closedStatuses)
-                                    ->whereIn($qualifiedCreatorColumn, $agentIds);
-                            })
-                            ->orWhere(function ($closedAgentFilter) use ($closedStatuses, $applySalesFilter) {
-                                $closedAgentFilter->whereIn('properties.moderation_status', $closedStatuses)
-                                    ->where($applySalesFilter);
-                            });
-                    });
-                } else {
-                    $query->whereIn($qualifiedCreatorColumn, $agentIds);
-                }
-            }
-        }
-
-        $scopeColumn = in_array($creatorColumn, ['sale_user_id', 'sale_agent_id'], true)
-            ? 'created_by'
-            : $creatorColumn;
-
-        $reportOwnerExpression = $query->getModel() instanceof Property
-            ? "CASE WHEN properties.moderation_status IN ('sold', 'rented', 'sold_by_owner') THEN "
-                .$this->salesAttributionService->primarySellerExpression().' ELSE '.$this->propertyAuthorExpression().' END'
-            : null;
-        $this->applyBranchAccessFilter($request, $query, $scopeColumn, $reportOwnerExpression);
-
-        // Диапазоны
-        foreach ([
-                     'price' => 'price',
-                     'rooms' => 'rooms',
-                     'total_area' => 'total_area',
-                     'living_area' => 'living_area',
-                     'floor' => 'floor',
-                     'total_floors' => 'total_floors',
-                     'year_built' => 'year_built',
-                 ] as $param => $col) {
-            $from = $request->input($param . 'From');
-            $to = $request->input($param . 'To');
-            if ($from !== null && $from !== '') $query->where($col, '>=', $from);
-            if ($to !== null && $to !== '') $query->where($col, '<=', $to);
-        }
-
-        return [$query, $dateField];
-    }
-
-    private function validateReportScope(Request $request): void
-    {
-        /** @var User|null $authUser */
-        $authUser = $request->user();
-
-        if (! $authUser) {
-            return;
-        }
-
-        if (! $authUser->usesAssignedGroupScope() && ! $authUser->hasPermission('property_reports.scope.branch')) {
-            return;
-        }
-
-        if (! $request->filled('branch_id') && ! empty($authUser->branch_id)) {
-            $request->merge(['branch_id' => (string) $authUser->branch_id]);
-        }
-
-        if ($request->filled('branch_id')) {
-            foreach ($this->toArray($request->input('branch_id')) as $branchId) {
-                $this->branchScope->ensureSameBranchOrDeny((int) $branchId, $authUser);
-            }
-        }
-
-        if ($request->filled('branch_group_id')) {
-            foreach ($this->toArray($request->input('branch_group_id')) as $branchGroupId) {
-                $belongs = BranchGroup::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
-                    ->whereKey((int) $branchGroupId)
-                    ->where('branch_id', $authUser->branch_id)
-                    ->exists();
-
-                if (! $belongs) {
-                    $this->branchScope->denyBranchScopeViolation();
-                }
-            }
-        }
-
-        if ($request->filled('agent_id')) {
-            $agentIds = array_map('intval', $this->toArray($request->input('agent_id')));
-
-            if (! empty($agentIds)) {
-                $count = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
-                    ->whereIn('id', $agentIds)
-                    ->where('branch_id', $authUser->branch_id)
-                    ->count();
-
-                if ($count !== count(array_unique($agentIds))) {
-                    $this->branchScope->denyBranchScopeViolation();
-                }
-            }
-        }
-    }
 
     private function priceExpr(Request $request): array
     {
@@ -880,7 +469,7 @@ class PropertyReportController extends Controller
             ->selectRaw('COUNT(DISTINCT id) as unique_clients_count')
             ->whereRaw($clientOwnerExpr.' IS NOT NULL');
 
-        $this->applyBranchAccessByUserColumn($request, $clientsQ, DB::raw($clientOwnerExpr));
+        $this->reportQuery->applyBranchAccessByUserColumn($request, $clientsQ, DB::raw($clientOwnerExpr));
 
         if ($request->filled('agent_id')) {
             $clientsQ->whereIn(DB::raw($clientOwnerExpr), array_map('intval', $this->toArray($request->input('agent_id'))));
@@ -919,7 +508,7 @@ class PropertyReportController extends Controller
             'deposit_received_at_to',
         ]));
 
-        [$query] = $this->applyCommonFilters($filterRequest, $query);
+        [$query] = $this->reportQuery->applyCommonFilters($filterRequest, $query);
 
         return $query;
     }
@@ -1011,80 +600,7 @@ class PropertyReportController extends Controller
     // --- 1) Сводка
     public function summary(Request $request)
     {
-        $soldStatuses = [
-            'sold',
-            'sold_by_owner',
-            'rented',
-        ];
-
-        $approved = 'approved';
-
-        // One report period must mean the same thing in every block:
-        // open objects by created_at, deposits by deposit_received_at and
-        // closed objects by sold_at.
-        $filterRequest = new Request($request->except([
-            'date_from',
-            'date_to',
-            'sold_at_from',
-            'sold_at_to',
-            'date_field',
-        ]));
-        $filterRequest->setUserResolver(fn () => $request->user());
-
-        $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
-        [$q] = $this->applyCommonFilters($filterRequest, $base);
-        $q = $this->applyAgentPropertiesPeriodFilter($request, $q, $soldStatuses);
-
-        $total = (clone $q)->count();
-
-        // --- опубликованные: продажа / аренда
-        $publishedSale = (clone $q)
-            ->where('moderation_status', 'approved')
-            ->where('offer_type', 'sale')
-            ->count();
-
-        $publishedRent = (clone $q)
-            ->where('moderation_status', 'approved')
-            ->where('offer_type', 'rent')
-            ->count();
-
-        // --- byStatus: all non-closed statuses from the same aligned set
-        $byStatus = (clone $q)
-            ->whereNotIn('moderation_status', array_merge($soldStatuses, [$approved]))
-            ->select('moderation_status', DB::raw('COUNT(*) as cnt'))
-            ->groupBy('moderation_status')
-            ->get();
-
-        // --- soldStatus: closed statuses from the same aligned set
-        $soldStatus = (clone $q)
-            ->whereIn('moderation_status', $soldStatuses)
-            ->select('moderation_status', DB::raw('COUNT(*) as cnt'))
-            ->groupBy('moderation_status')
-            ->get();
-
-        $byOffer = (clone $q)->select('offer_type', DB::raw('COUNT(*) as cnt'))
-            ->groupBy('offer_type')->get();
-
-        // Средние
-        $avgPrice = (clone $q)->avg('price');
-        $avgArea = (clone $q)->avg('total_area');
-
-        // Суммы
-        $sumPrice = (clone $q)->sum('price');
-        $sumArea = (clone $q)->sum('total_area');
-
-        return response()->json([
-            'total' => $total,
-            'published_sale' => $publishedSale,
-            'published_rent' => $publishedRent,
-            'by_status' => $byStatus,
-            'sold_status' => $soldStatus,
-            'by_offer_type' => $byOffer,
-            'avg_price' => round((float)$avgPrice, 2),
-            'avg_total_area' => round((float)$avgArea, 2),
-            'sum_price' => round((float)$sumPrice, 2),
-            'sum_total_area' => round((float)$sumArea, 2),
-        ]);
+        return response()->json($this->reportQuery->summary($this->reportQuery->records($request)));
     }
 
     // --- 2) Эффективность менеджеров/агентов
@@ -1101,7 +617,7 @@ class PropertyReportController extends Controller
         $uniqueClientsMap = $this->buildManagerUniqueClientsMap($request, $groupBy, $soldStatuses);
 
         $scopedUsersQuery = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->select('id');
-        $this->applyBranchAccessByUserColumn($request, $scopedUsersQuery, 'id');
+        $this->reportQuery->applyBranchAccessByUserColumn($request, $scopedUsersQuery, 'id');
         if ($request->filled('agent_id')) {
             $scopedUsersQuery->whereIn('id', array_map('intval', $this->toArray($request->input('agent_id'))));
         }
@@ -1126,7 +642,7 @@ class PropertyReportController extends Controller
         // Avoid pre-filtering by created_at in applyCommonFilters to keep totals aligned.
         $periodRequestData['from'] = $request->input('date_from');
         $periodRequestData['to'] = $request->input('date_to');
-        [$q] = $this->applyCommonFilters(new Request($periodRequestData), $base);
+        [$q] = $this->reportQuery->applyCommonFilters(new Request($periodRequestData), $base);
         $q = $this->applyAgentPropertiesPeriodFilter(new Request($periodRequestData), $q, $soldStatuses);
 
         // Open objects belong to their creator. Closed objects are added below
@@ -1135,13 +651,13 @@ class PropertyReportController extends Controller
         $baseData = (clone $q)
             ->whereNotIn('moderation_status', $soldStatuses)
             ->select([
-                DB::raw($this->propertyAuthorExpression().' as created_by'),
+                DB::raw($this->reportQuery->propertyAuthorExpression().' as created_by'),
                 DB::raw('COUNT(*) as total'),
                 DB::raw("SUM(CASE WHEN moderation_status = 'approved' THEN 1 ELSE 0 END) as approved"),
                 DB::raw("$expr as $alias"),
                 DB::raw("SUM(COALESCE(total_area,0)) as sum_total_area"),
             ])
-            ->groupBy(DB::raw($this->propertyAuthorExpression()))
+            ->groupBy(DB::raw($this->reportQuery->propertyAuthorExpression()))
             ->get()
             ->keyBy('created_by');
         // Normalize to base Collection so `only()` filters by collection keys (group ids),
@@ -1154,7 +670,7 @@ class PropertyReportController extends Controller
         $soldRequest['sold_at_to']   = $request->input('date_to');
 
         $soldBase = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->whereIn('moderation_status', $soldStatuses);
-        [$soldQ] = $this->applyCommonFilters(new Request($soldRequest), $soldBase);
+        [$soldQ] = $this->reportQuery->applyCommonFilters(new Request($soldRequest), $soldBase);
 
         $soldSelect = ['id', 'moderation_status', 'sold_at', ...$this->salesAttributionService->sellerColumns()];
 
@@ -1283,7 +799,7 @@ class PropertyReportController extends Controller
     public function byStatus(Request $request)
     {
         $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
-        [$q] = $this->applyCommonFilters($request, $base);
+        [$q] = $this->reportQuery->applyCommonFilters($request, $base);
 
         $rows = (clone $q)->select('moderation_status', DB::raw('COUNT(*) as cnt'))
             ->groupBy('moderation_status')->orderByDesc('cnt')->get();
@@ -1295,7 +811,7 @@ class PropertyReportController extends Controller
     public function byType(Request $request)
     {
         $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->with('type:id,name');
-        [$q] = $this->applyCommonFilters($request, $base);
+        [$q] = $this->reportQuery->applyCommonFilters($request, $base);
 
         $rows = (clone $q)->select('type_id', DB::raw('COUNT(*) as cnt'))
             ->groupBy('type_id')->orderByDesc('cnt')->get();
@@ -1313,7 +829,7 @@ class PropertyReportController extends Controller
     public function byLocation(Request $request)
     {
         $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->with('location:id,name');
-        [$q] = $this->applyCommonFilters($request, $base);
+        [$q] = $this->reportQuery->applyCommonFilters($request, $base);
 
         $rows = (clone $q)->select('location_id', DB::raw('COUNT(*) as cnt'))
             ->groupBy('location_id')->orderByDesc('cnt')->get();
@@ -1346,7 +862,7 @@ class PropertyReportController extends Controller
         $filterRequest->setUserResolver(fn () => $request->user());
 
         $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
-        [$q] = $this->applyCommonFilters($filterRequest, $base);
+        [$q] = $this->reportQuery->applyCommonFilters($filterRequest, $base);
         $q = $this->applyAgentPropertiesPeriodFilter($request, $q, $soldStatuses);
 
         $dateField = "CASE
@@ -1388,7 +904,7 @@ class PropertyReportController extends Controller
         $buckets = max(1, (int)$request->input('buckets', 8));
 
         $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->whereNotNull('price')->where('price', '>', 0);
-        [$q] = $this->applyCommonFilters($request, $base);
+        [$q] = $this->reportQuery->applyCommonFilters($request, $base);
 
         $min = (clone $q)->min('price');
         $max = (clone $q)->max('price');
@@ -1425,27 +941,7 @@ class PropertyReportController extends Controller
     // --- 8) Гистограмма по комнатам
     public function roomsHistogram(Request $request)
     {
-        $soldStatuses = ['sold', 'rented', 'sold_by_owner'];
-        $filterRequest = new Request($request->except([
-            'date_from',
-            'date_to',
-            'sold_at_from',
-            'sold_at_to',
-            'date_field',
-        ]));
-        $filterRequest->setUserResolver(fn () => $request->user());
-
-        $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->whereNotNull('rooms');
-        [$q] = $this->applyCommonFilters($filterRequest, $base);
-        $q = $this->applyAgentPropertiesPeriodFilter($request, $q, $soldStatuses);
-
-        $rows = (clone $q)
-            ->select('rooms', DB::raw('COUNT(*) as cnt'))
-            ->groupBy('rooms')
-            ->orderBy('rooms')
-            ->get();
-
-        return response()->json($rows);
+        return response()->json($this->reportQuery->rooms($this->reportQuery->records($request)));
     }
 
 // --- 9) Лидерборд агентов (детализация по закрытиям)
@@ -1459,7 +955,7 @@ class PropertyReportController extends Controller
         $soldRequest = $request->except(['date_from', 'date_to']);
         $soldRequest['sold_at_from'] = $request->input('date_from');
         $soldRequest['sold_at_to'] = $request->input('date_to');
-        [$q] = $this->applyCommonFilters(new Request($soldRequest), $base, 'sale_user_id');
+        [$q] = $this->reportQuery->applyCommonFilters(new Request($soldRequest), $base, 'sale_user_id');
 
         $soldSelect = ['id', 'moderation_status', 'price', ...$this->salesAttributionService->sellerColumns()];
 
@@ -1532,7 +1028,7 @@ class PropertyReportController extends Controller
     public function conversionFunnel(Request $request)
     {
         $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
-        [$q] = $this->applyCommonFilters($request, $base);
+        [$q] = $this->reportQuery->applyCommonFilters($request, $base);
 
         // группируем по агенту (или created_by — если так у вас хранится автор)
         $groupBy = $request->input('group_by', 'created_by');
@@ -1624,7 +1120,7 @@ class PropertyReportController extends Controller
         $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->select($select);
 
-        [$q] = $this->applyCommonFilters($request, $base);
+        [$q] = $this->reportQuery->applyCommonFilters($request, $base);
         $this->scopeVisiblePropertyClient($request, $q, 'properties.owner_client_id');
 
         $phoneMissing = $this->phoneIsNullExpr();
@@ -1670,7 +1166,7 @@ class PropertyReportController extends Controller
     public function missingPhoneAgentsByStatus(Request $request)
     {
         $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
-        [$q] = $this->applyCommonFilters($request, $base);
+        [$q] = $this->reportQuery->applyCommonFilters($request, $base);
         $this->scopeVisiblePropertyClient($request, $q, 'properties.owner_client_id');
 
         $phoneMissing = $this->phoneIsNullExpr();
@@ -1765,7 +1261,7 @@ class PropertyReportController extends Controller
                 $propsQ->where(function ($q) use ($agentId, $soldStatuses) {
                     $q->where(function ($openQ) use ($agentId, $soldStatuses) {
                         $openQ->whereNotIn('moderation_status', $soldStatuses)
-                            ->where(DB::raw($this->propertyAuthorExpression()), (int) $agentId);
+                            ->where(DB::raw($this->reportQuery->propertyAuthorExpression()), (int) $agentId);
                     })->orWhere(function ($closedQ) use ($agentId, $soldStatuses) {
                         $closedQ->whereIn('moderation_status', $soldStatuses);
 
@@ -1893,7 +1389,7 @@ class PropertyReportController extends Controller
     public function agentContractsStats(Request $request)
     {
         $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
-        [$q] = $this->applyCommonFilters($request, $base);
+        [$q] = $this->reportQuery->applyCommonFilters($request, $base);
 
         if ($request->filled('agent_id')) {
             $agentIds = $this->toArray($request->input('agent_id'));
@@ -1929,7 +1425,7 @@ class PropertyReportController extends Controller
     public function agentClientsStats(Request $request)
     {
         $base = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
-        [$q] = $this->applyCommonFilters($request, $base, 'properties.created_by');
+        [$q] = $this->reportQuery->applyCommonFilters($request, $base, 'properties.created_by');
 
         if ($request->filled('agent_id')) {
             $agentIds = $this->toArray($request->input('agent_id'));
@@ -2009,14 +1505,14 @@ class PropertyReportController extends Controller
 
     private function employeeShowsQuery(Request $request)
     {
-        $this->ensureReportsAllowed($request);
+        $this->reportQuery->ensureReportsAllowed($request);
         $column = \App\Support\BookingAttribution::column();
         $query = Booking::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->leftJoin('properties', 'properties.id', '=', 'bookings.property_id');
         // Apply explicit property filters, but never the listing's creation period.
         $propertyFilters = clone $request;
         $propertyFilters->query->remove('date_from');
         $propertyFilters->query->remove('date_to');
-        [$query] = $this->applyCommonFilters($propertyFilters, $query, $column);
+        [$query] = $this->reportQuery->applyCommonFilters($propertyFilters, $query, $column);
         foreach (['from' => ['date_from', '>='], 'to' => ['date_to', '<=']] as $key => [$alias, $operator]) {
             $raw = $request->input($key, $request->input($alias));
             if ($raw) {
@@ -2047,7 +1543,7 @@ class PropertyReportController extends Controller
         $soldRequest['sold_at_to'] = $request->input('date_to');
 
         // Filtering and totals use the same primary seller as KPI and property details.
-        [$q] = $this->applyCommonFilters(new Request($soldRequest), $base, 'sale_user_id');
+        [$q] = $this->reportQuery->applyCommonFilters(new Request($soldRequest), $base, 'sale_user_id');
 
         $soldSelect = ['id', 'moderation_status', 'price', ...$this->salesAttributionService->sellerColumns()];
 

@@ -940,7 +940,9 @@ class PropertyController extends Controller
         } else {
             return $query->whereRaw('1 = 0');
         }
-        if (! $request->filled('moderation_status')) $query->where('moderation_status', '!=', 'deleted');
+        if (! $request->filled('moderation_status') && ! $this->isGeneralReportRequest($request)) {
+            $query->where('moderation_status', '!=', 'deleted');
+        }
 
         return $query;
     }
@@ -1517,9 +1519,21 @@ class PropertyController extends Controller
         return "{$formatted} {$unit}";
     }
 
+    private function isGeneralReportRequest(Request $request): bool
+    {
+        return ($request->boolean('report_context') || $request->filled('report_employee_id'))
+            && $request->user()?->hasPermission('property_reports.view')
+            && collect(['all', 'branch', 'group'])->contains(fn ($scope) => $request->user()->hasPermission('property_reports.scope.'.$scope));
+    }
+
     // ==== Единая фильтрация для списка и карты ====
     private function applyFilters(Builder $query, Request $request): void
     {
+        if ($this->isGeneralReportRequest($request)) {
+            $query->whereIn('properties.id', app(\App\Services\PropertyReportQuery::class)->inventory($request)->select('properties.id'));
+            return;
+        }
+
         $toArray = function ($value) {
             if ($value === null || $value === '') {
                 return [];
@@ -2044,6 +2058,10 @@ class PropertyController extends Controller
         ] as $field => $allowed) {
             if (! $request->filled($field)) {
                 continue;
+            }
+
+            if ($field === 'moderation_status' && $this->isGeneralReportRequest($request)) {
+                $allowed = [...$allowed, 'unknown', '__no_match__'];
             }
 
             $values = is_array($request->input($field))

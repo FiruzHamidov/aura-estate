@@ -1928,7 +1928,14 @@ class KpiModuleService
         $query = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->select('users.*')
             ->with(['role:id,slug', 'branch:id,name', 'branchGroup:id,branch_id,name'])
-            ->whereHas('role', fn (Builder $q) => $q->withPermission('kpi.subject.period_reports'));
+            ->where(function (Builder $query) use ($filters) {
+                $query->whereHas('role', fn (Builder $q) => $q->withPermission('kpi.subject.period_reports'));
+                // Internal inventory owners, still subject to every employee access
+                // and branch/group restriction below. Not accepted by KPI HTTP APIs.
+                if (($filters['unified_employees'] ?? false) && ! empty($filters['inventory_owner_ids'])) {
+                    $query->orWhereIn('users.id', $filters['inventory_owner_ids']);
+                }
+            });
 
         if (! $includeInactive) {
             $query->where('users.status', '!=', 'inactive');
