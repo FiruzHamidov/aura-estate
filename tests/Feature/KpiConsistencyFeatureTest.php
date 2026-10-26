@@ -386,7 +386,7 @@ class KpiConsistencyFeatureTest extends TestCase
         string $from, string $to, string $scope, bool $inactive, string $timezone
     ): void {
         config(['app.timezone' => $timezone]);
-        [, $agent, $branch, $group] = $this->fixture();
+        [$admin, $agent, $branch, $group] = $this->fixture();
         $this->employeeReportProperties();
         Schema::table('branches', fn (Blueprint $t) => $t->boolean('is_hidden')->default(false));
         $branchB = Branch::create(['name' => 'B']);
@@ -402,7 +402,8 @@ class KpiConsistencyFeatureTest extends TestCase
             $t->unsignedBigInteger('created_by'); $t->unsignedBigInteger('branch_group_id')->nullable();
             $t->unsignedBigInteger('crm_client_id')->nullable(); $t->dateTime('start_time'); $t->dateTime('end_time'); $t->timestamps();
         });
-        foreach ([$agent, $other, $former] as $author) {
+        // A booking-only author outside the KPI roster must not disappear from totals.
+        foreach ([$admin, $agent, $other, $former] as $author) {
             foreach (['2026-09-30 18:59:59', '2026-09-30 19:00:00', '2026-10-12 18:59:59',
                 '2026-10-12 19:00:00', '2026-10-13 18:59:59', '2026-10-13 19:00:00',
                 '2026-10-19 09:00:00', '2026-10-25 18:59:59', '2026-10-25 19:00:00',
@@ -414,6 +415,9 @@ class KpiConsistencyFeatureTest extends TestCase
         }
         \DB::table('bookings')->insert(['agent_id' => $agent->id, 'created_by' => $agent->id,
             'branch_group_id' => $hiddenGroup->id, 'start_time' => '2026-10-13 10:00:00', 'end_time' => '2026-10-13 11:00:00']);
+        Schema::table('daily_reports', fn (Blueprint $t) => $t->boolean('is_finalized')->default(false));
+        $frozen = $this->report($agent, '2026-10-13', ['shows_count' => 0]);
+        $frozen->forceFill(['is_finalized' => true])->save();
         $filters = ['date_from' => $from, 'date_to' => $to, 'include_inactive' => (int) $inactive] + match ($scope) {
             'branch_b' => ['branch_id' => $branchB->id],
             'group_a' => ['branch_id' => $branch->id, 'branch_group_id' => $group->id],
@@ -423,15 +427,29 @@ class KpiConsistencyFeatureTest extends TestCase
         $report = $this->getJson('/api/reports/employees?'.http_build_query($filters))->assertOk()->json();
         $list = $this->getJson('/api/bookings?'.http_build_query($filters + ['attribution' => 'author', 'per_page' => 100]))->assertOk()->json();
         $expectedPerPerson = $from === '2026-10-01' ? 9 : ($from === '2026-10-12' ? 4 : 2);
-        $expectedPeople = $scope === 'all' ? ($inactive ? 3 : 2) : ($scope === 'group_a' && $inactive ? 2 : 1);
+        $expectedPeople = match ($scope) {
+            'all' => $inactive ? 4 : 3,
+            'group_a' => $inactive ? 3 : 2,
+            default => 1,
+        };
         $this->assertSame($expectedPerPerson * $expectedPeople, $list['total']);
         $this->assertEquals($list['total'], $report['totals']['shows']);
+        foreach ($list['data'] as $booking) {
+            $this->assertStringEndsWith('+05:00', $booking['start_time']);
+            $this->assertGreaterThanOrEqual($from, substr($booking['start_time'], 0, 10));
+            $this->assertLessThanOrEqual($to, substr($booking['start_time'], 0, 10));
+        }
         foreach ($report['data'] as $row) {
             $employeeList = $this->getJson('/api/bookings?'.http_build_query($filters + [
                 'attribution' => 'author', 'agent_id' => $row['employee_id'], 'per_page' => 100,
             ]))->assertOk()->json();
             $this->assertEquals($row['shows'], $employeeList['total']);
+            $this->assertEquals($row['shows'], $row['shows_raw']);
+            $this->assertSame((string) $row['shows'], $row['shows_display']);
             $this->assertSame($expectedPerPerson, $employeeList['total']);
+            if ($row['employee_id'] === $agent->id && $from <= '2026-10-13' && $to >= '2026-10-13') {
+                $this->assertEquals($expectedPerPerson - 2, $row['metrics']['shows']['final_value'], 'The locked KPI snapshot must remain unchanged.');
+            }
         }
         if ($scope === 'all' && $from === '2026-10-01') {
             $ids = [];
