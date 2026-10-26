@@ -60,6 +60,22 @@ class PropertyReportController extends Controller
             : Carbon::parse($filters['date_from'], 'Asia/Dushanbe')->startOfDay();
         $to = $allPeriod ? Carbon::now('Asia/Dushanbe')->endOfDay()
             : Carbon::parse($filters['date_to'], 'Asia/Dushanbe')->endOfDay();
+        // The list contains live bookings. Frozen daily KPI snapshots must not
+        // replace these counts; they remain available in the separate metrics.
+        $liveShows = null;
+        if ($canReadKpi && Schema::hasTable('bookings')) {
+            $column = \App\Support\BookingAttribution::column();
+            $shows = Booking::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
+            $this->reportQuery->applyBranchAccessByUserColumn($request, $shows, $column);
+            if ($request->filled('agent_id')) $shows->where($column, $request->integer('agent_id'));
+            if (! $request->boolean('include_inactive')) {
+                $shows->whereIn($column, User::query()->where('status', '!=', 'inactive')->select('id'));
+            }
+            if (! $allPeriod) $shows->whereBetween('bookings.start_time', [$from->copy()->utc(), $to->copy()->utc()]);
+            $liveShows = $shows->selectRaw($column.' as employee_id, COUNT(*) as count')
+                ->groupBy($column)->get()->mapWithKeys(fn ($row) => [(int) $row->employee_id => (int) $row->count]);
+            $filters['inventory_owner_ids'] = array_values(array_unique(array_merge($filters['inventory_owner_ids'], $liveShows->keys()->all())));
+        }
         $period = $allPeriod ? 'range' : ($from->isSameDay($to) ? 'day' : (($filters['interval'] ?? '') === 'month' ? 'month' : 'week'));
         // Internal options: HTTP pagination cannot truncate totals or Excel exports.
         $payload = $canReadKpi ? $kpi->periodRowsV2($actor, $period, $from, $to, array_merge($filters, [
@@ -70,9 +86,10 @@ class PropertyReportController extends Controller
 
         // The inventory may belong to an office account or a former group member
         // outside the KPI roster. Keep those objects visible in their own row.
-        $missingIds = $byEmployee->keys()->diff($rows->pluck('employee_id'));
+        $ownerIds = $byEmployee->keys()->merge($liveShows?->keys() ?? [])->unique();
+        $missingIds = $ownerIds->diff($rows->pluck('employee_id'));
         $owners = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
-            ->with(['branch:id,name', 'role'])->whereIn('id', $byEmployee->keys())->get()->keyBy('id');
+            ->with(['branch:id,name', 'role'])->whereIn('id', $ownerIds)->get()->keyBy('id');
         foreach ($missingIds as $id) {
             $owner = $owners->get($id);
             $rows->push([
@@ -83,7 +100,7 @@ class PropertyReportController extends Controller
         }
         $statuses = ['draft', 'pending', 'approved', 'deposit', 'sold', 'rented', 'sold_by_owner', 'denied', 'rejected', 'deleted', 'unknown'];
         $contracts = ['alternative', 'exclusive', 'none', 'unspecified'];
-        $rows = $rows->map(function (array $row) use ($byEmployee, $statuses, $contracts, $owners) {
+        $rows = $rows->map(function (array $row) use ($byEmployee, $statuses, $contracts, $owners, $liveShows) {
             $items = $byEmployee->get($row['employee_id'], collect());
             $byStatus = array_fill_keys($statuses, 0);
             $byContract = array_fill_keys($contracts, 0);
@@ -111,6 +128,11 @@ class PropertyReportController extends Controller
             ])->values();
             foreach ($row['metrics'] as $key => $metric) {
                 if (($metric['source_error'] ?? false) && $key !== 'sales') $row[$key] = null;
+            }
+            if ($liveShows !== null) {
+                $row['shows'] = (int) $liveShows->get($row['employee_id'], 0);
+                $row['shows_raw'] = $row['shows'];
+                $row['shows_display'] = (string) $row['shows'];
             }
             if (($owner = $owners->get($row['employee_id'])) && ! $owner->hasPermission('kpi.subject.period_reports')) {
                 foreach ($row['metrics'] as &$metric) { $metric['target_value'] = 0; $metric['weight_used'] = 0; }

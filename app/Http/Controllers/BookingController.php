@@ -68,7 +68,7 @@ class BookingController extends Controller
 
     private function bookingApiTimezone(): string
     {
-        return (string) config('app.timezone', 'Asia/Dushanbe');
+        return 'Asia/Dushanbe';
     }
 
     private function parseInputDateTimeToUtc(string $value): Carbon
