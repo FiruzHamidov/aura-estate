@@ -415,6 +415,26 @@ class UserAccessTest extends TestCase
         }
     }
 
+    public function test_legacy_dismissal_preserves_other_assignees_and_original_authorship(): void
+    {
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $admin = User::create(['name' => 'Admin', 'phone' => '900093001', 'role_id' => $adminRole->id, 'status' => 'active']);
+        $employee = User::create(['name' => 'Employee', 'phone' => '900093002', 'role_id' => $agentRole->id, 'status' => 'active']);
+        $other = User::create(['name' => 'Current owner', 'phone' => '900093003', 'role_id' => $agentRole->id, 'status' => 'active']);
+        $recipient = User::create(['name' => 'Recipient', 'phone' => '900093004', 'role_id' => $agentRole->id, 'status' => 'active']);
+        $owned = DB::table('properties')->insertGetId(['title' => 'Legacy author-owned', 'created_by' => $employee->id, 'agent_id' => null, 'moderation_status' => 'approved']);
+        $transferred = DB::table('properties')->insertGetId(['title' => 'Already transferred', 'created_by' => $employee->id, 'agent_id' => $other->id, 'moderation_status' => 'approved']);
+        Sanctum::actingAs($admin);
+
+        $this->deleteJson('/api/user/'.$employee->id, ['agent_id' => $recipient->id])
+            ->assertOk()->assertJsonPath('redistributed_count', 1);
+
+        $this->assertDatabaseHas('properties', ['id' => $owned, 'created_by' => $employee->id, 'agent_id' => $recipient->id]);
+        $this->assertDatabaseHas('properties', ['id' => $transferred, 'created_by' => $employee->id, 'agent_id' => $other->id]);
+        $this->assertSame('inactive', $employee->fresh()->status);
+    }
+
     public function test_dismissal_transfers_properties_to_co_owner_before_redistribution(): void
     {
         $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
@@ -483,12 +503,12 @@ class UserAccessTest extends TestCase
             ->assertJsonPath('redistributed_count', 1);
 
         $withCoOwner = DB::table('properties')->where('id', $withCoOwnerId)->first();
-        $this->assertSame($coOwner->id, (int) $withCoOwner->created_by);
+        $this->assertSame($dismissed->id, (int) $withCoOwner->created_by);
         $this->assertSame($coOwner->id, (int) $withCoOwner->agent_id);
         $this->assertNull($withCoOwner->co_owner_user_id);
 
         $withoutCoOwner = DB::table('properties')->where('id', $withoutCoOwnerId)->first();
-        $this->assertSame($fallbackAgent->id, (int) $withoutCoOwner->created_by);
+        $this->assertSame($dismissed->id, (int) $withoutCoOwner->created_by);
         $this->assertSame($fallbackAgent->id, (int) $withoutCoOwner->agent_id);
         $this->assertNull($withoutCoOwner->co_owner_user_id);
     }

@@ -2228,10 +2228,10 @@ class PropertyController extends Controller
         foreach ($records as $record) app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $record);
         if (! empty($data['agent_id'])) {
             $responsible = User::query()->lockForUpdate()->findOrFail($data['agent_id']);
+            abort_unless($responsible->status === User::STATUS_ACTIVE && ! $responsible->isDeletedAccount(), 422, 'INVALID_TRANSFER_TARGET');
             $groupId = $data['branch_group_id'] ?? ($records['property'] ?? null)?->getRawOriginal('branch_group_id') ?? $responsible->branch_group_id;
             if ($groupId && $responsible->hasPermission('users.subject.assignment_group_required')) {
                 abort_unless((int) $responsible->branch_group_id === (int) $groupId, 422, 'RESPONSIBLE_GROUP_MISMATCH');
-                abort_unless($responsible->status === User::STATUS_ACTIVE && ! $responsible->isDeletedAccount(), 422, 'INVALID_TRANSFER_TARGET');
             }
         }
         return [$actor, $records['property'] ?? null];
@@ -2269,6 +2269,10 @@ class PropertyController extends Controller
             $dups = $this->propertyDuplicateService->find($validated);
             $qualityWarnings = $this->propertyQualityService->inspect($validated);
             $validated['created_by'] = $user->id;
+            // Keep authorship and current responsibility explicit from creation.
+            // The locked actor cannot acquire new work after a concurrent dismissal.
+            abort_unless($user->status === User::STATUS_ACTIVE && ! $user->isDeletedAccount(), 422, 'INVALID_TRANSFER_TARGET');
+            $validated['agent_id'] ??= $user->id;
             $requiresReview = $requestedType !== 'regular' && ! $this->moderationAccess->canModerate($user, new Property($validated));
             $validated = $this->moderation->creationState($validated, $dups, $qualityWarnings, $requiresReview);
             $property = Property::create($validated);

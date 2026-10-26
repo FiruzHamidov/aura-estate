@@ -600,6 +600,21 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertSame($foreign->id, $property->fresh()->co_owner_user_id);
     }
 
+    public function test_transfer_cannot_remove_the_responsible_employee(): void
+    {
+        [$agent, $rop] = $this->users();
+        $property = Property::create($this->propertyPayload($agent, ['agent_id' => $agent->id, 'moderation_version' => 1]));
+        try {
+            $this->moderation()->transfer($property, $rop, ['agent_id' => null], 'Нельзя оставить без ответственного', 1);
+            $this->fail('Removing responsibility must fail');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
+            $this->assertSame(422, $e->getStatusCode());
+            $this->assertSame('Выберите действующего ответственного за объявление.', $e->getMessage());
+        }
+        $this->assertSame($agent->id, $property->fresh()->agent_id);
+        $this->assertSame(1, $property->fresh()->moderation_version);
+    }
+
     public function test_transfer_requires_independent_moderator_and_preserves_moderation_history(): void
     {
         [$agent, $rop, $director] = $this->users();
@@ -1921,6 +1936,37 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertSame('pending', $result->publication_status);
         $this->assertFalse($service->isPublic($result));
         $this->assertTrue($result->moderationCases()->where('status', 'open')->where('blocking', true)->exists());
+    }
+
+    public function test_reopening_requires_an_active_current_responsible_even_for_legacy_author_only_listings(): void
+    {
+        [$property, $agent, $rop, , $service] = $this->reopeningFixture();
+        $agent->forceFill(['status' => 'inactive'])->save();
+        foreach ([$agent->id, null] as $responsibleId) {
+            $property->forceFill(['agent_id' => $responsibleId])->save();
+            try {
+                $service->reopenListing($property, $rop, 'Владелец вернул объект в продажу', (int) $property->moderation_version);
+                $this->fail('An inactive employee must not receive reopened work');
+            } catch (\Symfony\Component\HttpKernel\Exception\HttpException $e) {
+                $this->assertSame(422, $e->getStatusCode());
+                $this->assertSame('Перед возвратом объявления назначьте действующего ответственного.', $e->getMessage());
+            }
+            $this->assertNotNull($property->fresh()->sold_at);
+            $this->assertTrue($property->fresh()->needsReopening());
+        }
+    }
+
+    public function test_reopening_legacy_listing_explicitly_assigns_its_active_author(): void
+    {
+        [$property, $agent, $rop, , $service] = $this->reopeningFixture();
+        $property->forceFill(['agent_id' => null])->save();
+
+        $result = $service->reopenListing($property, $rop, 'Владелец вернул объект в продажу', (int) $property->moderation_version);
+
+        $this->assertSame($agent->id, $result->agent_id);
+        $this->assertSame($agent->id, $result->created_by);
+        $log = $result->logs()->where('action', 'listing_reopened')->sole();
+        $this->assertSame(['old' => null, 'new' => $agent->id], $log->changes['agent_id']);
     }
 
     public function test_reopen_http_contract_and_legacy_deal_endpoint_guard(): void

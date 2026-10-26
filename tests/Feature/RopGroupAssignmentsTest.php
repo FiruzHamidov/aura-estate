@@ -1344,6 +1344,48 @@ class RopGroupAssignmentsTest extends TestCase
         $this->assertDatabaseCount('clients', 0);
     }
 
+    public function test_legacy_property_write_rejects_a_changed_effective_owner(): void
+    {
+        Schema::create('properties', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('created_by');
+            $table->unsignedBigInteger('agent_id')->nullable();
+            $table->unsignedBigInteger('branch_id');
+            $table->unsignedBigInteger('branch_group_id')->nullable();
+        });
+        $author = $this->user('agent', $this->a);
+        $recipient = $this->user('agent', $this->a);
+        $id = DB::table('properties')->insertGetId(['created_by' => $author->id,
+            'agent_id' => null, 'branch_id' => $this->branch->id, 'branch_group_id' => $this->a->id]);
+        $property = \App\Models\Property::findOrFail($id);
+        DB::table('properties')->where('id', $property->id)->update(['created_by' => $recipient->id]);
+
+        try {
+            DB::transaction(fn () => app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($this->admin, $property));
+            $this->fail('A changed legacy owner must be locked before writing.');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $error) {
+            $this->assertSame(409, $error->getStatusCode());
+            $this->assertSame('RECORD_OWNERSHIP_CHANGED', $error->getMessage());
+        }
+    }
+
+    public function test_property_assignment_rejects_an_inactive_recipient_without_group_policy(): void
+    {
+        $role = Role::create(['name' => 'Custom assignee', 'slug' => 'custom_inactive_assignee']);
+        $employee = $this->user($role->slug, $this->a);
+        $employee->forceFill(['status' => 'inactive'])->save();
+        $controller = app(\App\Http\Controllers\PropertyController::class);
+        $lock = new \ReflectionMethod($controller, 'lockPropertyWrite');
+
+        try {
+            DB::transaction(fn () => $lock->invoke($controller, $this->admin, null, ['agent_id' => $employee->id]));
+            $this->fail('Inactive recipients must be rejected regardless of group policy.');
+        } catch (\Symfony\Component\HttpKernel\Exception\HttpException $error) {
+            $this->assertSame(422, $error->getStatusCode());
+            $this->assertSame('INVALID_TRANSFER_TARGET', $error->getMessage());
+        }
+    }
+
     public function test_client_write_rejects_stale_ownership_after_a_record_transfer(): void
     {
         $agentA = $this->user('agent', $this->a);

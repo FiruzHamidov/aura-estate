@@ -32,6 +32,11 @@ final class GroupRecordWriteLock
         foreach ($records as $record) {
             $field = $this->ownerField($record);
             $responsibleIds[] = $record->getRawOriginal($field);
+            // Legacy properties without agent_id still belong to their author.
+            // Serialize reopening and other writes with that author's dismissal.
+            if ($record instanceof \App\Models\Property && $record->getRawOriginal($field) === null) {
+                $responsibleIds[] = $record->getRawOriginal('created_by');
+            }
             $groupIds[] = $record->getRawOriginal('branch_group_id');
         }
         $users = User::query()->whereIn('id', array_filter([$actor->id, ...$responsibleIds]))
@@ -51,6 +56,10 @@ final class GroupRecordWriteLock
             abort_unless((string) $fresh->getRawOriginal($field) === (string) $original->getRawOriginal($field)
                 && (string) $fresh->getRawOriginal('branch_group_id') === (string) $original->getRawOriginal('branch_group_id'),
                 409, 'RECORD_OWNERSHIP_CHANGED');
+            if ($original instanceof \App\Models\Property && $original->getRawOriginal($field) === null) {
+                abort_unless((string) $fresh->getRawOriginal('created_by') === (string) $original->getRawOriginal('created_by'),
+                    409, 'RECORD_OWNERSHIP_CHANGED');
+            }
             $records[$key] = $fresh;
         }
 
