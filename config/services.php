@@ -42,6 +42,13 @@ return [
         'auth_ttl_seconds' => (int) env('TELEGRAM_AUTH_TTL_SECONDS', 300),
     ],
 
+    'openai' => [
+        'base_url' => env('OPENAI_BASE', 'https://api.openai.com'),
+        'model' => env('OPENAI_MODEL', 'gpt-5-mini'),
+        'api_key' => env('OPENAI_API_KEY'),
+        'relay_shared_key' => env('RELAY_SHARED_KEY'),
+    ],
+
     'firebase' => [
         'credentials' => env('FIREBASE_CREDENTIALS', storage_path('app/private/firebase-service-account.json')),
         'project_id' => env('FIREBASE_PROJECT_ID', 'aura-estate-e7696'),
