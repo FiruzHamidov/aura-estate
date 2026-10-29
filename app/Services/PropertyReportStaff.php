@@ -11,10 +11,15 @@ class PropertyReportStaff
     public function attach(Collection $properties): void
     {
         $properties->loadMissing(['saleUser:id,name,branch_id,branch_group_id', 'agent:id,name,branch_id,branch_group_id', 'creator', 'saleAgents.role']);
-        $sources = $properties->mapWithKeys(function ($property) {
-            $seller = $property->saleUser
-                ?? $property->saleAgents->first(fn ($agent) => $agent->pivot?->role === 'main')
-                ?? $property->saleAgents->first();
+        $attribution = app(SalesAttributionService::class);
+        $sellers = User::query()->select(['id', 'name', 'branch_id', 'branch_group_id'])
+            ->whereIn('id', $properties->map(fn ($property) => $attribution->primarySellerId($property))->filter()->unique())
+            ->get()->keyBy('id');
+        $sources = $properties->mapWithKeys(function ($property) use ($attribution, $sellers) {
+            // Match the seller used by report filters and totals, including legacy rows.
+            $seller = in_array($property->moderation_status, PropertyReportQuery::CLOSED, true)
+                ? $sellers->get($attribution->primarySellerId($property))
+                : $property->saleUser;
             $property->setAttribute('report_seller', $seller ? ['id' => $seller->id, 'name' => $seller->name] : null);
 
             return [$property->id => $seller ?? $property->agent ?? $property->creator];

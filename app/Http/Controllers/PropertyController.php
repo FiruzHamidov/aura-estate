@@ -804,6 +804,13 @@ class PropertyController extends Controller
             app(\App\Services\PropertyReportStaff::class)->attach($result->getCollection());
         }
 
+        $result->getCollection()->load('agent');
+        $result->through(function (Property $property): array {
+            $responsible = $property->agent?->only(['id', 'name', 'photo']);
+            $property->unsetRelation('agent');
+            return [...$property->toArray(), 'responsible_agent' => $responsible];
+        });
+
         return response()->json($summary === null ? $result : array_merge($result->toArray(), ['security_summary' => $summary]));
     }
 
@@ -1549,11 +1556,14 @@ class PropertyController extends Controller
         // created_by and agent_id filters available for explicit historical queries.
         $responsibleIds = $toArray($request->input('responsible_user_id'));
         if ($responsibleIds !== []) {
-            $query->where(fn (Builder $owner) => $owner
-                ->whereIn('properties.agent_id', $responsibleIds)
-                ->orWhere(fn (Builder $unassigned) => $unassigned
-                    ->whereNull('properties.agent_id')
-                    ->whereIn('properties.created_by', $responsibleIds)));
+            $query->where(function (Builder $owner) use ($responsibleIds, $request) {
+                $owner->whereIn('properties.agent_id', $responsibleIds)
+                    ->orWhere(fn (Builder $unassigned) => $unassigned
+                        ->whereNull('properties.agent_id')->whereIn('properties.created_by', $responsibleIds));
+                if ($request->boolean('include_co_owned') && $this->supportsPropertyCoOwner()) {
+                    $owner->orWhereIn('properties.co_owner_user_id', $responsibleIds);
+                }
+            });
         }
 
         // Report drilldowns follow the same attribution as the report totals:
@@ -3152,9 +3162,19 @@ class PropertyController extends Controller
             $this->ensureDealAssignmentUsersInScope($user, $request->validated(), $locked);
             $isDepositStatus = $request->deal_status === 'deposit';
             $isSaleStatus = in_array($request->deal_status, ['sold', 'sold_by_owner', 'rented'], true);
+            $wasSale = $locked->sold_at !== null || in_array($locked->deal_status, ['sold', 'sold_by_owner', 'rented'], true)
+                || in_array($locked->moderation_status, ['sold', 'sold_by_owner', 'rented'], true);
+            $cancelDeposit = $request->deal_status === 'available'
+                && ($locked->deal_status === 'deposit' || $locked->moderation_status === 'deposit');
             $legacyStatus = match ($request->deal_status) {
                 'client_denied' => 'denied',
-                'available' => $locked->moderation_status,
+                'available' => $cancelDeposit ? match ($locked->publication_status) {
+                    'draft' => 'draft',
+                    'rejected' => 'rejected',
+                    'pending', 'hidden' => 'pending',
+                    'archived' => 'deleted',
+                    default => Property::PUBLIC_MODERATION_STATUS,
+                } : $locked->moderation_status,
                 default => $request->deal_status,
             };
             $payload = [
@@ -3164,14 +3184,14 @@ class PropertyController extends Controller
                 ...Schema::hasColumn('properties', 'deal_status')
                     ? ['deal_status' => $request->deal_status]
                     : [],
-                ...Schema::hasColumn('properties', 'publication_status') && $isSaleStatus
+                ...Schema::hasColumn('properties', 'publication_status') && ($isSaleStatus || $request->deal_status === 'client_denied')
                     ? ['publication_status' => PropertyModerationService::PUBLICATION_ARCHIVED]
                     : [],
-                'sold_at' => $isSaleStatus
+                'sold_at' => $isSaleStatus && ! $wasSale
                     ? now()
                     : $locked->sold_at,
                 'sale_user_id' => $request->input('sale_user_id')
-                    ?? ($isSaleStatus ? $user->id : $locked->sale_user_id),
+                    ?? ($isSaleStatus && ! $wasSale ? $user->id : $locked->sale_user_id),
                 ...Schema::hasColumn('properties', 'moderation_version')
                     ? ['moderation_version' => (int) $locked->moderation_version + 1]
                     : [],
@@ -3190,6 +3210,16 @@ class PropertyController extends Controller
             }
             if ($request->has('deposit_user_id') || $isDepositStatus) {
                 $payload['deposit_user_id'] = $request->input('deposit_user_id') ?? $user->id;
+            }
+
+            if ($cancelDeposit) {
+                // The observer keeps the previous deposit in the audit log.
+                foreach (['deposit_amount', 'deposit_received_at', 'deposit_taken_at', 'deposit_user_id',
+                    'company_expected_income', 'planned_contract_signed_at'] as $field) {
+                    $payload[$field] = null;
+                }
+                $payload['deposit_currency'] = 'TJS';
+                $payload['company_expected_income_currency'] = 'TJS';
             }
 
             $this->ensureVisibleClientsForProperty($payload, $locked);

@@ -568,6 +568,123 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
         $this->assertNotNull($property->sold_at);
     }
 
+    private function workflowFixture(): array
+    {
+        (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
+        Schema::table('property_statuses', fn (Blueprint $table) => $table->string('slug')->nullable());
+        $role = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $branch = Branch::create(['name' => 'Workflow']);
+        $actor = $this->makeUser($role, $branch->id, 'workflow');
+        $property = $this->makeProperty($actor, PropertyType::create(['name' => 'Apartment']),
+            PropertyStatus::create(['name' => 'Available', 'slug' => 'available']));
+        $property->refresh()->forceFill(['publication_status' => 'published', 'deal_status' => 'available', 'moderation_version' => 1])->saveQuietly();
+        Sanctum::actingAs($actor);
+        return [$actor, $property];
+    }
+
+    public function test_refusal_unpublishes_and_legacy_closed_rows_are_never_public(): void
+    {
+        [, $property] = $this->workflowFixture();
+        $this->assertTrue(Property::publicSearchable()->whereKey($property->id)->exists());
+        $this->postJson('/api/properties/'.$property->id.'/deal', [
+            'deal_status' => 'client_denied', 'version' => 1, 'status_comment' => 'Sold by another agency',
+        ])->assertOk();
+        $this->assertSame('archived', $property->fresh()->publication_status);
+        $this->assertSame('denied', $property->fresh()->moderation_status);
+        $this->assertNull($property->fresh()->sold_at);
+        $this->assertNull($property->fresh()->sale_user_id);
+        Sanctum::actingAs($this->makeUser(Role::firstOrCreate(['slug' => 'client'], ['name' => 'Client']), 1, 'public-refusal'));
+        $this->getJson('/api/properties/'.$property->id)->assertNotFound();
+        foreach (['client_denied', 'sold', 'rented', 'sold_by_owner'] as $status) {
+            $property->refresh()->forceFill(['publication_status' => 'published', 'moderation_status' => 'approved', 'deal_status' => $status])->saveQuietly();
+            $this->assertFalse(Property::publicSearchable()->whereKey($property->id)->exists(), $status);
+            $this->getJson('/api/properties/'.$property->id)->assertNotFound();
+        }
+        $property->refresh()->forceFill(['deal_status' => 'available', 'moderation_status' => 'denied'])->saveQuietly();
+        $this->assertFalse(Property::publicSearchable()->whereKey($property->id)->exists());
+    }
+
+    public function test_cancelling_deposit_restores_available_state_and_clears_current_deposit(): void
+    {
+        [, $property] = $this->workflowFixture();
+        $this->postJson('/api/properties/'.$property->id.'/deal', $this->depositPayload(['version' => 1]))->assertOk();
+        $this->postJson('/api/properties/'.$property->id.'/deal', ['deal_status' => 'available', 'version' => 2])->assertOk();
+        $property->refresh();
+        $this->assertSame('available', $property->deal_status);
+        $this->assertSame('approved', $property->moderation_status);
+        $this->assertSame('published', $property->publication_status);
+        foreach (['deposit_amount', 'deposit_received_at', 'deposit_taken_at', 'deposit_user_id', 'company_expected_income', 'planned_contract_signed_at'] as $field) {
+            $this->assertNull($property->{$field}, $field);
+        }
+        $this->postJson('/api/properties/'.$property->id.'/deal', $this->depositPayload(['version' => 3]))->assertOk();
+        $this->assertSame('deposit', $property->fresh()->deal_status);
+        $property->refresh()->forceFill(['publication_status' => 'pending'])->saveQuietly();
+        $this->postJson('/api/properties/'.$property->id.'/deal', ['deal_status' => 'available', 'version' => 4])->assertOk();
+        $this->assertSame('pending', $property->fresh()->moderation_status);
+        $this->assertSame('pending', $property->fresh()->publication_status);
+    }
+
+    public function test_editing_closed_deals_preserves_sale_date_and_seller_and_checks_version(): void
+    {
+        [$actor, $property] = $this->workflowFixture();
+        $seller = $this->makeUser($actor->role, $actor->branch_id, 'original-seller');
+        foreach (['sold', 'rented', 'sold_by_owner'] as $status) {
+            $property->refresh()->forceFill(['sold_at' => null, 'sale_user_id' => null, 'deal_status' => 'available',
+                'moderation_status' => 'approved', 'publication_status' => 'published', 'moderation_version' => 1])->saveQuietly();
+            $this->travelTo(\Illuminate\Support\Carbon::parse('2026-09-18 12:00:00'));
+            Sanctum::actingAs($seller);
+            $this->postJson('/api/properties/'.$property->id.'/deal', $this->salePayload(['deal_status' => $status, 'version' => 1]))->assertOk();
+            $this->assertSame($seller->id, $property->fresh()->sale_user_id);
+            $closedAt = $property->fresh()->getRawOriginal('sold_at');
+            $this->travelTo(\Illuminate\Support\Carbon::parse('2026-10-29 12:00:00'));
+            Sanctum::actingAs($actor);
+            $payload = $this->salePayload(['deal_status' => $status, 'version' => 2, 'status_comment' => 'Corrected details']);
+            $this->postJson('/api/properties/'.$property->id.'/deal', $payload)->assertOk();
+            $this->assertSame($closedAt, $property->fresh()->getRawOriginal('sold_at'));
+            $this->assertSame($seller->id, $property->fresh()->sale_user_id);
+            $this->postJson('/api/properties/'.$property->id.'/deal', $payload)->assertConflict();
+            $this->postJson('/api/properties/'.$property->id.'/deal', $this->salePayload([
+                'deal_status' => $status, 'version' => 3, 'sale_user_id' => $actor->id,
+            ]))->assertOk();
+            $this->assertSame($actor->id, $property->fresh()->sale_user_id);
+            $this->assertSame($closedAt, $property->fresh()->getRawOriginal('sold_at'));
+        }
+        $this->travelBack();
+    }
+
+    public function test_editing_legacy_closed_deal_does_not_invent_missing_date_or_seller(): void
+    {
+        [, $property] = $this->workflowFixture();
+        $property->refresh()->forceFill(['deal_status' => 'sold', 'moderation_status' => 'sold',
+            'publication_status' => 'archived', 'sold_at' => null, 'sale_user_id' => null])->saveQuietly();
+        $this->postJson('/api/properties/'.$property->id.'/deal', $this->salePayload(['version' => 1]))->assertOk();
+        $this->assertNull($property->fresh()->sold_at);
+        $this->assertNull($property->fresh()->sale_user_id);
+    }
+
+    public function test_state_reconciliation_preserves_sale_history_and_audits_cancelled_deposit(): void
+    {
+        [$actor, $property] = $this->workflowFixture();
+        $property->refresh()->forceFill(['deal_status' => 'client_denied', 'moderation_status' => 'denied'])->saveQuietly();
+        $cancelled = $this->makeProperty($actor, $property->type, $property->status);
+        $cancelled->forceFill(['deal_status' => 'available', 'moderation_status' => 'deposit', 'publication_status' => 'published',
+            'deposit_amount' => 1000, 'deposit_currency' => 'USD', 'moderation_version' => 7])->saveQuietly();
+        $timestamp = $property->fresh()->getRawOriginal('updated_at');
+        $migration = require database_path('migrations/2026_10_29_140000_reconcile_property_deal_states.php');
+        $migration->up();
+        $this->assertSame('archived', $property->fresh()->publication_status);
+        $this->assertSame($timestamp, $property->fresh()->getRawOriginal('updated_at'));
+        $this->assertNull($property->fresh()->sale_user_id);
+        $this->assertNull($property->fresh()->sold_at);
+        $this->assertSame('approved', $cancelled->fresh()->moderation_status);
+        $this->assertNull($cancelled->fresh()->deposit_amount);
+        $this->assertSame(8, $cancelled->fresh()->moderation_version);
+        $log = \Illuminate\Support\Facades\DB::table('property_logs')->where('property_id', $cancelled->id)->where('action', 'deal_state_reconciled')->first();
+        $this->assertEquals(1000, json_decode($log->changes, true)['deposit_amount']['old']);
+        $migration->up();
+        $this->assertSame(2, \Illuminate\Support\Facades\DB::table('property_logs')->where('action', 'deal_state_reconciled')->count());
+    }
+
     private function runCase(string $key, string $method, string $url, array $body, int $propertyId): array
     {
         $response = $this->{$method}($url, $body);
