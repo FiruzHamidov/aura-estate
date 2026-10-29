@@ -287,6 +287,58 @@ class PropertyMyPropertiesBranchFilterTest extends TestCase
         $this->getJson('/api/my-properties?responsible_user_id=888')->assertOk()->assertJsonPath('total', 0);
     }
 
+    public function test_author_can_find_and_manage_a_legacy_denied_listing_before_and_after_responsibility_backfill(): void
+    {
+        Schema::table('users', function (Blueprint $table): void {
+            $table->timestamp('deleted_at')->nullable();
+            $table->timestamp('deletion_requested_at')->nullable();
+        });
+        Schema::table('properties', function (Blueprint $table): void {
+            $table->string('deal_status')->nullable();
+            $table->text('status_comment')->nullable();
+            $table->unsignedBigInteger('sale_user_id')->nullable();
+        });
+        $role = Role::create(['name' => 'Author', 'slug' => 'own_author']);
+        $author = User::create(['name' => 'Author', 'phone' => 'own-author', 'role_id' => $role->id]);
+        $other = User::create(['name' => 'Other agent', 'phone' => 'own-other', 'role_id' => $role->id]);
+        $type = PropertyType::create(['name' => 'Apartment']);
+        $status = PropertyStatus::create(['name' => 'Active']);
+        $property = Property::create([
+            'title' => 'Legacy listing', 'type_id' => $type->id, 'status_id' => $status->id,
+            'price' => 755000, 'created_by' => $author->id, 'agent_id' => null,
+            'moderation_status' => 'denied', 'deal_status' => 'client_denied',
+            'status_comment' => 'Продано другим агентом', 'sale_user_id' => $other->id,
+        ]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role->forceFill(['permissions' => ['properties.list.internal', 'properties.list.scope.own', 'properties.edit']])->save();
+        $access = app(\App\Services\PropertyModeration\PropertyModerationAccess::class);
+
+        foreach ([false, true] as $backfilled) {
+            if ($backfilled) {
+                (require database_path('migrations/2026_10_29_120000_backfill_property_responsible_authors.php'))->up();
+            }
+            Sanctum::actingAs($author->fresh());
+            $url = '/api/my-properties?responsible_user_id='.$author->id;
+            foreach ([1, 20] as $perPage) {
+                $this->getJson($url.'&moderation_status=denied&per_page='.$perPage)->assertOk()
+                    ->assertJsonPath('total', 1)->assertJsonPath('data.0.id', $property->id)
+                    ->assertJsonPath('data.0.agent_id', $backfilled ? $author->id : null);
+            }
+            $this->getJson($url.'&moderation_status=sold')->assertOk()->assertJsonPath('total', 0);
+            $this->assertTrue($access->canEdit($author->fresh(), $property->fresh()));
+            $this->assertFalse($access->canEdit($other->fresh(), $property->fresh()));
+
+            Sanctum::actingAs($other->fresh());
+            $this->getJson('/api/my-properties?moderation_status=denied&responsible_user_id='.$other->id)
+                ->assertOk()->assertJsonPath('total', 0);
+        }
+        $this->assertDatabaseHas('properties', [
+            'id' => $property->id, 'agent_id' => $author->id, 'created_by' => $author->id,
+            'moderation_status' => 'denied', 'deal_status' => 'client_denied',
+            'status_comment' => 'Продано другим агентом', 'sale_user_id' => $other->id,
+        ]);
+    }
+
     public function test_custom_list_scopes_are_shared_by_list_count_map_and_my_properties(): void
     {
         Schema::table('properties', function (Blueprint $table): void {
