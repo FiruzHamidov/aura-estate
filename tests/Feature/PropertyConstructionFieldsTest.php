@@ -235,6 +235,7 @@ class PropertyConstructionFieldsTest extends TestCase
             Sanctum::actingAs($user->fresh());
             $this->postJson('/api/properties', $payload)->assertOk();
             $created = \App\Models\Property::query()->where('created_by', $user->id)->sole();
+            $this->assertSame($user->id, $created->agent_id);
             // Passing the outer gate never replaces the edit check or enables unrelated endpoints.
             $this->putJson('/api/properties/'.$created->id, ['title' => 'Forbidden'])->assertForbidden();
             $this->postJson('/api/roles', ['name' => 'Unexpected', 'slug' => 'unexpected'])->assertForbidden();
@@ -372,6 +373,8 @@ class PropertyConstructionFieldsTest extends TestCase
         $response->assertOk();
         $response->assertJsonPath('construction_status', 'commissioned');
         $response->assertJsonPath('renovation_permission_status', 'allowed');
+        $response->assertJsonPath('created_by', $user->id);
+        $response->assertJsonPath('agent_id', $user->id);
     }
 
     public function test_property_store_accepts_missing_status_id(): void

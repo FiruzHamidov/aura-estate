@@ -377,8 +377,9 @@ class UserController extends Controller
         return Property::query()
             ->where('moderation_status', 'approved')
             ->where(function (Builder $query) use ($user) {
-                $query->where('created_by', $user->id)
-                    ->orWhere('agent_id', $user->id);
+                $query->where('agent_id', $user->id)
+                    ->orWhere(fn (Builder $unassigned) => $unassigned
+                        ->whereNull('agent_id')->where('created_by', $user->id));
             });
     }
 
@@ -410,7 +411,6 @@ class UserController extends Controller
         ];
 
         $newValues = [
-            'created_by' => $targetUserId,
             'agent_id' => $targetUserId,
             'co_owner_user_id' => null,
         ];

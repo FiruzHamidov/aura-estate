@@ -580,6 +580,14 @@ class Property extends Model
                 ->whereNotIn('properties.moderation_status', self::CLOSED_MODERATION_STATUSES);
         }
 
+        // Older records may still say published after a deal was closed/refused.
+        $query->where(fn (Builder $state) => $state->whereNull('properties.moderation_status')
+            ->orWhereNotIn('properties.moderation_status', ['sold', 'sold_by_owner', 'rented', 'denied']));
+        if (Schema::hasColumn('properties', 'deal_status')) {
+            $query->where(fn (Builder $state) => $state->whereNull('properties.deal_status')
+                ->orWhereNotIn('properties.deal_status', ['sold', 'sold_by_owner', 'rented', 'client_denied']));
+        }
+
         if (Schema::hasColumn('properties', 'sold_at')) {
             $query->whereNull('properties.sold_at');
         }

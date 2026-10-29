@@ -191,7 +191,7 @@ class ChatService
 
         // === 1) Первый проход: модель решает, вызывать ли tool ===
         $res1 = $this->openai([
-            'model'       => env('OPENAI_MODEL', 'gpt-5-mini'),
+            'model'       => config('services.openai.model', 'gpt-5-mini'),
             'input'       => $messages,
             'tools'       => $tools,
             'tool_choice' => 'auto',
@@ -286,7 +286,7 @@ class ChatService
 
                 // Второй вызов: просто передаём обновлённый input (без tool_outputs и без role: tool)
                 $res2 = $this->openai([
-                    'model' => env('OPENAI_MODEL', 'gpt-5-mini'),
+                    'model' => config('services.openai.model', 'gpt-5-mini'),
                     'input' => $messages,
                     'store' => false,
                 ]);
@@ -365,7 +365,7 @@ class ChatService
                 ];
 
                 $res2 = $this->openai([
-                    'model' => env('OPENAI_MODEL', 'gpt-5-mini'),
+                    'model' => config('services.openai.model', 'gpt-5-mini'),
                     'input' => $messages,
                     'store' => false,
                 ]);
@@ -501,11 +501,11 @@ class ChatService
     private function openai(array $payload): array
     {
         try {
-            $base = env('OPENAI_BASE', 'https://api.openai.com');
+            $base = config('services.openai.base_url', 'https://api.openai.com');
             $url  = rtrim($base, '/') . '/v1/responses';
 
-            $relayKey = env('RELAY_SHARED_KEY');
-            $openaiApiKey = env('OPENAI_API_KEY');
+            $relayKey = config('services.openai.relay_shared_key');
+            $openaiApiKey = config('services.openai.api_key');
 
             $requestHeaders = [];
             $safeHeaders = [];
@@ -517,7 +517,12 @@ class ChatService
                 $requestHeaders['Authorization'] = 'Bearer '.$openaiApiKey;
                 $safeHeaders['Authorization'] = 'Bearer ***set***';
             } else {
-                $safeHeaders['auth'] = '***missing***';
+                \Log::error('[OpenAI][CONFIG]', ['code' => 'credentials_missing']);
+
+                return [
+                    'error' => ['status' => 0, 'message' => 'Chat provider credentials are not configured'],
+                    'raw' => null,
+                ];
             }
 
             \Log::info('[OpenAI][REQ]', [

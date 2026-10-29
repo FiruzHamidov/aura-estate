@@ -79,6 +79,10 @@ class PublicLeadIntakeTest extends TestCase
 
     private function prepareChat(): void
     {
+        config(['services.openai' => [
+            'base_url' => 'https://provider.invalid', 'model' => 'fixture-model',
+            'api_key' => 'fixture-api-key', 'relay_shared_key' => null,
+        ]]);
         Http::swap(new \Illuminate\Http\Client\Factory);
         Http::preventStrayRequests();
         foreach (['2025_10_01_000001_create_chat_sessions_table.php', '2025_10_01_000002_create_chat_messages_table.php'] as $file) {

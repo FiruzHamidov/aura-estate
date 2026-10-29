@@ -287,6 +287,58 @@ class PropertyMyPropertiesBranchFilterTest extends TestCase
         $this->getJson('/api/my-properties?responsible_user_id=888')->assertOk()->assertJsonPath('total', 0);
     }
 
+    public function test_author_can_find_and_manage_a_legacy_denied_listing_before_and_after_responsibility_backfill(): void
+    {
+        Schema::table('users', function (Blueprint $table): void {
+            $table->timestamp('deleted_at')->nullable();
+            $table->timestamp('deletion_requested_at')->nullable();
+        });
+        Schema::table('properties', function (Blueprint $table): void {
+            $table->string('deal_status')->nullable();
+            $table->text('status_comment')->nullable();
+            $table->unsignedBigInteger('sale_user_id')->nullable();
+        });
+        $role = Role::create(['name' => 'Author', 'slug' => 'own_author']);
+        $author = User::create(['name' => 'Author', 'phone' => 'own-author', 'role_id' => $role->id]);
+        $other = User::create(['name' => 'Other agent', 'phone' => 'own-other', 'role_id' => $role->id]);
+        $type = PropertyType::create(['name' => 'Apartment']);
+        $status = PropertyStatus::create(['name' => 'Active']);
+        $property = Property::create([
+            'title' => 'Legacy listing', 'type_id' => $type->id, 'status_id' => $status->id,
+            'price' => 755000, 'created_by' => $author->id, 'agent_id' => null,
+            'moderation_status' => 'denied', 'deal_status' => 'client_denied',
+            'status_comment' => 'Продано другим агентом', 'sale_user_id' => $other->id,
+        ]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role->forceFill(['permissions' => ['properties.list.internal', 'properties.list.scope.own', 'properties.edit']])->save();
+        $access = app(\App\Services\PropertyModeration\PropertyModerationAccess::class);
+
+        foreach ([false, true] as $backfilled) {
+            if ($backfilled) {
+                (require database_path('migrations/2026_10_29_120000_backfill_property_responsible_authors.php'))->up();
+            }
+            Sanctum::actingAs($author->fresh());
+            $url = '/api/my-properties?responsible_user_id='.$author->id;
+            foreach ([1, 20] as $perPage) {
+                $this->getJson($url.'&moderation_status=denied&per_page='.$perPage)->assertOk()
+                    ->assertJsonPath('total', 1)->assertJsonPath('data.0.id', $property->id)
+                    ->assertJsonPath('data.0.agent_id', $backfilled ? $author->id : null);
+            }
+            $this->getJson($url.'&moderation_status=sold')->assertOk()->assertJsonPath('total', 0);
+            $this->assertTrue($access->canEdit($author->fresh(), $property->fresh()));
+            $this->assertFalse($access->canEdit($other->fresh(), $property->fresh()));
+
+            Sanctum::actingAs($other->fresh());
+            $this->getJson('/api/my-properties?moderation_status=denied&responsible_user_id='.$other->id)
+                ->assertOk()->assertJsonPath('total', 0);
+        }
+        $this->assertDatabaseHas('properties', [
+            'id' => $property->id, 'agent_id' => $author->id, 'created_by' => $author->id,
+            'moderation_status' => 'denied', 'deal_status' => 'client_denied',
+            'status_comment' => 'Продано другим агентом', 'sale_user_id' => $other->id,
+        ]);
+    }
+
     public function test_custom_list_scopes_are_shared_by_list_count_map_and_my_properties(): void
     {
         Schema::table('properties', function (Blueprint $table): void {
@@ -598,4 +650,66 @@ class PropertyMyPropertiesBranchFilterTest extends TestCase
         $this->getJson('/api/my-properties?moderation_status=sold')->assertOk()
             ->assertJsonMissingPath('data.0.report_rop');
     }
+    private function consistencyFixture(): array
+    {
+        $role = Role::create(['name' => 'Reader', 'slug' => 'consistency-reader']);
+        $actor = User::create(['name' => 'Current agent', 'phone' => 'consistency1', 'role_id' => $role->id]);
+        $author = User::create(['name' => 'Previous author', 'phone' => 'consistency2', 'role_id' => $role->id]);
+        $property = Property::create(['title' => 'Transferred', 'type_id' => PropertyType::create(['name' => 'Apartment'])->id,
+            'status_id' => PropertyStatus::create(['name' => 'Active'])->id, 'price' => 100000, 'moderation_status' => 'approved',
+            'created_by' => $author->id, 'agent_id' => $actor->id]);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role->forceFill(['permissions' => ['properties.list.internal', 'properties.list.scope.all', 'properties.edit']])->save();
+        Sanctum::actingAs($actor->fresh());
+        return [$actor, $author, $property];
+    }
+
+    public function test_internal_list_exposes_the_same_safe_responsible_contact_as_catalog(): void
+    {
+        [$actor, $author, $property] = $this->consistencyFixture();
+        foreach (['/api/properties', '/api/my-properties'] as $url) {
+            $this->getJson($url.'?responsible_user_id='.$actor->id)->assertOk()
+                ->assertJsonPath('data.0.id', $property->id)
+                ->assertJsonPath('data.0.creator.id', $author->id)
+                ->assertJsonPath('data.0.responsible_agent.id', $actor->id)
+                ->assertJsonPath('data.0.responsible_agent.name', $actor->name)
+                ->assertJsonMissingPath('data.0.responsible_agent.email')
+                ->assertJsonMissingPath('data.0.responsible_agent.phone')
+                ->assertJsonMissingPath('data.0.agent');
+        }
+    }
+
+    public function test_legacy_report_label_uses_the_same_seller_as_sql_and_credit_attribution(): void
+    {
+        [$actor, $other, $property] = $this->consistencyFixture();
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedBigInteger('sale_user_id')->nullable());
+        $property->forceFill(['moderation_status' => 'sold', 'sale_user_id' => null])->saveQuietly();
+        $property->saleAgents()->attach($other->id, ['role' => 'main']);
+        $service = app(\App\Services\SalesAttributionService::class);
+        foreach ([null, $other->id] as $explicitSeller) {
+            $property->refresh()->forceFill(['sale_user_id' => $explicitSeller])->saveQuietly();
+            $rows = Property::whereKey($property->id)->get();
+            app(\App\Services\PropertyReportStaff::class)->attach($rows);
+            $expected = $explicitSeller ?? $actor->id;
+            $this->assertSame($expected, $service->primarySellerId($property->fresh()));
+            $this->assertSame($expected, $rows->first()->report_seller['id']);
+            $this->assertSame($expected, (int) Property::whereKey($property->id)->selectRaw($service->primarySellerExpression().' AS credited_seller')->first()->credited_seller);
+        }
+    }
+
+    public function test_personal_participation_includes_coowned_without_changing_responsibility_counts(): void
+    {
+        [$actor, $other, $assigned] = $this->consistencyFixture();
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedBigInteger('co_owner_user_id')->nullable());
+        $coowned = Property::create(['title' => 'Shared', 'type_id' => $assigned->type_id, 'status_id' => $assigned->status_id,
+            'price' => 200000, 'created_by' => $other->id, 'agent_id' => $other->id, 'co_owner_user_id' => $actor->id]);
+        $unrelated = Property::create(['title' => 'Other', 'type_id' => $assigned->type_id, 'status_id' => $assigned->status_id,
+            'price' => 300000, 'created_by' => $other->id, 'agent_id' => $other->id]);
+        $url = '/api/my-properties?responsible_user_id='.$actor->id;
+        $this->getJson($url)->assertOk()->assertJsonPath('total', 1)->assertJsonPath('data.0.id', $assigned->id);
+        $result = $this->getJson($url.'&include_co_owned=1')->assertOk()->assertJsonPath('total', 2);
+        $this->assertEqualsCanonicalizing([$assigned->id, $coowned->id], array_column($result->json('data'), 'id'));
+        $this->getJson('/api/properties/count?responsible_user_id='.$actor->id.'&include_co_owned=1')->assertOk()->assertJsonPath('count', 2);
+    }
+
 }

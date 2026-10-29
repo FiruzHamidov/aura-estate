@@ -774,6 +774,7 @@ final class PropertyModerationService
                     continue;
                 }
                 $targetId = $changes[$field] !== null ? (int) $changes[$field] : null;
+                abort_if($field === 'agent_id' && $targetId === null, 422, 'Выберите действующего ответственного за объявление.');
                 if ($targetId !== null) {
                     $target = User::query()->where('status', User::STATUS_ACTIVE)->lockForUpdate()->findOrFail($targetId);
                     if (! $actor->hasPermission('properties.ownership.assign_across_branches')) {
@@ -1636,6 +1637,9 @@ final class PropertyModerationService
             abort_unless($this->access->canModerate($actor, $locked), 403);
             abort_if((int) $locked->moderation_version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
             abort_unless($locked->needsReopening(), 409, 'Объявление уже возвращено. Обновите карточку.');
+            $responsible = User::query()->find($locked->agent_id ?? $locked->created_by);
+            abort_unless($responsible && $responsible->status === User::STATUS_ACTIVE && ! $responsible->isDeletedAccount(),
+                422, 'Перед возвратом объявления назначьте действующего ответственного.');
             abort_if($this->hasConfirmedDuplicate($locked), 409, 'Сначала отмените решение о подтверждённом дубле через модерацию.');
             abort_if($this->hasOpenBlockingCases($locked), 409,
                 'Сначала завершите блокирующую модерацию объявления.');
@@ -1678,6 +1682,7 @@ final class PropertyModerationService
             }
             $needsReview = $duplicates->isNotEmpty() || $warnings !== [] || $contentChanged || (float) $locked->price <= 0;
             $locked->forceFill([
+                'agent_id' => $responsible->id,
                 'deal_status' => 'available',
                 'publication_status' => $needsReview ? self::PUBLICATION_PENDING : self::PUBLICATION_PUBLISHED,
                 'moderation_status' => $needsReview ? 'pending' : Property::PUBLIC_MODERATION_STATUS,
@@ -1696,7 +1701,7 @@ final class PropertyModerationService
             if ($needsReview && ($warnings !== [] || $contentChanged || (float) $locked->price <= 0)) {
                 $this->upsertOpenCase($locked, PropertyModerationCase::TYPE_INITIAL, $actor, $locked->approved_content_snapshot, $this->contentSnapshot($locked), ['reopened_listing_requires_review']);
             }
-            foreach (['deal_status', 'publication_status', 'moderation_status', 'listing_type', 'status_id', 'listing_updated_at'] as $field) {
+            foreach (['agent_id', 'deal_status', 'publication_status', 'moderation_status', 'listing_type', 'status_id', 'listing_updated_at'] as $field) {
                 $changes[$field] = ['old' => $before[$field] ?? null, 'new' => $locked->getAttributes()[$field] ?? null];
             }
             \App\Models\PropertyLog::create([
