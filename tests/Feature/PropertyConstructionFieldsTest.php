@@ -211,6 +211,7 @@ class PropertyConstructionFieldsTest extends TestCase
         });
         (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
         (require database_path('migrations/2026_10_19_090000_add_non_client_property_views.php'))->up();
+        (require database_path('migrations/2026_10_31_100000_add_bathroom_type_to_properties_table.php'))->up();
     }
 
     protected function tearDown(): void
@@ -338,6 +339,33 @@ class PropertyConstructionFieldsTest extends TestCase
             $this->assertDatabaseHas('property_moderation_cases', ['property_id' => $response->json('id'), 'type' => 'initial_review', 'status' => 'open']);
         }
         $this->postJson('/api/properties', ['type_id' => $type->id, 'price' => 990000, 'currency' => 'TJS', 'offer_type' => 'sale', 'requested_listing_type' => 'invalid'])->assertUnprocessable();
+    }
+
+    public function test_bathroom_type_can_be_created_changed_preserved_and_cleared(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create(['name' => 'Agent', 'phone' => '930000095', 'role_id' => $role->id, 'status' => 'active']);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        Sanctum::actingAs($user);
+        $payload = ['type_id' => $type->id, 'price' => 150000, 'currency' => 'TJS', 'offer_type' => 'sale'];
+
+        $id = $this->postJson('/api/properties', $payload + ['bathroom_type' => 'combined'])
+            ->assertOk()->assertJsonPath('bathroom_type', 'combined')->json('id');
+        $this->getJson('/api/properties/'.$id)->assertOk()->assertJsonPath('bathroom_type', 'combined');
+        $this->putJson('/api/properties/'.$id, ['bathroom_type' => 'separate'])
+            ->assertOk()->assertJsonPath('bathroom_type', 'separate');
+        $this->putJson('/api/properties/'.$id, ['title' => 'Updated title'])
+            ->assertOk()->assertJsonPath('bathroom_type', 'separate');
+        $this->putJson('/api/properties/'.$id, ['bathroom_type' => 'invalid'])->assertUnprocessable();
+        $this->assertDatabaseHas('properties', ['id' => $id, 'bathroom_type' => 'separate']);
+        $this->putJson('/api/properties/'.$id, ['bathroom_type' => ''])
+            ->assertOk()->assertJsonPath('bathroom_type', null);
+        $this->assertDatabaseHas('properties', ['id' => $id, 'bathroom_type' => null]);
+        $this->postJson('/api/properties', $payload)->assertOk()->assertJsonPath('bathroom_type', null);
+        $this->postJson('/api/properties', $payload + ['bathroom_type' => null])->assertOk()->assertJsonPath('bathroom_type', null);
+        foreach (['invalid', 'Совмещённый', 1, ['combined']] as $invalid) {
+            $this->postJson('/api/properties', $payload + ['bathroom_type' => $invalid])->assertUnprocessable();
+        }
     }
 
     public function test_property_store_accepts_construction_and_renovation_statuses(): void
@@ -1400,6 +1428,7 @@ class PropertyConstructionFieldsTest extends TestCase
         $status = \App\Models\PropertyStatus::create(['name' => 'Available', 'slug' => 'available']);
         $property = \App\Models\Property::query()->create([
             'title' => 'Compact Feed Card',
+            'bathroom_type' => 'separate',
             'description' => str_repeat('Public description ', 10),
             'type_id' => $type->id,
             'status_id' => $status->id,
@@ -1422,6 +1451,7 @@ class PropertyConstructionFieldsTest extends TestCase
             ->assertOk()
             ->assertJsonPath('per_page', 4)
             ->assertJsonPath('data.0.title', 'Compact Feed Card')
+            ->assertJsonPath('data.0.bathroom_type', 'separate')
             ->assertJsonPath('data.0.type.slug', 'apartments')
             ->assertJsonPath('data.0.photos.0.file_path', 'properties/card.jpg')
             ->assertJsonMissing(['owner_phone' => 'PRIVATE-OWNER-PHONE'])
@@ -2137,9 +2167,11 @@ class PropertyConstructionFieldsTest extends TestCase
     public function test_authenticated_property_show_exposes_refresh_capability_and_guest_does_not(): void
     {
         [$owner, $property] = $this->createListingDateRefreshFixture('approved', '930000405');
+        $property->update(['bathroom_type' => 'combined']);
 
         $this->getJson("/api/properties/{$property->id}")
             ->assertOk()
+            ->assertJsonPath('bathroom_type', 'combined')
             ->assertJsonMissingPath('capabilities')
             ->assertJsonMissingPath('listing_date_refresh');
 
@@ -2187,7 +2219,7 @@ class PropertyConstructionFieldsTest extends TestCase
         $agent = User::forceCreate(['name' => 'Agent', 'phone' => '930000009', 'role_id' => $role->id, 'status' => 'active']);
         $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
         Sanctum::actingAs($agent);
-        $payload = ['type_id' => $type->id, 'price' => 100000, 'currency' => 'TJS', 'offer_type' => 'sale'];
+        $payload = ['type_id' => $type->id, 'price' => 100000, 'currency' => 'TJS', 'offer_type' => 'sale', 'bathroom_type' => 'combined'];
 
         $this->postJson('/api/properties', $payload + ['moderation_status' => 'approved'])
             ->assertUnprocessable()->assertJsonPath('code', 'PROTECTED_FIELD');
@@ -2195,6 +2227,7 @@ class PropertyConstructionFieldsTest extends TestCase
             ->assertUnprocessable()->assertJsonPath('code', 'PROMOTION_PROTECTED_FIELD');
         $created = $this->postJson('/api/properties', $payload)->assertOk()->assertJsonPath('publication_status', 'published');
         $id = $created->json('id');
+        $this->assertSame('combined', \App\Models\Property::findOrFail($id)->approved_content_snapshot['bathroom_type']);
         $version = $created->json('moderation_version');
         $key = ['Idempotency-Key' => 'moderation-price-change-001'];
         $changed = $this->putJson("/api/properties/{$id}", ['price' => 100100, 'version' => $version] + $payload, $key)
