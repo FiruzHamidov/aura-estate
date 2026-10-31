@@ -22,6 +22,8 @@ class Property extends Model
         'description',
         'type_id',
         'status_id',
+        'building_type_id',
+        'building_type_resolved_at',
         'location_id',
         'repair_type_id',
         'contract_type_id',
@@ -143,6 +145,8 @@ class Property extends Model
         'description',
         'type_id',
         'status_id',
+        'building_type_id',
+        'building_type_resolved_at',
         'location_id',
         'repair_type_id',
         'price',
@@ -298,7 +302,7 @@ class Property extends Model
 
     public function buildingType()
     {
-        return $this->belongsTo(BuildingType::class, 'status_id');
+        return $this->belongsTo(BuildingType::class, Schema::hasColumn('properties', 'building_type_id') ? 'building_type_id' : 'status_id');
     }
 
     public function parking()

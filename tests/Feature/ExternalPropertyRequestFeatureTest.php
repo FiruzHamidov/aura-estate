@@ -700,6 +700,38 @@ class ExternalPropertyRequestFeatureTest extends TestCase
         return [['agent'], ['custom_converter'], ['client'], ['external_agent'], ['intern']];
     }
 
+    public static function dedicatedBuildingTypes(): array
+    {
+        return [[2, true], [3, false]];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('dedicatedBuildingTypes')]
+    public function test_conversion_uses_dedicated_building_type_without_a_closed_status_default(int $buildingType, bool $hasAvailable): void
+    {
+        (require database_path('migrations/2026_06_25_120000_make_property_status_id_nullable.php'))->up();
+        (require database_path('migrations/2026_10_31_160000_separate_property_building_type.php'))->up();
+        \Illuminate\Support\Facades\DB::table('building_types')->insert(['id' => $buildingType, 'name' => 'Тип дома']);
+        \Illuminate\Support\Facades\DB::table('property_statuses')->insert([
+            ['id' => 2, 'name' => 'Продан', 'slug' => 'sold'], ['id' => 3, 'name' => 'Арендован', 'slug' => 'rented'],
+        ]);
+        if ($hasAvailable) \Illuminate\Support\Facades\DB::table('property_statuses')->insert(['id' => 1, 'name' => 'Доступен', 'slug' => 'available']);
+        $external = $this->user($this->externalRole, '930009991', branchId: 1, branchGroupId: 1);
+        $actor = $this->user($this->agentRole, '930009992', branchId: 1, branchGroupId: 1);
+        $type = PropertyType::create(['name' => 'Квартира', 'slug' => 'apartment']);
+        $request = ExternalPropertyRequest::create(['external_agent_id' => $external->id, 'branch_id' => 1, 'branch_group_id' => 1,
+            'status' => ExternalPropertyRequest::STATUS_SUBMITTED, 'offer_type' => 'sale', 'type_id' => $type->id,
+            'price' => 85000, 'currency' => 'TJS', 'owner_phone' => '930009993']);
+        Sanctum::actingAs($actor);
+        $url = "/api/external-agent-requests/{$request->id}/convert";
+        $this->postJson($url, ['status_id' => 2])->assertUnprocessable()->assertJsonStructure(['details' => ['errors' => ['status_id']]]);
+        $this->assertDatabaseCount('properties', 0);
+        $this->postJson($url, ['building_type_id' => $buildingType])->assertCreated()
+            ->assertJsonPath('data.building_type_id', $buildingType)->assertJsonPath('data.status_id', $hasAvailable ? 1 : null);
+        $property = Property::query()->sole();
+        $this->assertFalse($property->requiresExplicitReopening());
+        $this->assertNotNull($property->building_type_resolved_at);
+    }
+
     #[\PHPUnit\Framework\Attributes\DataProvider('conversionRoles')]
     public function test_internal_agent_converts_external_request_to_property_with_source(string $actorSlug): void
     {

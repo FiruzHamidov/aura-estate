@@ -10,6 +10,7 @@ use App\Models\PropertyModerationCase;
 use App\Models\User;
 use App\Services\Crm\ClientAttachService;
 use App\Services\Crm\Matching\ClientPropertyMatcher;
+use App\Services\PropertyBuildingType;
 use App\Services\PropertyDuplicateService;
 use App\Services\PropertyModeration\PropertyModerationAccess;
 use App\Services\PropertyModeration\PropertyModerationService;
@@ -366,7 +367,7 @@ class PropertyController extends Controller
             ]);
         }
 
-        $payload = $property->toArray();
+        $payload = app(PropertyBuildingType::class)->present($property, $property->toArray());
         $payload['responsible_agent'] = $this->serializeResponsibleAgent($property);
         $payload['branch_id'] = $this->resolvePropertyBranchId($property);
         $payload['branch_group_id'] = $this->resolvePropertyBranchGroupId($property);
@@ -425,6 +426,7 @@ class PropertyController extends Controller
     private function withModerationWorkflow(Property $property, User $user, ?array $payload = null): array
     {
         $payload ??= $property->toArray();
+        if (! array_key_exists('building_type_source', $payload)) $payload = app(PropertyBuildingType::class)->present($property, $payload);
         $payload['publication_visibility'] ??= app(PropertyPublicationVisibility::class)->forProperty($property);
         if (! Schema::hasTable('property_moderation_cases')) {
             $payload['moderation_reasons'] = [];
@@ -2284,6 +2286,7 @@ class PropertyController extends Controller
         unset($validated['tags']);
         [$property, $dups, $qualityWarnings, $user] = DB::transaction(function () use ($request, $validated, $featureIds, $tagIds, $user, $requiresReview, $requestedType) {
             [$user] = $this->lockPropertyWrite($user, null, $validated);
+            $validated = app(PropertyBuildingType::class)->normalizeWrite($validated);
             $this->moderation->assertCanCreate($user);
             if ($requestedType !== 'regular') {
                 abort_unless($user->hasPermission('properties.promotions.request') && $user->hasPermission('properties.edit'), 403, 'PROMOTION_PERMISSION_DENIED');
@@ -2374,6 +2377,7 @@ class PropertyController extends Controller
             $user
         ): void {
             [$user, $property] = $this->lockPropertyWrite($user, $property, $validated);
+            $validated = app(PropertyBuildingType::class)->normalizeWrite($validated, $property);
             $validated = $this->normalizePropertyWriteGroup($user, $validated);
             $this->ensureVisibleClientsForProperty($validated, $property);
             $validated = $this->syncPropertyClientSnapshots($validated);
@@ -2575,7 +2579,7 @@ class PropertyController extends Controller
         $payload['public_view_only'] = true;
         $payload['capabilities'] = $this->propertyCapabilities(null, $property);
 
-        return $payload;
+        return app(PropertyBuildingType::class)->present($property, $payload);
     }
 
     public function show(Request $request, Property $property)
@@ -2792,6 +2796,7 @@ class PropertyController extends Controller
             'document_type_id' => 'nullable|exists:document_types,id',
             'type_id' => ($isUpdate ? 'sometimes' : 'required').'|exists:property_types,id',
             'status_id' => 'nullable|exists:property_statuses,id',
+            'building_type_id' => 'sometimes|nullable|integer|exists:building_types,id',
             'location_id' => 'nullable|exists:locations,id',
             'repair_type_id' => 'nullable|exists:repair_types,id',
             'price' => ($isUpdate ? 'sometimes' : 'required').'|numeric',

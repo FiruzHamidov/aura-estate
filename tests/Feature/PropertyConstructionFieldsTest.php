@@ -258,6 +258,95 @@ class PropertyConstructionFieldsTest extends TestCase
         $this->assertDatabaseCount('properties', 3);
     }
 
+    private function buildingTypeFixture(): array
+    {
+        Schema::create('building_types', function (Blueprint $table): void { $table->id(); $table->string('name'); $table->timestamps(); });
+        \Illuminate\Support\Facades\DB::table('building_types')->insert([['id' => 2, 'name' => 'Кирпичный'], ['id' => 3, 'name' => 'Монолитный']]);
+        \Illuminate\Support\Facades\DB::table('property_statuses')->insert([['id' => 2, 'name' => 'Продан', 'slug' => 'sold'], ['id' => 3, 'name' => 'Арендован', 'slug' => 'rented']]);
+        (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
+        (require database_path('migrations/2026_10_31_160000_separate_property_building_type.php'))->up();
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $actor = User::create(['name' => 'Agent', 'phone' => '930009999', 'role_id' => $role->id, 'status' => 'active']);
+        Sanctum::actingAs($actor);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        return ['type_id' => $type->id, 'price' => 150000, 'currency' => 'TJS', 'offer_type' => 'sale'];
+    }
+
+    public function test_building_ids_matching_closed_statuses_do_not_close_new_listings(): void
+    {
+        $payload = $this->buildingTypeFixture();
+        foreach ([2, 3] as $buildingType) {
+            $response = $this->postJson('/api/properties', [...$payload, 'building_type_id' => $buildingType])->assertOk()
+                ->assertJsonPath('status_id', null)->assertJsonPath('building_type_id', $buildingType)->assertJsonPath('building_type_source', 'confirmed');
+            $property = \App\Models\Property::findOrFail($response->json('id'));
+            $this->assertFalse($property->requiresExplicitReopening());
+            $this->assertSame($buildingType, $property->buildingType->id);
+            $this->assertNotNull($property->building_type_resolved_at);
+        }
+        $this->postJson('/api/properties', [...$payload, 'building_type_id' => 999])->assertUnprocessable();
+        $this->postJson('/api/properties', [...$payload, 'status_id' => 2])->assertUnprocessable();
+        $this->postJson('/api/properties', [...$payload, 'building_type_resolved_at' => now()->toIso8601String()])->assertUnprocessable();
+        \Illuminate\Support\Facades\DB::table('property_statuses')->insert(['id' => 1, 'name' => 'Доступен', 'slug' => 'available']);
+        $this->postJson('/api/properties', [...$payload, 'status_id' => 1])->assertOk()
+            ->assertJsonPath('status_id', 1)->assertJsonPath('building_type_id', null)->assertJsonPath('building_type_source', 'confirmed');
+    }
+
+    public function test_legacy_echo_preserves_closed_status_and_never_promotes_old_type_to_verified(): void
+    {
+        $payload = $this->buildingTypeFixture();
+        $created = $this->postJson('/api/properties', $payload)->assertOk();
+        $id = $created->json('id');
+        \Illuminate\Support\Facades\DB::table('properties')->where('id', $id)->update(['status_id' => 3, 'building_type_id' => null,
+            'building_type_resolved_at' => null, 'moderation_status' => 'approved', 'publication_status' => 'published']);
+        $property = \App\Models\Property::findOrFail($id);
+        $presented = app(\App\Services\PropertyBuildingType::class)->present($property, []);
+        $this->assertSame('legacy_unverified', $presented['building_type_source']);
+        $this->assertNull($presented['building_type_id']);
+        $this->assertSame('Монолитный', $presented['building_type']['name']);
+        $response = $this->putJson('/api/properties/'.$id, ['version' => $property->moderation_version, 'status_id' => 3, 'description' => 'Уточнено описание'])->assertOk();
+        $this->assertDatabaseHas('properties', ['id' => $id, 'status_id' => 3, 'building_type_id' => null]);
+        $this->putJson('/api/properties/'.$id, ['version' => $response->json('moderation_version'), 'status_id' => null])->assertUnprocessable();
+        $this->assertTrue($property->fresh()->requiresExplicitReopening());
+    }
+
+    public function test_verified_building_type_can_be_cleared_without_legacy_fallback(): void
+    {
+        $payload = $this->buildingTypeFixture();
+        $created = $this->postJson('/api/properties', [...$payload, 'building_type_id' => 2])->assertOk();
+        $id = $created->json('id');
+        $this->putJson('/api/properties/'.$id, ['version' => $created->json('moderation_version'), 'building_type_id' => null])->assertOk()
+            ->assertJsonPath('building_type_id', null)->assertJsonPath('building_type', null)->assertJsonPath('building_type_source', 'confirmed');
+        $this->assertDatabaseHas('properties', ['id' => $id, 'status_id' => null, 'building_type_id' => null]);
+    }
+
+    public static function approvedBuildingSnapshots(): array
+    {
+        return [['legacy', null, null], ['confirmed', 2, '2026-10-01 00:00:00'], ['cleared', null, '2026-10-01 00:00:00']];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('approvedBuildingSnapshots')]
+    public function test_withdraw_building_proposal_restores_approved_or_legacy_snapshot(string $kind, ?int $type, ?string $resolved): void
+    {
+        $payload = $this->buildingTypeFixture();
+        $created = $this->postJson('/api/properties', [...$payload, 'building_type_id' => $type])->assertOk();
+        $property = \App\Models\Property::findOrFail($created->json('id'));
+        $snapshot = $payload;
+        if ($kind !== 'legacy') $snapshot += ['building_type_id' => $type, 'building_type_resolved_at' => $resolved];
+        $property->forceFill(['moderation_status' => 'approved', 'publication_status' => 'published',
+            'building_type_resolved_at' => $resolved, 'approved_content_snapshot' => $snapshot])->saveQuietly();
+        $property->moderationCases()->update(['status' => 'approved', 'blocking' => false]);
+        $this->putJson('/api/properties/'.$property->id, ['version' => $property->moderation_version, 'building_type_id' => 3])
+            ->assertOk()->assertJsonPath('publication_status', 'pending');
+        $property->refresh();
+        $this->assertTrue($property->moderationCases()->where('type', \App\Models\PropertyModerationCase::TYPE_CONTENT)->where('status', 'open')->exists());
+        $restored = app(\App\Services\PropertyModeration\PropertyModerationService::class)
+            ->withdrawChanges($property, User::findOrFail($property->created_by), (int) $property->moderation_version);
+        $this->assertSame($type, $restored->building_type_id);
+        $this->assertSame($resolved, $restored->building_type_resolved_at);
+        $this->assertSame($snapshot, $restored->approved_content_snapshot);
+        $this->assertSame('published', $restored->publication_status);
+    }
+
     public function test_custom_writer_can_be_restricted_to_its_assigned_group(): void
     {
         Schema::table('users', fn (Blueprint $table) => $table->unsignedBigInteger('branch_group_id')->nullable());

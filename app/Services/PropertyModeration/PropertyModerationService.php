@@ -45,6 +45,7 @@ final class PropertyModerationService
         'approved_content_snapshot',
         'duplicate_of_property_id',
         'moderation_version',
+        'building_type_resolved_at',
         'created_by',
         'agent_id',
         'co_owner_user_id',
@@ -86,6 +87,7 @@ final class PropertyModerationService
     ];
 
     private const MATERIAL_FIELDS = [
+        'building_type_id',
         'owner_phone', 'owner_name', 'owner_client_id', 'type_id', 'location_id', 'district', 'address',
         'latitude', 'longitude', 'rooms', 'total_area', 'land_size', 'living_area', 'floor', 'total_floors', 'developer_id',
         'offer_type',
@@ -525,7 +527,7 @@ final class PropertyModerationService
                         $this->event($other->property, $other, 'proposal_discarded_on_restore', $actor);
                     });
                 abort_if($this->hasOpenBlockingCases($property), 409, 'OPEN_BLOCKING_CASES');
-                $property->fill(array_intersect_key($snapshot, array_flip(Property::LISTING_CONTENT_FIELDS)));
+                $property->fill($this->approvedSnapshotFields($snapshot));
                 $this->assertCanPublish($property);
                 $this->restoreApprovedPhotos($property, $snapshot);
                 $this->restoreApprovedRelations($property, $snapshot);
@@ -614,7 +616,7 @@ final class PropertyModerationService
                     'moderation_version' => (int) $locked->moderation_version + 1,
                 ])->save();
             } else {
-                $locked->fill(array_intersect_key($snapshot, array_flip(Property::LISTING_CONTENT_FIELDS)));
+                $locked->fill($this->approvedSnapshotFields($snapshot));
                 $this->assertCanPublish($locked);
                 $this->restoreApprovedPhotos($locked, $snapshot);
                 $this->restoreApprovedRelations($locked, $snapshot);
@@ -742,7 +744,7 @@ final class PropertyModerationService
 
             $snapshot = (array) $property->approved_content_snapshot;
             if ($snapshot !== []) {
-                $property->fill(array_intersect_key($snapshot, array_flip(Property::LISTING_CONTENT_FIELDS)));
+                $property->fill($this->approvedSnapshotFields($snapshot));
                 $this->assertCanPublish($property);
                 $this->restoreApprovedPhotos($property, $snapshot);
                 $this->restoreApprovedRelations($property, $snapshot);
@@ -1157,6 +1159,16 @@ final class PropertyModerationService
                 'position' => (int) $photo->position,
             ];
         })->all();
+    }
+
+    private function approvedSnapshotFields(array $snapshot): array
+    {
+        // A pre-migration snapshot did not approve a new building type. Reverting
+        // to it must also discard the proposed type and its confirmation marker.
+        if (Schema::hasColumn('properties', 'building_type_id')) {
+            $snapshot += ['building_type_id' => null, 'building_type_resolved_at' => null];
+        }
+        return array_intersect_key($snapshot, array_flip(Property::LISTING_CONTENT_FIELDS));
     }
 
     private function contentSnapshot(Property $property): array
