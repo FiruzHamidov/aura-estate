@@ -465,6 +465,79 @@ class KpiConsistencyFeatureTest extends TestCase
         }
     }
 
+    public static function transferredEmployeePlans(): array
+    {
+        return [
+            'personal plan in previous group' => ['personal_previous'],
+            'legacy personal plan without group' => ['personal_ungrouped'],
+            'branch common plan' => ['common_branch'],
+            'global common plan' => ['common_global'],
+        ];
+    }
+
+    #[DataProvider('transferredEmployeePlans')]
+    public function test_current_team_monthly_reports_use_employee_totals_and_canonical_plans(string $planScope): void
+    {
+        [$admin, $agent, $branch, $group] = $this->fixture();
+        $this->employeeReportProperties();
+        $previous = BranchGroup::create(['name' => 'Previous', 'branch_id' => $branch->id]);
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $rop = User::create(['name' => 'Supervisor', 'phone' => '900990003', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $rop->supervisedGroups()->attach($group->id);
+        Schema::create('bookings', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('agent_id'); $t->unsignedBigInteger('created_by');
+            $t->unsignedBigInteger('branch_group_id')->nullable(); $t->dateTime('start_time'); $t->dateTime('end_time');
+        });
+        for ($i = 0; $i < 15; $i++) {
+            \DB::table('bookings')->insert(['agent_id' => $agent->id, 'created_by' => $agent->id,
+                'branch_group_id' => $i === 0 ? $group->id : ($i === 1 ? null : $previous->id),
+                'start_time' => '2026-10-10 10:00:00', 'end_time' => '2026-10-10 11:00:00']);
+        }
+        for ($i = 0; $i < 16; $i++) {
+            \DB::table('properties')->insert(['created_by' => $agent->id, 'agent_id' => $agent->id,
+                'sale_agent_id' => $agent->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id,
+                'created_at' => '2026-10-10 10:00:00', 'moderation_status' => $i === 15 ? 'sold' : 'approved',
+                'sold_at' => $i === 15 ? '2026-10-10 10:00:00' : null]);
+        }
+        $this->report($agent, '2026-10-10', ['calls_count' => 323, 'ad_count' => 309, 'shows_count' => 1]);
+        foreach (['objects' => 15, 'shows' => 20, 'ads' => 200, 'calls' => 200, 'sales' => 2] as $key => $target) {
+            KpiPlan::create(['user_id' => str_starts_with($planScope, 'personal') ? $agent->id : null,
+                'role_slug' => 'agent', 'branch_id' => $planScope === 'common_global' ? null : $branch->id,
+                'branch_group_id' => $planScope === 'personal_previous' ? $previous->id : null,
+                'metric_key' => $key, 'daily_plan' => $target, 'weight' => .2, 'effective_from' => '2026-10-01']);
+        }
+        $query = 'date_from=2026-10-01&date_to=2026-10-31&interval=month&agent_id='.$agent->id;
+        $monthly = '/api/kpi/monthly?v=2&year=2026&month=10&agent_id='.$agent->id;
+        $expected = $this->getJson('/api/reports/employees?'.$query)->assertOk()
+            ->assertJsonPath('data.0.shows', 15)->assertJsonPath('data.0.kpi_percent', 85)->json('data.0');
+        Sanctum::actingAs($agent);
+        $self = $this->getJson($monthly)->assertOk()->json('data.0');
+        $this->assertEquals($expected['metrics'], $self['metrics']);
+        Sanctum::actingAs($rop);
+        foreach (['', '&branch_group_id='.$group->id] as $scope) {
+            $report = $this->getJson('/api/reports/employees?'.$query.$scope)->assertOk()
+                ->assertJsonPath('data.0.shows', 15)->assertJsonPath('data.0.shows_visible', 1)
+                ->assertJsonPath('data.0.kpi_percent', 85)->json('data.0');
+            $kpi = $this->getJson($monthly.$scope)->assertOk()->assertJsonPath('data.0.kpi_percent', 85)->json('data.0');
+            $this->assertEquals($expected['metrics'], $report['metrics']);
+            $this->assertEquals($self['metrics'], $kpi['metrics']);
+        }
+        // Full aggregates do not grant access to the underlying foreign cards/plans.
+        $this->getJson('/api/bookings/2')->assertNotFound();
+        $this->getJson('/api/bookings/3')->assertNotFound();
+        $plan = KpiPlan::firstOrFail();
+        $this->getJson('/api/kpi/plans/'.($plan->user_id === null ? 'common/' : '').$plan->id)->assertNotFound();
+        // A former employee remains limited to facts in the supervised historical group.
+        $agent->update(['branch_group_id' => $previous->id]);
+        $this->getJson('/api/reports/employees?'.$query)->assertOk()
+            ->assertJsonPath('data.0.shows', 1)->assertJsonPath('data.0.shows_visible', 1)
+            ->assertJsonPath('data.0.metrics.shows.final_value', 1)
+            ->assertJsonPath('data.0.metrics.shows.plan_source', 'system');
+        // Removing supervision must remove the full employee totals immediately.
+        $rop->supervisedGroups()->detach();
+        $this->getJson('/api/reports/employees?'.$query)->assertForbidden();
+    }
+
     private function fixture(string $name = 'Agent'): array
     {
         $adminRole = Role::firstOrCreate(['slug' => 'admin'], ['name' => 'Admin']);

@@ -1124,6 +1124,16 @@ class KpiModuleService
             (bool) ($filters['include_breakdown'] ?? false), $periodType === 'week');
     }
 
+    /** Current, authorized employees whose aggregate activity follows the person after a transfer. */
+    public function currentReportUserIds(User $actor, array $filters): array
+    {
+        $visibleRoles = app(KpiRoleCatalog::class)->reportPresentation($actor)['visible_roles'];
+        if ($visibleRoles !== null) {
+            $filters['roles'] = isset($filters['roles']) ? array_values(array_intersect($filters['roles'], $visibleRoles)) : $visibleRoles;
+        }
+        return $this->weeklyUsersScopeQuery($actor, $filters)->pluck('users.id')->map(fn ($id) => (int) $id)->all();
+    }
+
     public function weeklyDailyRowsV2(User $authUser, Carbon $day, array $filters): array
     {
         return $this->dailyRowsV2($authUser, $day, $filters);
@@ -1196,6 +1206,11 @@ class KpiModuleService
         // source once for the whole page and aggregate it in memory.
         $autoMetricsByUserDate = $this->preloadAutoMetricsByUserDate($userIds->all(), $from, $to, $authUser);
         $authorizedPlans = $this->loadCanonicalPlans($allUsers, $from, $to);
+        // Aggregate employee KPI uses the same plan as the employee/admin, including
+        // plans retained in a previous group and common branch/global plans. Only
+        // the already-authorized current roster gets this calculation context;
+        // historical employees and plan management retain record-level group access.
+        $currentPlans = $this->loadCanonicalPlans($allUsers->whereIn('id', $currentUserIds), $from, $to, scopePlans: false);
         $lockedScopes = $this->preloadLockedScopes($periodType, $from);
 
         $mapping = (array) config('kpi.v2.metric_mapping', []);
@@ -1220,7 +1235,7 @@ class KpiModuleService
         }
 
         $hasClients = Schema::hasTable('clients');
-        $data = $allUsers->map(function (User $user) use ($unifiedEmployees, $hasClients, $currentContexts, $currentReports, $currentAutoMetrics, $currentSales, $authUser, $reports, $periodType, $from, $to, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, $preloadedSalesByUserDate, $autoMetricsByUserDate, $authorizedPlans, $lockedScopes, &$globalSourceError, &$planTraceRows) {
+        $data = $allUsers->map(function (User $user) use ($unifiedEmployees, $hasClients, $currentContexts, $currentReports, $currentAutoMetrics, $currentSales, $currentPlans, $authUser, $reports, $periodType, $from, $to, $mapping, $defaultTargetMap, $weightMap, $withBreakdown, $daysInPeriod, $includeWeeklyStats, $preloadedSalesByUserDate, $autoMetricsByUserDate, $authorizedPlans, $lockedScopes, &$globalSourceError, &$planTraceRows) {
             $contextKey = $authUser->usesAssignedGroupScope() && ! $unifiedEmployees ? $user->id.'|'.$user->branch_group_id : $user->id;
             $rows = collect($reports->get($contextKey, collect()));
             if ($authUser->usesAssignedGroupScope() && ! $unifiedEmployees) $rows = $rows->where('role_slug', $user->role?->slug)->values();
@@ -1231,7 +1246,8 @@ class KpiModuleService
                 $autoByDate = $currentAutoMetrics[$user->id] ?? [];
             }
             $sourceErrors = [];
-            $targetResolution = $this->periodPlanResolution($user, $from, $to, $periodType, $authorizedPlans, $withBreakdown, $rows);
+            $targetResolution = $this->periodPlanResolution($user, $from, $to, $periodType,
+                $currentMember ? $currentPlans : $authorizedPlans, $withBreakdown, $rows, scopePersonalPlans: ! $currentMember);
             $targetMap = $targetResolution['monthly_targets'];
             $metricPlanSourceMap = $targetResolution['sources'];
             $metricPlanDailyMap = $targetResolution['plan_daily_values'];
@@ -1603,18 +1619,18 @@ class KpiModuleService
     }
 
     /** Resolve each metric independently, including its weight, at the date of the fact. */
-    private function dailyPlanResolution(User $user, Carbon $date, Collection $plans): array
+    private function dailyPlanResolution(User $user, Carbon $date, Collection $plans, bool $scopePersonalPlans = true): array
     {
         $defaults = (array) config('kpi.v2.targets', []);
         $weights = (array) config('kpi.v2.weights', []);
         $resolution = $this->defaultPeriodTargetMap($defaults, $date);
-        $eligible = $plans->filter(function (KpiPlan $plan) use ($user, $date) {
+        $eligible = $plans->filter(function (KpiPlan $plan) use ($user, $date, $scopePersonalPlans) {
             $day = $date->toDateString();
             if (($plan->effective_from && $plan->effective_from->toDateString() > $day)
                 || ($plan->effective_to && $plan->effective_to->toDateString() < $day)) return false;
             if ($plan->user_id !== null) {
                 return (int) $plan->user_id === (int) $user->id
-                    && (! auth()->user()?->usesAssignedGroupScope()
+                    && (! $scopePersonalPlans || ! auth()->user()?->usesAssignedGroupScope()
                         || ((int) $plan->branch_group_id === (int) $user->branch_group_id && $plan->role_slug === $user->role?->slug));
             }
             return $plan->role_slug === $user->role?->slug
@@ -1640,7 +1656,7 @@ class KpiModuleService
         return $resolution;
     }
 
-    private function periodPlanResolution(User $user, Carbon $from, Carbon $to, string $periodType, Collection $plans, bool $withBreakdown = false, ?Collection $reports = null): array
+    private function periodPlanResolution(User $user, Carbon $from, Carbon $to, string $periodType, Collection $plans, bool $withBreakdown = false, ?Collection $reports = null, bool $scopePersonalPlans = true): array
     {
         $reportsByDate = ($reports ?? collect())->keyBy(fn (DailyReport $report) => $report->report_date->toDateString());
         $contexts = $reportsByDate->map(fn (DailyReport $report) => $this->planContextForReport($user, $report));
@@ -1651,14 +1667,14 @@ class KpiModuleService
             : $contexts->contains(fn (User $context) => $plan->role_slug === $context->role?->slug
                 && ($plan->branch_id === null || (int) $plan->branch_id === (int) $context->branch_id)
                 && ($plan->branch_group_id === null || (int) $plan->branch_group_id === (int) $context->branch_group_id)));
-        $resolution = $this->dailyPlanResolution($contexts->get($from->toDateString(), $user), $from, $plans);
+        $resolution = $this->dailyPlanResolution($contexts->get($from->toDateString(), $user), $from, $plans, $scopePersonalPlans);
         $resolution['monthly_targets'] = $resolution['targets'];
         $resolution['targets'] = array_fill_keys(array_keys($resolution['targets']), 0.0);
         $resolution['weights'] = array_fill_keys(array_keys($resolution['weights']), 0.0);
         $resolution['by_date'] = [];
         $days = 0;
         for ($date = $from->copy()->startOfDay(); $date->lte($to); $date->addDay()) {
-            $daily = $this->dailyPlanResolution($contexts->get($date->toDateString(), $user), $date, $plans);
+            $daily = $this->dailyPlanResolution($contexts->get($date->toDateString(), $user), $date, $plans, $scopePersonalPlans);
             if ($withBreakdown) $resolution['by_date'][$date->toDateString()] = $daily;
             foreach ($daily['targets'] as $key => $monthlyTarget) {
                 $resolution['targets'][$key] += $periodType === 'day' && $key === 'sales'
@@ -1674,10 +1690,10 @@ class KpiModuleService
         return $resolution;
     }
 
-    private function loadCanonicalPlans(Collection $users, Carbon $from, Carbon $to): Collection
+    private function loadCanonicalPlans(Collection $users, Carbon $from, Carbon $to, bool $scopePlans = true): Collection
     {
         if ($users->isEmpty() || ! Schema::hasTable('kpi_plans')) return collect();
-        return KpiPlan::query()->tap(fn ($query) => $this->scopePlanQuery($query))
+        return KpiPlan::query()->when($scopePlans, fn ($query) => $this->scopePlanQuery($query))
             ->where(fn ($q) => $q->whereIn('user_id', $users->pluck('id'))->orWhereNull('user_id'))
             ->where(fn ($q) => $q->whereNull('effective_from')->orWhereDate('effective_from', '<=', $to->toDateString()))
             ->where(fn ($q) => $q->whereNull('effective_to')->orWhereDate('effective_to', '>=', $from->toDateString()))
