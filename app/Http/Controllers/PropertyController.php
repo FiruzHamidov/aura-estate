@@ -10,9 +10,11 @@ use App\Models\PropertyModerationCase;
 use App\Models\User;
 use App\Services\Crm\ClientAttachService;
 use App\Services\Crm\Matching\ClientPropertyMatcher;
+use App\Services\PropertyBuildingType;
 use App\Services\PropertyDuplicateService;
 use App\Services\PropertyModeration\PropertyModerationAccess;
 use App\Services\PropertyModeration\PropertyModerationService;
+use App\Services\PropertyPublicationVisibility;
 use App\Services\PropertyQualityService;
 use App\Support\ClientAccess;
 use Illuminate\Database\Eloquent\Builder;
@@ -365,7 +367,7 @@ class PropertyController extends Controller
             ]);
         }
 
-        $payload = $property->toArray();
+        $payload = app(PropertyBuildingType::class)->present($property, $property->toArray());
         $payload['responsible_agent'] = $this->serializeResponsibleAgent($property);
         $payload['branch_id'] = $this->resolvePropertyBranchId($property);
         $payload['branch_group_id'] = $this->resolvePropertyBranchGroupId($property);
@@ -391,6 +393,7 @@ class PropertyController extends Controller
         }
 
         if ($authUser) {
+            $payload['publication_visibility'] = app(PropertyPublicationVisibility::class)->forProperty($property);
             $payload['external_source'] = $property->external_agent_id ? [
                 'source_type' => $property->source_type,
                 'external_agent_id' => $property->external_agent_id,
@@ -423,6 +426,8 @@ class PropertyController extends Controller
     private function withModerationWorkflow(Property $property, User $user, ?array $payload = null): array
     {
         $payload ??= $property->toArray();
+        if (! array_key_exists('building_type_source', $payload)) $payload = app(PropertyBuildingType::class)->present($property, $payload);
+        $payload['publication_visibility'] ??= app(PropertyPublicationVisibility::class)->forProperty($property);
         if (! Schema::hasTable('property_moderation_cases')) {
             $payload['moderation_reasons'] = [];
             $payload['open_moderation_cases'] = [];
@@ -799,19 +804,30 @@ class PropertyController extends Controller
         }
 
         // A deterministic tie-breaker keeps page-by-page report exports stable.
+        $publicationQuery = $request->boolean('include_publication_summary') ? clone $query : null;
         $result = $query->latest()->orderByDesc('properties.id')->paginate($perPage);
         if ($request->user()?->hasPermission('properties.reports.economics')) {
             app(\App\Services\PropertyReportStaff::class)->attach($result->getCollection());
         }
 
         $result->getCollection()->load('agent');
-        $result->through(function (Property $property): array {
+        $visibility = app(PropertyPublicationVisibility::class)->forProperties($result->getCollection());
+        $result->through(function (Property $property) use ($visibility): array {
             $responsible = $property->agent?->only(['id', 'name', 'photo']);
             $property->unsetRelation('agent');
-            return [...$property->toArray(), 'responsible_agent' => $responsible];
+            return [...$property->toArray(), 'responsible_agent' => $responsible,
+                'publication_visibility' => $visibility[$property->id]];
         });
 
-        return response()->json($summary === null ? $result : array_merge($result->toArray(), ['security_summary' => $summary]));
+        $payload = $result->toArray();
+        if ($summary !== null) $payload['security_summary'] = $summary;
+        if ($publicationQuery !== null) {
+            $published = $publicationQuery->withoutEagerLoads()->reorder()->publicSearchable()->count();
+            $payload['publication_summary'] = ['total' => $result->total(), 'published' => $published,
+                'not_published' => max(0, $result->total() - $published)];
+        }
+
+        return response()->json($payload);
     }
 
     private function propertyListRelations(): array
@@ -878,6 +894,7 @@ class PropertyController extends Controller
             'heating_type_id', 'parking_type_id', 'document_type_id', 'developer_id', 'created_by',
             'price', 'discount_price', 'currency', 'offer_type', 'rooms', 'total_area', 'land_size',
             'living_area', 'floor', 'total_floors', 'year_built', 'condition', 'construction_status',
+            'bathroom_type',
             'apartment_type', 'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
             'landmark', 'latitude', 'longitude', 'district', 'address', 'listing_type', 'views_count',
             'moderation_status', 'publication_expires_at', 'listed_at', 'created_at', 'updated_at',
@@ -2269,6 +2286,7 @@ class PropertyController extends Controller
         unset($validated['tags']);
         [$property, $dups, $qualityWarnings, $user] = DB::transaction(function () use ($request, $validated, $featureIds, $tagIds, $user, $requiresReview, $requestedType) {
             [$user] = $this->lockPropertyWrite($user, null, $validated);
+            $validated = app(PropertyBuildingType::class)->normalizeWrite($validated);
             $this->moderation->assertCanCreate($user);
             if ($requestedType !== 'regular') {
                 abort_unless($user->hasPermission('properties.promotions.request') && $user->hasPermission('properties.edit'), 403, 'PROMOTION_PERMISSION_DENIED');
@@ -2359,6 +2377,7 @@ class PropertyController extends Controller
             $user
         ): void {
             [$user, $property] = $this->lockPropertyWrite($user, $property, $validated);
+            $validated = app(PropertyBuildingType::class)->normalizeWrite($validated, $property);
             $validated = $this->normalizePropertyWriteGroup($user, $validated);
             $this->ensureVisibleClientsForProperty($validated, $property);
             $validated = $this->syncPropertyClientSnapshots($validated);
@@ -2536,6 +2555,7 @@ class PropertyController extends Controller
             'rooms', 'youtube_link', 'instagram_link', 'total_area', 'land_size', 'living_area',
             'floor', 'total_floors', 'year_built', 'condition', 'construction_status',
             'renovation_permission_status', 'has_garden', 'has_parking', 'apartment_type',
+            'bathroom_type',
             'is_mortgage_available', 'is_from_developer', 'moderation_status', 'publication_status',
             'deal_status', 'listing_type', 'is_full_apartment', 'developer_id', 'views_count',
             'landmark', 'latitude', 'longitude', 'address', 'district', 'district_id',
@@ -2559,7 +2579,7 @@ class PropertyController extends Controller
         $payload['public_view_only'] = true;
         $payload['capabilities'] = $this->propertyCapabilities(null, $property);
 
-        return $payload;
+        return app(PropertyBuildingType::class)->present($property, $payload);
     }
 
     public function show(Request $request, Property $property)
@@ -2776,6 +2796,7 @@ class PropertyController extends Controller
             'document_type_id' => 'nullable|exists:document_types,id',
             'type_id' => ($isUpdate ? 'sometimes' : 'required').'|exists:property_types,id',
             'status_id' => 'nullable|exists:property_statuses,id',
+            'building_type_id' => 'sometimes|nullable|integer|exists:building_types,id',
             'location_id' => 'nullable|exists:locations,id',
             'repair_type_id' => 'nullable|exists:repair_types,id',
             'price' => ($isUpdate ? 'sometimes' : 'required').'|numeric',
@@ -2807,6 +2828,7 @@ class PropertyController extends Controller
             'condition' => 'nullable|string',
             'construction_status' => 'nullable|in:under_construction,built,commissioned',
             'renovation_permission_status' => 'nullable|in:not_allowed,allowed',
+            'bathroom_type' => 'nullable|string|in:combined,separate',
             'apartment_type' => 'nullable|string',
             'has_garden' => 'sometimes|boolean',
             'has_parking' => 'sometimes|boolean',

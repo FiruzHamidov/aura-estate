@@ -63,6 +63,7 @@ class PropertyReportController extends Controller
         // The list contains live bookings. Frozen daily KPI snapshots must not
         // replace these counts; they remain available in the separate metrics.
         $liveShows = null;
+        $visibleShows = null;
         if ($canReadKpi && Schema::hasTable('bookings')) {
             $column = \App\Support\BookingAttribution::column();
             $shows = Booking::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
@@ -74,6 +75,20 @@ class PropertyReportController extends Controller
             if (! $allPeriod) $shows->whereBetween('bookings.start_time', [$from->copy()->utc(), $to->copy()->utc()]);
             $liveShows = $shows->selectRaw($column.' as employee_id, COUNT(*) as count')
                 ->groupBy($column)->get()->mapWithKeys(fn ($row) => [(int) $row->employee_id => (int) $row->count]);
+            $visibleShows = $liveShows;
+            if ($actor->usesAssignedGroupScope()) {
+                // Current employees keep their full activity totals after a group
+                // transfer. Booking cards still obey their own historical group.
+                $currentIds = $kpi->currentReportUserIds($actor, $filters);
+                if ($currentIds !== []) {
+                    $employeeShows = Booking::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
+                        ->whereIn($column, $currentIds);
+                    if (! $allPeriod) $employeeShows->whereBetween('bookings.start_time', [$from->copy()->utc(), $to->copy()->utc()]);
+                    $counts = $employeeShows->selectRaw($column.' as employee_id, COUNT(*) as count')
+                        ->groupBy($column)->get()->mapWithKeys(fn ($row) => [(int) $row->employee_id => (int) $row->count]);
+                    $liveShows = $liveShows->replace($counts);
+                }
+            }
             $filters['inventory_owner_ids'] = array_values(array_unique(array_merge($filters['inventory_owner_ids'], $liveShows->keys()->all())));
         }
         $period = $allPeriod ? 'range' : ($from->isSameDay($to) ? 'day' : (($filters['interval'] ?? '') === 'month' ? 'month' : 'week'));
@@ -100,7 +115,7 @@ class PropertyReportController extends Controller
         }
         $statuses = ['draft', 'pending', 'approved', 'deposit', 'sold', 'rented', 'sold_by_owner', 'denied', 'rejected', 'deleted', 'unknown'];
         $contracts = ['alternative', 'exclusive', 'none', 'unspecified'];
-        $rows = $rows->map(function (array $row) use ($byEmployee, $statuses, $contracts, $owners, $liveShows) {
+        $rows = $rows->map(function (array $row) use ($byEmployee, $statuses, $contracts, $owners, $liveShows, $visibleShows) {
             $items = $byEmployee->get($row['employee_id'], collect());
             $byStatus = array_fill_keys($statuses, 0);
             $byContract = array_fill_keys($contracts, 0);
@@ -131,6 +146,7 @@ class PropertyReportController extends Controller
             }
             if ($liveShows !== null) {
                 $row['shows'] = (int) $liveShows->get($row['employee_id'], 0);
+                $row['shows_visible'] = (int) $visibleShows->get($row['employee_id'], 0);
                 $row['shows_raw'] = $row['shows'];
                 $row['shows_display'] = (string) $row['shows'];
             }

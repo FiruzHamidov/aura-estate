@@ -22,6 +22,8 @@ class Property extends Model
         'description',
         'type_id',
         'status_id',
+        'building_type_id',
+        'building_type_resolved_at',
         'location_id',
         'repair_type_id',
         'contract_type_id',
@@ -42,6 +44,7 @@ class Property extends Model
         'condition',
         'construction_status',
         'renovation_permission_status',
+        'bathroom_type',
         'apartment_type',
         'has_garden',
         'has_parking',
@@ -142,6 +145,8 @@ class Property extends Model
         'description',
         'type_id',
         'status_id',
+        'building_type_id',
+        'building_type_resolved_at',
         'location_id',
         'repair_type_id',
         'price',
@@ -160,6 +165,7 @@ class Property extends Model
         'condition',
         'construction_status',
         'renovation_permission_status',
+        'bathroom_type',
         'apartment_type',
         'has_garden',
         'has_parking',
@@ -296,7 +302,7 @@ class Property extends Model
 
     public function buildingType()
     {
-        return $this->belongsTo(BuildingType::class, 'status_id');
+        return $this->belongsTo(BuildingType::class, Schema::hasColumn('properties', 'building_type_id') ? 'building_type_id' : 'status_id');
     }
 
     public function parking()
@@ -667,5 +673,21 @@ class Property extends Model
             || in_array($this->publication_status, ['archived', 'draft'], true)
             || in_array($this->moderation_status, self::CLOSED_MODERATION_STATUSES, true)
             || (Schema::hasTable('property_statuses') && $this->status()->whereIn('slug', self::CLOSED_STATUS_SLUGS)->exists());
+    }
+
+    /** A draft/rejection is resubmittable; a closed deal requires an explicit return. */
+    public function hasClosedDealState(): bool
+    {
+        return $this->sold_at !== null
+            || in_array($this->deal_status, ['sold', 'sold_by_owner', 'rented', 'client_denied'], true)
+            || in_array($this->moderation_status, ['sold', 'sold_by_owner', 'rented', 'denied'], true)
+            || (Schema::hasTable('property_statuses') && $this->status()->whereIn('slug', self::CLOSED_STATUS_SLUGS)->exists());
+    }
+
+    public function requiresExplicitReopening(): bool
+    {
+        return $this->hasClosedDealState()
+            || $this->publication_status === 'archived'
+            || $this->moderation_status === 'deleted';
     }
 }

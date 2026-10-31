@@ -514,6 +514,9 @@ class PropertyModerationWorkflowTest extends TestCase
         $service->decideDuplicate($candidate, $rop, PropertyDuplicateCandidate::DECISION_CONFIRMED, 'Совпадение', 1);
         $appeal = $service->appeal($case->fresh(), $agent, 'Это разные квартиры', (int) $case->fresh()->version);
 
+        $this->assertTrue(app(PropertyModerationAccess::class)->capabilities($director, $duplicate->fresh())['can_approve']);
+        $this->assertFalse(app(PropertyModerationAccess::class)->capabilities($rop, $duplicate->fresh())['can_approve']);
+
         $resolved = $service->approveCase($appeal, $director, 'Апелляция подтверждена', 1);
 
         $this->assertSame('published', $resolved->publication_status);
@@ -2023,6 +2026,190 @@ class PropertyModerationWorkflowTest extends TestCase
             $this->assertSame('sold', $property->fresh()->deal_status);
             $this->assertSame(1, $property->saleAgents()->count());
         }
+    }
+
+    public static function closedPublicationTransitions(): iterable
+    {
+        $states = [
+            'sold' => ['deal_status' => 'sold'],
+            'owner_sold' => ['deal_status' => 'sold_by_owner'],
+            'rented' => ['deal_status' => 'rented'],
+            'refused' => ['deal_status' => 'client_denied'],
+            'sale_date_only' => ['sold_at' => '2026-10-24 14:57:19'],
+            'legacy_sold' => ['status_id' => 2],
+            'legacy_rented' => ['status_id' => 3],
+            'closed_moderation_only' => ['moderation_status' => 'sold'],
+            'archived_only' => ['publication_status' => 'archived'],
+            'deleted_only' => ['moderation_status' => 'deleted'],
+        ];
+        foreach ($states as $state => $attributes) {
+            foreach (['submit', 'approve', 'approve_all', 'restore', 'withdraw_changes', 'withdraw_case', 'to_draft', 'break_glass', 'content_appeal'] as $action) {
+                yield $state.' / '.$action => [$attributes, $action];
+            }
+        }
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('closedPublicationTransitions')]
+    public function test_closed_records_cannot_be_republished_by_moderation(array $attributes, string $action): void
+    {
+        [$property, $agent, $rop, $director, $service] = $this->reopeningFixture();
+        Schema::create('property_statuses', function (Blueprint $table): void { $table->id(); $table->string('slug'); });
+        DB::table('property_statuses')->insert([['id' => 2, 'slug' => 'sold'], ['id' => 3, 'slug' => 'rented']]);
+        $property->forceFill(array_merge(['sold_at' => null, 'deal_status' => 'available',
+            'publication_status' => 'published', 'moderation_status' => 'approved', 'status_id' => null], $attributes))->save();
+        $case = PropertyModerationCase::create(['property_id' => $property->id, 'type' => 'content_review',
+            'status' => 'open', 'blocking' => true, 'submitted_by' => $agent->id, 'submitted_at' => now(), 'version' => 1]);
+        if ($action === 'content_appeal') {
+            $case->update(['status' => 'rejected', 'decided_by' => $rop->id]);
+            $case = PropertyModerationCase::create(['property_id' => $property->id, 'parent_case_id' => $case->id,
+                'type' => 'appeal', 'status' => 'open', 'blocking' => true, 'submitted_by' => $agent->id,
+                'submitted_at' => now(), 'version' => 1]);
+        }
+        $before = $property->fresh()->getAttributes();
+        $beforeCase = $case->fresh()->getAttributes();
+        $eventCount = DB::table('property_moderation_events')->count();
+        $version = (int) $property->moderation_version;
+        $adminRole = Role::firstOrCreate(['slug' => 'superadmin'], ['name' => 'Admin']);
+        $director->forceFill(['role_id' => $adminRole->id])->save();
+
+        try {
+            match ($action) {
+                'submit' => $service->submit($property, $agent, [], $version),
+                'approve' => $service->approveCase($case, $rop, 'Проверено', 1),
+                'approve_all' => $service->approveAllCases($property, $rop, $version),
+                'restore' => $service->rejectCase($case, $rop, 'Вернуть прежнюю версию', 1, 'restore_and_publish'),
+                'withdraw_changes' => $service->withdrawChanges($property, $agent, $version),
+                'withdraw_case' => $service->withdrawCase($case, $agent, 1),
+                'to_draft' => $service->withdrawListing($property, $agent, 'draft', $version),
+                'break_glass' => $service->breakGlassApprove($case, $director->fresh(), 'Проверка исключения', 1),
+                'content_appeal' => $service->approveCase($case, $director->fresh(), 'Проверка апелляции', 1),
+            };
+            $this->fail('Closed listing must require an explicit return.');
+        } catch (HttpResponseException $e) {
+            $this->assertSame(409, $e->getResponse()->getStatusCode());
+            $this->assertSame('PROPERTY_REOPEN_REQUIRED', json_decode($e->getResponse()->getContent(), true)['code']);
+        }
+        $this->assertSame($before, $property->fresh()->getAttributes());
+        $this->assertSame($beforeCase, $case->fresh()->getAttributes());
+        $this->assertSame($eventCount, DB::table('property_moderation_events')->count());
+        $capabilities = app(PropertyModerationAccess::class)->capabilities($rop, $property->fresh());
+        $this->assertFalse($capabilities['can_submit']);
+        $this->assertFalse($capabilities['can_approve']);
+        $this->assertFalse($capabilities['can_approve_all']);
+        $this->assertFalse($capabilities['can_withdraw_changes']);
+        $this->assertTrue($capabilities['can_reopen_listing']);
+    }
+
+    public function test_closed_submit_http_conflict_and_stale_version_preserve_sale(): void
+    {
+        [$property, $agent] = $this->reopeningFixture();
+        $this->actingAs($agent);
+        $url = '/api/properties/'.$property->id.'/moderation/submit';
+        $route = app('router')->getRoutes()->match(Request::create($url, 'POST'));
+        $this->withoutMiddleware(array_values(array_filter(app('router')->gatherRouteMiddleware($route),
+            fn ($middleware) => $middleware !== \Illuminate\Routing\Middleware\SubstituteBindings::class)));
+        $before = $property->getAttributes();
+        $this->postJson($url, ['version' => $property->moderation_version])->assertConflict()->assertJsonPath('code', 'PROPERTY_REOPEN_REQUIRED');
+        $this->postJson($url, ['version' => $property->moderation_version + 1])->assertConflict()->assertJsonPath('code', 'MODERATION_VERSION_CONFLICT');
+        $this->assertSame($before, $property->fresh()->getAttributes());
+    }
+
+    public function test_editing_closed_content_and_media_preserves_lifecycle_until_explicit_return(): void
+    {
+        [$property, $agent, , , $service] = $this->reopeningFixture();
+        $before = $property->only(['publication_status', 'moderation_status', 'deal_status', 'sold_at', 'actual_sale_price', 'buyer_full_name']);
+        $property->fill(['description' => 'Уточнение описания после сделки', 'price' => 120000]);
+        $outcome = $service->evaluateUpdate($property, $agent);
+        $property->save();
+        $service->recordUpdateOutcome($property, $agent, $outcome);
+        $service->handleMediaMutation($property, $agent, ['action' => 'photo_added']);
+        $this->assertSame($before, $property->fresh()->only(array_keys($before)));
+        $this->assertSame(0, $property->moderationCases()->open()->count());
+        $this->assertSame('Уточнение описания после сделки', $property->fresh()->description);
+    }
+
+    public function test_regular_drafts_and_rejections_remain_submittable(): void
+    {
+        [$agent, $rop] = $this->users();
+        $service = $this->moderation();
+        foreach (['draft', 'rejected'] as $state) {
+            $property = Property::forceCreate($this->propertyPayload($agent, ['publication_status' => $state, 'moderation_status' => $state]));
+            $this->assertTrue(app(PropertyModerationAccess::class)->capabilities($agent, $property)['can_submit']);
+            $result = $service->submit($property, $agent, [], (int) $property->moderation_version);
+            $this->assertSame('published', $result->publication_status);
+            $this->assertTrue($service->isPublic($result));
+        }
+    }
+
+    public static function snapshotRestorationActions(): array
+    {
+        return [['restore'], ['withdraw_changes'], ['withdraw_case']];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('snapshotRestorationActions')]
+    public function test_restoring_a_legacy_closed_snapshot_rolls_back_the_whole_transition(string $action): void
+    {
+        [$property, $agent, $rop, , $service] = $this->reopeningFixture();
+        Schema::create('property_statuses', function (Blueprint $table): void { $table->id(); $table->string('slug'); });
+        DB::table('property_statuses')->insert(['id' => 2, 'slug' => 'sold']);
+        $property->forceFill(['sold_at' => null, 'deal_status' => 'available', 'publication_status' => 'pending',
+            'moderation_status' => 'pending', 'status_id' => null,
+            'approved_content_snapshot' => [...$property->approved_content_snapshot, 'status_id' => 2]])->save();
+        $case = PropertyModerationCase::create(['property_id' => $property->id, 'type' => 'content_review',
+            'status' => 'open', 'blocking' => true, 'submitted_by' => $agent->id, 'submitted_at' => now(), 'version' => 1]);
+        $before = $property->fresh()->getAttributes();
+        $beforeCase = $case->fresh()->getAttributes();
+        try {
+            match ($action) {
+                'restore' => $service->rejectCase($case, $rop, 'Восстановить прежнюю версию', 1, 'restore_and_publish'),
+                'withdraw_changes' => $service->withdrawChanges($property, $agent, (int) $property->moderation_version),
+                'withdraw_case' => $service->withdrawCase($case, $agent, 1),
+            };
+            $this->fail('A closed snapshot must not be published.');
+        } catch (HttpResponseException $e) {
+            $this->assertSame(409, $e->getResponse()->getStatusCode());
+            $this->assertSame('PROPERTY_REOPEN_REQUIRED', json_decode($e->getResponse()->getContent(), true)['code']);
+        }
+        $this->assertSame($before, $property->fresh()->getAttributes());
+        $this->assertSame($beforeCase, $case->fresh()->getAttributes());
+    }
+
+    public function test_submit_checks_locked_current_state_instead_of_the_previously_loaded_model(): void
+    {
+        [$property, $agent, , , $service] = $this->reopeningFixture();
+        $property->forceFill(['sold_at' => null, 'deal_status' => 'available', 'publication_status' => 'draft', 'moderation_status' => 'draft'])->save();
+        Property::whereKey($property->id)->update(['deal_status' => 'rented']);
+        $this->assertFalse($property->requiresExplicitReopening());
+        $before = $property->fresh()->getAttributes();
+        try {
+            $service->submit($property, $agent, [], (int) $property->moderation_version);
+            $this->fail('Submission must check the locked current deal status.');
+        } catch (HttpResponseException $e) {
+            $this->assertSame('PROPERTY_REOPEN_REQUIRED', json_decode($e->getResponse()->getContent(), true)['code']);
+        }
+        $this->assertSame($before, $property->fresh()->getAttributes());
+    }
+
+    public function test_duplicate_appeal_cannot_republish_a_closed_deal(): void
+    {
+        [$property, $agent, $rop, $director, $service] = $this->reopeningFixture();
+        $original = Property::create($this->propertyPayload($agent));
+        $property->forceFill(['duplicate_of_property_id' => $original->id])->save();
+        $parent = PropertyModerationCase::create(['property_id' => $property->id, 'type' => 'duplicate_review',
+            'status' => 'merged', 'blocking' => true, 'submitted_by' => $agent->id, 'submitted_at' => now(), 'decided_by' => $rop->id, 'version' => 1]);
+        $appeal = PropertyModerationCase::create(['property_id' => $property->id, 'parent_case_id' => $parent->id,
+            'type' => 'appeal', 'status' => 'open', 'blocking' => true, 'submitted_by' => $agent->id, 'submitted_at' => now(), 'version' => 1]);
+        $before = $property->fresh()->getAttributes();
+        $this->assertFalse(app(PropertyModerationAccess::class)->capabilities($director, $property)['can_approve']);
+        try {
+            $service->approveCase($appeal, $director, 'Проверена апелляция', 1);
+            $this->fail('A duplicate appeal must not clear a closed deal.');
+        } catch (HttpResponseException $e) {
+            $this->assertSame('PROPERTY_REOPEN_REQUIRED', json_decode($e->getResponse()->getContent(), true)['code']);
+        }
+        $this->assertSame($before, $property->fresh()->getAttributes());
+        $this->assertSame('open', $appeal->fresh()->status);
+        $this->assertTrue($parent->fresh()->blocking);
     }
 
     private function reopeningFixture(): array

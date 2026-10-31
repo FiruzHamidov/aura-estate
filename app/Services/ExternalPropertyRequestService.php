@@ -290,7 +290,8 @@ class ExternalPropertyRequestService
             abort_if($request->property_id || $request->status === ExternalPropertyRequest::STATUS_CONVERTED, 422, 'Заявка уже сконвертирована.');
             abort_if(in_array($request->status, [ExternalPropertyRequest::STATUS_REJECTED, ExternalPropertyRequest::STATUS_ARCHIVED], true), 422, 'Закрытую заявку нельзя конвертировать.');
 
-            $propertyPayload = array_merge($this->prefillPayload($request, $actor), $payload);
+            $propertyPayload = array_merge($this->prefillPayload($request, $actor),
+                app(\App\Services\PropertyBuildingType::class)->normalizeWrite($payload));
             $propertyPayload['created_by'] = $actor->id;
             $propertyPayload['agent_id'] = $propertyPayload['agent_id'] ?? $request->assigned_agent_id ?? $actor->id;
             $propertyPayload['branch_id'] = $propertyPayload['branch_id'] ?? $request->branch_id ?? $actor->branch_id;
@@ -597,6 +598,9 @@ class ExternalPropertyRequestService
 
     private function defaultPropertyStatusId(): ?int
     {
+        if (Schema::hasColumn('properties', 'building_type_id')) {
+            return PropertyStatus::query()->where('slug', 'available')->value('id');
+        }
         return PropertyStatus::query()->orderBy('id')->value('id');
     }
 
