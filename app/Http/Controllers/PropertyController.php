@@ -13,6 +13,7 @@ use App\Services\Crm\Matching\ClientPropertyMatcher;
 use App\Services\PropertyDuplicateService;
 use App\Services\PropertyModeration\PropertyModerationAccess;
 use App\Services\PropertyModeration\PropertyModerationService;
+use App\Services\PropertyPublicationVisibility;
 use App\Services\PropertyQualityService;
 use App\Support\ClientAccess;
 use Illuminate\Database\Eloquent\Builder;
@@ -391,6 +392,7 @@ class PropertyController extends Controller
         }
 
         if ($authUser) {
+            $payload['publication_visibility'] = app(PropertyPublicationVisibility::class)->forProperty($property);
             $payload['external_source'] = $property->external_agent_id ? [
                 'source_type' => $property->source_type,
                 'external_agent_id' => $property->external_agent_id,
@@ -423,6 +425,7 @@ class PropertyController extends Controller
     private function withModerationWorkflow(Property $property, User $user, ?array $payload = null): array
     {
         $payload ??= $property->toArray();
+        $payload['publication_visibility'] ??= app(PropertyPublicationVisibility::class)->forProperty($property);
         if (! Schema::hasTable('property_moderation_cases')) {
             $payload['moderation_reasons'] = [];
             $payload['open_moderation_cases'] = [];
@@ -799,19 +802,30 @@ class PropertyController extends Controller
         }
 
         // A deterministic tie-breaker keeps page-by-page report exports stable.
+        $publicationQuery = $request->boolean('include_publication_summary') ? clone $query : null;
         $result = $query->latest()->orderByDesc('properties.id')->paginate($perPage);
         if ($request->user()?->hasPermission('properties.reports.economics')) {
             app(\App\Services\PropertyReportStaff::class)->attach($result->getCollection());
         }
 
         $result->getCollection()->load('agent');
-        $result->through(function (Property $property): array {
+        $visibility = app(PropertyPublicationVisibility::class)->forProperties($result->getCollection());
+        $result->through(function (Property $property) use ($visibility): array {
             $responsible = $property->agent?->only(['id', 'name', 'photo']);
             $property->unsetRelation('agent');
-            return [...$property->toArray(), 'responsible_agent' => $responsible];
+            return [...$property->toArray(), 'responsible_agent' => $responsible,
+                'publication_visibility' => $visibility[$property->id]];
         });
 
-        return response()->json($summary === null ? $result : array_merge($result->toArray(), ['security_summary' => $summary]));
+        $payload = $result->toArray();
+        if ($summary !== null) $payload['security_summary'] = $summary;
+        if ($publicationQuery !== null) {
+            $published = $publicationQuery->withoutEagerLoads()->reorder()->publicSearchable()->count();
+            $payload['publication_summary'] = ['total' => $result->total(), 'published' => $published,
+                'not_published' => max(0, $result->total() - $published)];
+        }
+
+        return response()->json($payload);
     }
 
     private function propertyListRelations(): array

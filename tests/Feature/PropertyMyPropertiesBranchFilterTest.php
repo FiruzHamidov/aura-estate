@@ -650,6 +650,70 @@ class PropertyMyPropertiesBranchFilterTest extends TestCase
         $this->getJson('/api/my-properties?moderation_status=sold')->assertOk()
             ->assertJsonMissingPath('data.0.report_rop');
     }
+
+    public function test_publication_metadata_and_totals_explain_hidden_active_records_without_changing_them(): void
+    {
+        [$actor, $other, $published] = $this->consistencyFixture();
+        Schema::table('properties', function (Blueprint $table): void {
+            $table->timestamp('sold_at')->nullable();
+            $table->unsignedBigInteger('co_owner_user_id')->nullable();
+        });
+        (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
+        $published->refresh();
+        $sold = PropertyStatus::create(['name' => 'Sold', 'slug' => 'sold']);
+        $rented = PropertyStatus::create(['name' => 'Rented', 'slug' => 'rented']);
+        $hidden = [];
+        foreach ([['publication_status' => 'archived', 'deal_status' => 'sold_by_owner', 'sold_at' => '2026-10-24 14:57:19'],
+            ['status_id' => $sold->id], ...array_fill(0, 6, ['status_id' => $rented->id])] as $attributes) {
+            $row = $published->replicate()->forceFill(['price' => 200000, ...$attributes]);
+            $row->saveQuietly();
+            $hidden[] = $row;
+        }
+        $blocked = $published->replicate()->forceFill(['price' => 200000]);
+        $blocked->saveQuietly();
+        \App\Models\PropertyModerationCase::create(['property_id' => $blocked->id, 'type' => 'content_review',
+            'status' => 'rejected', 'blocking' => true, 'submitted_by' => $actor->id, 'submitted_at' => now(), 'version' => 1]);
+        // This employee's counts must not include a different employee's public object.
+        $foreign = $published->replicate()->forceFill(['agent_id' => $other->id, 'created_by' => $other->id]);
+        $foreign->saveQuietly();
+        $before = \Illuminate\Support\Facades\DB::table('properties')->orderBy('id')->get()->toJson();
+        $url = '/api/my-properties?moderation_status=approved&responsible_user_id='.$actor->id;
+        $response = $this->getJson($url.'&include_publication_summary=1&per_page=100')->assertOk()
+            ->assertJsonPath('total', 10)->assertJsonPath('publication_summary', ['total' => 10, 'published' => 1, 'not_published' => 9]);
+        $rows = collect($response->json('data'))->keyBy('id');
+        $this->assertSame(['is_public' => true, 'reason_codes' => []], $rows[$published->id]['publication_visibility']);
+        foreach ($hidden as $row) $this->assertFalse($rows[$row->id]['publication_visibility']['is_public']);
+        $this->assertContains('deal_sold_by_owner', $rows[$hidden[0]->id]['publication_visibility']['reason_codes']);
+        $this->assertContains('legacy_sold', $rows[$hidden[1]->id]['publication_visibility']['reason_codes']);
+        $this->assertContains('legacy_rented', $rows[$hidden[2]->id]['publication_visibility']['reason_codes']);
+        $this->assertSame(['moderation_blocked'], $rows[$blocked->id]['publication_visibility']['reason_codes']);
+        foreach ([1, 2, 5] as $page) {
+            $this->getJson($url.'&include_publication_summary=1&per_page=2&page='.$page)->assertOk()
+                ->assertJsonPath('publication_summary', ['total' => 10, 'published' => 1, 'not_published' => 9]);
+        }
+        $this->getJson($url.'&include_publication_summary=1&priceTo=150000')->assertOk()
+            ->assertJsonPath('publication_summary', ['total' => 1, 'published' => 1, 'not_published' => 0]);
+        $this->getJson($url.'&per_page=1')->assertOk()->assertJsonMissingPath('publication_summary');
+        $this->assertSame($before, \Illuminate\Support\Facades\DB::table('properties')->orderBy('id')->get()->toJson());
+    }
+
+    public function test_publication_summary_keeps_own_scope_and_coowner_filter(): void
+    {
+        [$actor, $other, $assigned] = $this->consistencyFixture();
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedBigInteger('co_owner_user_id')->nullable());
+        $actor->role->forceFill(['permissions' => ['properties.list.internal', 'properties.list.scope.own']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $shared = $assigned->replicate()->forceFill(['agent_id' => $other->id, 'co_owner_user_id' => $actor->id]);
+        $shared->saveQuietly();
+        $foreign = $assigned->replicate()->forceFill(['agent_id' => $other->id]);
+        $foreign->saveQuietly();
+        $url = '/api/my-properties?moderation_status=approved&include_publication_summary=1&responsible_user_id='.$actor->id;
+        $this->getJson($url)->assertOk()->assertJsonPath('publication_summary', ['total' => 1, 'published' => 1, 'not_published' => 0]);
+        $this->getJson($url.'&include_co_owned=1')->assertOk()->assertJsonPath('publication_summary', ['total' => 2, 'published' => 2, 'not_published' => 0]);
+        $this->getJson('/api/my-properties?include_publication_summary=1&responsible_user_id='.$other->id)->assertOk()
+            ->assertJsonPath('publication_summary', ['total' => 1, 'published' => 1, 'not_published' => 0]);
+    }
+
     private function consistencyFixture(): array
     {
         $role = Role::create(['name' => 'Reader', 'slug' => 'consistency-reader']);

@@ -223,6 +223,16 @@ final class PropertyModerationService
         }
 
         $dirty = array_keys($property->getDirty());
+        $original = new Property;
+        $original->setRawAttributes($property->getRawOriginal());
+        if ($original->requiresExplicitReopening()) {
+            // Content edits must not erase closure or start a new publication workflow.
+            if ($property->isDirty('status_id')) $this->assertCanPublish($original);
+            if ($dirty !== []) $property->moderation_version = (int) $property->getOriginal('moderation_version') + 1;
+
+            return ['cases' => [], 'duplicates' => collect(), 'withdraw_case_types' => [],
+                'event' => $dirty !== [] ? 'property_updated_without_review' : null];
+        }
         $wasPublished = $this->publicationStatus($property, original: true) === self::PUBLICATION_PUBLISHED;
         $hasApprovedSnapshot = (array) $property->approved_content_snapshot !== [];
         $cases = [];
@@ -341,6 +351,7 @@ final class PropertyModerationService
         }
 
         if (($outcome['withdraw_case_types'] ?? []) !== [] && $outcome['cases'] === [] && ! $this->hasOpenBlockingCases($property) && ! $this->hasConfirmedDuplicate($property)) {
+            $this->assertCanPublish($property);
             $property->forceFill(array_merge([
                 'publication_status' => self::PUBLICATION_PUBLISHED,
                 'moderation_status' => Property::PUBLIC_MODERATION_STATUS,
@@ -377,6 +388,10 @@ final class PropertyModerationService
                     || PropertyDuplicateCandidate::query()->where('moderation_case_id', $lockedCase->parent_case_id)->where('decided_by', $actor->id)->exists(), 403, 'APPEAL_REVIEWER_CONFLICT');
             }
             abort_unless($this->access->canDecideCase($actor, $lockedCase), 403, 'SELF_APPROVAL_FORBIDDEN');
+            $isDuplicateAppeal = $lockedCase->type === PropertyModerationCase::TYPE_APPEAL
+                && $lockedCase->parentCase?->type === PropertyModerationCase::TYPE_DUPLICATE
+                && $property->duplicate_of_property_id !== null;
+            $this->assertCanPublish($property, $isDuplicateAppeal);
             if ($lockedCase->type === PropertyModerationCase::TYPE_APPEAL) {
                 $this->reverseDuplicateConfirmationForAppeal($lockedCase, $property, $actor, $comment);
             } else {
@@ -415,6 +430,7 @@ final class PropertyModerationService
         return DB::transaction(function () use ($property, $actor, $expectedVersion, $comment): Property {
             $lockedProperty = Property::query()->lockForUpdate()->findOrFail($property->id);
             abort_if((int) $lockedProperty->moderation_version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
+            $this->assertCanPublish($lockedProperty);
             abort_if($this->hasConfirmedDuplicate($lockedProperty), 409, 'DUPLICATE_BLOCK_ACTIVE');
 
             $cases = $lockedProperty->moderationCases()->open()->lockForUpdate()->get();
@@ -490,6 +506,7 @@ final class PropertyModerationService
                 'version' => $lockedCase->version + 1,
             ]);
             if ($action === 'restore_and_publish') {
+                $this->assertCanPublish($property);
                 abort_if($this->hasConfirmedDuplicate($property), 409, 'DUPLICATE_BLOCK_ACTIVE');
                 $snapshot = (array) $property->approved_content_snapshot;
                 abort_if($snapshot === [], 409, 'APPROVED_SNAPSHOT_MISSING');
@@ -509,6 +526,7 @@ final class PropertyModerationService
                     });
                 abort_if($this->hasOpenBlockingCases($property), 409, 'OPEN_BLOCKING_CASES');
                 $property->fill(array_intersect_key($snapshot, array_flip(Property::LISTING_CONTENT_FIELDS)));
+                $this->assertCanPublish($property);
                 $this->restoreApprovedPhotos($property, $snapshot);
                 $this->restoreApprovedRelations($property, $snapshot);
                 $property->forceFill([
@@ -518,8 +536,8 @@ final class PropertyModerationService
                 ])->save();
             } else {
                 $property->forceFill([
-                    'publication_status' => self::PUBLICATION_REJECTED,
-                    'moderation_status' => 'rejected',
+                    'publication_status' => $property->requiresExplicitReopening() ? $property->publication_status : self::PUBLICATION_REJECTED,
+                    'moderation_status' => $property->requiresExplicitReopening() ? $property->moderation_status : 'rejected',
                     'moderation_version' => (int) $property->moderation_version + 1,
                 ])->save();
                 $this->suspendPromotions($property, $actor);
@@ -546,6 +564,7 @@ final class PropertyModerationService
             $lockedCase = PropertyModerationCase::query()->lockForUpdate()->findOrFail($case->id);
             abort_unless($lockedCase->status === PropertyModerationCase::STATUS_OPEN, 409, 'MODERATION_CASE_NOT_OPEN');
             abort_if($lockedCase->version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
+            $this->assertCanPublish($property);
             abort_if($this->hasConfirmedDuplicate($property), 409, 'DUPLICATE_BLOCK_ACTIVE');
             abort_if($lockedCase->type === PropertyModerationCase::TYPE_DUPLICATE && $lockedCase->duplicateCandidates()->where('decision', PropertyDuplicateCandidate::DECISION_PENDING)->exists(), 409, 'DUPLICATE_REVIEW_REQUIRED');
 
@@ -584,6 +603,7 @@ final class PropertyModerationService
                 'MODERATION_VERSION_CONFLICT'
             );
             abort_if($this->hasConfirmedDuplicate($locked), 409, 'MODERATION_WITHDRAW_NOT_ALLOWED');
+            $this->assertCanPublish($locked);
 
             $snapshot = (array) $locked->approved_content_snapshot;
             $this->withdrawOpenCases($locked, $actor, PropertyModerationCase::STATUS_WITHDRAWN, $snapshot !== []);
@@ -595,6 +615,7 @@ final class PropertyModerationService
                 ])->save();
             } else {
                 $locked->fill(array_intersect_key($snapshot, array_flip(Property::LISTING_CONTENT_FIELDS)));
+                $this->assertCanPublish($locked);
                 $this->restoreApprovedPhotos($locked, $snapshot);
                 $this->restoreApprovedRelations($locked, $snapshot);
                 $locked->forceFill([
@@ -617,6 +638,7 @@ final class PropertyModerationService
         return DB::transaction(function () use ($property, $actor, $qualityWarnings, $expectedVersion): Property {
             [$actor, $locked] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, $property);
             abort_if($expectedVersion !== null && (int) $locked->moderation_version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
+            $this->assertCanPublish($locked);
             abort_if($this->hasConfirmedDuplicate($locked), 409, 'DUPLICATE_BLOCK_ACTIVE');
 
             $locked->moderationCases()->where('status', PropertyModerationCase::STATUS_REJECTED)
@@ -674,6 +696,7 @@ final class PropertyModerationService
         return DB::transaction(function () use ($property, $actor, $target, $expectedVersion): Property {
             [$actor, $locked] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, $property);
             abort_if($expectedVersion !== null && (int) $locked->moderation_version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
+            if ($target === self::PUBLICATION_DRAFT) $this->assertCanPublish($locked);
             $locked->forceFill([
                 'publication_status' => $target,
                 'moderation_status' => $target === self::PUBLICATION_DRAFT ? 'draft' : 'deleted',
@@ -706,6 +729,7 @@ final class PropertyModerationService
                 ->where('decision', PropertyDuplicateCandidate::DECISION_CONFIRMED)
                 ->whereNull('reversed_at')
                 ->exists(), 409, 'MODERATION_WITHDRAW_NOT_ALLOWED');
+            $this->assertCanPublish($property);
 
             $lockedCase->update([
                 'status' => PropertyModerationCase::STATUS_WITHDRAWN,
@@ -719,6 +743,7 @@ final class PropertyModerationService
             $snapshot = (array) $property->approved_content_snapshot;
             if ($snapshot !== []) {
                 $property->fill(array_intersect_key($snapshot, array_flip(Property::LISTING_CONTENT_FIELDS)));
+                $this->assertCanPublish($property);
                 $this->restoreApprovedPhotos($property, $snapshot);
                 $this->restoreApprovedRelations($property, $snapshot);
             }
@@ -1067,7 +1092,8 @@ final class PropertyModerationService
             $hasApprovedSnapshot = (array) $locked->approved_content_snapshot !== [];
             $baseline = (array) $locked->approved_content_snapshot;
             $proposed = $this->contentSnapshot($locked);
-            if ($this->publicationStatus($locked) === self::PUBLICATION_PUBLISHED || $hasApprovedSnapshot) {
+            if (! $locked->requiresExplicitReopening()
+                && ($this->publicationStatus($locked) === self::PUBLICATION_PUBLISHED || $hasApprovedSnapshot)) {
                 $locked->forceFill([
                     'publication_status' => self::PUBLICATION_PENDING,
                     'moderation_status' => 'pending',
@@ -1088,6 +1114,18 @@ final class PropertyModerationService
                 'proposed_snapshot' => $proposed,
             ]));
         });
+    }
+
+    private function assertCanPublish(Property $property, bool $duplicateAppeal = false): void
+    {
+        // An independent duplicate appeal may undo its own archive, never a closed deal.
+        $requiresReturn = $duplicateAppeal ? $property->hasClosedDealState() : $property->requiresExplicitReopening();
+        if ($requiresReturn) {
+            throw new HttpResponseException(response()->json([
+                'code' => 'PROPERTY_REOPEN_REQUIRED',
+                'message' => 'Объявление закрыто или архивировано. Используйте «Вернуть в работу» с указанием причины.',
+            ], 409));
+        }
     }
 
     private function approvedPricePayload(array $attributes, ?int $approvedBy = null): array

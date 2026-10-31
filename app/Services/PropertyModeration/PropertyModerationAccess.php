@@ -205,10 +205,15 @@ final class PropertyModerationAccess
 
         $canEdit = $this->canEdit($user, $property);
         $canModerate = $this->canModerate($user, $property);
+        $requiresReturn = $property->requiresExplicitReopening();
         $openCases = Schema::hasTable('property_moderation_cases')
             ? $property->moderationCases()->open()->with(['parentCase', 'duplicateCandidates'])->get()
             : collect();
         $decidableCases = $openCases->filter(fn (PropertyModerationCase $case) => $this->canDecideCase($user, $case));
+        $canApproveDuplicateAppeal = $property->duplicate_of_property_id !== null
+            && ! $property->hasClosedDealState()
+            && $decidableCases->contains(fn (PropertyModerationCase $case) => $case->type === PropertyModerationCase::TYPE_APPEAL
+                && $case->parentCase?->type === PropertyModerationCase::TYPE_DUPLICATE);
         $ownsProperty = in_array((int) $user->id, array_filter([
             (int) $property->created_by,
             (int) $property->agent_id,
@@ -224,10 +229,10 @@ final class PropertyModerationAccess
 
         return [
             'can_edit' => $canEdit,
-            'can_submit' => $canEdit,
+            'can_submit' => $canEdit && ! $requiresReturn,
             'can_moderate' => $canEdit || $canModerate,
-            'can_approve' => $decidableCases->isNotEmpty(),
-            'can_approve_all' => $openCases->isNotEmpty()
+            'can_approve' => (! $requiresReturn && $decidableCases->isNotEmpty()) || $canApproveDuplicateAppeal,
+            'can_approve_all' => ! $requiresReturn && $openCases->isNotEmpty()
                 && $decidableCases->count() === $openCases->count()
                 && ! $openCases->contains('type', PropertyModerationCase::TYPE_APPEAL)
                 && ! $openCases->contains(fn (PropertyModerationCase $case) => $case->type === PropertyModerationCase::TYPE_DUPLICATE
@@ -253,7 +258,7 @@ final class PropertyModerationAccess
             'can_request_promotion' => $this->canRequestPromotion($user, $property) && in_array($property->publication_status, ['published', 'pending'], true) && $requestedPromotions->isEmpty(),
             'can_approve_promotion' => $this->canManagePromotion($user, $property) && $isPublished && $requestedPromotions->isNotEmpty(),
             'can_manage_promotion_directly' => $this->canManagePromotion($user, $property) && $this->canRequestPromotion($user, $property) && $isPublished,
-            'can_withdraw_changes' => $canEdit,
+            'can_withdraw_changes' => $canEdit && ! $requiresReturn,
             'can_withdraw_listing' => $canEdit,
             'submit_requires_review' => $canEdit && (array) $property->approved_content_snapshot !== [],
         ];
