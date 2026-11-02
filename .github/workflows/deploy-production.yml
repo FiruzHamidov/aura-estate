@@ -13,13 +13,101 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  inputs:
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    environment: production
+    outputs:
+      settings: ${{ steps.export.outputs.settings }}
+      digest: ${{ steps.export.outputs.digest }}
+    steps:
+      - name: Read allowlisted public build settings
+        id: export
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+            set -euo pipefail
+            umask 077
+            dir=$(mktemp -d "$RUNNER_TEMP/aura-ssh.XXXXXX")
+            trap 'rm -f "$dir/key" "$dir/known_hosts" "$dir/delivery"; rmdir "$dir"' EXIT
+            printf '%s\n' "$DEPLOY_SSH_KEY" > "$dir/key"
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$dir/known_hosts"
+            remote=(ssh -T -i "$dir/key" -p "$DEPLOY_PORT" -o BatchMode=yes -o IdentitiesOnly=yes
+              -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$dir/known_hosts"
+              -o ConnectTimeout=15 -o ServerAliveInterval=20 -o ServerAliveCountMax=6 "$DEPLOY_USER@$DEPLOY_HOST")
+            settings=$("${remote[@]}" build-config)
+            printf 'settings=%s\n' "$settings" >> "$GITHUB_OUTPUT"
+            printf 'digest=%s\n' "$(printf '%s' "$settings" | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: inputs
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.23.4'
+      - name: Prepare public environment
+        env:
+          SETTINGS: ${{ needs.inputs.outputs.settings }}
+        run: printf '%s' "$SETTINGS" | jq -r 'to_entries[] | "\(.key)=\(.value)"' >> "$GITHUB_ENV"
+      - name: Build on an ephemeral runner
+        shell: bash
+        run: |
+            set -euo pipefail
+            composer install --no-dev --no-scripts --no-plugins --prefer-dist --no-interaction
+            npm ci --ignore-scripts --no-fund
+            npm audit --audit-level=moderate
+            npm run build
+            tar --hard-dereference -C public -czf "$RUNNER_TEMP/build.tar.gz" build
+      - id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: production-build-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/build.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  deploy:
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    needs: [inputs, build]
+    runs-on: ubuntu-24.04
     timeout-minutes: 65
     environment: production
     steps:
-      - name: Deploy the exact main commit over restricted SSH
+      - name: Read only the fixed build payload from this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          [[ $ARTIFACT_ID =~ ^[0-9]+$ ]]
+          endpoint="repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID"
+          gh api "$endpoint" | jq -e --arg run "$GITHUB_RUN_ID" --arg sha "$GITHUB_SHA" \
+            '(.workflow_run.id | tostring) == $run and .workflow_run.head_sha == $sha and .expired == false' >/dev/null
+          mkdir -m 700 "$RUNNER_TEMP/delivery"
+          cd "$RUNNER_TEMP/delivery"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --max-time 300 --max-filesize 1100000000 -H "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/$endpoint/zip" -o upload.zip
+          # Stream the named member to a fixed path. ZIP entries never become filesystem paths.
+          (ulimit -f 1048576; unzip -p upload.zip build.tar.gz) > payload.tar.gz
+          test -s payload.tar.gz
+      - name: Deploy the verified main commit and its build
         shell: bash
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -28,15 +116,22 @@ jobs:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           DEPLOY_SHA: ${{ github.sha }}
+          CONFIG_DIGEST: ${{ needs.inputs.outputs.digest }}
         run: |
-          set -euo pipefail
-          umask 077
-          key_dir="$(mktemp -d "$RUNNER_TEMP/aura-ssh.XXXXXX")"
-          trap 'rm -f "$key_dir/key" "$key_dir/known_hosts"; rmdir "$key_dir"' EXIT
-          printf '%s\n' "$DEPLOY_SSH_KEY" > "$key_dir/key"
-          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$key_dir/known_hosts"
-          ssh -T -i "$key_dir/key" -p "$DEPLOY_PORT" \
-            -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
-            -o UserKnownHostsFile="$key_dir/known_hosts" \
-            -o ConnectTimeout=15 -o ServerAliveInterval=20 -o ServerAliveCountMax=6 \
-            "$DEPLOY_USER@$DEPLOY_HOST" "deploy $DEPLOY_SHA"
+            set -euo pipefail
+            umask 077
+            dir=$(mktemp -d "$RUNNER_TEMP/aura-ssh.XXXXXX")
+            trap 'rm -f "$dir/key" "$dir/known_hosts" "$dir/delivery"; rmdir "$dir"' EXIT
+            printf '%s\n' "$DEPLOY_SSH_KEY" > "$dir/key"
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$dir/known_hosts"
+            remote=(ssh -T -i "$dir/key" -p "$DEPLOY_PORT" -o BatchMode=yes -o IdentitiesOnly=yes
+              -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$dir/known_hosts"
+              -o ConnectTimeout=15 -o ServerAliveInterval=20 -o ServerAliveCountMax=6 "$DEPLOY_USER@$DEPLOY_HOST")
+            archive="$RUNNER_TEMP/delivery/payload.tar.gz"
+            digest=$(sha256sum "$archive" | cut -d' ' -f1)
+            audience="aura-deploy/backend/$DEPLOY_SHA/$CONFIG_DIGEST/$digest"
+            token=$(curl -fsSG --max-time 30 -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              --data-urlencode "audience=$audience" "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -er '.value')
+            { printf '%s\n' "$token"; cat "$archive"; } > "$dir/delivery"
+            unset token
+            "${remote[@]}" "deploy-bundle $DEPLOY_SHA $CONFIG_DIGEST $digest" < "$dir/delivery"

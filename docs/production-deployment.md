@@ -1,20 +1,28 @@
 # Production deployment
 
-Pushes to `main` and manual runs of **Deploy production** deploy `FiruzHamidov/aura-estate` to `https://backend.aura.tj`. Other branches do not deploy. The workflow uses the `production` environment and read-only GitHub permissions.
+Pushes to `main` and manual runs of **Deploy production** deploy `FiruzHamidov/aura-estate` to `https://backend.aura.tj`. Other branches do not deploy. Separate jobs fetch public build settings, build assets on a disposable Ubuntu runner, and deploy the artifact from the same run. Only the configuration and deployment jobs have access to the SSH secret. The build checks the full npm dependency graph.
 
-Required repository Actions secrets: `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`. The dedicated SSH key has `restrict` and a forced `/usr/local/sbin/aura-deploy-dispatch backend` command. Only `check` and `deploy <40-character SHA>` are allowed. A separate read-only GitHub key is installed at `/etc/aura-deploy/backend_readonly`; host keys are pinned. The personal GitHub token and root password are not used by Actions.
+Required repository Actions secrets: `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`. The dedicated SSH key has `restrict` and a forced `/usr/local/sbin/aura-deploy-dispatch backend` command. Only `check`, `build-config` and `deploy-bundle <commit> <public-config SHA-256> <archive SHA-256>` are allowed. A separate read-only GitHub key is installed at `/etc/aura-deploy/backend_readonly`; host keys are pinned. The personal GitHub token and root password are not used by Actions.
+
+The delivery job obtains a short-lived GitHub Actions OIDC token covering the project, commit, configuration and archive digests. The VPS verifies its issuer signature, numeric repository ID, production environment, main branch and deployment workflow before importing any files. Install the reviewed verifier and allow the dispatcher to fetch the GitHub Actions issuer’s public keys over HTTPS.
 
 ## Deployment sequence
 
 1. Verify `/var/www/aura-estate` is on `main`, source files are clean, history can fast-forward, prune stale deploy artifacts, and confirm at least 3 GiB of disk space remains. Existing generated `storage` and `bootstrap/cache` files are preserved.
 2. Save the previous commit, source archive, protected `.env` copy and a full MySQL dump under `/var/backups/aura-deploy/`. A failed database backup stops the deployment.
-3. Prepare Composer production dependencies and Vite assets in `/var/lib/aura-deploy/backend-builds/`, before entering maintenance mode.
+3. Stage the exact Git commit, import the static assets built in Actions and install production PHP dependencies without plugins or package scripts.
 4. Enter maintenance mode, fast-forward the source checkout, retain previous dependencies/assets in the backup, then install prepared dependencies/assets.
 5. Rebuild generated manifests, run `php artisan migrate --force`, and rebuild configuration, route and view caches.
 6. Ensure the versioned `aura-estate-reverb` Supervisor program is running and verify the approved/foreign Origin WebSocket boundary through `backend.aura.tj:443` before enabling realtime.
 7. Enable `BROADCAST_CONNECTION=reverb` and `MESSAGING_REALTIME_BROADCAST_ENABLED=true` atomically, rebuild config cache, restart queue/Reverb, and verify both Supervisor processes, unauthenticated auth boundaries, `/up`, and the public `/api/new-buildings` contract. A failed post-enable check restores the previous environment and rebuilds cache, leaving messaging polling available.
 
 The source directory, `.env`, persistent `storage`, public storage link, existing scheduler and Supervisor configuration remain in place. Other applications are not deployed. Both Aura repositories use one server lock to prevent overlapping builds/migrations. Superseded commits are skipped.
+
+## Installing the build protocol
+
+Install the reviewed helpers from `deploy/tools` under `/usr/local/lib/aura-deploy` as root. Install `runtime-php.sh` executable, `scripts/enable-messaging-realtime.php` alongside the helpers and `scripts/deploy-production.sh` as `backend.sh`. The shared dispatcher is `deploy/tools/dispatch.sh` installed as `/usr/local/sbin/aura-deploy-dispatch`. Coordinate the dispatcher change with the frontend workflow and entry point. The previous protocol accepts a commit without build artifacts, so preserve a root-owned backup for rollback and switch both entry points and the dispatcher under the shared deployment lock. Install the verified Node.js 22.23.4 runtime as `/usr/local/bin/aura-node` before switching.
+
+The production key can read the public asset URL, request a preflight check, or deliver a build for the protected main commit. The VPS verifies the public configuration digest, imports only static files under `public/build`, and declines a release if required files are missing. Composer installs production packages with plugins and scripts disabled. Laravel generates caches and the database dump under the application identity in a transient systemd service. PHP gets a read-only application tree, the application's own environment and a private writable cache during preparation. The root deployment process owns recovery files and the published caches.
 
 ## Recovery and maintenance
 
@@ -26,6 +34,6 @@ Use Actions → Deploy production → Run workflow → `main` to retry. The inst
 
 Failures attempt to leave maintenance mode and report the backup path. Database and source rollback are **not automatic**: an administrator must check migration compatibility before restoring source, dependencies or the database. Never restore a database blindly over new user writes. Prefer a forward fix when possible.
 
-The two newest recovery backups are retained; older validated backups are removed automatically before the disk-space gate and after a successful deploy. A failed staging directory remains available for diagnosis until the next deploy preflight; successful staging directories are removed immediately. Backup directories contain sensitive environment and database data and remain root-only. Rotate keys independently of application deploys.
+Retention counts only completed recovery sets carrying the root-owned .recovery-complete marker. It keeps the two newest marked sets. Existing unmarked backups are preserved for administrator review. To recover a previous generation, restore its source, vendor, public-build and bootstrap-cache together, preserving the root ownership and original modes of the cached PHP files. Review database migration compatibility before restoring the database. A failed staging directory remains available for diagnosis until the next deploy preflight; successful staging directories are removed immediately. Backup directories contain sensitive environment and database data and remain root-only. Rotate keys independently of application deploys.
 
 The deploy backup contains the database, protected environment, source and replaced runtime artifacts. It does **not** copy `storage/app`: production media must have a separate, verified filesystem/object-storage snapshot and restore procedure before a residential release. Do not try to archive the production media into `/var/backups/aura-deploy` without a capacity plan.
