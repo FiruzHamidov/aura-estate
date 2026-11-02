@@ -1,0 +1,16 @@
+name: Security regression tests
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  account-and-media-security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - run: composer install --no-interaction --prefer-dist --no-scripts
+      - run: php -d memory_limit=512M vendor/bin/phpunit --filter 'InternationalPhoneTest|AuthRegistrationTest|TelegramAuthTest|ReelFeatureTest|AgentReviewTest|test_only_reencoded|ApiRequestLogFeatureTest|ProductionDeployContractTest'

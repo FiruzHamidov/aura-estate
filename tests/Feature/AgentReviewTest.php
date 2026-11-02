@@ -72,7 +72,7 @@ class AgentReviewTest extends TestCase
         $smsAuthService = $this->createMock(SmsAuthService::class);
         $smsAuthService->expects($this->once())
             ->method('verifyCode')
-            ->with('992900000000', '123456')
+            ->with('+992 900 000 000', '123456', \App\Models\SmsVerificationCode::PURPOSE_REVIEW)
             ->willReturn(true);
         $this->app->instance(SmsAuthService::class, $smsAuthService);
 
@@ -152,7 +152,7 @@ class AgentReviewTest extends TestCase
         $smsAuthService = $this->createMock(SmsAuthService::class);
         $smsAuthService->expects($this->once())
             ->method('verifyCode')
-            ->with('992900000010', '123456')
+            ->with('992900000010', '123456', \App\Models\SmsVerificationCode::PURPOSE_REVIEW)
             ->willReturn(true);
         $this->app->instance(SmsAuthService::class, $smsAuthService);
 

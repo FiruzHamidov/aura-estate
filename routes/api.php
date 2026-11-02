@@ -94,13 +94,13 @@ Route::get('/ping', fn () => response()->json(['message' => 'API works']));
 Route::get('/push/health', PushHealthController::class)->middleware('throttle:20,1');
 
 // --- ПУБЛИЧНЫЕ ---
-Route::post('/register', [AuthController::class, 'register']);
-Route::post('/login', [AuthController::class, 'login']);
-Route::post('/sms/request', [AuthController::class, 'requestSmsCode']);
-Route::post('/sms/verify', [AuthController::class, 'verifySmsCode']);
-Route::post('/password/reset/request', [AuthController::class, 'requestPasswordResetCode']);
-Route::post('/password/reset/confirm', [AuthController::class, 'resetPassword']);
-Route::post('/telegram/auth/login', [TelegramAuthController::class, 'login']);
+Route::post('/register', [AuthController::class, 'register'])->middleware('throttle:auth-verify');
+Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:auth-password');
+Route::post('/sms/request', [AuthController::class, 'requestSmsCode'])->middleware('throttle:auth-issue');
+Route::post('/sms/verify', [AuthController::class, 'verifySmsCode'])->middleware('throttle:auth-verify');
+Route::post('/password/reset/request', [AuthController::class, 'requestPasswordResetCode'])->middleware('throttle:auth-issue');
+Route::post('/password/reset/confirm', [AuthController::class, 'resetPassword'])->middleware('throttle:auth-verify');
+Route::post('/telegram/auth/login', [TelegramAuthController::class, 'login'])->middleware('throttle:auth-password');
 Route::post('/lead-requests', [LeadRequestController::class, 'store'])->middleware('throttle:20,1');
 
 Route::get('/properties', [PropertyController::class, 'index']);
@@ -144,9 +144,9 @@ Route::get('/public/team/hall-of-fame', [PublicTeamController::class, 'hallOfFam
 Route::get('/stories/feed', [StoryController::class, 'feed']);
 Route::get('/stories/{story}', [StoryController::class, 'show'])->whereNumber('story');
 Route::post('/stories/{story}/view', [StoryController::class, 'trackView'])->whereNumber('story')->middleware('throttle:120,1');
-Route::post('/reviews/request-code', [ReviewController::class, 'requestCode'])->middleware('throttle:10,1');
+Route::post('/reviews/request-code', [ReviewController::class, 'requestCode'])->middleware('throttle:auth-issue');
 Route::get('/agents/{agent}/reviews', [ReviewController::class, 'index'])->whereNumber('agent');
-Route::post('/agents/{agent}/reviews', [ReviewController::class, 'store'])->middleware('throttle:10,1')->whereNumber('agent');
+Route::post('/agents/{agent}/reviews', [ReviewController::class, 'store'])->middleware('throttle:auth-verify')->whereNumber('agent');
 
 Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::get('/rbac', [\App\Http\Controllers\RolePermissionController::class, 'index']);

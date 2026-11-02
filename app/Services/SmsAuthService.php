@@ -3,6 +3,9 @@
 namespace App\Services;
 
 use App\Models\SmsVerificationCode;
+use App\Support\InternationalPhone;
+use App\Support\UserPhoneIdentity;
+use Illuminate\Support\Facades\DB;
 use OsonSMS\OsonSMSService\OsonSmsService;
 use RuntimeException;
 
@@ -17,22 +20,22 @@ class SmsAuthService
         ?string $message = null
     ): string
     {
-        if ($this->isAppReviewLoginOtp($phone, $purpose)) {
-            return $this->storeCode($phone, $purpose, $this->appReviewOtp());
-        }
-
         $code = random_int(100000, 999999);
         $txnId = uniqid($purpose.'_', true);
         $message ??= $purpose === SmsVerificationCode::PURPOSE_PASSWORD_RESET
             ? "Ваш код для сброса пароля: $code"
             : "Ваш код авторизации: $code";
 
-        $this->osonSmsService->sendSMS(
-            senderName: config('osonsmsservice.sender_name'),
-            phonenumber: $phone,
-            message: $message,
-            txnId: $txnId
-        );
+        try {
+            $this->osonSmsService->sendSMS(
+                senderName: config('osonsmsservice.sender_name'),
+                phonenumber: ltrim(InternationalPhone::e164($phone), '+'),
+                message: $message,
+                txnId: $txnId
+            );
+        } catch (\Exception) {
+            throw new RuntimeException('Не удалось доставить SMS.');
+        }
 
         $this->storeCode($phone, $purpose, (string) $code);
 
@@ -51,75 +54,43 @@ class SmsAuthService
     public function verifyCode(
         string $phone,
         string $code,
-        string $purpose = SmsVerificationCode::PURPOSE_LOGIN,
-        bool $consume = false
-    ): bool
-    {
-        if (
-            $this->isAppReviewLoginOtp($phone, $purpose)
-            && hash_equals($this->appReviewOtp(), $code)
-        ) {
-            return true;
-        }
-
-        $record = SmsVerificationCode::whereIn('phone', \App\Support\UserPhoneIdentity::variants($phone))
-            ->where('purpose', $purpose)
-            ->where('expires_at', '>', now())
-            ->first();
-
-        if (! $record || $record->code !== $code) {
+        string $purpose = SmsVerificationCode::PURPOSE_LOGIN
+    ): bool {
+        if (!preg_match('/^[0-9]{6}$/D', $code)) {
             return false;
         }
 
-        if ($consume) {
-            $record->delete();
-        }
-
-        return true;
+        // One conditional write also prevents concurrent redemption.
+        return SmsVerificationCode::where('phone', InternationalPhone::e164($phone))
+            ->where('purpose', $purpose)
+            ->where('expires_at', '>', now())
+            ->where('code', $this->digest($phone, $purpose, $code))
+            ->delete() > 0;
     }
 
-    public function clearCode(string $phone, string $purpose): void
+    private function digest(string $phone, string $purpose, string $code): string
     {
-        SmsVerificationCode::whereIn('phone', \App\Support\UserPhoneIdentity::variants($phone))
-            ->where('purpose', $purpose)
-            ->delete();
+        $key = config('app.key');
+        if (!is_string($key) || $key === '') {
+            throw new RuntimeException('Application key is missing.');
+        }
+        return hash_hmac('sha256', $purpose.'|'.InternationalPhone::e164($phone).'|'.$code, $key);
     }
 
     private function storeCode(string $phone, string $purpose, string $code): string
     {
-        // A reissued code replaces older codes stored under another phone format.
-        $this->clearCode($phone, $purpose);
-
-        SmsVerificationCode::updateOrCreate(
-            ['phone' => \App\Support\InternationalPhone::accountValue($phone), 'purpose' => $purpose],
-            [
-                'code' => $code,
+        $canonical = InternationalPhone::e164($phone);
+        DB::transaction(function () use ($phone, $canonical, $purpose, $code) {
+            SmsVerificationCode::whereIn('phone', UserPhoneIdentity::variants($phone))
+                ->where('phone', '!=', $canonical)->where('purpose', $purpose)->delete();
+            SmsVerificationCode::upsert([
+                'phone' => $canonical,
+                'purpose' => $purpose,
+                'code' => $this->digest($phone, $purpose, $code),
                 'expires_at' => now()->addMinutes(5),
-            ]
-        );
+            ], ['phone', 'purpose'], ['code', 'expires_at', 'updated_at']);
+        }, 3);
 
         return $code;
-    }
-
-    private function isAppReviewLoginOtp(string $phone, string $purpose): bool
-    {
-        return $purpose === SmsVerificationCode::PURPOSE_LOGIN
-            && $this->normalizePhone($phone) === $this->normalizePhone((string) config('auth.app_review.phone'));
-    }
-
-    private function appReviewOtp(): string
-    {
-        return (string) config('auth.app_review.otp', '000000');
-    }
-
-    private function normalizePhone(string $phone): string
-    {
-        $digits = preg_replace('/\D+/', '', $phone) ?? '';
-
-        if (strlen($digits) === 12 && str_starts_with($digits, '992')) {
-            return substr($digits, 3);
-        }
-
-        return $digits;
     }
 }

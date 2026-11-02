@@ -22,7 +22,11 @@ final class InternationalPhone
             return $raw;
         }
 
-        return str_starts_with($phone, '+992') ? substr($phone, 4) : substr($phone, 1);
+        if (str_starts_with($phone, '+992')) {
+            return substr($phone, 4);
+        }
+        $digits = substr($phone, 1);
+        return self::e164($digits) === $phone ? $digits : $phone;
     }
 
     /** Validate national length, without rejecting newly allocated operator prefixes. */

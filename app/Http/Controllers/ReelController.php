@@ -14,7 +14,7 @@ use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\DB;
 use App\Services\GroupAccess\ReelWriteLock;
-use Illuminate\Support\Str;
+use App\Services\PublicPhoto;
 use Illuminate\Validation\Rule;
 use RuntimeException;
 
@@ -267,14 +267,13 @@ class ReelController extends Controller
         ];
     }
 
-    private function storeMediaFile($file, string $directory): string
+    private function storeVideo(UploadedFile $file): string
     {
-        $extension = strtolower((string) $file->getClientOriginalExtension());
-        $filename = $directory.'/'.Str::uuid().($extension ? '.'.$extension : '');
-
-        Storage::disk('public')->putFileAs($directory, $file, basename($filename));
-
-        return $filename;
+        $path = $this->uploadService->directUploadPath($file->getMimeType());
+        if (!Storage::disk('public')->putFileAs(dirname($path), $file, basename($path))) {
+            throw new RuntimeException('Не удалось сохранить видео.');
+        }
+        return $path;
     }
 
     private function deleteMediaFiles(array $paths): void
@@ -404,12 +403,12 @@ class ReelController extends Controller
 
             $groupId = $this->creationGroup($user, $property, $validated['branch_group_id'] ?? null);
 
-            $videoPath = $this->storeMediaFile($request->file('video'), 'reels/originals');
+            $videoPath = $this->storeVideo($request->file('video'));
             $previewPath = $request->hasFile('preview_image')
-                ? $this->storeMediaFile($request->file('preview_image'), 'reels/previews')
+                ? PublicPhoto::store($request->file('preview_image'), 'reels/previews', 'preview_image')
                 : null;
             $thumbnailPath = $request->hasFile('thumbnail')
-                ? $this->storeMediaFile($request->file('thumbnail'), 'reels/thumbnails')
+                ? PublicPhoto::store($request->file('thumbnail'), 'reels/thumbnails', 'thumbnail')
                 : null;
 
             $reel = Reel::query()->create([
@@ -475,7 +474,7 @@ class ReelController extends Controller
 
             $groupId = $this->creationGroup($user, $property, $validated['branch_group_id'] ?? null);
 
-            $path = $this->uploadService->directUploadPath($validated['extension'] ?? 'mp4');
+            $path = $this->uploadService->directUploadPath($validated['mime_type']);
 
             $reel = Reel::query()->create([
                 'branch_group_id' => $groupId,
@@ -610,7 +609,7 @@ class ReelController extends Controller
             if ($request->hasFile('video')) {
                 /** @var UploadedFile $video */
                 $video = $request->file('video');
-                $data['video_url'] = $this->storeMediaFile($video, 'reels/originals');
+                $data['video_url'] = $this->storeVideo($video);
                 $data['mp4_url'] = null;
                 $data['hls_url'] = null;
                 $data['preview_image'] = null;
@@ -637,12 +636,12 @@ class ReelController extends Controller
             }
 
             if ($request->hasFile('preview_image')) {
-                $data['preview_image'] = $this->storeMediaFile($request->file('preview_image'), 'reels/previews');
+                $data['preview_image'] = PublicPhoto::store($request->file('preview_image'), 'reels/previews', 'preview_image');
                 $filesToDelete[] = $reel->preview_image;
             }
 
             if ($request->hasFile('thumbnail')) {
-                $data['thumbnail_url'] = $this->storeMediaFile($request->file('thumbnail'), 'reels/thumbnails');
+                $data['thumbnail_url'] = PublicPhoto::store($request->file('thumbnail'), 'reels/thumbnails', 'thumbnail');
                 $filesToDelete[] = $reel->thumbnail_url;
             }
 

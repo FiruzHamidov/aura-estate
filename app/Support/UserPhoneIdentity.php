@@ -24,7 +24,7 @@ final class UserPhoneIdentity
             $variants[] = '0'.$national;
         }
 
-        return array_values(array_unique($variants));
+        return array_values(array_unique(array_filter($variants, fn ($variant) => InternationalPhone::e164($variant) === $e164)));
     }
 
     public static function query(string $phone): Builder
@@ -33,11 +33,11 @@ final class UserPhoneIdentity
         // REPLACE is supported by both production MySQL and test SQLite.
         // Match legacy presentation separators without changing stored contacts.
         $expression = 'phone';
-        foreach ([' ', '+', '-', '(', ')', '.'] as $separator) {
+        foreach ([' ', '-', '(', ')', '.'] as $separator) {
             $expression = "REPLACE({$expression}, '{$separator}', '')";
         }
         $digits = array_values(array_unique(array_map(
-            fn (string $value) => str_replace([' ', '+', '-', '(', ')', '.'], '', $value),
+            fn (string $value) => str_replace([' ', '-', '(', ')', '.'], '', $value),
             $variants
         )));
 

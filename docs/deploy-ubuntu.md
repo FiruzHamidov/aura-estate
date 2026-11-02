@@ -175,15 +175,11 @@ php artisan migrate --force
 ```bash
 cd /var/www/aura-estate
 php artisan storage:link
-sudo chown -R www-data:www-data storage bootstrap/cache
-sudo chmod -R 775 storage bootstrap/cache
-```
-
-If your deploy user must also write during deploy:
-
-```bash
-sudo chgrp -R www-data storage bootstrap/cache
-sudo chmod -R ug+rwx storage bootstrap/cache
+sudo chown -R www-data:www-data storage
+sudo install -d -o root -g www-data -m 2750 bootstrap/cache
+sudo chown root:www-data bootstrap/cache/.gitignore
+# On upgrades, quarantine old writable manifests before privileged Artisan runs.
+(umask 0027 && php artisan config:cache && php artisan route:cache)
 ```
 
 ## 7. Optimize Laravel
@@ -236,7 +232,9 @@ server {
         proxy_pass http://127.0.0.1:8080;
     }
 
-    location ~ \.php$ {
+    location ~* \.(?:php[0-9]*|phtml|phar|phps)(?:[./]|$) { return 404; }
+
+    location = /index.php {
         include snippets/fastcgi-php.conf;
         fastcgi_pass unix:/run/php/php8.2-fpm.sock;
         fastcgi_param SCRIPT_FILENAME $realpath_root$fastcgi_script_name;
@@ -317,7 +315,7 @@ crontab -e
 Then:
 
 ```cron
-* * * * * cd /var/www/aura-estate && php artisan schedule:run >> /dev/null 2>&1
+* * * * * cd /var/www/aura-estate && runuser -u www-data -- /usr/bin/php artisan schedule:run >> /dev/null 2>&1
 ```
 
 ## 11. HTTPS with Let's Encrypt

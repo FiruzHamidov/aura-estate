@@ -236,12 +236,17 @@ class TelegramAuthTest extends TestCase
         $payload = [
             'message' => [
                 'text' => '/start',
-                'chat' => ['id' => '555000111'],
+                'chat' => ['id' => '100005', 'type' => 'private'],
                 'from' => ['id' => '100005', 'username' => 'notify_agent'],
             ],
         ];
 
         $this->postJson('/api/telegram/webhook', $payload)->assertForbidden();
+        $group = $payload;
+        $group['message']['chat'] = ['id' => '-1234', 'type' => 'group'];
+        $this->postJson('/api/telegram/webhook', $group, ['X-Telegram-Bot-Api-Secret-Token' => 'secret-123'])->assertOk();
+        $this->assertNull($user->fresh()->telegram_chat_id);
+
 
         $this->postJson(
             '/api/telegram/webhook',
@@ -250,7 +255,7 @@ class TelegramAuthTest extends TestCase
         )->assertOk();
 
         $user->refresh();
-        $this->assertSame('555000111', $user->telegram_chat_id);
+        $this->assertSame('100005', $user->telegram_chat_id);
     }
 
     public function test_telegram_bot_service_sends_notification(): void
@@ -295,7 +300,7 @@ class TelegramAuthTest extends TestCase
             'role_id' => $role->id,
             'status' => 'active',
             'telegram_id' => '701001',
-            'telegram_chat_id' => '880011',
+            'telegram_chat_id' => '701001',
         ]);
 
         $this->postJson('/api/password/reset/request', [
@@ -304,15 +309,18 @@ class TelegramAuthTest extends TestCase
         ])->assertOk()->assertJsonPath('message', 'Код для сброса пароля отправлен в Telegram');
 
         $record = SmsVerificationCode::query()
-            ->where('phone', \App\Support\InternationalPhone::accountValue($user->phone))
+            ->where('phone', \App\Support\InternationalPhone::e164($user->phone))
             ->where('purpose', SmsVerificationCode::PURPOSE_PASSWORD_RESET)
             ->first();
 
         $this->assertNotNull($record);
+        $sent = Http::recorded()->last()[0]['text'];
+        $this->assertSame(1, preg_match('/[0-9]{6}/', $sent, $matches));
+        $this->assertNotSame($matches[0], $record->code);
 
         $this->postJson('/api/password/reset/confirm', [
             'phone' => $user->phone,
-            'code' => $record->code,
+            'code' => $matches[0],
             'new_password' => 'new-secret',
             'new_password_confirmation' => 'new-secret',
         ])->assertOk()->assertJsonPath('message', 'Пароль успешно сброшен');

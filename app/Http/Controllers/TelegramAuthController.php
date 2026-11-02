@@ -29,9 +29,7 @@ class TelegramAuthController extends Controller
     {
         $secret = config('services.telegram.webhook_secret');
 
-        if (! $secret) {
-            return;
-        }
+        abort_unless(is_string($secret) && $secret !== '', 403, 'Forbidden');
 
         abort_unless(
             hash_equals($secret, (string) $request->header('X-Telegram-Bot-Api-Secret-Token')),
@@ -116,7 +114,7 @@ class TelegramAuthController extends Controller
         $telegramUsername = data_get($message, 'from.username');
         $photoUrl = null;
 
-        if (! $chatId || ! $telegramUserId || $text === '') {
+        if (data_get($message, 'chat.type') !== 'private' || !$telegramUserId || (string) $chatId !== (string) $telegramUserId || $text === '') {
             return response()->json(['ok' => true]);
         }
 
