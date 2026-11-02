@@ -407,9 +407,12 @@ class PropertyController extends Controller
             ] : null;
             $refreshState = $this->listingDateRefreshState($property);
             $payload['capabilities'] = $this->propertyCapabilities($authUser, $property, $refreshState);
-            if ($includeAuthContacts && $payload['capabilities']['can_manage_deal']) {
-                // A live relation hidden by group permissions is not a deleted buyer.
-                $payload['buyer_client_unavailable'] = $property->buyer_client_id !== null && $property->buyerClient === null;
+            if ($payload['capabilities']['can_manage_deal']) {
+                $payload['moderation_version'] = $property->moderation_version;
+                if ($includeAuthContacts) {
+                    // A live relation hidden by group permissions is not a deleted buyer.
+                    $payload['buyer_client_unavailable'] = $property->buyer_client_id !== null && $property->buyerClient === null;
+                }
             }
             $payload['listing_date_refresh'] = $refreshState;
         }
