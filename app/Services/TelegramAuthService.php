@@ -136,6 +136,9 @@ class TelegramAuthService
 
     private function syncTelegramProfile(User $user, array $data): void
     {
+        if ((string) $user->telegram_id !== (string) $data['id']) {
+            $user->telegram_chat_id = null;
+        }
         $user->forceFill([
             'telegram_id' => $data['id'],
             'telegram_username' => $data['username'],

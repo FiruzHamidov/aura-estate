@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Review;
+use App\Models\SmsVerificationCode;
 use App\Models\User;
 use App\Services\RealtorReviewService;
 use App\Services\SmsAuthService;
@@ -26,11 +27,8 @@ class ReviewController extends Controller
             'phone' => [new \App\Rules\InternationalPhoneNumber, 'required', 'string'],
         ]);
 
-        // Можно нормализовать phone тут (убрать пробелы, +, тире)
-        $phone = $this->normalizePhone($data['phone']);
-
         try {
-            $smsAuthService->sendVerificationCode($phone);
+            $smsAuthService->sendVerificationCode($data['phone'], SmsVerificationCode::PURPOSE_REVIEW);
             return response()->json(['message' => 'Код отправлен']);
         } catch (\RuntimeException $e) {
             return response()->json(['message' => $e->getMessage()], 500);
@@ -62,7 +60,7 @@ class ReviewController extends Controller
 
         $phone = $this->normalizePhone($data['reviewer_phone']);
 
-        if (!$smsAuthService->verifyCode($phone, $data['code'])) {
+        if (!$smsAuthService->verifyCode($data['reviewer_phone'], $data['code'], SmsVerificationCode::PURPOSE_REVIEW)) {
             return response()->json(['message' => 'Неверный или просроченный код'], 401);
         }
 

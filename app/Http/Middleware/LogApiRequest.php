@@ -46,7 +46,10 @@ class LogApiRequest
         try {
             $user = $request->user();
             $route = $request->route();
-            $technicalOnly = ResidentialDiagnostics::applies($request);
+            $technicalOnly = ResidentialDiagnostics::applies($request) || $request->is(
+                'api/login', 'api/register', 'api/sms/*', 'api/password/*', 'api/telegram/*',
+                'api/reviews/request-code', 'api/agents/*/reviews'
+            );
 
             ApiRequestLog::create([
                 'trace_id' => $request->attributes->get('trace_id'),

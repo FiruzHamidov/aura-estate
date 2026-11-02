@@ -38,7 +38,6 @@ class TelegramBotService
             'chat_id' => (string) $chatId,
             'bot_enabled' => $this->isEnabled(),
             'has_bot_token' => filled($botToken),
-            'text_preview' => mb_strimwidth($text, 0, 120, '...'),
         ]);
 
         if (! $botToken) {
@@ -46,26 +45,28 @@ class TelegramBotService
             throw new RuntimeException('Telegram bot token is not configured.');
         }
 
-        $response = Http::timeout(15)
-            ->baseUrl(sprintf('https://api.telegram.org/bot%s', $botToken))
-            ->post('/sendMessage', [
-                'chat_id' => (string) $chatId,
-                'text' => $text,
-                'parse_mode' => 'HTML',
-            ]);
+        try {
+            $response = Http::timeout(15)
+                ->baseUrl(sprintf('https://api.telegram.org/bot%s', $botToken))
+                ->post('/sendMessage', [
+                    'chat_id' => (string) $chatId,
+                    'text' => $text,
+                    'parse_mode' => 'HTML',
+                ]);
+        } catch (\Illuminate\Http\Client\ConnectionException) {
+            throw new RuntimeException('Telegram API unavailable.');
+        }
 
         Log::info('Telegram API response received.', [
             'chat_id' => (string) $chatId,
             'status' => $response->status(),
             'ok' => $response->ok(),
-            'body' => $response->json(),
         ]);
 
         if ($response->failed()) {
             Log::error('Telegram API request failed.', [
                 'chat_id' => (string) $chatId,
                 'status' => $response->status(),
-                'body' => $response->json(),
             ]);
             throw new RuntimeException('Telegram API request failed.');
         }

@@ -95,42 +95,12 @@ class AuthRegistrationTest extends TestCase
         $this->assertSame($clientRole->id, $user->role_id);
     }
 
-    public function test_app_review_account_can_sign_in_with_fixed_sms_code(): void
+    public function test_app_review_account_requires_a_fresh_code(): void
     {
-        config()->set('auth.app_review.phone', '938080888');
-        config()->set('auth.app_review.otp', '000000');
-
-        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
-        $user = User::create([
-            'name' => 'App Review',
-            'phone' => '938080888',
-            'password' => bcrypt('password'),
-            'role_id' => $role->id,
-            'status' => 'active',
-            'auth_method' => 'sms',
-        ]);
-
-        $this->postJson('/api/sms/request', [
-            'phone' => '938080888',
-        ])->assertOk();
-
-        $this->assertDatabaseHas('sms_verification_codes', [
-            'phone' => '938080888',
-            'purpose' => SmsVerificationCode::PURPOSE_LOGIN,
-            'code' => '000000',
-        ]);
-
-        $response = $this->postJson('/api/sms/verify', [
+        $this->postJson('/api/sms/verify', [
             'phone' => '938080888',
             'code' => '000000',
-            'device_name' => 'iPad Air 11-inch (M3)',
-            'platform' => 'ios',
-            'app_version' => '1.0',
-        ]);
-
-        $response->assertOk();
-        $response->assertJsonPath('user.id', $user->id);
-        $this->assertNotEmpty($response->json('token'));
+        ])->assertUnauthorized();
     }
 
     public function test_mobile_client_filters_route_is_available_for_authenticated_users(): void
@@ -239,6 +209,28 @@ class AuthRegistrationTest extends TestCase
         $this->postJson('/api/login', ['phone' => '901234567', 'password' => 'password123'])->assertForbidden();
     }
 
+    public function test_failed_otp_verification_is_throttled_across_phone_formats(): void
+    {
+        $codes = ['901234567', '+992901234567', '+992 90 123-45-67'];
+        for ($attempt = 0; $attempt < 6; $attempt++) {
+            $this->postJson('/api/sms/verify', ['phone' => $codes[$attempt % 3], 'code' => '000000'])
+                ->assertUnauthorized();
+        }
+        $this->postJson('/api/sms/verify', ['phone' => $codes[0], 'code' => '000000'])->assertStatus(429);
+    }
+
+    public function test_foreign_phone_cannot_authenticate_an_equal_length_tajik_number(): void
+    {
+        $role = Role::create(['name' => 'Client', 'slug' => 'client']);
+        $victim = User::create(['name' => 'TJ', 'phone' => '376812345', 'role_id' => $role->id, 'status' => 'active']);
+        $service = app(\App\Services\SmsAuthService::class);
+        $code = $service->storeVerificationCode('+376812345', 'login');
+        $this->assertFalse($service->verifyCode('+992376812345', $code));
+        $response = $this->postJson('/api/sms/verify', ['phone' => '+376812345', 'code' => $code])->assertOk();
+        $this->assertNotSame($victim->id, $response->json('user.id'));
+        $this->assertSame('+376812345', $response->json('user.phone'));
+    }
+
     public function test_reissued_sms_code_replaces_legacy_format_and_uniqueness_ignores_only_self(): void
     {
         $role = Role::create(['name' => 'Client', 'slug' => 'client']);
@@ -251,6 +243,7 @@ class AuthRegistrationTest extends TestCase
         $code = $service->storeVerificationCode('901234567', 'login');
         $this->assertFalse($service->verifyCode('+992901234567', 'old-code'));
         $this->assertTrue($service->verifyCode('+992901234567', $code));
-        $this->assertDatabaseCount('sms_verification_codes', 1);
+        $this->assertFalse($service->verifyCode('+992901234567', $code));
+        $this->assertDatabaseCount('sms_verification_codes', 0);
     }
 }

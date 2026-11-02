@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers;
 
+use App\Services\PublicPhoto;
+
 use App\Models\BranchGroup;
 use App\Models\CrmAuditLog;
 use App\Models\Property;
@@ -736,10 +738,8 @@ class UserController extends Controller
             }
 
             if ($request->hasFile('photo')) {
-                $file = $request->file('photo');
-                $filename = 'users/'.uniqid().'.'.$file->getClientOriginalExtension();
-                $path = \Storage::disk('public')->put($filename, file_get_contents($file));
-                $data['photo'] = $filename;
+                $request->validate(['photo' => 'required|image|max:2048']);
+                $data['photo'] = PublicPhoto::store($request->file('photo'), 'users');
             }
 
             $user = app(\App\Services\GroupAccess\UserOrganizationService::class)->update($authUser, $user, $data);
@@ -758,12 +758,7 @@ class UserController extends Controller
             'photo' => 'required|image|max:2048',
         ]);
 
-        if ($request->hasFile('photo')) {
-            $file = $request->file('photo');
-            $filename = 'users/'.uniqid().'.'.$file->getClientOriginalExtension();
-            \Storage::disk('public')->put($filename, file_get_contents($file));
-            $user->update(['photo' => $filename]);
-        }
+        $user->update(['photo' => PublicPhoto::store($request->file('photo'), 'users')]);
 
         return response()->json(['message' => 'Photo updated', 'photo' => $user->photo]);
     }

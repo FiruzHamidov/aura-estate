@@ -21,11 +21,15 @@ class ReelUploadService
         return Storage::disk($this->diskName());
     }
 
-    public function directUploadPath(string $extension = 'mp4'): string
+    public function directUploadPath(string $mimeType): string
     {
-        $normalized = strtolower(trim($extension)) ?: 'mp4';
+        $extension = match ($mimeType) {
+            'video/mp4' => 'mp4',
+            'video/quicktime' => 'mov',
+            default => throw new \InvalidArgumentException('Unsupported video type'),
+        };
 
-        return 'reels/originals/'.now()->format('Y/m').'/'.Str::uuid().'.'.$normalized;
+        return 'reels/originals/'.now()->format('Y/m').'/'.Str::uuid().'.'.$extension;
     }
 
     public function createTemporaryUpload(Reel $reel, string $path, string $mimeType, int $expiresMinutes = 15): array

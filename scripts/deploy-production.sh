@@ -111,6 +111,10 @@ if [[ ${1:-} == --check ]]; then
   exit 0
 fi
 
+# Refuse unsafe legacy PHP caches before a privileged Artisan bootstrap.
+cache_dir="$repo/bootstrap/cache"
+[[ ! -L $cache_dir && $(stat -c '%U:%G:%a' "$cache_dir") == root:www-data:2750 ]]
+[[ -z $(find "$cache_dir" -mindepth 1 \( ! -type f -o ! -user root -o -perm /022 \) -print -quit) ]]
 sha=${1:?Commit SHA required}
 [[ $sha =~ ^[0-9a-f]{40}$ ]] || exit 2
 git -C "$repo" fetch --no-tags "$remote" refs/heads/main:refs/remotes/aura-deploy/main
@@ -149,9 +153,9 @@ finish() {
   trap - EXIT
   if (( result != 0 && realtime_env_changed == 1 )); then
     install -m 600 "$backup/pre-realtime-environment" "$repo/.env" || true
-    (cd "$repo" && php artisan config:cache && php artisan queue:restart && php artisan reverb:restart) || true
+    (cd "$repo" && (umask 0027 && php artisan config:cache) && runuser -u www-data -- php artisan queue:restart && runuser -u www-data -- php artisan reverb:restart) || true
   fi
-  if (( maintenance == 1 )); then (cd "$repo" && php artisan up) || true; fi
+  if (( maintenance == 1 )); then (cd "$repo" && runuser -u www-data -- php artisan up) || true; fi
   if (( result != 0 )); then
     echo "Backend deployment failed. Source, environment, database and previous dependencies: $backup" >&2
     echo "Failed build retained for diagnosis until the next deploy: $stage" >&2
@@ -164,14 +168,19 @@ trap 'exit 143' TERM INT
 
 install -m 644 "$stage/deploy/supervisor/aura-estate-reverb.conf" /etc/supervisor/conf.d/aura-estate-reverb.conf
 install -m 644 "$stage/deploy/supervisor/aura-estate-queue.conf" /etc/supervisor/conf.d/aura-estate-queue.conf
+for service in reverb queue; do
+  conf="/etc/supervisor/conf.d/aura-estate-$service.conf"
+  sed -i -e 's/^user=root$/user=www-data/' -e "s|^stdout_logfile=.*|stdout_logfile=/var/log/supervisor/aura-estate-$service.log|" "$conf"
+done
 supervisorctl reread
 supervisorctl update
 wait_for_supervisor_program aura-estate-reverb
 (cd "$stage" && php scripts/verify-reverb-runtime.php)
 
 cd "$repo"
+install -d -o root -g www-data -m 2750 bootstrap/cache
 maintenance=1
-php artisan down --retry=10
+runuser -u www-data -- php artisan down --retry=10
 git merge --ff-only "$sha"
 if [[ -d vendor ]]; then mv vendor "$backup/vendor"; fi
 mv "$stage/vendor" vendor
@@ -184,14 +193,13 @@ for manifest in config.php packages.php services.php; do
   if [[ -f bootstrap/cache/$manifest ]]; then mv "bootstrap/cache/$manifest" "$backup/$manifest"; fi
 done
 php artisan config:clear
-php artisan package:discover --ansi
+(umask 0027 && php artisan package:discover --ansi)
 php artisan migrate --force --no-interaction
-php artisan config:cache
-php artisan route:cache
-php artisan view:cache
-chown -R www-data:www-data bootstrap/cache
+(umask 0027 && php artisan config:cache)
+(umask 0027 && php artisan route:cache)
+runuser -u www-data -- php artisan view:cache
 systemctl reload php8.2-fpm
-php artisan up
+runuser -u www-data -- php artisan up
 maintenance=0
 
 deploy_step='preserve realtime environment'
@@ -200,11 +208,11 @@ deploy_step='enable messaging realtime'
 php scripts/enable-messaging-realtime.php
 realtime_env_changed=1
 deploy_step='cache realtime configuration'
-php artisan config:cache
+(umask 0027 && php artisan config:cache)
 deploy_step='restart queues'
-php artisan queue:restart
+runuser -u www-data -- php artisan queue:restart
 deploy_step='restart Reverb'
-php artisan reverb:restart
+runuser -u www-data -- php artisan reverb:restart
 deploy_step='wait for queue worker'
 wait_for_supervisor_program aura-estate-queue:aura-estate-queue_00
 deploy_step='wait for Reverb worker'

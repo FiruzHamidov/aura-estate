@@ -6,6 +6,8 @@ use Illuminate\Database\Eloquent\Model;
 
 class SmsVerificationCode extends Model
 {
+    public const PURPOSE_REVIEW = 'review';
+
     public const PURPOSE_LOGIN = 'login';
 
     public const PURPOSE_PASSWORD_RESET = 'password_reset';

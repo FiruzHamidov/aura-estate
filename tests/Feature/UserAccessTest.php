@@ -16,6 +16,30 @@ use Tests\TestCase;
 
 class UserAccessTest extends TestCase
 {
+    public function test_only_reencoded_photos_can_be_published_from_user_update(): void
+    {
+        \Illuminate\Support\Facades\Storage::fake('public');
+        $branch = Branch::create(['name' => 'Sandbox']);
+        $clientRole = Role::create(['name' => 'Client', 'slug' => 'client']);
+        $hrRole = Role::create(['name' => 'HR', 'slug' => 'hr']);
+        $actor = User::create(['name' => 'HR', 'phone' => '900000001', 'role_id' => $hrRole->id, 'branch_id' => $branch->id, 'status' => 'active']);
+        $target = User::create(['name' => 'Client', 'phone' => '900000002', 'role_id' => $clientRole->id, 'status' => 'active']);
+        Sanctum::actingAs($actor);
+        $url = '/api/user/'.$target->id;
+        $factory = \Illuminate\Http\UploadedFile::fake();
+        $this->patchJson($url, ['photo' => $factory->createWithContent('marker.php', 'inert text')])
+            ->assertUnprocessable()->assertJsonStructure(['details' => ['errors' => ['photo']]]);
+
+        $image = $factory->image('test.png');
+        $bytes = file_get_contents($image->getRealPath());
+        $photo = $factory->createWithContent('marker.html', $bytes.'inert trailing marker')->mimeType('image/png');
+        $path = $this->patchJson($url, ['photo' => $photo])->assertOk()->json('photo');
+        $this->assertMatchesRegularExpression('#^users/[a-f0-9-]+\.webp$#', $path);
+        $stored = \Illuminate\Support\Facades\Storage::disk('public')->get($path);
+        $this->assertSame('image/webp', getimagesizefromstring($stored)['mime']);
+        $this->assertStringNotContainsString('inert trailing marker', $stored);
+    }
+
     protected function setUp(): void
     {
         parent::setUp();

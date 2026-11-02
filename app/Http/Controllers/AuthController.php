@@ -168,7 +168,7 @@ class AuthController extends Controller
     public function checkMethod(Request $request)
     {
         $request->validate([
-            'phone' => 'required|string',
+            'phone' => ['required', 'string', new \App\Rules\InternationalPhoneNumber],
         ]);
 
         $user = $this->findUserForPhoneLogin($request->phone);
@@ -191,7 +191,7 @@ class AuthController extends Controller
     public function requestSmsCode(Request $request, SmsAuthService $smsAuthService)
     {
         $request->validate([
-            'phone' => 'required|string'
+            'phone' => ['required', 'string', new \App\Rules\InternationalPhoneNumber]
         ]);
 
         $user = $this->findUserForPhoneLogin($request->phone);
@@ -204,7 +204,7 @@ class AuthController extends Controller
             $smsAuthService->sendVerificationCode($request->phone);
             return response()->json(['message' => 'Код отправлен']);
         } catch (\RuntimeException $e) {
-            return response()->json(['message' => $e->getMessage()], 500);
+            return response()->json(['message' => 'Не удалось доставить код.'], 500);
         }
     }
 
@@ -214,7 +214,7 @@ class AuthController extends Controller
         TelegramBotService $telegramBotService
     ) {
         $validated = $request->validate([
-            'phone' => 'required|string',
+            'phone' => ['required', 'string', new \App\Rules\InternationalPhoneNumber],
             'channel' => 'required|string|in:sms,telegram',
         ]);
 
@@ -230,7 +230,7 @@ class AuthController extends Controller
 
         try {
             if ($validated['channel'] === 'telegram') {
-                if (! $user->telegram_id || ! $user->telegram_chat_id) {
+                if (! $user->telegram_id || (string) $user->telegram_chat_id !== (string) $user->telegram_id) {
                     return response()->json([
                         'message' => 'Для этого пользователя не подключён Telegram для получения кода.',
                     ], 422);
@@ -256,14 +256,14 @@ class AuthController extends Controller
 
             return response()->json(['message' => 'Код для сброса пароля отправлен по SMS']);
         } catch (RuntimeException $e) {
-            return response()->json(['message' => $e->getMessage()], 500);
+            return response()->json(['message' => 'Не удалось доставить код.'], 500);
         }
     }
 
     public function resetPassword(Request $request, SmsAuthService $smsAuthService)
     {
         $validated = $request->validate([
-            'phone' => 'required|string',
+            'phone' => ['required', 'string', new \App\Rules\InternationalPhoneNumber],
             'code' => 'required|string',
             'new_password' => 'required|string|min:6|confirmed',
         ]);
@@ -281,8 +281,7 @@ class AuthController extends Controller
         if (! $smsAuthService->verifyCode(
             $validated['phone'],
             $validated['code'],
-            SmsVerificationCode::PURPOSE_PASSWORD_RESET,
-            true
+            SmsVerificationCode::PURPOSE_PASSWORD_RESET
         )) {
             return response()->json(['message' => 'Неверный код'], 401);
         }
@@ -302,7 +301,7 @@ class AuthController extends Controller
     public function verifySmsCode(Request $request, SmsAuthService $smsAuthService)
     {
         $request->validate([
-            'phone' => 'required|string',
+            'phone' => ['required', 'string', new \App\Rules\InternationalPhoneNumber],
             'code' => 'required|string',
             'device_name' => 'nullable|string|max:255',
             'platform' => 'nullable|string|max:50',
@@ -339,7 +338,7 @@ class AuthController extends Controller
     public function login(Request $request)
     {
         $request->validate([
-            'phone' => 'required|string',
+            'phone' => ['required', 'string', new \App\Rules\InternationalPhoneNumber],
             'password' => 'required|string',
             'device_name' => 'nullable|string|max:255',
             'platform' => 'nullable|string|max:50',

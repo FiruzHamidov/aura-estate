@@ -125,9 +125,9 @@ class ApiRequestLogFeatureTest extends TestCase
 
         $log = ApiRequestLog::query()->where('trace_id', 'trace-sensitive')->firstOrFail();
 
-        $this->assertSame('[redacted]', $log->request_body['phone']);
-        $this->assertSame('[redacted]', $log->request_body['password']);
-        $this->assertSame('ios', $log->request_body['device_name']);
+        $this->assertNull($log->request_body);
+        $this->assertNull($log->request_query);
+        $this->assertNull($log->error_message);
     }
 
     public function test_only_admin_and_superadmin_can_read_audit_logs(): void

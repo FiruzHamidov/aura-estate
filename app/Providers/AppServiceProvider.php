@@ -44,6 +44,23 @@ class AppServiceProvider extends ServiceProvider
             'user' => User::class,
         ]);
 
+        \OsonSMS\OsonSMSService\Models\OsonSMSLog::saving(function ($log) {
+            $log->message = '[redacted]';
+            $log->server_response = null;
+        });
+
+        foreach (['auth-issue' => 3, 'auth-verify' => 6, 'auth-password' => 10] as $name => $attempts) {
+            RateLimiter::for($name, function (Request $request) use ($attempts) {
+                $raw = $request->is('api/agents/*/reviews')
+                    ? $request->input('reviewer_phone') : $request->input('phone');
+                $phone = is_string($raw) ? \App\Support\InternationalPhone::e164($raw) : null;
+                return [
+                    Limit::perMinute(30)->by('ip:'.$request->ip()),
+                    Limit::perMinutes(5, $attempts)->by('phone:'.($phone ?? $request->ip())),
+                ];
+            });
+        }
+
         RateLimiter::for('attendance-device', function (Request $request) {
             $serial = (string) ($request->query('SN') ?? $request->query('sn') ?? 'unknown');
 

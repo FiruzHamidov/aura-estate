@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Branch;
+use App\Services\PublicPhoto;
 use Illuminate\Http\Request;
 
 class BranchController extends Controller
@@ -29,10 +30,7 @@ class BranchController extends Controller
         ]);
 
         if ($request->hasFile('photo')) {
-            $file = $request->file('photo');
-            $filename = 'branches/' . uniqid('', true) . '.' . $file->getClientOriginalExtension();
-            \Storage::disk('public')->put($filename, file_get_contents($file));
-            $validated['photo'] = $filename;
+            $validated['photo'] = PublicPhoto::store($request->file('photo'), 'branches');
         }
 
         $branch = Branch::create($validated);
@@ -57,17 +55,14 @@ class BranchController extends Controller
         ]);
 
         if ($request->hasFile('photo')) {
-            if ($branch->photo && \Storage::disk('public')->exists($branch->photo)) {
-                \Storage::disk('public')->delete($branch->photo);
-            }
-
-            $file = $request->file('photo');
-            $filename = 'branches/' . uniqid('', true) . '.' . $file->getClientOriginalExtension();
-            \Storage::disk('public')->put($filename, file_get_contents($file));
-            $validated['photo'] = $filename;
+            $validated['photo'] = PublicPhoto::store($request->file('photo'), 'branches');
         }
 
+        $previousPhoto = $branch->photo;
         $branch->update($validated);
+        if ($request->hasFile('photo') && $previousPhoto) {
+            \Storage::disk('public')->delete($previousPhoto);
+        }
 
         return response()->json($branch);
     }
