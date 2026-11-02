@@ -18,7 +18,9 @@ use App\Services\PropertyPublicationVisibility;
 use App\Services\PropertyQualityService;
 use App\Support\ClientAccess;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Database\QueryException;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -405,6 +407,10 @@ class PropertyController extends Controller
             ] : null;
             $refreshState = $this->listingDateRefreshState($property);
             $payload['capabilities'] = $this->propertyCapabilities($authUser, $property, $refreshState);
+            if ($includeAuthContacts && $payload['capabilities']['can_manage_deal']) {
+                // A live relation hidden by group permissions is not a deleted buyer.
+                $payload['buyer_client_unavailable'] = $property->buyer_client_id !== null && $property->buyerClient === null;
+            }
             $payload['listing_date_refresh'] = $refreshState;
         }
 
@@ -3152,6 +3158,16 @@ class PropertyController extends Controller
         return response()->json($logs);
     }
 
+    private function dealBuyerError(string $message): HttpResponseException
+    {
+        return new HttpResponseException(response()->json([
+            'code' => 'DEAL_BUYER_CONFIRMATION_REQUIRED',
+            'message' => $message,
+            'details' => ['errors' => ['buyer_client_id' => [$message]]],
+            'trace_id' => request()->attributes->get('trace_id'),
+        ], 422));
+    }
+
     public function saveDeal(
         SavePropertyDealRequest $request,
         Property $property
@@ -3167,7 +3183,14 @@ class PropertyController extends Controller
         $updated = DB::transaction(function () use ($request, $property, $user): Property {
             $data = $request->validated();
             $participants = [$data['sale_user_id'] ?? null, $data['deposit_user_id'] ?? null, ...array_column($data['agents'] ?? [], 'agent_id')];
-            [$user, $locked] = $this->lockPropertyWrite($user, $property, $data, $participants);
+            try {
+                [$user, $locked] = $this->lockPropertyWrite($user, $property, $data, $participants);
+            } catch (ModelNotFoundException $exception) {
+                if ($exception->getModel() !== Client::class) {
+                    throw $exception;
+                }
+                throw $this->dealBuyerError('Карточка покупателя недоступна. Выберите действующую карточку или подтвердите имя и телефон покупателя вручную.');
+            }
             $user = $this->authorizePropertyDealMutation(
                 $locked,
                 $request->deal_status,
@@ -3234,6 +3257,22 @@ class PropertyController extends Controller
                 $payload['deposit_user_id'] = $request->input('deposit_user_id') ?? $user->id;
             }
 
+            if ($locked->buyer_client_id && ! $request->filled('buyer_client_id')
+                && in_array($request->deal_status, ['deposit', 'sold', 'rented'], true)) {
+                // Existing API clients may omit the relation when submitting manual details.
+                // A locking read also serializes starting a deposit with deleting its buyer.
+                $currentBuyer = Client::query()->lockForUpdate()->find($locked->buyer_client_id);
+                if (! $currentBuyer || $request->has('buyer_client_id')) {
+                    if ($currentBuyer) {
+                        $this->clientAccess->ensureVisible($user, $currentBuyer);
+                    }
+                    if (! $request->filled(['buyer_full_name', 'buyer_phone'])) {
+                        throw $this->dealBuyerError('Для смены покупателя выберите действующую карточку или укажите имя и телефон вручную.');
+                    }
+                    $payload['buyer_client_id'] = null;
+                }
+            }
+
             if ($cancelDeposit) {
                 // The observer keeps the previous deposit in the audit log.
                 foreach (['deposit_amount', 'deposit_received_at', 'deposit_taken_at', 'deposit_user_id',
@@ -3259,7 +3298,7 @@ class PropertyController extends Controller
             ]);
 
             return $locked->fresh();
-        });
+        }, 3);
 
         return response()->json([
             'message' => 'Сделка успешно сохранена',

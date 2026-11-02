@@ -42,7 +42,8 @@ class SavePropertyDealRequest extends FormRequest
                 'min:6',
                 Rule::requiredIf(fn () => $this->input('deal_status') === 'deposit' && empty($this->input('buyer_client_id'))),
             ],
-            'buyer_client_id' => 'nullable|exists:clients,id',
+            // The deal transaction verifies the selected buyer while acquiring its write lock.
+            'buyer_client_id' => ['nullable', 'integer', 'min:1'],
 
             'deposit_amount'       => 'required_if:deal_status,deposit|numeric|min:0.01',
             'deposit_currency'     => 'required_if:deal_status,deposit|in:TJS,USD',

@@ -472,6 +472,51 @@ class ClientIntegrationTest extends TestCase
         $this->assertSame('sold', $property->moderation_status);
     }
 
+    public function test_deleting_a_deposit_buyer_is_blocked_until_the_last_deposit_is_resolved(): void
+    {
+        [$agent, $client, $property] = $this->seedClientContext();
+        Sanctum::actingAs($agent);
+        Schema::table('properties', fn (Blueprint $table) => $table->string('deal_status')->nullable());
+        $property->update(['buyer_client_id' => $client->id, 'deal_status' => 'deposit']);
+        $legacy = $property->replicate();
+        $legacy->deal_status = null;
+        $legacy->moderation_status = 'deposit';
+        $legacy->save();
+        $url = '/api/clients/'.$client->id;
+        $this->deleteJson($url)->assertConflict();
+        $property->update(['deal_status' => 'sold']);
+        $this->deleteJson($url)->assertConflict();
+        $legacy->update(['deal_status' => 'available']);
+        $this->deleteJson($url)->assertConflict();
+        $this->assertNotSoftDeleted($client);
+        $legacy->update(['buyer_client_id' => null]);
+        $this->deleteJson($url)->assertOk();
+        $this->assertSoftDeleted($client);
+        $this->assertDatabaseHas('crm_audit_logs', ['auditable_id' => $client->id, 'event' => 'deleted', 'actor_id' => $agent->id]);
+    }
+
+    public function test_stale_buyer_requires_reselection_or_complete_manual_details_before_closing(): void
+    {
+        [$agent, $client, $property] = $this->seedClientContext();
+        Sanctum::actingAs($agent);
+        $property->update(['buyer_client_id' => $client->id, 'moderation_status' => 'deposit', 'deposit_amount' => 9260]);
+        $client->delete(); // Reproduce a dangling historical link, before the deletion guard existed.
+        $url = '/api/properties/'.$property->id.'/deal';
+        $sale = ['deal_status' => 'sold', 'version' => 0, 'actual_sale_price' => 700000,
+            'actual_sale_currency' => 'TJS', 'company_commission_amount' => 15000, 'company_commission_currency' => 'TJS'];
+        $this->postJson($url, $sale + ['buyer_client_id' => $client->id])->assertUnprocessable()
+            ->assertJsonPath('code', 'DEAL_BUYER_CONFIRMATION_REQUIRED')
+            ->assertJsonPath('message', fn (string $message) => str_contains($message, 'Карточка покупателя недоступна'))
+            ->assertJsonValidationErrors('buyer_client_id', 'details.errors');
+        $this->postJson($url, $sale)->assertUnprocessable()->assertJsonValidationErrors('buyer_client_id', 'details.errors');
+        $this->postJson($url, $sale + ['buyer_client_id' => null, 'buyer_full_name' => 'Manual Buyer'])
+            ->assertUnprocessable()->assertJsonValidationErrors('buyer_client_id', 'details.errors');
+        $this->assertDatabaseHas('properties', ['id' => $property->id, 'moderation_status' => 'deposit', 'sold_at' => null]);
+        $this->postJson($url, $sale + ['buyer_full_name' => 'Manual Buyer', 'buyer_phone' => '+992905550002'])->assertOk();
+        $this->assertDatabaseHas('properties', ['id' => $property->id, 'moderation_status' => 'sold', 'buyer_client_id' => null,
+            'buyer_full_name' => 'Manual Buyer', 'buyer_phone' => '+992905550002', 'deposit_amount' => 9260]);
+    }
+
     public function test_save_deal_allows_deposit_with_buyer_client_only(): void
     {
         [$agent, $client, $property] = $this->seedClientContext();

@@ -1116,10 +1116,23 @@ class ClientController extends Controller
             $this->clientAccess->ensureCanMutateClients($authUser, 'clients.delete');
             $this->clientAccess->ensureVisible($authUser, $client, 'clients.delete');
 
+            $deposits = $client->buyerProperties();
+            if (Schema::hasColumn('properties', 'deal_status')) {
+                $deposits->where(fn ($query) => $query->where('deal_status', 'deposit')
+                    ->orWhere(fn ($legacy) => $legacy->where('moderation_status', 'deposit')
+                        ->where(fn ($state) => $state->whereNull('deal_status')->orWhere('deal_status', 'available'))));
+            } else {
+                $deposits->where('moderation_status', 'deposit');
+            }
+            // Read the current state after acquiring the client lock, including concurrent deal saves.
+            if ($deposits->lockForUpdate()->first(['id'])) {
+                abort(409, 'Нельзя удалить покупателя, пока с ним связан объект в залоге. Сначала измените покупателя, снимите залог или завершите сделку.');
+            }
             $client->delete();
+            $this->auditLogger->log($client, $authUser, 'deleted');
 
             return response()->json(['message' => 'Client deleted']);
-        });
+        }, 3);
     }
 
     public function settings()

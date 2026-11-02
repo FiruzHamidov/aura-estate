@@ -253,6 +253,22 @@ class PropertyShowAuthContactsTest extends TestCase
         $this->getJson('/api/properties/'.$property->id)->assertOk()->assertJsonPath('responsible_agent', null);
     }
 
+    public function test_deal_editor_can_detect_a_deleted_buyer_without_exposing_it_on_the_public_card(): void
+    {
+        [$rop, $property, $agent] = $this->publicRopFixture();
+        $buyer = Client::create(['full_name' => 'Buyer', 'created_by' => $agent->id]);
+        $property->forceFill(['buyer_client_id' => $buyer->id])->saveQuietly();
+        $url = '/api/properties/'.$property->id;
+        $this->getJson($url)->assertOk()->assertJsonMissingPath('buyer_client_unavailable');
+        $this->withToken($agent->createToken('deal')->plainTextToken);
+        $this->getJson($url)->assertOk()->assertJsonPath('buyer_client_unavailable', false);
+        $buyer->delete();
+        $this->getJson($url)->assertOk()->assertJsonPath('buyer_client_unavailable', true)->assertJsonPath('buyerClient', null);
+        $this->app['auth']->forgetGuards();
+        $this->withToken($rop->createToken('out-of-scope')->plainTextToken)->getJson($url)
+            ->assertOk()->assertJsonMissingPath('buyer_client_unavailable');
+    }
+
     public function test_rop_reads_public_foreign_listing_without_private_fields_or_actions(): void
     {
         [$rop, $property, $agent] = $this->publicRopFixture();
