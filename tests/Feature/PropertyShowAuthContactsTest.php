@@ -272,7 +272,7 @@ class PropertyShowAuthContactsTest extends TestCase
     public function test_rop_reads_public_foreign_listing_without_private_fields_or_actions(): void
     {
         [$rop, $property, $agent] = $this->publicRopFixture();
-        $guest = $this->getJson('/api/properties/'.$property->id)->assertOk()->json();
+        $guest = $this->getJson('/api/properties/'.$property->id)->assertOk()->assertJsonMissingPath('moderation_version')->json();
         $this->withToken($rop->createToken('test')->plainTextToken);
         $response = $this->getJson('/api/properties/'.$property->id)->assertOk()
             ->assertJsonPath('public_view_only', true)->assertJsonPath('title', $guest['title'])

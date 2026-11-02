@@ -442,6 +442,29 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
         $this->assertSame($agentA->id, $otherBranchProperty->fresh()->sale_user_id);
     }
 
+    public function test_colleague_can_save_a_deposit_with_the_displayed_version_and_cannot_overwrite_it(): void
+    {
+        [$owner, $property] = $this->workflowFixture();
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $colleague = $this->makeUser($agentRole, $owner->branch_id, 'colleague');
+        $property->forceFill(['moderation_version' => 2])->saveQuietly();
+        Sanctum::actingAs($colleague);
+
+        $url = '/api/properties/'.$property->id;
+        $version = $this->getJson($url)->assertOk()
+            ->assertJsonPath('capabilities.can_manage_deal', true)
+            ->assertJsonPath('capabilities.can_edit', false)
+            ->assertJsonMissingPath('open_moderation_cases')
+            ->assertJsonPath('moderation_version', 2)->json('moderation_version');
+
+        $this->postJson($url.'/deal', $this->depositPayload(['version' => $version]))->assertOk();
+        $this->postJson($url.'/deal', $this->depositPayload(['version' => $version, 'deposit_amount' => 2000]))
+            ->assertConflict();
+        $property->refresh();
+        $this->assertSame(3, $property->moderation_version);
+        $this->assertEquals(1000, $property->deposit_amount);
+    }
+
     public function test_agent_can_assign_deposit_sale_and_shared_agent_to_same_branch_user(): void
     {
         $branchA = Branch::create(['name' => 'Branch A']);
