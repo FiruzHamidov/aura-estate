@@ -1093,6 +1093,7 @@ class RopGroupAssignmentsTest extends TestCase
             $table->id(); $table->unsignedBigInteger('branch_id'); $table->unsignedBigInteger('branch_group_id');
             $table->string('moderation_status'); $table->string('title');
             $table->unsignedBigInteger('agent_id')->nullable(); $table->unsignedBigInteger('created_by')->nullable();
+            $table->string('owner_name')->nullable(); $table->string('owner_phone')->nullable();
         });
         Schema::create('property_photos', function (Blueprint $table) {
             $table->id(); $table->unsignedBigInteger('property_id'); $table->integer('position')->default(0);
@@ -1101,14 +1102,24 @@ class RopGroupAssignmentsTest extends TestCase
         (require database_path('migrations/2025_06_24_151549_create_favorites_table.php'))->up();
         (require database_path('migrations/2026_08_28_150000_expand_favorites_for_residential_objects.php'))->up();
         $this->rop->supervisedGroups()->attach($this->a->id);
+        $assigned = $this->user('agent', $this->a);
         foreach ([$this->a, $this->c] as $group) {
             DB::table('properties')->insert(['id' => $group->id, 'branch_id' => $this->branch->id,
                 'branch_group_id' => $group->id, 'moderation_status' => \App\Models\Property::PUBLIC_MODERATION_STATUS,
-                'title' => $group->name]);
+                'title' => $group->name, 'owner_name' => 'Private '.$group->name,
+                'owner_phone' => '93000000'.$group->id,
+                'agent_id' => $group->id === $this->a->id ? $assigned->id : null]);
             \App\Models\Favorite::create(['user_id' => $this->rop->id, 'property_id' => $group->id]);
         }
         Sanctum::actingAs($this->rop);
-        $this->getJson('/api/favorites')->assertOk()->assertJsonCount(1)->assertJsonPath('0.property.id', $this->a->id);
+        $this->getJson('/api/favorites')->assertOk()->assertJsonCount(1)
+            ->assertJsonPath('0.property.id', $this->a->id)
+            ->assertJsonMissingPath('0.property.owner_name')
+            ->assertJsonMissingPath('0.property.owner_phone')
+            ->assertJsonPath('0.property.agent.id', $assigned->id)
+            ->assertJsonPath('0.property.responsible_agent.id', $assigned->id)
+            ->assertJsonMissingPath('0.property.agent.phone')
+            ->assertJsonMissingPath('0.property.agent.email');
         $this->postJson('/api/favorites', ['property_id' => $this->c->id])->assertNotFound();
         $this->deleteJson('/api/favorites/'.$this->c->id)->assertNotFound();
         $this->assertDatabaseCount('favorites', 2);

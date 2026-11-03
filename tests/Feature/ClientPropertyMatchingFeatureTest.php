@@ -402,18 +402,25 @@ class ClientPropertyMatchingFeatureTest extends TestCase
         $role = $agentA->role;
         $role->forceFill(['slug' => 'custom_matcher', 'permissions' => ['clients.scope.all', 'properties.matching.view']])->save();
         Sanctum::actingAs($agentA->fresh());
+        $this->getJson('/api/properties/'.$property->id)
+            ->assertOk()
+            ->assertJsonPath('public_view_only', true);
+        $this->getJson('/api/properties/'.$property->id.'/matching-clients')->assertForbidden();
+        $internalPropertyScope = ['properties.list.internal', 'properties.list.scope.own'];
+        $role->forceFill(['permissions' => ['clients.scope.all', 'properties.matching.view', ...$internalPropertyScope]])->save();
+        Sanctum::actingAs($agentA->fresh());
         $this->getJson('/api/properties/'.$property->id.'/matching-clients')->assertOk()->assertJsonCount(2, 'matches');
-        $role->forceFill(['permissions' => ['clients.scope.all', 'properties.matching.view', 'properties.matching.own_clients']])->save();
+        $role->forceFill(['permissions' => ['clients.scope.all', 'properties.matching.view', 'properties.matching.own_clients', ...$internalPropertyScope]])->save();
         Sanctum::actingAs($agentA->fresh());
         $this->getJson('/api/properties/'.$property->id.'/matching-clients')->assertOk()->assertJsonCount(1, 'matches')->assertJsonPath('matches.0.client_id', $ownClient->id);
-        $role->forceFill(['permissions' => ['clients.scope.all']])->save();
+        $role->forceFill(['permissions' => ['clients.scope.all', ...$internalPropertyScope]])->save();
         Sanctum::actingAs($agentA->fresh());
         $this->getJson('/api/properties/'.$property->id.'/matching-clients')->assertForbidden();
         foreach (['client', 'external_agent', 'accountant'] as $slug) {
-            $role->forceFill(['slug' => $slug, 'permissions' => ['clients.scope.all', 'properties.matching.view']])->save();
+            $role->forceFill(['slug' => $slug, 'permissions' => ['clients.scope.all', 'properties.matching.view', ...$internalPropertyScope]])->save();
             Sanctum::actingAs($agentA->fresh());
             $this->getJson('/api/properties/'.$property->id.'/matching-clients')->assertOk()->assertJsonCount(2, 'matches');
-            $role->forceFill(['permissions' => ['clients.scope.all']])->save();
+            $role->forceFill(['permissions' => ['clients.scope.all', ...$internalPropertyScope]])->save();
             Sanctum::actingAs($agentA->fresh());
             $this->getJson('/api/properties/'.$property->id.'/matching-clients')->assertForbidden();
         }

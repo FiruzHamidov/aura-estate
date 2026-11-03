@@ -8,17 +8,23 @@ use App\Models\User;
 use App\Support\RopGroupAccess;
 use Illuminate\Support\Facades\DB;
 use App\Services\NotificationService;
+use App\Services\PublicPropertyPresenter;
 use Illuminate\Http\Request;
 
 class FavoriteController extends Controller
 {
     public function __construct(
-        private readonly NotificationService $notifications
+        private readonly NotificationService $notifications,
+        private readonly PublicPropertyPresenter $publicProperties,
     ) {}
 
     // Получить список избранных текущего пользователя
     public function index()
     {
+        $propertyRelations = array_map(
+            fn (string $relation): string => 'property.'.$relation,
+            $this->publicProperties->relations()
+        );
         $favorites = Favorite::where('user_id', auth()->id())
             ->where('entity_type', 'property')
             ->whereHas('property', function ($properties) {
@@ -27,10 +33,19 @@ class FavoriteController extends Controller
                     app(RopGroupAccess::class)->scope($properties, auth()->user(), 'properties.branch_group_id', 'properties.branch_id');
                 }
             })
-            ->with('property.photos', 'property.type') // Загрузка property и его photos
+            ->with($propertyRelations)
             ->get();
 
-        return response()->json($favorites);
+        return response()->json($favorites->map(function (Favorite $favorite): array {
+            $payload = $favorite->only([
+                'id', 'user_id', 'property_id', 'entity_type', 'entity_id', 'created_at', 'updated_at',
+            ]);
+            $payload['property'] = $this->publicProperties->presentCard($favorite->property);
+            // Preserve the legacy mobile key with the same minimal, assigned-agent projection.
+            $payload['property']['agent'] = $payload['property']['responsible_agent'];
+
+            return $payload;
+        })->values());
     }
 
     // Добавить объект в избранное

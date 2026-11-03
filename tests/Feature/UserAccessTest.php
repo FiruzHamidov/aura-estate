@@ -2409,7 +2409,7 @@ class UserAccessTest extends TestCase
             'status' => 'inactive',
         ]);
 
-        User::create([
+        $manager = User::create([
             'name' => 'Manager User',
             'phone' => '900000109',
             'password' => bcrypt('password'),
@@ -2424,6 +2424,14 @@ class UserAccessTest extends TestCase
         $activeResponse->assertJsonCount(2);
         $activeResponse->assertJsonPath('0.id', $activeMop->id);
         $activeResponse->assertJsonPath('1.id', $activeAgent->id);
+        $this->assertEqualsCanonicalizing(
+            ['id', 'name', 'phone', 'photo', 'role'],
+            array_keys($activeResponse->json('0'))
+        );
+        $this->assertEqualsCanonicalizing(
+            ['id', 'name', 'slug'],
+            array_keys($activeResponse->json('0.role'))
+        );
         $this->assertSame(
             [$activeMop->id, $activeAgent->id],
             array_column($activeResponse->json(), 'id')
@@ -2432,14 +2440,127 @@ class UserAccessTest extends TestCase
 
         $inactiveResponse = $this->getJson('/api/user/agents?status=inactive');
         $inactiveResponse->assertOk();
-        $inactiveResponse->assertJsonCount(2);
-        $inactiveResponse->assertJsonPath('0.id', $inactiveMop->id);
-        $inactiveResponse->assertJsonPath('1.id', $inactiveAgent->id);
-        $this->assertSame(
-            [$inactiveMop->id, $inactiveAgent->id],
-            array_column($inactiveResponse->json(), 'id')
+        $inactiveResponse->assertExactJson([]);
+
+        Sanctum::actingAs($manager);
+        $directoryResponse = $this->getJson('/api/user/agents?status=all')->assertOk();
+        $directoryResponse->assertJsonCount(4);
+        $directory = collect($directoryResponse->json())->keyBy('id');
+        $this->assertEqualsCanonicalizing(
+            ['id', 'name', 'phone', 'photo', 'role_id', 'branch_id', 'branch_group_id', 'status', 'role'],
+            array_keys($directory[$inactiveAgent->id])
         );
-        $inactiveResponse->assertJsonMissing(['phone' => '900000109']);
+        $this->assertSame('inactive', $directory[$inactiveAgent->id]['status']);
+        $this->assertSame($branch->id, $directory[$inactiveAgent->id]['branch_id']);
+        $this->assertSame($group->id, $directory[$inactiveAgent->id]['branch_group_id']);
+        $directoryResponse->assertJsonMissingPath('0.email')
+            ->assertJsonMissingPath('0.auth_method')
+            ->assertJsonMissingPath('0.telegram_id');
+
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $admin = User::create([
+            'name' => 'Admin',
+            'phone' => '900000110',
+            'role_id' => $adminRole->id,
+            'status' => 'active',
+        ]);
+        Sanctum::actingAs($admin);
+        $this->getJson('/api/user/agents?status=inactive')
+            ->assertOk()
+            ->assertJsonCount(2)
+            ->assertJsonPath('0.id', $inactiveMop->id)
+            ->assertJsonPath('1.id', $inactiveAgent->id)
+            ->assertJsonPath('0.status', 'inactive');
+    }
+
+    public function test_minimal_agent_directory_uses_branch_and_assigned_group_boundaries(): void
+    {
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+
+        $ownBranch = Branch::create(['name' => 'Own branch']);
+        $foreignBranch = Branch::create(['name' => 'Foreign branch']);
+        $allowedGroup = BranchGroup::create(['branch_id' => $ownBranch->id, 'name' => 'Allowed']);
+        $peerGroup = BranchGroup::create(['branch_id' => $ownBranch->id, 'name' => 'Peer']);
+        $foreignGroup = BranchGroup::create(['branch_id' => $foreignBranch->id, 'name' => 'Foreign']);
+        $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $directoryRole = Role::forceCreate([
+            'name' => 'CRM coordinator',
+            'slug' => 'crm_directory',
+            'permissions' => ['users.agents.directory'],
+        ]);
+        $groupDirectoryRole = Role::forceCreate([
+            'name' => 'Group coordinator',
+            'slug' => 'group_directory',
+            'permissions' => ['users.agents.directory', 'data.scope.assigned_groups'],
+        ]);
+        $create = fn (string $name, string $phone, BranchGroup $group, string $status = 'active'): User => User::create([
+            'name' => $name,
+            'phone' => $phone,
+            'role_id' => $agentRole->id,
+            'branch_id' => $group->branch_id,
+            'branch_group_id' => $group->id,
+            'status' => $status,
+        ]);
+        $allowed = $create('Allowed agent', '903000001', $allowedGroup);
+        $allowedInactive = $create('Allowed inactive', '903000002', $allowedGroup, 'inactive');
+        $peer = $create('Peer agent', '903000003', $peerGroup);
+        $foreign = $create('Foreign agent', '903000004', $foreignGroup);
+
+        $directoryActor = User::create([
+            'name' => 'CRM coordinator',
+            'phone' => '903000005',
+            'role_id' => $directoryRole->id,
+            'branch_id' => $ownBranch->id,
+            'status' => 'active',
+        ]);
+        $groupActor = User::create([
+            'name' => 'Group coordinator',
+            'phone' => '903000006',
+            'role_id' => $groupDirectoryRole->id,
+            'branch_id' => $ownBranch->id,
+            'status' => 'active',
+        ]);
+        $groupActor->supervisedGroups()->attach($allowedGroup->id);
+        Sanctum::actingAs($directoryActor);
+        $branchDirectory = $this->getJson('/api/user/agents?status=all')->assertOk();
+        $this->assertEqualsCanonicalizing(
+            [$allowed->id, $allowedInactive->id, $peer->id],
+            array_column($branchDirectory->json(), 'id')
+        );
+        $branchDirectory->assertJsonMissing(['id' => $foreign->id]);
+        $this->assertEqualsCanonicalizing(
+            ['id', 'name', 'phone', 'photo', 'role_id', 'branch_id', 'branch_group_id', 'status', 'role'],
+            array_keys($branchDirectory->json('0'))
+        );
+        $branchDirectory->assertJsonMissingPath('0.email')
+            ->assertJsonMissingPath('0.birthday')
+            ->assertJsonMissingPath('0.auth_method')
+            ->assertJsonMissingPath('0.telegram_id');
+        $directoryActor->update(['branch_id' => null]);
+        Sanctum::actingAs($directoryActor->fresh());
+        $this->getJson('/api/user/agents?status=all')->assertOk()->assertExactJson([]);
+
+        Sanctum::actingAs($groupActor);
+        $this->getJson('/api/user/agents?status=all')
+            ->assertOk()
+            ->assertJsonCount(2)
+            ->assertJsonFragment(['id' => $allowed->id])
+            ->assertJsonFragment(['id' => $allowedInactive->id])
+            ->assertJsonMissing(['id' => $peer->id])
+            ->assertJsonMissing(['id' => $foreign->id]);
+
+        $groupActor->update(['status' => 'inactive']);
+        Sanctum::actingAs($groupActor->fresh());
+        $publicFallback = $this->getJson('/api/user/agents')->assertOk();
+        $publicFallback->assertJsonMissing(['id' => $allowedInactive->id]);
+        $this->assertEqualsCanonicalizing(
+            ['id', 'name', 'phone', 'photo', 'role'],
+            array_keys($publicFallback->json('0'))
+        );
+        $publicFallback->assertJsonMissingPath('0.status')
+            ->assertJsonMissingPath('0.branch_id')
+            ->assertJsonMissingPath('0.branch_group_id');
+        $this->getJson('/api/user/agents?status=inactive')->assertOk()->assertExactJson([]);
     }
 
     public static function hrLifecycleRoles(): array

@@ -336,15 +336,147 @@ class PropertySearchFeatureTest extends TestCase
             ->assertJsonPath('data.0.id', $property->id);
     }
 
+    public function test_public_catalog_never_serializes_crm_contacts_or_employee_profiles(): void
+    {
+        $this->agent->forceFill([
+            'email' => 'private-agent@example.test',
+            'auth_method' => 'password',
+        ])->save();
+        $source = $this->createProperty([
+            'title' => 'Public source',
+            'owner_name' => 'Private Owner',
+            'owner_phone' => '992900001111',
+        ]);
+        $similar = $this->createProperty([
+            'title' => 'Public similar',
+            'owner_name' => 'Other Private Owner',
+            'owner_phone' => '992900002222',
+        ]);
+
+        $list = $this->getJson('/api/properties?per_page=10')->assertOk();
+        $list->assertJsonMissingPath('data.0.owner_name')
+            ->assertJsonMissingPath('data.0.owner_phone')
+            ->assertJsonMissingPath('data.0.creator.email')
+            ->assertJsonMissingPath('data.0.creator.auth_method');
+
+        $this->getJson('/api/properties/'.$source->id)
+            ->assertOk()
+            ->assertJsonMissingPath('owner_name')
+            ->assertJsonMissingPath('owner_phone')
+            ->assertJsonMissingPath('creator.email')
+            ->assertJsonMissingPath('creator.auth_method');
+
+        $this->getJson('/api/properties/'.$source->id.'/similar?use_radius=0&price_tolerance=1')
+            ->assertOk()
+            ->assertJsonFragment(['id' => $similar->id])
+            ->assertJsonMissingPath('0.owner_name')
+            ->assertJsonMissingPath('0.owner_phone')
+            ->assertJsonMissingPath('0.creator.email')
+            ->assertJsonMissingPath('0.creator.auth_method');
+
+        $this->getJson('/api/properties/count?owner_phone=992900001111')->assertForbidden();
+    }
+
+    public function test_internal_owner_filter_and_contacts_still_require_employee_permissions(): void
+    {
+        $property = $this->createProperty([
+            'owner_name' => 'Private Owner',
+            'owner_phone' => '992900003333',
+        ]);
+
+        \Laravel\Sanctum\Sanctum::actingAs($this->agent);
+        $this->getJson('/api/properties/count?owner_phone=992900003333')
+            ->assertOk()
+            ->assertJsonPath('count', 1);
+        $this->getJson('/api/properties?owner_phone=992900003333')
+            ->assertOk()
+            ->assertJsonPath('data.0.id', $property->id)
+            ->assertJsonPath('data.0.owner_name', 'Private Owner')
+            ->assertJsonPath('data.0.owner_phone', '992900003333');
+
+        $foreign = $this->createProperty([
+            'created_by' => 999,
+            'agent_id' => 999,
+            'owner_name' => 'Foreign Private Owner',
+            'owner_phone' => '992900003334',
+        ]);
+        $this->getJson('/api/properties/'.$foreign->id)
+            ->assertOk()
+            ->assertJsonPath('capabilities.can_view_contacts', false)
+            ->assertJsonMissingPath('owner_name')
+            ->assertJsonMissingPath('owner_phone');
+
+        $clientRole = Role::create(['name' => 'Client', 'slug' => 'client']);
+        $client = User::create([
+            'name' => 'Client',
+            'phone' => '930000099',
+            'role_id' => $clientRole->id,
+            'status' => 'active',
+        ]);
+        \Laravel\Sanctum\Sanctum::actingAs($client);
+        $this->getJson('/api/properties/'.$property->id)
+            ->assertOk()
+            ->assertJsonMissingPath('owner_name')
+            ->assertJsonMissingPath('owner_phone');
+        $this->getJson('/api/properties/count?owner_phone=992900003333')->assertForbidden();
+    }
+
+    public function test_internal_list_flag_without_a_scope_cannot_unlock_private_property_fields(): void
+    {
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $property = $this->createProperty([
+            'owner_name' => 'Scope Protected Owner',
+            'owner_phone' => '992900004444',
+        ]);
+        $this->agentRole->forceFill([
+            'slug' => 'custom_internal_without_scope',
+            'permissions' => ['properties.list.internal', 'properties.contacts.view'],
+        ])->save();
+        \Laravel\Sanctum\Sanctum::actingAs($this->agent->fresh());
+
+        $this->getJson('/api/properties/'.$property->id)
+            ->assertOk()
+            ->assertJsonPath('public_view_only', true)
+            ->assertJsonPath('capabilities.can_view_contacts', false)
+            ->assertJsonMissingPath('owner_name')
+            ->assertJsonMissingPath('owner_phone')
+            ->assertJsonMissingPath('owner_client');
+    }
+
+    public function test_external_agent_list_scope_cannot_open_unpublished_catalog_records(): void
+    {
+        $draft = $this->createProperty([
+            'title' => 'Unpublished external record',
+            'moderation_status' => 'pending',
+            'owner_name' => 'Private Draft Owner',
+            'owner_phone' => '992900005555',
+        ]);
+        $externalRole = Role::create(['name' => 'External agent', 'slug' => 'external_agent']);
+        $external = User::create([
+            'name' => 'External agent',
+            'phone' => '930000098',
+            'role_id' => $externalRole->id,
+            'status' => 'active',
+        ]);
+        \Laravel\Sanctum\Sanctum::actingAs($external);
+
+        $this->getJson('/api/properties?moderation_status=pending')
+            ->assertOk()
+            ->assertJsonPath('total', 0)
+            ->assertJsonMissing(['id' => $draft->id]);
+        $this->getJson('/api/properties/'.$draft->id)->assertNotFound();
+        $this->getJson('/api/properties/search?q=Private+Draft+Owner')->assertOk()->assertJsonPath('total', 0);
+    }
+
     public function test_owner_search_grant_can_be_assigned_and_revoked_without_expanding_the_list_scope(): void
     {
         Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
         $own = $this->createProperty(['title' => 'Quiet apartment', 'owner_name' => 'Privateowner', 'owner_phone' => '992987654321']);
         $this->createProperty(['title' => 'Foreign apartment', 'created_by' => 999, 'owner_name' => 'Privateowner', 'owner_phone' => '992987654321']);
-        $this->agentRole->forceFill(['slug' => 'custom_search', 'permissions' => ['properties.list.scope.own']])->save();
+        $this->agentRole->forceFill(['slug' => 'custom_search', 'permissions' => ['properties.list.internal', 'properties.list.scope.own']])->save();
 
         foreach ([false, true, false] as $grant) {
-            $this->agentRole->forceFill(['permissions' => ['properties.list.scope.own', ...($grant ? ['properties.search.owner'] : [])]])->save();
+            $this->agentRole->forceFill(['permissions' => ['properties.list.internal', 'properties.list.scope.own', ...($grant ? ['properties.search.owner'] : [])]])->save();
             \Laravel\Sanctum\Sanctum::actingAs($this->agent->fresh());
             foreach (['Privateowner', '992987654321'] as $term) {
                 $response = $this->getJson('/api/properties/search?q='.$term)->assertOk()->assertJsonPath('total', $grant ? 1 : 0);

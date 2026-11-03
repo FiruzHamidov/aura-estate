@@ -15,6 +15,7 @@ use App\Services\PropertyDuplicateService;
 use App\Services\PropertyModeration\PropertyModerationAccess;
 use App\Services\PropertyModeration\PropertyModerationService;
 use App\Services\PropertyPublicationVisibility;
+use App\Services\PublicPropertyPresenter;
 use App\Services\PropertyQualityService;
 use App\Support\ClientAccess;
 use Illuminate\Database\Eloquent\Builder;
@@ -50,11 +51,14 @@ class PropertyController extends Controller
 
     protected PropertyModerationAccess $moderationAccess;
 
+    protected PublicPropertyPresenter $publicProperties;
+
     public function __construct(
         PropertyDuplicateService $propertyDuplicateService,
         PropertyQualityService $propertyQualityService,
         PropertyModerationService $moderation,
         PropertyModerationAccess $moderationAccess,
+        PublicPropertyPresenter $publicProperties,
     ) {
         $this->imageManager = new ImageManager(new Driver);
         $this->clientAccess = app(ClientAccess::class);
@@ -64,6 +68,7 @@ class PropertyController extends Controller
         $this->propertyQualityService = $propertyQualityService;
         $this->moderation = $moderation;
         $this->moderationAccess = $moderationAccess;
+        $this->publicProperties = $publicProperties;
     }
 
     private function propertyDetailRelations(): array
@@ -160,7 +165,51 @@ class PropertyController extends Controller
         $user = $request->user() ?? $request->user('sanctum');
         $user?->loadMissing('role');
 
-        return $user;
+        return $user && $user->status === User::STATUS_ACTIVE && ! $user->isDeletedAccount()
+            ? $user
+            : null;
+    }
+
+    private function canViewInternalPropertyList(?User $user): bool
+    {
+        if (! $user?->hasPermission('properties.list.internal')) {
+            return false;
+        }
+
+        foreach (['all', 'public', 'own', 'group'] as $scope) {
+            if ($user->hasPermission('properties.list.scope.'.$scope)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function canViewInternalPropertyDetails(?User $user, Property $property, Request $request): bool
+    {
+        if (! $user) {
+            return false;
+        }
+
+        if ($this->moderationAccess->canEdit($user, $property)
+            || $this->moderationAccess->canViewClosedProperty($user, $property)) {
+            return true;
+        }
+
+        return $this->canViewPropertyWithinInternalList($user, $property, $request);
+    }
+
+    private function canViewPropertyWithinInternalList(?User $user, Property $property, Request $request): bool
+    {
+        if (! $this->canViewInternalPropertyList($user)) {
+            return false;
+        }
+
+        return $this->scopePropertyList(
+            Property::query()->whereKey($property->id),
+            $user,
+            $request
+        )->exists();
     }
 
     private function crmAuthUser(): User
@@ -228,7 +277,10 @@ class PropertyController extends Controller
         return array_merge($workflow, [
             'can_manage_listing_date' => $user && $this->moderationAccess->canRefreshListingDate($user, $property),
             'can_refresh_listing_date' => $user && $this->moderationAccess->canRefreshListingDate($user, $property) && $refreshState['available'],
-            'can_view_contacts' => $user?->hasPermission('properties.contacts.view') ?? false,
+            'can_view_contacts' => $user
+                && $this->canViewInternalPropertyList($user)
+                && $user->hasPermission('properties.contacts.view')
+                && $this->canViewPropertyWithinInternalList($user, $property, request()),
             'can_view_history' => $user && $this->moderationAccess->canViewHistory($user, $property),
             'can_moderate' => $workflow['can_moderate'],
             'can_manage_co_owner' => $workflow['can_manage_co_owner'],
@@ -350,9 +402,30 @@ class PropertyController extends Controller
         ]);
     }
 
+    private function addPublicBranchIds(Property $property, array $payload): array
+    {
+        $payload['branch_id'] = $this->resolvePropertyBranchId($property);
+        $payload['branch_group_id'] = $this->resolvePropertyBranchGroupId($property);
+
+        if (isset($payload['creator']) && is_array($payload['creator'])) {
+            $payload['creator']['branch_id'] = $this->resolveUserBranchId(
+                $property->created_by ?: ($payload['creator']['id'] ?? null),
+                $property->relationLoaded('creator') ? $property->creator : null
+            );
+            $payload['creator']['branch_group_id'] = $this->resolveUserBranchGroupId(
+                $property->created_by ?: ($payload['creator']['id'] ?? null),
+                $property->relationLoaded('creator') ? $property->creator : null
+            );
+        }
+
+        return $payload;
+    }
+
     private function serializePropertyShow(Property $property, ?User $authUser): array
     {
-        $includeAuthContacts = $authUser?->hasPermission('properties.contacts.view') ?? false;
+        $includeAuthContacts = $authUser
+            && $this->canViewPropertyWithinInternalList($authUser, $property, request())
+            && $authUser->hasPermission('properties.contacts.view');
 
         if ($authUser) {
             $property->loadMissing(['externalAgent', 'externalPropertyRequest']);
@@ -713,14 +786,46 @@ class PropertyController extends Controller
         $this->validateListFilters($request);
 
         $compact = $request->boolean('compact');
+        $actor = $this->propertyShowAuthUser($request);
+        $internal = $this->canViewInternalPropertyList($actor);
         $query = $this->baseQuery($request, $compact ? $this->propertyCompactRelations() : null);
         $this->applyFilters($query, $request);
         $this->applySorts($query, $request->input('sort'), $request->input('dir'));
         $perPage = (int) $request->input('per_page', 20);
 
         $page = $query->latest()->paginate($perPage);
-        $page->getCollection()->load('agent');
-        $page->through(function (Property $property) use ($compact): array {
+        if ($internal) {
+            $page->getCollection()->load('agent');
+        } elseif ($compact) {
+            $page->getCollection()->load('agent:id,name,photo');
+        }
+        $page->through(function (Property $property) use ($actor, $compact, $internal): array {
+            if (! $internal) {
+                if (! $compact) {
+                    return $this->publicProperties->presentCard($property);
+                }
+
+                $payload = $this->compactFeedProperty($property);
+                $payload['agent_id'] = $property->agent_id;
+                $payload['responsible_agent'] = $property->agent?->only(['id', 'name', 'photo']);
+
+                return $payload;
+            }
+
+            if ($actor->hasPermission('properties.contacts.view')) {
+                $property->makeVisible([
+                    'owner_client_id', 'owner_name', 'owner_phone',
+                    'buyer_client_id', 'buyer_full_name', 'buyer_phone',
+                ]);
+            } else {
+                $property->makeHidden([
+                    'owner_client_id', 'owner_name', 'owner_phone',
+                    'buyer_client_id', 'buyer_full_name', 'buyer_phone',
+                ]);
+                $property->unsetRelation('ownerClient');
+                $property->unsetRelation('buyerClient');
+            }
+
             $responsible = $property->agent?->only(['id', 'name', 'photo']);
             $property->unsetRelation('agent');
             $payload = $compact ? $this->compactFeedProperty($property) : $property->toArray();
@@ -948,9 +1053,20 @@ class PropertyController extends Controller
 
     private function baseQuery(Request $request, ?array $relations = null): Builder
     {
-        $query = Property::query()->with($relations ?? $this->propertyListRelations());
+        $actor = $this->propertyShowAuthUser($request);
+        $defaultRelations = $this->canViewInternalPropertyList($actor)
+            ? $this->propertyListRelations()
+            : $this->publicProperties->relations();
+        $query = Property::query()->with($relations ?? $defaultRelations);
 
-        return $this->scopePropertyList($query, $this->propertyShowAuthUser($request), $request);
+        $query = $this->scopePropertyList($query, $actor, $request);
+        if ($actor
+            && ! $this->canViewInternalPropertyList($actor)
+            && ! $this->isGeneralReportRequest($request)) {
+            $query->publicSearchable();
+        }
+
+        return $query;
     }
 
     private function scopePropertyList(Builder $query, ?User $user, Request $request): Builder
@@ -1071,7 +1187,8 @@ class PropertyController extends Controller
 
     private function canSearchPropertyCrmFields(?User $user): bool
     {
-        return $user?->hasPermission('properties.search.owner') ?? false;
+        return $this->canViewInternalPropertyList($user)
+            && $user->hasPermission('properties.search.owner');
     }
 
     private function applyPropertySearchFilters(Builder $query, array $filters): void
@@ -1562,6 +1679,14 @@ class PropertyController extends Controller
     // ==== Единая фильтрация для списка и карты ====
     private function applyFilters(Builder $query, Request $request): void
     {
+        if ($request->has('owner_phone')) {
+            abort_unless(
+                $this->canSearchPropertyCrmFields($this->propertyShowAuthUser($request)),
+                403,
+                'Доступ к поиску по телефону владельца запрещён.'
+            );
+        }
+
         if ($this->isGeneralReportRequest($request)) {
             $query->whereIn('properties.id', app(\App\Services\PropertyReportQuery::class)->inventory($request)->select('properties.id'));
             return;
@@ -2557,38 +2682,11 @@ class PropertyController extends Controller
 
     private function serializePublicPropertyView(Property $property): array
     {
-        // Explicit storefront fields: never serialize CRM contacts, financial records or moderation history.
-        $payload = $property->only([
-            'id', 'title', 'description', 'created_by', 'agent_id', 'type_id', 'status_id', 'location_id', 'repair_type_id',
-            'heating_type_id', 'parking_type_id', 'price', 'discount_price', 'currency', 'offer_type',
-            'rooms', 'youtube_link', 'instagram_link', 'total_area', 'land_size', 'living_area',
-            'floor', 'total_floors', 'year_built', 'condition', 'construction_status',
-            'renovation_permission_status', 'has_garden', 'has_parking', 'apartment_type',
-            'bathroom_type',
-            'is_mortgage_available', 'is_from_developer', 'moderation_status', 'publication_status',
-            'deal_status', 'listing_type', 'is_full_apartment', 'developer_id', 'views_count',
-            'landmark', 'latitude', 'longitude', 'address', 'district', 'district_id',
-            'created_at', 'updated_at', 'listing_updated_at', 'listed_at', 'contract_type_id',
-            'document_type_id', 'public_price_badge',
-        ]);
-        $relations = array_diff($this->propertyDetailRelations(), [
-            'creator', 'ownerClient.type', 'buyerClient.type', 'depositUser', 'saleUser', 'coOwner.role', 'activePromotion',
-        ]);
-        $property->load($relations);
-        foreach ($relations as $relation) {
-            $payload[Str::snake($relation)] = $property->getRelation($relation)?->toArray();
-        }
-        $property->load('creator.role');
-        // The public listing contact is not a full employee profile.
-        $payload['creator'] = $property->creator?->only(['id', 'name', 'photo', 'phone', 'description']);
-        if ($payload['creator']) {
-            $payload['creator']['role'] = $property->creator->role?->only(['name', 'slug']);
-        }
-        $payload['responsible_agent'] = $this->serializeResponsibleAgent($property);
+        $payload = $this->addPublicBranchIds($property, $this->publicProperties->present($property));
         $payload['public_view_only'] = true;
         $payload['capabilities'] = $this->propertyCapabilities(null, $property);
 
-        return app(PropertyBuildingType::class)->present($property, $payload);
+        return $payload;
     }
 
     public function show(Request $request, Property $property)
@@ -2600,7 +2698,33 @@ class PropertyController extends Controller
 
             return response()->json($this->serializePublicPropertyView($property));
         }
-        $this->moderation->publicOrFail($property, $authUser);
+
+        $internal = $this->canViewInternalPropertyDetails($authUser, $property, $request);
+        $this->moderation->publicOrFail($property, $internal ? $authUser : null);
+
+        if (! $internal) {
+            if (Schema::hasTable('reels')) {
+                $property->load([
+                    'reels' => fn ($query) => $query->published()->ordered(),
+                ]);
+            }
+
+            $payload = $this->addPublicBranchIds($property, $this->publicProperties->present($property));
+            $payload['public_view_only'] = true;
+            if ($authUser) {
+                $refreshState = $this->listingDateRefreshState($property);
+                $capabilities = $this->propertyCapabilities($authUser, $property, $refreshState);
+                $canManageDeal = $capabilities['can_manage_deal'];
+                $payload['public_view_only'] = ! $canManageDeal;
+                $payload['capabilities'] = $capabilities;
+                $payload['listing_date_refresh'] = $refreshState;
+                if ($canManageDeal) {
+                    $payload['moderation_version'] = (int) $property->moderation_version;
+                }
+            }
+
+            return response()->json($payload);
+        }
 
         $property->load($this->propertyDetailRelations());
         if ($authUser && Schema::hasTable('property_moderation_cases') && (
@@ -2689,6 +2813,11 @@ class PropertyController extends Controller
     {
         $authUser = $this->crmAuthUser();
         abort_unless($authUser->hasPermission('properties.matching.view'), 403, 'Нет права подбирать клиентов к объекту.');
+        abort_unless(
+            $this->canViewInternalPropertyDetails($authUser, $property, $request),
+            403,
+            'Объект недоступен для внутреннего подбора.'
+        );
         $validated = $request->validate([
             'limit' => 'nullable|integer|min:1|max:20',
         ]);
@@ -3138,10 +3267,11 @@ class PropertyController extends Controller
             $query->where('repair_type_id', $property->repair_type_id);
         }
 
-        // eager load
-        $result = $query->with(['type', 'status', 'location', 'repairType', 'photos', 'creator', 'contractType', 'ownerClient.type', 'buyerClient.type'])
+        $result = $query->with($this->publicProperties->relations())
             ->limit($limit)
-            ->get();
+            ->get()
+            ->map(fn (Property $item): array => $this->publicProperties->presentCard($item))
+            ->values();
 
         return response()->json($result);
     }
