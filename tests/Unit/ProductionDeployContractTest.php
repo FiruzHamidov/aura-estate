@@ -63,15 +63,15 @@ class ProductionDeployContractTest extends TestCase
     {
         $this->assertStringContainsString('aura-estate-reverb.conf', $this->deploy);
         $this->assertStringContainsString('wait_for_supervisor_program aura-estate-reverb', $this->deploy);
-        $this->assertStringContainsString('php scripts/verify-reverb-runtime.php)', $this->deploy);
+        $this->assertStringContainsString('scripts/verify-reverb-runtime.php', $this->deploy);
         $this->assertStringContainsString('php scripts/verify-reverb-runtime.php --expect-enabled', $this->deploy);
-        $this->assertStringContainsString('php scripts/enable-messaging-realtime.php', $this->deploy);
+        $this->assertStringContainsString('php -n /usr/local/lib/aura-deploy/enable-messaging-realtime.php', $this->deploy);
         $this->assertStringContainsString('check_realtime_auth_boundaries', $this->deploy);
         $this->assertStringContainsString('pre-realtime-environment', $this->deploy);
         $this->assertStringContainsString('result != 0 && realtime_env_changed == 1', $this->deploy);
 
-        $preEnableProbe = strpos($this->deploy, '(cd "$stage" && php scripts/verify-reverb-runtime.php)');
-        $enable = strpos($this->deploy, 'php scripts/enable-messaging-realtime.php');
+        $preEnableProbe = strpos($this->deploy, '"$runtime" "$stage" "$(fresh_cache)" "$private/runtime.env" scripts/verify-reverb-runtime.php');
+        $enable = strpos($this->deploy, 'php -n /usr/local/lib/aura-deploy/enable-messaging-realtime.php');
         $enabledProbe = strrpos($this->deploy, 'wait_for_realtime_runtime');
         $deployedState = strpos($this->deploy, 'backend.current');
 

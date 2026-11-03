@@ -125,6 +125,43 @@ class RolePermissionsTest extends TestCase
         $this->assertNull($rop->fresh()->permissions);
     }
 
+    public function test_agent_directory_migration_preserves_existing_workflows_and_explicit_revocation(): void
+    {
+        $manager = Role::where('slug', 'manager')->firstOrFail();
+        $managerBefore = ['properties.list.internal', 'properties.list.scope.all'];
+        $manager->forceFill(['permissions' => $managerBefore])->save();
+        $custom = Role::forceCreate([
+            'name' => 'CRM coordinator',
+            'slug' => 'crm_coordinator',
+            'permissions' => ['clients.update'],
+        ]);
+        $operator = Role::where('slug', 'operator')->firstOrFail();
+        $operator->forceFill(['permissions' => []])->save();
+        $intern = Role::where('slug', 'intern')->firstOrFail();
+        $intern->forceFill(['permissions' => null])->save();
+
+        $migration = require database_path('migrations/2026_11_03_100000_add_user_agent_directory_permission.php');
+        $migration->up();
+
+        $this->assertSame([...$managerBefore, 'users.agents.directory'], $manager->fresh()->permissions);
+        $this->assertSame(['clients.update', 'users.agents.directory'], $custom->fresh()->permissions);
+        $this->assertSame([], $operator->fresh()->permissions);
+        $this->assertNull($intern->fresh()->permissions);
+        $this->assertTrue($intern->fresh()->hasPermission('users.agents.directory'));
+        $this->assertDatabaseCount('role_permission_audits', 2);
+        foreach ([$manager, $custom] as $role) {
+            $this->assertDatabaseHas('role_permission_audits', [
+                'role_id' => $role->id,
+                'version' => $role->fresh()->permissions_version,
+            ]);
+        }
+
+        $versions = [$manager->fresh()->permissions_version, $custom->fresh()->permissions_version];
+        $migration->up();
+        $this->assertSame($versions, [$manager->fresh()->permissions_version, $custom->fresh()->permissions_version]);
+        $this->assertDatabaseCount('role_permission_audits', 2);
+    }
+
     private function actor(string $slug): User
     {
         $user = User::create(['name' => $slug, 'role_id' => Role::where('slug', $slug)->firstOrFail()->id]);
@@ -268,14 +305,28 @@ class RolePermissionsTest extends TestCase
         }
     }
 
-    public function test_owner_search_defaults_preserve_all_existing_non_client_roles(): void
+    public function test_owner_search_defaults_exclude_public_account_roles(): void
     {
         foreach (Role::all() as $role) {
-            $this->assertSame($role->slug !== 'client', $role->hasPermission('properties.search.owner'), $role->slug);
+            $this->assertSame(! in_array($role->slug, ['client', 'external_agent'], true), $role->hasPermission('properties.search.owner'), $role->slug);
         }
         $catalog = app(PermissionCatalog::class);
         $this->assertContains('properties.search.owner', $catalog->migrationDefaults('legacy_custom'));
         $this->assertNotContains('properties.search.owner', $catalog->defaults('new_custom'));
+    }
+
+    public function test_agent_directory_defaults_exclude_public_account_roles_and_custom_roles(): void
+    {
+        foreach (Role::all() as $role) {
+            $this->assertSame(
+                ! in_array($role->slug, ['client', 'external_agent'], true),
+                $role->hasPermission('users.agents.directory'),
+                $role->slug
+            );
+        }
+        $catalog = app(PermissionCatalog::class);
+        $this->assertNotContains('users.agents.directory', $catalog->migrationDefaults('legacy_custom'));
+        $this->assertNotContains('users.agents.directory', $catalog->defaults('new_custom'));
     }
 
     public function test_monthly_kpi_banner_defaults_preserve_agent_and_mop_visibility(): void
@@ -375,7 +426,11 @@ class RolePermissionsTest extends TestCase
     public function test_property_contact_defaults_preserve_separate_payload_and_website_access(): void
     {
         foreach (Role::all() as $role) {
-            $this->assertTrue($role->hasPermission('properties.contacts.view'), $role->slug);
+            $this->assertSame(
+                ! in_array($role->slug, ['client', 'external_agent'], true),
+                $role->hasPermission('properties.contacts.view'),
+                $role->slug
+            );
             $this->assertSame(in_array($role->slug, ['manager', 'admin', 'superadmin', 'marketing', 'rop', 'branch_director', 'security'], true), $role->hasPermission('properties.contacts.site.all'), $role->slug);
             $this->assertSame(in_array($role->slug, ['agent', 'mop'], true), $role->hasPermission('properties.contacts.site.own'), $role->slug);
         }

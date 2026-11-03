@@ -431,7 +431,7 @@ class PropertyShowAuthContactsTest extends TestCase
         });
         \Illuminate\Support\Facades\DB::table('external_property_requests')->insert(['id' => 71, 'owner_name' => 'External owner', 'owner_phone' => '930000201']);
         $property->forceFill(['external_property_request_id' => 71])->saveQuietly();
-        foreach ([[], ['properties.contacts.view'], []] as $permissions) {
+        foreach ([[], ['properties.list.internal', 'properties.list.scope.all', 'properties.contacts.view'], []] as $permissions) {
             $agentRole->forceFill(['slug' => 'custom_contacts', 'permissions' => $permissions])->save();
             \Laravel\Sanctum\Sanctum::actingAs($user->fresh());
             $response = $this->getJson('/api/properties/'.$property->id)->assertOk();

@@ -21,6 +21,7 @@ prune_backend_artifacts() {
 
   while IFS= read -r -d '' entry; do
     target=${entry#* }
+    [[ -f $target/.recovery-complete ]] || continue
     if (( kept < 2 )); then
       ((kept += 1))
       continue
@@ -38,12 +39,13 @@ export GIT_SSH_COMMAND="ssh -i /etc/aura-deploy/backend_readonly -o IdentitiesOn
 export GIT_TERMINAL_PROMPT=0 COMPOSER_ALLOW_SUPERUSER=1
 remote=git@github.com:FiruzHamidov/aura-estate.git
 
-for command in git php composer curl flock tar gzip mysqldump install supervisorctl systemctl; do command -v "$command" >/dev/null; done
+for command in git php composer curl flock tar gzip mysqldump install supervisorctl systemctl python3 prlimit; do command -v "$command" >/dev/null; done
 test -d "$repo/.git"
 test "$(git -C "$repo" branch --show-current)" = main
 
 check_public_api() {
   curl --fail --silent --show-error --max-time 20 https://backend.aura.tj/up >/dev/null
+  # shellcheck disable=SC2016 # The single-quoted program is PHP.
   curl --fail --silent --show-error --max-time 20 \
     'https://backend.aura.tj/api/new-buildings?per_page=1' | php -r '
       $payload = json_decode(stream_get_contents(STDIN), true, 512, JSON_THROW_ON_ERROR);
@@ -69,7 +71,7 @@ wait_for_realtime_runtime() {
   local attempt
 
   for attempt in {1..3}; do
-    if php scripts/verify-reverb-runtime.php --expect-enabled; then return 0; fi
+    if runuser -u www-data -- php scripts/verify-reverb-runtime.php --expect-enabled; then return 0; fi
     if (( attempt < 3 )); then
       echo "Reverb readiness check failed; retrying (${attempt}/3)." >&2
       sleep 3
@@ -117,6 +119,12 @@ cache_dir="$repo/bootstrap/cache"
 [[ -z $(find "$cache_dir" -mindepth 1 \( ! -type f -o ! -user root -o -perm /022 \) -print -quit) ]]
 sha=${1:?Commit SHA required}
 [[ $sha =~ ^[0-9a-f]{40}$ ]] || exit 2
+# Keep the transfer separate from commands that might read stdin.
+exec 3<&0 </dev/null
+export RESIDENTIAL_UI_MODE RESIDENTIAL_UI_PILOT_IDS
+public_config=$(/usr/local/bin/aura-node /usr/local/lib/aura-deploy/public-build-config.cjs backend)
+config_digest=$(printf '%s' "$public_config" | sha256sum | cut -d' ' -f1)
+[[ ${2:-} == "$config_digest" ]] || { echo 'Build configuration changed; rebuild this commit.' >&2; exit 2; }
 git -C "$repo" fetch --no-tags "$remote" refs/heads/main:refs/remotes/aura-deploy/main
 latest=$(git -C "$repo" rev-parse refs/remotes/aura-deploy/main)
 if [[ $sha != "$latest" ]]; then
@@ -129,22 +137,60 @@ install -d -m 700 "$backup_root" "$build_root"
 prune_backend_artifacts
 available_kb=$(df -Pk /var/www | awk 'NR==2 {print $4}')
 (( available_kb > 3 * 1024 * 1024 )) || { echo 'Less than 3 GiB free; deployment stopped.' >&2; exit 1; }
-backup=$(mktemp -d "$backup_root/backend-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")
 stage=$(mktemp -d "$build_root/${sha}.XXXXXX")
+git -C "$repo" archive "$sha" | tar -x -C "$stage"
+cd "$stage"
+prlimit --as=402653184 --cpu=240 -- python3 /usr/local/lib/aura-deploy/import-build.py backend "$stage/public" "${3:?Missing signed archive digest}" <&3
+exec 3<&-
+composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader --no-plugins --no-scripts
+backup=$(mktemp -d "$backup_root/backend-$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")
+private=$(mktemp -d /run/aura-maintenance.XXXXXXXX)
+trap 'rm -rf -- "$private"; if [[ ! -f $backup/.recovery-complete ]]; then rm -rf -- "$backup"; fi' EXIT
 git -C "$repo" rev-parse HEAD > "$backup/previous-commit"
 git -C "$repo" archive HEAD | gzip > "$backup/source.tar.gz"
 install -m 600 "$repo/.env" "$backup/environment"
-php /usr/local/lib/aura-deploy/backup-database.php "$repo" "$backup/database.sql"
+runtime=/usr/local/lib/aura-deploy/runtime-php.sh
+install -m 0440 -g www-data "$repo/.env" "$private/runtime.env"
+fresh_cache() {
+  local dir
+  dir=$(mktemp -d "$private/cache.XXXXXXXX")
+  chown www-data:www-data "$dir"
+  printf '%s\n' "$dir"
+}
+# Capture stdout as root. No application code opens a privileged backup path.
+"$runtime" "$repo" "$cache_dir" "$private/runtime.env" /usr/local/lib/aura-deploy/backup-database.php > "$backup/database.sql"
+test -s "$backup/database.sql"
 gzip "$backup/database.sql"
 
-git -C "$repo" archive "$sha" | tar -x -C "$stage"
-install -m 600 "$repo/.env" "$stage/.env"
-cd "$stage"
-composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader --no-scripts
-if [[ -f package-lock.json ]]; then
-  npm ci --no-audit --no-fund
-  npm run build
-fi
+install -m 0600 /dev/null "$stage/.env"
+chmod 0755 "$stage" # Traversable only through the private service's bind mount.
+
+rebuild_caches() {
+  local dir manifest tmp
+  dir=$(fresh_cache)
+  install -m 0440 -g www-data "$repo/.env" "$private/runtime.env"
+  "$runtime" "$repo" "$dir" "$private/runtime.env" artisan package:discover --ansi
+  if [[ ${1:-} == migrate ]]; then
+    "$runtime" "$repo" "$dir" "$private/runtime.env" artisan migrate --force --no-interaction
+  fi
+  "$runtime" "$repo" "$dir" "$private/runtime.env" artisan config:cache
+  "$runtime" "$repo" "$dir" "$private/runtime.env" artisan route:cache
+  for manifest in packages.php services.php config.php routes-v7.php; do
+    [[ -f $dir/$manifest && ! -L $dir/$manifest ]]
+    tmp=$(mktemp "$cache_dir/.install.XXXXXXXX")
+    # Drop privileges before opening any file produced by application code.
+    (cd "$dir" && timeout 30 runuser -u www-data -- cat "./$manifest") > "$tmp"
+    test -s "$tmp"
+    chown root:www-data "$tmp"; chmod 0640 "$tmp"
+    mv -fT "$tmp" "$cache_dir/$manifest"
+  done
+}
+
+# Snapshot the full previous generation before any change to the running release.
+cp -a -- "$cache_dir" "$backup/bootstrap-cache"
+if [[ -d $repo/vendor ]]; then cp -a --reflink=auto -- "$repo/vendor" "$backup/vendor"; fi
+if [[ -d $repo/public/build ]]; then cp -a --reflink=auto -- "$repo/public/build" "$backup/public-build"; fi
+touch "$backup/.recovery-complete"
 
 maintenance=0
 realtime_env_changed=0
@@ -153,7 +199,7 @@ finish() {
   trap - EXIT
   if (( result != 0 && realtime_env_changed == 1 )); then
     install -m 600 "$backup/pre-realtime-environment" "$repo/.env" || true
-    (cd "$repo" && (umask 0027 && php artisan config:cache) && runuser -u www-data -- php artisan queue:restart && runuser -u www-data -- php artisan reverb:restart) || true
+    (cd "$repo" && rebuild_caches && runuser -u www-data -- php artisan queue:restart && runuser -u www-data -- php artisan reverb:restart) || true
   fi
   if (( maintenance == 1 )); then (cd "$repo" && runuser -u www-data -- php artisan up) || true; fi
   if (( result != 0 )); then
@@ -161,6 +207,7 @@ finish() {
     echo "Failed build retained for diagnosis until the next deploy: $stage" >&2
     echo 'Database rollback is deliberately not automatic; review migration compatibility before recovery.' >&2
   fi
+  rm -rf -- "$private"
   exit "$result"
 }
 trap finish EXIT
@@ -175,28 +222,21 @@ done
 supervisorctl reread
 supervisorctl update
 wait_for_supervisor_program aura-estate-reverb
-(cd "$stage" && php scripts/verify-reverb-runtime.php)
+"$runtime" "$stage" "$(fresh_cache)" "$private/runtime.env" scripts/verify-reverb-runtime.php
 
 cd "$repo"
 install -d -o root -g www-data -m 2750 bootstrap/cache
 maintenance=1
 runuser -u www-data -- php artisan down --retry=10
 git merge --ff-only "$sha"
-if [[ -d vendor ]]; then mv vendor "$backup/vendor"; fi
+if [[ -d vendor ]]; then mv vendor "$stage/previous-vendor"; fi
 mv "$stage/vendor" vendor
 if [[ -d $stage/public/build ]]; then
-  if [[ -d public/build ]]; then mv public/build "$backup/public-build"; fi
+  if [[ -d public/build ]]; then mv public/build "$stage/previous-build"; fi
   mv "$stage/public/build" public/build
 fi
-# Rebuild generated manifests against the new dependency set (not stale dev providers).
-for manifest in config.php packages.php services.php; do
-  if [[ -f bootstrap/cache/$manifest ]]; then mv "bootstrap/cache/$manifest" "$backup/$manifest"; fi
-done
-php artisan config:clear
-(umask 0027 && php artisan package:discover --ansi)
-php artisan migrate --force --no-interaction
-(umask 0027 && php artisan config:cache)
-(umask 0027 && php artisan route:cache)
+# Existing root-owned manifests stay in place until their replacements are ready.
+rebuild_caches migrate
 runuser -u www-data -- php artisan view:cache
 systemctl reload php8.2-fpm
 runuser -u www-data -- php artisan up
@@ -205,10 +245,10 @@ maintenance=0
 deploy_step='preserve realtime environment'
 install -m 600 "$repo/.env" "$backup/pre-realtime-environment"
 deploy_step='enable messaging realtime'
-php scripts/enable-messaging-realtime.php
+php -n /usr/local/lib/aura-deploy/enable-messaging-realtime.php "$repo/.env"
 realtime_env_changed=1
 deploy_step='cache realtime configuration'
-(umask 0027 && php artisan config:cache)
+rebuild_caches
 deploy_step='restart queues'
 runuser -u www-data -- php artisan queue:restart
 deploy_step='restart Reverb'

@@ -785,19 +785,67 @@ class UserController extends Controller
         $status = $validated['status'] ?? 'active';
 
         $actor = $request->user() ?? $request->user('sanctum');
-        $agents = User::with(['role', 'branch', 'branchGroup'])
-            ->when($actor?->usesAssignedGroupScope(), fn ($query) => app(\App\Support\RopGroupAccess::class)->scope($query, $actor, 'users.branch_group_id', 'users.branch_id'))
+        $scoped = $actor
+            && $actor->status === User::STATUS_ACTIVE
+            && ! $actor->isDeletedAccount()
+            && ($actor->hasPermission('users.scope.all') || $actor->hasPermission('users.scope.branch'));
+        $directory = ! $scoped
+            && $actor
+            && $actor->status === User::STATUS_ACTIVE
+            && ! $actor->isDeletedAccount()
+            && $actor->hasPermission('users.agents.directory');
+
+        if (! $scoped && ! $directory && $status !== 'active') {
+            return response()->json([]);
+        }
+
+        $query = $scoped
+            ? $this->visibleUsersQuery($actor, false, false)
+            : User::query()
+                ->select($directory
+                    ? ['id', 'name', 'phone', 'photo', 'role_id', 'branch_id', 'branch_group_id', 'status']
+                    : ['id', 'name', 'phone', 'photo', 'role_id'])
+                ->with('role:id,name,slug');
+
+        if ($directory) {
+            if ($actor->usesAssignedGroupScope()) {
+                app(\App\Support\RopGroupAccess::class)
+                    ->scope($query, $actor, 'users.branch_group_id', 'users.branch_id');
+            } elseif ($actor->branch_id) {
+                $query->where('users.branch_id', $actor->branch_id);
+            } else {
+                $query->whereRaw('1 = 0');
+            }
+        }
+
+        $agents = $query
             ->whereHas('role', function ($q) {
                 $q->withPermission('users.subject.public_agent');
             })
-            ->when($status !== 'all', function ($q) use ($status) {
-                $this->applyStatusFilter($q, $status);
+            ->when($scoped ? $status !== 'all' : (! $directory || $status !== 'all'), function ($q) use ($scoped, $directory, $status) {
+                $this->applyStatusFilter($q, ($scoped || $directory) ? $status : 'active');
             })
             ->get()
             ->sortBy(function (User $user) {
                 return $user->role?->slug === 'mop' ? 0 : 1;
             })
             ->values();
+
+        if (! $scoped) {
+            $agents = $agents->map(fn (User $user): array => [
+                'id' => $user->id,
+                'name' => $user->name,
+                'phone' => $user->phone,
+                'photo' => $user->photo,
+                ...($directory ? [
+                    'role_id' => $user->role_id,
+                    'branch_id' => $user->branch_id,
+                    'branch_group_id' => $user->branch_group_id,
+                    'status' => $user->status,
+                ] : []),
+                'role' => $user->role?->only(['id', 'name', 'slug']),
+            ]);
+        }
 
         return response()->json($agents);
     }

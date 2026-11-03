@@ -1,7 +1,9 @@
 #!/usr/bin/env php
 <?php
 
-$environmentPath = dirname(__DIR__).'/.env';
+umask(0077);
+
+$environmentPath = $argv[1] ?? dirname(__DIR__).'/.env';
 $contents = @file_get_contents($environmentPath);
 
 if (! is_string($contents)) {
