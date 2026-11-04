@@ -761,6 +761,65 @@ class PropertyMyPropertiesBranchFilterTest extends TestCase
         }
     }
 
+    public function test_public_agent_list_matches_published_personal_count_across_cities_and_marks_shared_objects(): void
+    {
+        [$actor, $other, $assigned] = $this->consistencyFixture();
+        Schema::create('locations', function (Blueprint $table): void {
+            $table->id();
+            $table->string('city');
+        });
+        \Illuminate\Support\Facades\DB::table('locations')->insert([
+            ['id' => 1, 'city' => 'Душанбе'], ['id' => 11, 'city' => 'Вахдат'],
+        ]);
+        Schema::table('properties', function (Blueprint $table): void {
+            $table->unsignedBigInteger('co_owner_user_id')->nullable();
+            $table->unsignedBigInteger('location_id')->nullable();
+            $table->timestamp('sold_at')->nullable();
+        });
+        (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
+        $actor->role->forceFill(['permissions' => ['properties.list.internal', 'properties.list.scope.own']])->save();
+        Sanctum::actingAs($actor->fresh());
+        $assigned->refresh()->forceFill(['location_id' => 1])->saveQuietly();
+        $copy = function (array $attributes) use ($assigned): Property {
+            $property = $assigned->replicate()->forceFill($attributes);
+            $property->saveQuietly();
+
+            return $property;
+        };
+        $shared = $copy(['agent_id' => $other->id, 'co_owner_user_id' => $actor->id]);
+        $otherCity = $copy(['location_id' => 11, 'co_owner_user_id' => $other->id]);
+        $copy(['agent_id' => $other->id, 'co_owner_user_id' => null]);
+        $copy(['publication_status' => 'hidden', 'co_owner_user_id' => $actor->id]);
+        $copy(['publication_status' => 'draft', 'moderation_status' => 'draft']);
+        $copy(['deal_status' => 'sold', 'sold_at' => now()]);
+        $blocked = $copy([]);
+        \App\Models\PropertyModerationCase::create(['property_id' => $blocked->id, 'type' => 'content_review',
+            'status' => 'open', 'blocking' => true, 'submitted_by' => $actor->id, 'submitted_at' => now(), 'version' => 1]);
+
+        $filters = 'responsible_user_id='.$actor->id.'&include_co_owned=1';
+        $this->getJson('/api/my-properties?'.$filters.'&moderation_status=approved&include_publication_summary=1')
+            ->assertOk()->assertJsonPath('publication_summary.published', 3);
+
+        $this->app['auth']->forgetGuards();
+        $this->withHeader('Authorization', '');
+        $list = $this->getJson('/api/properties?'.$filters)->assertOk()->assertJsonPath('total', 3);
+        $rows = collect($list->json('data'))->keyBy('id');
+        $this->assertEqualsCanonicalizing([$assigned->id, $shared->id, $otherCity->id], $rows->keys()->all());
+        $this->assertFalse($rows[$assigned->id]['is_co_owned']);
+        $this->assertTrue($rows[$shared->id]['is_co_owned']);
+        $this->assertTrue($rows[$otherCity->id]['is_co_owned']);
+        foreach ($rows as $row) {
+            $this->assertArrayNotHasKey('co_owner_user_id', $row);
+            $this->assertArrayNotHasKey('co_owner', $row);
+        }
+        $this->getJson('/api/properties/count?'.$filters)->assertOk()->assertJsonPath('count', 3);
+        $this->getJson('/api/properties?'.$filters.'&location_id=1')->assertOk()->assertJsonPath('total', 2);
+        $this->getJson('/api/properties?'.$filters.'&location_id=11')->assertOk()
+            ->assertJsonPath('total', 1)->assertJsonPath('data.0.id', $otherCity->id);
+        $this->getJson('/api/properties?'.$filters.'&location_id=999')->assertOk()->assertJsonPath('total', 0);
+        $this->getJson('/api/properties?'.$filters.'&per_page=1&page=2')->assertOk()->assertJsonPath('total', 3);
+    }
+
     public function test_personal_participation_includes_coowned_without_changing_responsibility_counts(): void
     {
         [$actor, $other, $assigned] = $this->consistencyFixture();
