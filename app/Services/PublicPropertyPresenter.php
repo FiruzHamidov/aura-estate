@@ -107,6 +107,7 @@ final class PublicPropertyPresenter
 
         $payload['creator'] = $this->publicAgent($property->creator, $includeAgentContact);
         $payload['responsible_agent'] = $this->publicAgent($property->agent, $includeAgentContact);
+        $payload['is_co_owned'] = (int) $property->getAttribute('co_owner_user_id') > 0;
 
         if ($property->relationLoaded('reels')) {
             $payload['reels'] = $property->reels
