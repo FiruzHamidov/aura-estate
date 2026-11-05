@@ -173,6 +173,27 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertSame('regular', $approved->fresh()->listing_type);
     }
 
+    public function test_owner_price_update_does_not_change_public_price_or_start_moderation(): void
+    {
+        (require database_path('migrations/2026_11_05_100000_add_owner_price_to_properties.php'))->up();
+        [$agent] = $this->users();
+        $property = Property::create($this->propertyPayload($agent, [
+            'owner_price' => 80000, 'moderation_status' => 'approved', 'publication_status' => 'published',
+            'approved_price' => 100000, 'approved_effective_price' => 100000, 'approved_currency' => 'TJS',
+            'approved_content_snapshot' => ['price' => 100000, 'currency' => 'TJS'], 'moderation_version' => 1,
+        ]));
+        $property->owner_price = 85000;
+        $outcome = $this->moderation()->evaluateUpdate($property, $agent);
+        $property->save();
+        $this->moderation()->recordUpdateOutcome($property, $agent, $outcome);
+
+        $this->assertSame('published', $property->fresh()->publication_status);
+        $this->assertSame('100000.00', $property->fresh()->approved_effective_price);
+        $this->assertSame('85000.00', $property->fresh()->owner_price);
+        $this->assertArrayNotHasKey('owner_price', $property->fresh()->approved_content_snapshot);
+        $this->assertDatabaseCount('property_moderation_cases', 0);
+    }
+
     public function test_price_decrease_stays_published_and_becomes_the_new_baseline(): void
     {
         [$agent] = $this->users();
