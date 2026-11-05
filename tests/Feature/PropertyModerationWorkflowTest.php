@@ -1820,6 +1820,86 @@ class PropertyModerationWorkflowTest extends TestCase
         $this->assertSame($count, PropertyModerationCase::count());
     }
 
+    public static function sameGroupTransferRoles(): array
+    {
+        return ['branch director' => ['branch_director'], 'ROP' => ['rop']];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('sameGroupTransferRoles')]
+    public function test_manager_can_transfer_property_within_current_group(string $role): void
+    {
+        Schema::table('users', fn (Blueprint $table) => $table->softDeletes());
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedBigInteger('co_owner_user_id')->nullable());
+        [$agent, $rop, $director] = $this->users();
+        $actor = $role === 'rop' ? $rop : $director;
+        $recipient = User::forceCreate(['name' => 'Recipient', 'phone' => '900000004',
+            'role_id' => $agent->role_id, 'branch_id' => 1, 'branch_group_id' => 1, 'status' => 'active']);
+        $property = Property::create($this->propertyPayload($agent, [
+            'co_owner_user_id' => $recipient->id, 'moderation_status' => 'approved',
+            'publication_status' => 'published', 'moderation_version' => 1,
+        ]));
+        Schema::create('crm_deals', function (Blueprint $table): void {
+            $table->id(); $table->unsignedBigInteger('primary_property_id')->nullable();
+            $table->string('control_kind')->nullable(); $table->timestamp('closed_at')->nullable();
+            $table->softDeletes();
+        });
+        Schema::create('crm_tasks', function (Blueprint $table): void {
+            $table->id(); $table->unsignedBigInteger('branch_group_id'); $table->unsignedBigInteger('assignee_id');
+            $table->string('related_entity_type'); $table->unsignedBigInteger('related_entity_id');
+            $table->string('status'); $table->timestamp('completed_at')->nullable(); $table->timestamps();
+        });
+        foreach ([['id' => 1, 'status' => 'todo', 'completed_at' => null], ['id' => 2, 'status' => 'done', 'completed_at' => now()]] as $task) {
+            DB::table('crm_tasks')->insert($task + ['branch_group_id' => 1, 'assignee_id' => $agent->id,
+                'related_entity_type' => 'property', 'related_entity_id' => $property->id]);
+        }
+        \Laravel\Sanctum\Sanctum::actingAs($actor);
+        $url = '/api/group-transfers/properties/'.$property->id;
+        $preview = $this->getJson($url)->assertOk()->assertJsonPath('branch_group_id', 1)->json();
+        $payload = ['branch_group_id' => 1, 'responsible_user_id' => $recipient->id,
+            'revision' => $preview['revision'], 'reason' => 'Передача внутри группы'];
+        $this->postJson($url, $payload)->assertOk();
+        $this->assertDatabaseHas('properties', ['id' => $property->id, 'branch_id' => 1, 'branch_group_id' => 1,
+            'agent_id' => $recipient->id, 'created_by' => $agent->id, 'co_owner_user_id' => null,
+            'moderation_status' => 'approved', 'publication_status' => 'published', 'moderation_version' => 2]);
+        $this->assertDatabaseHas('crm_tasks', ['id' => 1, 'branch_group_id' => 1, 'assignee_id' => $recipient->id]);
+        $this->assertDatabaseHas('crm_tasks', ['id' => 2, 'branch_group_id' => 1, 'assignee_id' => $agent->id]);
+        $event = \App\Models\PropertyModerationEvent::where('event_type', 'property_transferred')->sole();
+        $this->assertSame($actor->id, $event->actor_id);
+        $this->assertSame($payload['reason'], $event->payload['reason']);
+        $this->assertSame($agent->id, $event->payload['old']['agent_id']);
+        $this->assertSame($recipient->id, $event->payload['new']['agent_id']);
+        $this->assertDatabaseHas('group_access_audit_logs', ['subject_id' => $property->id, 'actor_id' => $actor->id,
+            'subject_type' => 'properties', 'event' => 'record_group_transferred', 'reason' => $payload['reason']]);
+        $this->postJson($url, $payload)->assertConflict();
+        $this->assertDatabaseCount('property_moderation_events', 1);
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('sameGroupTransferRoles')]
+    public function test_same_group_property_transfer_rejects_invalid_recipients(string $role): void
+    {
+        Schema::table('users', fn (Blueprint $table) => $table->softDeletes());
+        [$agent, $rop, $director] = $this->users();
+        $actor = $role === 'rop' ? $rop : $director;
+        $recipient = User::forceCreate(['name' => 'Recipient', 'phone' => '900000004',
+            'role_id' => $agent->role_id, 'branch_id' => 1, 'branch_group_id' => 1, 'status' => 'inactive']);
+        DB::table('branch_groups')->insert(['id' => 2, 'branch_id' => 1, 'name' => 'Other']);
+        $property = Property::create($this->propertyPayload($agent));
+        $before = $property->fresh()->getAttributes();
+        \Laravel\Sanctum\Sanctum::actingAs($actor);
+        $url = '/api/group-transfers/properties/'.$property->id;
+        $preview = $this->getJson($url)->assertOk()->json();
+        $payload = ['branch_group_id' => 1, 'responsible_user_id' => $recipient->id,
+            'revision' => $preview['revision'], 'reason' => 'Передача внутри группы'];
+        $this->postJson($url, $payload)->assertStatus($role === 'rop' ? 403 : 422);
+        $recipient->forceFill(['status' => 'active', 'branch_group_id' => 2])->saveQuietly();
+        $this->postJson($url, $payload)->assertStatus($role === 'rop' ? 403 : 422);
+        $recipient->forceFill(['branch_group_id' => 1, 'branch_id' => 2])->saveQuietly();
+        $this->postJson($url, $payload)->assertStatus($role === 'rop' ? 403 : 422);
+        $this->assertSame($before, $property->fresh()->getAttributes());
+        $this->assertDatabaseCount('property_moderation_events', 0);
+        $this->assertDatabaseCount('group_access_audit_logs', 0);
+    }
+
     private function users(): array
     {
         $agentRole = Role::firstOrCreate(['slug' => 'agent'], ['name' => 'Agent']);
