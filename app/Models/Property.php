@@ -95,6 +95,7 @@ class Property extends Model
     ];
 
     protected $casts = [
+        'owner_price' => 'decimal:2',
         'listing_updated_at' => 'datetime',
         'listed_at' => 'datetime',
         'liquidity_calculated_at' => 'datetime',
@@ -113,6 +114,7 @@ class Property extends Model
     ];
 
     protected $hidden = [
+        'owner_price',
         'non_client_views_count',
         'effective_price',
         'liquidity_score',
@@ -141,6 +143,7 @@ class Property extends Model
     ];
 
     protected $fillable = [
+        'owner_price',
         'title',
         'description',
         'type_id',

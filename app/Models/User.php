@@ -99,6 +99,13 @@ class User extends Authenticatable
         return $this->role && $this->role->slug === $slug;
     }
 
+    public function canAccessPropertyOwnerPrice(): bool
+    {
+        return $this->status === self::STATUS_ACTIVE && ! $this->isDeletedAccount()
+            && ! in_array($this->role?->slug, ['client', 'external_agent'], true)
+            && $this->hasPermission('properties.list.internal');
+    }
+
     public function hasPermission(string $permission): bool
     {
         return $this->role?->hasPermission($permission) ?? false;

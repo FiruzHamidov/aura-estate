@@ -212,6 +212,7 @@ class PropertyConstructionFieldsTest extends TestCase
         (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
         (require database_path('migrations/2026_10_19_090000_add_non_client_property_views.php'))->up();
         (require database_path('migrations/2026_10_31_100000_add_bathroom_type_to_properties_table.php'))->up();
+        (require database_path('migrations/2026_11_05_100000_add_owner_price_to_properties.php'))->up();
     }
 
     protected function tearDown(): void
@@ -428,6 +429,59 @@ class PropertyConstructionFieldsTest extends TestCase
             $this->assertDatabaseHas('property_moderation_cases', ['property_id' => $response->json('id'), 'type' => 'initial_review', 'status' => 'open']);
         }
         $this->postJson('/api/properties', ['type_id' => $type->id, 'price' => 990000, 'currency' => 'TJS', 'offer_type' => 'sale', 'requested_listing_type' => 'invalid'])->assertUnprocessable();
+    }
+
+    public function test_owner_price_can_be_created_updated_preserved_and_cleared(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create(['name' => 'Agent', 'phone' => '930000096', 'role_id' => $role->id, 'status' => 'active']);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        Sanctum::actingAs($user);
+        $payload = ['type_id' => $type->id, 'price' => 150000, 'currency' => 'TJS', 'offer_type' => 'sale'];
+
+        $id = $this->postJson('/api/properties', $payload + ['owner_price' => '120000.50'])
+            ->assertOk()->assertJsonPath('owner_price', '120000.50')->json('id');
+        $this->getJson('/api/properties/'.$id)->assertOk()->assertJsonPath('owner_price', '120000.50')
+            ->assertJsonPath('capabilities.can_view_owner_price', true);
+        $this->putJson('/api/properties/'.$id, ['owner_price' => '125000.25'])
+            ->assertOk()->assertJsonPath('owner_price', '125000.25');
+        $this->putJson('/api/properties/'.$id, ['title' => 'Updated title'])
+            ->assertOk()->assertJsonPath('owner_price', '125000.25');
+        $this->assertDatabaseHas('properties', ['id' => $id, 'price' => 150000, 'owner_price' => 125000.25]);
+        foreach ([-1, 0, 'invalid', 10000000000000, [120000]] as $invalid) {
+            $this->putJson('/api/properties/'.$id, ['owner_price' => $invalid])->assertUnprocessable()
+                ->assertJsonPath('details.errors.owner_price', fn ($errors) => is_array($errors) && count($errors) > 0);
+        }
+        $this->putJson('/api/properties/'.$id, ['owner_price' => ''])
+            ->assertOk()->assertJsonPath('owner_price', null);
+        $this->assertDatabaseHas('properties', ['id' => $id, 'owner_price' => null]);
+        $this->postJson('/api/properties', $payload)->assertOk()->assertJsonPath('owner_price', null);
+    }
+
+    public function test_client_and_external_agent_cannot_write_or_read_owner_price_even_with_edit_grants(): void
+    {
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        foreach (['client', 'external_agent', 'custom_writer'] as $index => $slug) {
+            $permissions = ['properties.create', 'properties.edit', 'properties.history.view'];
+            if ($slug !== 'custom_writer') $permissions = [...$permissions, 'properties.list.internal', 'properties.list.scope.all'];
+            $role = Role::create(['name' => $slug, 'slug' => $slug]);
+            $role->forceFill(['permissions' => $permissions])->save();
+            $user = User::create(['name' => $slug, 'phone' => '93000009'.$index, 'role_id' => $role->id, 'status' => 'active']);
+            Sanctum::actingAs($user);
+            $payload = ['type_id' => $type->id, 'price' => 150000, 'currency' => 'TJS', 'offer_type' => 'sale'];
+            $this->postJson('/api/properties', $payload + ['owner_price' => 120000])->assertForbidden();
+            $id = $this->postJson('/api/properties', $payload)->assertOk()->assertJsonMissingPath('owner_price')->json('id');
+            \App\Models\Property::findOrFail($id)->forceFill(['owner_price' => 120000])->saveQuietly();
+            $this->putJson('/api/properties/'.$id, ['owner_price' => null])->assertForbidden();
+            $this->getJson('/api/properties/'.$id)->assertOk()->assertJsonMissingPath('owner_price')
+                ->assertJsonPath('capabilities.can_view_owner_price', false);
+            $this->assertDatabaseHas('properties', ['id' => $id, 'owner_price' => 120000]);
+            $log = \App\Models\PropertyLog::create(['property_id' => $id, 'user_id' => $user->id, 'action' => 'updated',
+                'changes' => ['owner_price' => ['old' => 110000, 'new' => 120000], 'title' => ['old' => 'Old', 'new' => 'New']]]);
+            $this->assertArrayNotHasKey('owner_price', $log->toArray()['changes']);
+            $this->getJson('/api/properties/'.$id.'/logs')->assertOk()->assertJsonMissingPath('data.0.changes.owner_price');
+        }
     }
 
     public function test_bathroom_type_can_be_created_changed_preserved_and_cleared(): void

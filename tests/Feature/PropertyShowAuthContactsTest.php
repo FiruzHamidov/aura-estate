@@ -199,6 +199,40 @@ class PropertyShowAuthContactsTest extends TestCase
             $table->timestamp('expires_at')->nullable();
             $table->timestamps();
         });
+        (require database_path('migrations/2026_11_05_100000_add_owner_price_to_properties.php'))->up();
+    }
+
+    public function test_owner_price_is_hidden_from_guests_clients_inactive_accounts_and_out_of_scope_rops(): void
+    {
+        [$rop, $property, $agent] = $this->publicRopFixture();
+        $property->forceFill(['owner_price' => 80000.50])->saveQuietly();
+        $this->assertArrayNotHasKey('owner_price', $property->toArray());
+        $this->assertArrayNotHasKey('owner_price', app(\App\Services\PublicPropertyPresenter::class)->present($property));
+
+        $viewers = [null, $rop];
+        foreach (['client', 'external_agent', 'admin', 'branch_director'] as $index => $slug) {
+            $role = Role::create(['name' => $slug, 'slug' => $slug]);
+            $viewers[] = User::create(['name' => $slug, 'phone' => '94000000'.$index, 'role_id' => $role->id,
+                'branch_id' => 20, 'status' => 'active']);
+        }
+        $viewers[] = $agent;
+        $viewers[] = User::create(['name' => 'Inactive agent', 'phone' => '940000009', 'role_id' => $agent->role_id, 'status' => 'inactive']);
+
+        foreach ($viewers as $viewer) {
+            $this->app['auth']->forgetGuards();
+            $this->withHeader('Authorization', $viewer ? 'Bearer '.$viewer->createToken('test')->plainTextToken : '');
+            $response = $this->getJson('/api/properties/'.$property->id)->assertOk();
+            $allowed = $viewer && $viewer->status === 'active' && in_array($viewer->role->slug, ['agent', 'admin', 'branch_director']);
+            if ($allowed) {
+                $response->assertJsonPath('owner_price', '80000.50')->assertJsonPath('capabilities.can_view_owner_price', true);
+                $this->getJson('/api/properties')->assertOk()->assertJsonPath('data.0.owner_price', '80000.50');
+            } else {
+                $response->assertJsonMissingPath('owner_price');
+                $this->assertNotSame(true, $response->json('capabilities.can_view_owner_price'));
+                $this->getJson('/api/properties')->assertOk()->assertJsonMissingPath('data.0.owner_price');
+                $this->getJson('/api/properties?compact=1')->assertOk()->assertJsonMissingPath('data.0.owner_price');
+            }
+        }
     }
 
     private function publicRopFixture(): array

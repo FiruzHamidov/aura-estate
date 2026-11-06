@@ -185,6 +185,18 @@ class PropertyController extends Controller
         return false;
     }
 
+    private function canAccessOwnerPrice(?User $user): bool
+    {
+        return $user?->canAccessPropertyOwnerPrice() ?? false;
+    }
+
+    private function assertCanWriteOwnerPrice(User $user, array $attributes): void
+    {
+        if (array_key_exists('owner_price', $attributes)) {
+            abort_unless($this->canAccessOwnerPrice($user), 403, 'Недостаточно прав для изменения цены собственника.');
+        }
+    }
+
     private function canViewInternalPropertyDetails(?User $user, Property $property, Request $request): bool
     {
         if (! $user) {
@@ -282,6 +294,8 @@ class PropertyController extends Controller
                 && $user->hasPermission('properties.contacts.view')
                 && $this->canViewPropertyWithinInternalList($user, $property, request()),
             'can_view_history' => $user && $this->moderationAccess->canViewHistory($user, $property),
+            'can_view_owner_price' => $this->canAccessOwnerPrice($user)
+                && $this->canViewInternalPropertyDetails($user, $property, request()),
             'can_moderate' => $workflow['can_moderate'],
             'can_manage_co_owner' => $workflow['can_manage_co_owner'],
         ]);
@@ -443,6 +457,9 @@ class PropertyController extends Controller
         }
 
         $payload = app(PropertyBuildingType::class)->present($property, $property->toArray());
+        if ($this->canAccessOwnerPrice($authUser)) {
+            $payload['owner_price'] = $property->owner_price;
+        }
         $payload['responsible_agent'] = $this->serializeResponsibleAgent($property);
         $payload['branch_id'] = $this->resolvePropertyBranchId($property);
         $payload['branch_group_id'] = $this->resolvePropertyBranchGroupId($property);
@@ -508,6 +525,9 @@ class PropertyController extends Controller
     private function withModerationWorkflow(Property $property, User $user, ?array $payload = null): array
     {
         $payload ??= $property->toArray();
+        if ($this->canAccessOwnerPrice($user)) {
+            $payload['owner_price'] = $property->owner_price;
+        }
         if (! array_key_exists('building_type_source', $payload)) $payload = app(PropertyBuildingType::class)->present($property, $payload);
         $payload['publication_visibility'] ??= app(PropertyPublicationVisibility::class)->forProperty($property);
         if (! Schema::hasTable('property_moderation_cases')) {
@@ -829,6 +849,9 @@ class PropertyController extends Controller
             $responsible = $property->agent?->only(['id', 'name', 'photo']);
             $property->unsetRelation('agent');
             $payload = $compact ? $this->compactFeedProperty($property) : $property->toArray();
+            if ($this->canAccessOwnerPrice($actor)) {
+                $payload['owner_price'] = $property->owner_price;
+            }
             $payload['agent_id'] = $property->agent_id;
             $payload['responsible_agent'] = $responsible;
 
@@ -926,10 +949,14 @@ class PropertyController extends Controller
 
         $result->getCollection()->load('agent');
         $visibility = app(PropertyPublicationVisibility::class)->forProperties($result->getCollection());
-        $result->through(function (Property $property) use ($visibility): array {
+        $result->through(function (Property $property) use ($visibility, $request): array {
             $responsible = $property->agent?->only(['id', 'name', 'photo']);
             $property->unsetRelation('agent');
-            return [...$property->toArray(), 'responsible_agent' => $responsible,
+            $payload = $property->toArray();
+            if ($this->canAccessOwnerPrice($request->user())) {
+                $payload['owner_price'] = $property->owner_price;
+            }
+            return [...$payload, 'responsible_agent' => $responsible,
                 'publication_visibility' => $visibility[$property->id]];
         });
 
@@ -2420,6 +2447,7 @@ class PropertyController extends Controller
         unset($validated['tags']);
         [$property, $dups, $qualityWarnings, $user] = DB::transaction(function () use ($request, $validated, $featureIds, $tagIds, $user, $requiresReview, $requestedType) {
             [$user] = $this->lockPropertyWrite($user, null, $validated);
+            $this->assertCanWriteOwnerPrice($user, $validated);
             $validated = app(PropertyBuildingType::class)->normalizeWrite($validated);
             $this->moderation->assertCanCreate($user);
             if ($requestedType !== 'regular') {
@@ -2511,6 +2539,7 @@ class PropertyController extends Controller
             $user
         ): void {
             [$user, $property] = $this->lockPropertyWrite($user, $property, $validated);
+            $this->assertCanWriteOwnerPrice($user, $validated);
             $validated = app(PropertyBuildingType::class)->normalizeWrite($validated, $property);
             $validated = $this->normalizePropertyWriteGroup($user, $validated);
             $this->ensureVisibleClientsForProperty($validated, $property);
@@ -2938,6 +2967,7 @@ class PropertyController extends Controller
             'location_id' => 'nullable|exists:locations,id',
             'repair_type_id' => 'nullable|exists:repair_types,id',
             'price' => ($isUpdate ? 'sometimes' : 'required').'|numeric',
+            'owner_price' => 'sometimes|nullable|numeric|min:0.01|max:9999999999999.99',
             'discount_price' => 'nullable|numeric|gt:0',
             'currency' => ($isUpdate ? 'sometimes' : 'required').'|in:TJS,USD',
             'offer_type' => ($isUpdate ? 'sometimes' : 'required').'|in:rent,sale',
