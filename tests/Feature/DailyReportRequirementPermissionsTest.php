@@ -44,7 +44,10 @@ class DailyReportRequirementPermissionsTest extends TestCase
     {
         $role = Role::create(['slug' => $slug, 'name' => $slug]);
         $role->forceFill(['permissions' => $permissions])->save();
-        return User::create(['name' => $slug, 'role_id' => $role->id]);
+        $user = User::create(['name' => $slug, 'role_id' => $role->id]);
+        $user->forceFill(['created_at' => now()->subDays(2)])->save();
+
+        return $user;
     }
 
     private function gate(User $user, string $path = '/api/private-work', string $method = 'GET'): int
@@ -99,5 +102,38 @@ class DailyReportRequirementPermissionsTest extends TestCase
         DB::table('daily_reports')->where('user_id', $user->id)->update(['submitted_at' => now()]);
         $this->assertSame(200, $this->gate($user));
         $this->assertNull(app(DailyReportService::class)->missingReportDate($user));
+    }
+
+    public function test_new_employee_does_not_owe_a_report_before_account_creation(): void
+    {
+        $user = $this->employee('agent');
+        $user->forceFill(['created_at' => now()->startOfDay()])->save();
+        $service = app(DailyReportService::class);
+
+        $this->assertSame(200, $this->gate($user));
+        $this->assertFalse($service->statusForUser($user)['daily_report_required']);
+        $this->assertSame('2026-10-10', $service->defaultReportDate($user));
+
+        Carbon::setTestNow(Carbon::parse('2026-10-11 10:59:00', 'Asia/Dushanbe'));
+        $this->assertSame(200, $this->gate($user));
+        Carbon::setTestNow(Carbon::parse('2026-10-11 11:00:00', 'Asia/Dushanbe'));
+        $this->assertSame(403, $this->gate($user));
+        $this->assertSame('2026-10-10', $service->missingReportDate($user));
+    }
+
+    public function test_account_creation_uses_the_local_report_day_and_preserves_legacy_enforcement(): void
+    {
+        $user = $this->employee('agent');
+        $service = app(DailyReportService::class);
+
+        // The UTC date is yesterday, but the account was created today in Dushanbe.
+        $user->setAttribute('created_at', Carbon::parse('2026-10-09 20:00:00', 'UTC')->setTimezone('Asia/Dushanbe'));
+        $this->assertNull($service->missingReportDate($user));
+
+        $user->setAttribute('created_at', Carbon::parse('2026-10-09 18:59:59', 'UTC')->setTimezone('Asia/Dushanbe'));
+        $this->assertSame('2026-10-09', $service->missingReportDate($user));
+
+        $user->setAttribute('created_at', null);
+        $this->assertSame('2026-10-09', $service->missingReportDate($user));
     }
 }

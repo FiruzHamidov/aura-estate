@@ -57,6 +57,12 @@ class DailyReportService
 
         $reportDate = $now->copy()->subDay()->toDateString();
 
+        // A new employee cannot owe a report for a day before their account existed.
+        $createdAt = $user->created_at;
+        if ($createdAt !== null && $createdAt->copy()->setTimezone($this->timezone())->toDateString() > $reportDate) {
+            return null;
+        }
+
         $submitted = DailyReport::query()
             ->where('user_id', $user->id)
             ->whereDate('report_date', $reportDate)
