@@ -8,6 +8,18 @@ use Illuminate\Http\Request;
 
 final class KpiPlanningController extends Controller
 {
+    public function bulkPreview(Request $request, \App\Services\Kpi\BulkResultGoalService $service)
+    {
+        return response()->json(['data' => $service->inspect($request->user(), $request->all())]);
+    }
+
+    public function bulkPublish(Request $request, \App\Services\Kpi\BulkResultGoalService $service)
+    {
+        $data = $request->validate(['preview_token' => 'required|string|size:64']);
+
+        return response()->json(['data' => $service->inspect($request->user(), $request->all(), $data['preview_token'])], 201);
+    }
+
     public function catalog(Request $request, PlanningScope $scope)
     {
         $data = $request->validate(['type' => 'required|in:goal,program']);
