@@ -78,6 +78,7 @@ class KpiResultsFeatureTest extends TestCase
             '2026_05_08_200000_add_ui_meta_and_reward_type_string_to_motivation_rules_table',
             '2026_11_05_140000_create_kpi_result_goals_and_facts',
             '2026_11_05_150000_extend_motivation_programs',
+            '2026_11_06_100000_create_kpi_planning_drafts',
         ] as $migration) {
             (require database_path('migrations/'.$migration.'.php'))->up();
         }
@@ -406,5 +407,230 @@ class KpiResultsFeatureTest extends TestCase
         ]])->save();
         Sanctum::actingAs($operator->fresh());
         $this->postJson('/api/motivation/achievements/'.$award->id.'/transition', ['action' => 'approve', 'expected_version' => 1])->assertForbidden();
+    }
+
+    private function planningDraft(array $payload, string $type = 'goal', int $step = 2): array
+    {
+        return $this->postJson('/api/kpi/planning/drafts', ['type' => $type, 'payload' => $payload, 'step' => $step, 'revision' => 0])
+            ->assertCreated()->json('data');
+    }
+
+    private function planningPreview(array $draft): array
+    {
+        return $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/preview', ['revision' => $draft['revision']])->assertOk()->json('data');
+    }
+
+    private function planningProgram(array $changes = []): array
+    {
+        return array_replace([
+            'audience' => 'group', 'branch_group_id' => 1, 'scope' => 'agent', 'metric_key' => 'result_goal',
+            'threshold_value' => 1, 'name' => 'Премия', 'reward_type' => 'cash', 'reward_amount' => 500, 'reward_currency' => 'TJS',
+            'period_type' => 'month', 'date_from' => '2026-12-01', 'date_to' => '2026-12-31', 'is_active' => true,
+            'condition' => ['source' => 'kpi_goal', 'kind' => 'sale', 'mode' => 'count_or_amount', 'currency' => 'TJS'],
+        ], $changes);
+    }
+
+    public function test_planning_partial_drafts_are_shared_only_with_managers_and_never_applied_to_results(): void
+    {
+        $draft = $this->planningDraft(['month' => '2026-12', 'user_id' => $this->agent->id, 'kind' => 'sale', 'mode' => 'amount', 'currency' => 'USD']);
+        $this->getJson('/api/kpi/planning/roster?month=2026-12')->assertOk()->assertJsonPath('data.counts.sale.draft', 1);
+        $this->getJson('/api/kpi/results/goals?month=2026-12')->assertOk()->assertJsonCount(0, 'data');
+        $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/preview', ['revision' => 1])->assertUnprocessable()->assertJsonStructure(['details' => ['errors' => ['amount_target']]]);
+        Sanctum::actingAs($this->agent);
+        $this->getJson('/api/kpi/planning/drafts?type=goal')->assertForbidden();
+        $this->getJson('/api/kpi/planning/roster?month=2026-12')->assertForbidden();
+        $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/preview', ['revision' => 1])->assertForbidden();
+        $this->assertDatabaseCount('kpi_result_goals', 0);
+    }
+
+    public function test_planning_group_review_excludes_personal_goals_and_new_members_inherit(): void
+    {
+        $other = $this->user('agent', 1);
+        $this->postJson('/api/kpi/results/goals', $this->goal(['month' => '2026-12']))->assertCreated();
+        $payload = $this->goal(['month' => '2026-12', 'branch_group_id' => 1]);
+        unset($payload['user_id']);
+        $draft = $this->planningDraft($payload);
+        $preview = $this->planningPreview($draft);
+        $this->assertSame([$this->agent->id], array_column($preview['excluded'], 'user_id'));
+        $this->assertSame([$other->id], array_column($preview['recipients'], 'user_id'));
+        $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/publish', ['revision' => 1, 'preview_token' => $preview['preview_token']])->assertCreated();
+        $new = $this->user('agent', 1);
+        $service = app(\App\Services\Kpi\ResultGoalService::class);
+        $this->assertSame($this->agent->id, $service->resolve($this->agent->id, 1, '2026-12', 'sale')['user_id']);
+        $this->assertNull($service->resolve($new->id, 1, '2026-12', 'sale')['user_id']);
+        $this->assertDatabaseMissing('kpi_planning_drafts', ['id' => $draft['id']]);
+    }
+
+    public function test_planning_publication_rechecks_membership_and_does_not_silently_overwrite(): void
+    {
+        $payload = $this->goal(['month' => '2026-12', 'branch_group_id' => 1]);
+        unset($payload['user_id']);
+        $draft = $this->planningDraft($payload);
+        $preview = $this->planningPreview($draft);
+        $this->user('agent', 1);
+        $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/publish', ['revision' => 1, 'preview_token' => $preview['preview_token']])
+            ->assertConflict()->assertJsonPath('code', 'PUBLICATION_PREVIEW_CHANGED');
+        $this->assertDatabaseCount('kpi_result_goals', 0);
+        $this->postJson('/api/kpi/results/goals', $payload)->assertCreated();
+        $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/preview', ['revision' => 1])
+            ->assertConflict()->assertJsonPath('code', 'KPI_GOAL_VERSION_CONFLICT')->assertJsonPath('current.version', 1);
+        $this->assertDatabaseHas('kpi_planning_drafts', ['id' => $draft['id'], 'revision' => 1]);
+    }
+
+    public function test_planning_draft_revision_collision_preserves_the_other_edit(): void
+    {
+        $payload = $this->goal(['month' => '2026-12']);
+        $draft = $this->planningDraft($payload);
+        $payload['count_target'] = 9;
+        $request = ['type' => 'goal', 'payload' => $payload, 'step' => 2, 'revision' => 1];
+        $this->putJson('/api/kpi/planning/drafts/'.$draft['id'], $request)->assertOk()->assertJsonPath('data.revision', 2);
+        $request['payload']['count_target'] = 10;
+        $this->putJson('/api/kpi/planning/drafts/'.$draft['id'], $request)->assertConflict()->assertJsonPath('current.payload.count_target', 9);
+        $this->postJson('/api/kpi/planning/drafts', $request)->assertConflict()->assertJsonPath('code', 'DRAFT_ALREADY_EXISTS');
+    }
+
+    public function test_planning_copy_month_creates_only_drafts_and_preserves_destination_goals_and_drafts(): void
+    {
+        $sale = $this->goal();
+        $rental = $this->goal(['kind' => 'rental', 'rental_basis' => 'contract_total']);
+        $this->postJson('/api/kpi/results/goals', $sale)->assertCreated();
+        $this->postJson('/api/kpi/results/goals', $rental)->assertCreated();
+        $this->postJson('/api/kpi/results/goals', array_replace($sale, ['month' => '2026-12', 'count_target' => 7]))->assertCreated();
+        $this->postJson('/api/kpi/planning/copy-month', ['from' => '2026-11', 'to' => '2026-12', 'branch_group_id' => 1])
+            ->assertOk()->assertJsonCount(1, 'data.created_ids')->assertJsonCount(1, 'data.skipped');
+        $this->assertDatabaseCount('kpi_result_goals', 3);
+        $this->assertDatabaseCount('kpi_planning_drafts', 1);
+        $this->postJson('/api/kpi/planning/copy-month', ['from' => '2026-11', 'to' => '2026-12', 'branch_group_id' => 1])
+            ->assertOk()->assertJsonCount(0, 'data.created_ids')->assertJsonCount(2, 'data.skipped');
+        $this->assertSame('contract_total', \App\Models\KpiPlanningDraft::sole()->payload['rental_basis']);
+    }
+
+    public function test_planning_motivation_readiness_counts_only_published_goals_and_warns_additive_rewards(): void
+    {
+        $draftAgent = $this->user('agent', 1);
+        $missingAgent = $this->user('agent', 1);
+        $this->postJson('/api/kpi/results/goals', $this->goal(['month' => '2026-12']))->assertCreated();
+        $this->planningDraft($this->goal(['month' => '2026-12', 'user_id' => $draftAgent->id]));
+        $program = $this->planningProgram();
+        $existing = $program;
+        unset($existing['audience']);
+        $this->postJson('/api/motivation/rules', $existing)->assertCreated();
+        $draft = $this->planningDraft($program, 'program', 3);
+        $preview = $this->planningPreview($draft);
+        $this->assertCount(1, $preview['ready']);
+        $this->assertCount(2, $preview['waiting']);
+        $this->assertSame(['draft', 'no_goal'], array_column($preview['waiting'], 'status'));
+        $this->assertEquals(1500, $preview['potential_amount']);
+        $this->assertCount(1, $preview['overlaps']);
+        $this->assertEquals(1000, $preview['combined_rewards'][0]['totals']['TJS']);
+        $this->assertDatabaseCount('motivation_rules', 1);
+        $this->assertDatabaseCount('motivation_achievements', 0);
+        $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/publish', ['revision' => 1, 'preview_token' => $preview['preview_token']])->assertCreated();
+        $this->assertDatabaseCount('motivation_rules', 2);
+        $this->assertDatabaseCount('motivation_achievements', 0);
+    }
+
+    public function test_planning_program_draft_never_enters_scheduler_and_retains_trip_fields(): void
+    {
+        $data = $this->planningProgram(['name' => 'Поездка', 'reward_type' => 'trip_tashkent', 'reward_amount' => null, 'reward_currency' => null,
+            'ui_meta' => ['reward_details' => ['title' => 'Ташкент', 'included' => 'Дорога и проживание', 'arrangement' => 'Даты согласуем после подведения итогов']]]);
+        $draft = $this->planningDraft($data, 'program', 3);
+        $this->getJson('/api/motivation/rules')->assertOk()->assertJsonCount(0, 'data');
+        app(\App\Services\Kpi\MotivationRecalculation::class)->run(['preview' => true], null);
+        $this->assertDatabaseCount('motivation_achievements', 0);
+        $preview = $this->planningPreview($draft);
+        $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/publish', ['revision' => 1, 'preview_token' => $preview['preview_token']])
+            ->assertCreated()->assertJsonPath('data.published.ui_meta.reward_details.included', 'Дорога и проживание');
+        $overview = app(\App\Services\MotivationService::class)->buildOverview($this->agent, 'month', '2026-12-01', '2026-12-31');
+        $this->assertCount(1, $overview['cards']);
+        $this->assertSame('no_plan', $overview['cards'][0]['progress']['status']);
+        $this->assertFalse($overview['cards'][0]['progress']['eligible']);
+        $this->assertSame('Руководитель ещё не назначил цель KPI на этот период.', $overview['cards'][0]['message_preview']);
+        $this->assertSame('Дорога и проживание', $overview['cards'][0]['ui_meta']['reward_details']['included']);
+    }
+
+    public function test_planning_rop_empty_groups_foreign_drafts_and_revocation(): void
+    {
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
+        $rop = $this->user('rop', 1);
+        $rop->supervisedGroups()->attach([1, 2]);
+        Sanctum::actingAs($rop->fresh());
+        $this->getJson('/api/kpi/planning/catalog?type=goal')->assertOk()->assertJsonCount(2, 'data.groups');
+        $draft = $this->planningDraft($this->goal(['month' => '2026-12']));
+        $preview = $this->planningPreview($draft);
+        $rop->supervisedGroups()->detach(1);
+        Sanctum::actingAs($rop->fresh());
+        $this->getJson('/api/kpi/planning/drafts?type=goal')->assertOk()->assertJsonCount(0, 'data');
+        $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/publish', ['revision' => 1, 'preview_token' => $preview['preview_token']])->assertForbidden();
+        $this->assertDatabaseCount('kpi_result_goals', 0);
+    }
+
+    public function test_planning_started_program_and_current_goal_are_immutable(): void
+    {
+        $this->postJson('/api/kpi/results/goals', $this->goal())->assertCreated();
+        $draft = $this->planningDraft($this->goal(['expected_version' => 1]));
+        $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/preview', ['revision' => 1])->assertUnprocessable();
+        $program = $this->program();
+        $payload = $this->planningProgram(['expected_version' => $program->version]);
+        $draft = $this->postJson('/api/kpi/planning/drafts', ['type' => 'program', 'payload' => $payload, 'entity_id' => $program->id, 'step' => 4, 'revision' => 0])->assertCreated()->json('data');
+        $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/preview', ['revision' => 1])->assertUnprocessable();
+        $this->assertDatabaseCount('motivation_rules', 1);
+    }
+
+    public function test_planning_readiness_uses_requested_kind_and_preserves_currency_totals(): void
+    {
+        $this->postJson('/api/kpi/results/goals', $this->goal(['month' => '2026-12']))->assertCreated();
+        $this->getJson('/api/kpi/planning/readiness?audience=group&branch_group_id=1&month=2026-12&kind=sale')->assertOk()->assertJsonPath('data.ready', 1);
+        $this->getJson('/api/kpi/planning/readiness?audience=group&branch_group_id=1&month=2026-12&kind=rental')->assertOk()->assertJsonPath('data.waiting', 1);
+        $usd = $this->planningProgram(['reward_currency' => 'USD', 'reward_amount' => 100]);
+        unset($usd['audience']);
+        $this->postJson('/api/motivation/rules', $usd)->assertCreated();
+        $draft = $this->planningDraft($this->planningProgram(), 'program');
+        $preview = $this->planningPreview($draft);
+        $this->assertEquals(['TJS' => 500, 'USD' => 100], $preview['combined_rewards'][0]['totals']);
+        $another = $this->planningProgram();
+        unset($another['audience']);
+        $this->postJson('/api/motivation/rules', $another)->assertCreated();
+        $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/publish', ['revision' => 1, 'preview_token' => $preview['preview_token']])->assertConflict()->assertJsonPath('code', 'PUBLICATION_PREVIEW_CHANGED');
+        $this->assertDatabaseCount('motivation_rules', 2);
+    }
+
+    public function test_planning_director_cannot_access_foreign_audience_or_retarget_foreign_draft(): void
+    {
+        DB::table('branches')->insert(['id' => 2, 'name' => 'Чужой филиал']);
+        DB::table('branch_groups')->insert(['id' => 3, 'branch_id' => 2, 'name' => 'Чужая группа']);
+        $foreign = $this->planningDraft($this->planningProgram(['branch_group_id' => 3]), 'program');
+        $director = $this->user('branch_director', 1);
+        Sanctum::actingAs($director);
+        $this->getJson('/api/kpi/planning/drafts?type=program')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/kpi/planning/readiness?audience=branch&branch_id=2&month=2026-12&kind=sale')->assertForbidden();
+        $this->getJson('/api/kpi/planning/readiness?audience=company&month=2026-12&kind=sale')->assertForbidden();
+        $this->postJson('/api/kpi/planning/copy-month', ['from' => '2026-11', 'to' => '2026-12', 'branch_group_id' => 3])->assertForbidden();
+        $this->putJson('/api/kpi/planning/drafts/'.$foreign['id'], ['type' => 'program', 'payload' => $this->planningProgram(), 'step' => 2, 'revision' => 1])->assertForbidden();
+        $own = $this->planningDraft($this->planningProgram(['audience' => 'branch', 'branch_id' => 1, 'branch_group_id' => null]), 'program');
+        $this->planningPreview($own);
+    }
+
+    public function test_planning_current_inherited_goal_cannot_be_replaced_by_a_new_personal_exception(): void
+    {
+        $payload = $this->goal(['branch_group_id' => 1]);
+        unset($payload['user_id']);
+        $this->postJson('/api/kpi/results/goals', $payload)->assertCreated();
+        $this->postJson('/api/kpi/results/goals', $this->goal())->assertUnprocessable();
+        $draft = $this->planningDraft($this->goal());
+        $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/preview', ['revision' => 1])->assertUnprocessable();
+        $this->assertDatabaseCount('kpi_result_goals', 1);
+    }
+
+    public function test_planning_private_unassigned_program_resumes_without_becoming_global(): void
+    {
+        $director = $this->user('branch_director', 1);
+        Sanctum::actingAs($director);
+        $draft = $this->planningDraft(['name' => 'Начатая программа', 'audience' => 'group'], 'program', 1);
+        $this->getJson('/api/kpi/planning/drafts?type=program')->assertOk()->assertJsonPath('data.0.payload.name', 'Начатая программа');
+        Sanctum::actingAs($this->admin);
+        $this->getJson('/api/kpi/planning/drafts?type=program')->assertOk()->assertJsonCount(0, 'data');
+        $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/preview', ['revision' => 1])->assertForbidden();
+        $this->assertDatabaseCount('motivation_rules', 0);
     }
 }

@@ -7,16 +7,13 @@ use App\Models\MotivationRewardIssue;
 use App\Models\MotivationRule;
 use App\Models\User;
 use App\Services\MotivationService;
-use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\Rule;
 
 class MotivationController extends Controller
 {
-    public function __construct(private readonly MotivationService $service)
-    {
-    }
+    public function __construct(private readonly MotivationService $service) {}
 
     public function rules(Request $request)
     {
@@ -55,8 +52,9 @@ class MotivationController extends Controller
     {
         $actor = $this->authUser();
         $this->ensureManageAccess($actor);
-        $data = $request->validate($this->programRules());
+        $data = $request->validate(\App\Services\Kpi\MotivationProgramService::rules($request->all()));
         $rule = app(\App\Services\Kpi\MotivationProgramService::class)->save($actor, $data);
+
         return response()->json(['data' => $rule], 201);
     }
 
@@ -64,38 +62,10 @@ class MotivationController extends Controller
     {
         $actor = $this->authUser();
         $this->ensureManageAccess($actor);
-        $data = $request->validate($this->programRules(true));
+        $data = $request->validate(\App\Services\Kpi\MotivationProgramService::rules($request->all(), true));
         $rule = app(\App\Services\Kpi\MotivationProgramService::class)->save($actor, $data, $rule->id);
-        return response()->json(['data' => $rule]);
-    }
 
-    private function programRules(bool $update = false): array
-    {
-        $required = $update ? 'sometimes' : 'required';
-        return [
-            'scope' => [$required, Rule::in(['agent', 'company'])],
-            'metric_key' => $required.'|in:sales_count,result_goal',
-            'threshold_value' => $required.'|numeric|min:0.01|max:9999',
-            'reward_type' => $required.'|string|max:64',
-            'name' => $required.'|string|max:255', 'description' => 'nullable|string|max:3000',
-            'period_type' => [$required, Rule::in(['week', 'month', 'year'])],
-            'date_from' => $required.'|date_format:Y-m-d', 'date_to' => $required.'|date_format:Y-m-d',
-            'is_active' => 'sometimes|boolean', 'ui_meta' => 'sometimes|array',
-            'expected_version' => ($update ? 'required' : 'sometimes').'|integer|min:1',
-            'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
-            'branch_id' => 'nullable|integer|exists:branches,id',
-            'condition' => 'nullable|array:source,kind,mode,count_target,amount_target,currency,rental_basis,goal_id',
-            'condition.source' => ['nullable', Rule::in(['independent', 'kpi_goal'])],
-            'condition.goal_id' => 'nullable|integer|exists:kpi_result_goals,id',
-            'condition.kind' => ['required_with:condition', Rule::in(['sale', 'rental'])],
-            'condition.mode' => ['required_with:condition', Rule::in(['count', 'amount', 'count_or_amount'])],
-            'condition.count_target' => ['nullable', Rule::requiredIf(fn () => request('condition.source') !== 'kpi_goal' && in_array(request('condition.mode'), ['count', 'count_or_amount'])), 'integer', 'min:1', 'max:1000000'],
-            'condition.amount_target' => ['nullable', Rule::requiredIf(fn () => request('condition.source') !== 'kpi_goal' && in_array(request('condition.mode'), ['amount', 'count_or_amount'])), 'numeric', 'min:0.01', 'max:999999999999.99', 'decimal:0,2'],
-            'condition.currency' => ['required_with:condition', Rule::in(['TJS', 'USD'])],
-            'condition.rental_basis' => ['nullable', 'required_if:condition.kind,rental', Rule::in(['monthly_rent', 'contract_total'])],
-            'reward_amount' => 'nullable|required_if:reward_type,cash|numeric|min:0.01|max:999999999999.99|decimal:0,2',
-            'reward_currency' => ['nullable', 'required_with:reward_amount', Rule::in(['TJS', 'USD'])],
-        ];
+        return response()->json(['data' => $rule]);
     }
 
     public function achievements(Request $request)
@@ -122,13 +92,17 @@ class MotivationController extends Controller
         }
 
         $rows = $query->orderByDesc('won_at')->get()->filter(function ($achievement) use ($actor) {
-            if ($achievement->company_scope) return $actor->hasPermission('motivation.achievements.company');
+            if ($achievement->company_scope) {
+                return $actor->hasPermission('motivation.achievements.company');
+            }
             $scope = $achievement->meta['scope'] ?? [
                 'user_id' => $achievement->user_id, 'branch_id' => $achievement->user?->branch_id,
                 'branch_group_id' => $achievement->user?->branch_group_id,
             ];
+
             return app(\App\Support\KpiResultAccess::class)->visible($actor, $scope, 'motivation.achievements');
         })->values();
+
         return response()->json(['data' => $rows]);
     }
 
@@ -184,12 +158,14 @@ class MotivationController extends Controller
             'idempotency_key' => 'nullable|required_if:action,issue|uuid',
         ]);
         $result = app(\App\Services\Kpi\MotivationWorkflow::class)->transition($this->authUser(), $achievement->id, $data);
+
         return response()->json(['data' => $result]);
     }
 
     public function history(MotivationAchievement $achievement)
     {
         app(\App\Services\Kpi\MotivationWorkflow::class)->ensureVisible($this->authUser(), $achievement);
+
         return response()->json(['data' => \DB::table('motivation_events')->where('achievement_id', $achievement->id)->orderBy('id')->get()]);
     }
 
@@ -200,6 +176,7 @@ class MotivationController extends Controller
         app(\App\Services\Kpi\MotivationWorkflow::class)->ensureVisible($actor, $achievement);
         $data = $request->validate(['assignee_id' => 'nullable|integer|exists:users,id', 'comment' => 'nullable|string|max:1000']);
         $issue = $this->service->upsertRewardIssue($achievement->id, $data + ['status' => 'in_progress']);
+
         return response()->json(['data' => $issue]);
     }
 
@@ -210,9 +187,11 @@ class MotivationController extends Controller
         app(\App\Services\Kpi\MotivationWorkflow::class)->ensureVisible($this->authUser(), $rewardIssue->achievement);
         if ($request->input('status') === 'issued') {
             $request->merge(['action' => 'issue']);
+
             return $this->transition($request, $rewardIssue->achievement);
         }
         $data = $request->validate(['assignee_id' => 'nullable|integer|exists:users,id', 'comment' => 'nullable|string|max:1000']);
+
         return response()->json(['data' => $this->service->upsertRewardIssue($rewardIssue->achievement_id, $data)]);
     }
 

@@ -3,8 +3,8 @@
 namespace App\Services;
 
 use App\Models\MotivationAchievement;
-use App\Models\MotivationRule;
 use App\Models\MotivationRewardIssue;
+use App\Models\MotivationRule;
 use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
@@ -78,6 +78,7 @@ class MotivationService
             $achievement = MotivationAchievement::whereKey($achievementId)->lockForUpdate()->firstOrFail();
             abort_unless($achievement->status === 'approved', 409, 'Награда ещё не согласована или уже выдана.');
             abort_if(($data['status'] ?? null) === 'issued', 422, 'Используйте подтверждение выдачи с датой и подтверждающим документом.');
+
             return MotivationRewardIssue::updateOrCreate(['achievement_id' => $achievementId], $data);
         }, 3);
     }
@@ -187,14 +188,27 @@ class MotivationService
         $threshold = (float) ($amountMode ? ($condition['amount_target'] ?? 0) : ($condition['count_target'] ?? $rule->threshold_value));
         $remaining = max(0, (int) ceil($threshold - $fact));
         $status = $progress['eligible'] ? 'achieved' : 'in_progress';
-        if ($achievement?->status === 'issued') $status = 'issued';
+        if ($achievement?->status === 'issued') {
+            $status = 'issued';
+        }
         $uiMeta = $this->applyUiMetaFallback($rule);
         $message = $progress['eligible'] ? 'Условие выполнено. Награда проходит проверку.' : $this->buildMessagePreview($uiMeta, $remaining);
-        if ($amountMode && ! $progress['eligible']) $message = 'До цели осталось '.number_format(max(0, $threshold - $fact), 2, '.', ' ').' '.($condition['currency'] ?? 'TJS').'.';
-        if (($condition['mode'] ?? '') === 'count_or_amount' && ! $progress['eligible']) $message = 'До цели: ещё '.$progress['remaining_count'].' '.$this->pluralizeRu((int) $progress['remaining_count'], $this->unitLabels($uiMeta)).' или '.number_format($progress['remaining_amount'], 2, '.', ' ').' '.($condition['currency'] ?? 'TJS').'.';
-        if ($progress['status'] === 'no_plan') $message = 'Руководитель ещё не назначил цель KPI на этот период.';
-        if ($progress['progress_is_lower_bound']) $message = 'Не все суммы подтверждены. Результат может увеличиться.';
-        if ($status === 'issued') $message = 'Награда выдана.';
+        if ($amountMode && ! $progress['eligible'] && $progress['status'] !== 'no_plan') {
+            $message = 'До цели осталось '.number_format(max(0, $threshold - $fact), 2, '.', ' ').' '.($condition['currency'] ?? 'TJS').'.';
+        }
+        if (($condition['mode'] ?? '') === 'count_or_amount' && ! $progress['eligible'] && $progress['status'] !== 'no_plan') {
+            $message = 'До цели: ещё '.$progress['remaining_count'].' '.$this->pluralizeRu((int) $progress['remaining_count'], $this->unitLabels($uiMeta)).' или '.number_format($progress['remaining_amount'], 2, '.', ' ').' '.($condition['currency'] ?? 'TJS').'.';
+        }
+        if ($progress['status'] === 'no_plan') {
+            $message = 'Руководитель ещё не назначил цель KPI на этот период.';
+        }
+        if ($progress['progress_is_lower_bound']) {
+            $message = 'Не все суммы подтверждены. Результат может увеличиться.';
+        }
+        if ($status === 'issued') {
+            $message = 'Награда выдана.';
+        }
+
         return [
             'rule_id' => (int) $rule->id, 'scope' => $rule->scope, 'reward_type' => $rule->reward_type, 'name' => $rule->name,
             'description' => $rule->description, 'fact' => $fact, 'threshold' => $threshold, 'remaining' => $remaining,

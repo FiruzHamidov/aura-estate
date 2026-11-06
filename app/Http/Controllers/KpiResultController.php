@@ -5,7 +5,6 @@ namespace App\Http\Controllers;
 use App\Services\Kpi\ResultGoalService;
 use App\Services\Kpi\ResultReportService;
 use Illuminate\Http\Request;
-use Illuminate\Validation\Rule;
 
 final class KpiResultController extends Controller
 {
@@ -54,18 +53,7 @@ final class KpiResultController extends Controller
 
     public function publish(Request $request, ResultGoalService $service)
     {
-        $data = $request->validate([
-            'month' => 'required|date_format:Y-m', 'kind' => ['required', Rule::in(['sale', 'rental'])],
-            'user_id' => 'nullable|required_without:branch_group_id|prohibits:branch_group_id|integer|exists:users,id',
-            'branch_group_id' => 'nullable|required_without:user_id|integer|exists:branch_groups,id',
-            'expected_version' => 'required|integer|min:0',
-            'mode' => ['required', Rule::in(['count', 'amount', 'count_or_amount'])],
-            'count_target' => 'nullable|required_if:mode,count,count_or_amount|integer|min:1|max:1000000',
-            'amount_target' => 'nullable|required_if:mode,amount,count_or_amount|numeric|min:0.01|max:999999999999.99|decimal:0,2',
-            'currency' => ['required', Rule::in(['TJS', 'USD'])],
-            'rental_basis' => ['nullable', 'required_if:kind,rental', Rule::in(['monthly_rent', 'contract_total'])],
-            'comment' => 'nullable|string|max:500',
-        ]);
+        $data = $request->validate(ResultGoalService::rules());
 
         return response()->json(['data' => $service->publish($request->user(), $data)], 201);
     }

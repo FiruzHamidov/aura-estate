@@ -7,10 +7,27 @@ use App\Models\User;
 use App\Support\KpiPlanScopePolicy;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
 final class ResultGoalService
 {
+    public static function rules(): array
+    {
+        return [
+            'month' => 'required|date_format:Y-m', 'kind' => ['required', Rule::in(['sale', 'rental'])],
+            'user_id' => 'nullable|required_without:branch_group_id|prohibits:branch_group_id|integer|exists:users,id',
+            'branch_group_id' => 'nullable|required_without:user_id|integer|exists:branch_groups,id',
+            'expected_version' => 'required|integer|min:0',
+            'mode' => ['required', Rule::in(['count', 'amount', 'count_or_amount'])],
+            'count_target' => 'nullable|required_if:mode,count,count_or_amount|integer|min:1|max:1000000',
+            'amount_target' => 'nullable|required_if:mode,amount,count_or_amount|numeric|min:0.01|max:999999999999.99|decimal:0,2',
+            'currency' => ['required', Rule::in(['TJS', 'USD'])],
+            'rental_basis' => ['nullable', 'required_if:kind,rental', Rule::in(['monthly_rent', 'contract_total'])],
+            'comment' => 'nullable|string|max:500',
+        ];
+    }
+
     public function publish(User $actor, array $data): array
     {
         return DB::transaction(function () use ($actor, $data) {
@@ -34,7 +51,8 @@ final class ResultGoalService
             $query = DB::table('kpi_result_goals')->where('scope_key', $key)->where('month', $month->toDateString())->where('kind', $data['kind']);
             $last = (clone $query)->latest('version')->first();
             abort_if((int) ($last?->version ?? 0) !== (int) $data['expected_version'], 409, 'KPI_GOAL_VERSION_CONFLICT');
-            if ($last && ! $month->isFuture()) {
+            $inherited = ! empty($scope['user_id']) ? $this->resolve($scope['user_id'], $scope['branch_group_id'], $data['month'], $data['kind'], true) : null;
+            if (($last || $inherited) && ! $month->isFuture()) {
                 throw ValidationException::withMessages(['month' => 'Опубликованный план текущего месяца зафиксирован. Создайте версию на следующий месяц.']);
             }
             $mode = $data['mode'];
@@ -54,10 +72,11 @@ final class ResultGoalService
         }, 3);
     }
 
-    public function resolve(int $userId, ?int $groupId, string $month, string $kind): ?array
+    public function resolve(int $userId, ?int $groupId, string $month, string $kind, bool $lock = false): ?array
     {
-        $rows = DB::table('kpi_result_goals')->where('month', $month.'-01')->where('kind', $kind)
-            ->whereIn('scope_key', ['user:'.$userId, 'group:'.$groupId])->orderByDesc('version')->get();
+        $query = DB::table('kpi_result_goals')->where('month', $month.'-01')->where('kind', $kind)
+            ->whereIn('scope_key', ['user:'.$userId, 'group:'.$groupId])->orderByDesc('version');
+        $rows = ($lock ? $query->lockForUpdate() : $query)->get();
         $goal = $rows->firstWhere('scope_key', 'user:'.$userId) ?? $rows->firstWhere('scope_key', 'group:'.$groupId);
 
         return $goal ? (array) $goal : null;
