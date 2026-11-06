@@ -288,6 +288,7 @@ Route::scopeBindings()->group(function () {
     Route::get('new-buildings/plans', [NewBuildingPlanController::class, 'index']);
     Route::get('new-buildings/map', [NewBuildingController::class, 'map']);
     Route::get('residential-sitemap', \App\Http\Controllers\ResidentialSitemapController::class);
+    Route::get('property-sitemap', \App\Http\Controllers\PropertySitemapController::class);
     Route::get('new-buildings/{new_building}/unit-facets', [DeveloperUnitController::class, 'facets']);
     Route::get('new-buildings/{new_building}/availability-grid', [DeveloperUnitController::class, 'grid']);
     Route::get('residential-media/{kind}/{record}/{variant}', [\App\Http\Controllers\ResidentialMediaController::class, 'show'])->whereIn('kind', ['building-photos', 'unit-photos', 'layouts', 'floor-plans'])->whereNumber('record')->whereIn('variant', ['preview', 'original', 'w320', 'w640', 'w960', 'w1600'])->name('residential.media');
