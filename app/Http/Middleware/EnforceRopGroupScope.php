@@ -23,6 +23,7 @@ final class EnforceRopGroupScope
 
         // These internal modules have no trustworthy group ownership yet (spec §6).
         // Their public storefront endpoints retain the public projection.
+        // KPI motivation actions listed below now enforce frozen achievement scope and locked group policies.
         $controller = $request->route()?->getActionName();
         abort_if($controller === 'App\\Http\\Controllers\\ChatController@feedback', 403, 'FORBIDDEN_ACTION');
         abort_if(in_array($controller, [
@@ -41,7 +42,7 @@ final class EnforceRopGroupScope
         abort_if(($controller && str_starts_with($controller, 'App\\Http\\Controllers\\AdminStoryController@'))
             || ($controller && str_starts_with($controller, 'App\\Http\\Controllers\\StoryController@') && ! $publicStory)
             || ($controller && str_starts_with($controller, 'App\\Http\\Controllers\\MotivationController@')
-                && $controller !== 'App\\Http\\Controllers\\MotivationController@rules'), 403, 'FORBIDDEN_ACTION');
+                && ! in_array(explode('@', $controller)[1], ['rules', 'myOverview', 'storeRule', 'updateRule', 'achievements', 'recalculate', 'transition', 'history'], true)), 403, 'FORBIDDEN_ACTION');
 
         $run = function () use ($request, $next, $actor) {
             // These endpoints validate their subjects and destinations under transaction locks.
@@ -52,6 +53,7 @@ final class EnforceRopGroupScope
             if (in_array($controller, ['App\\Http\\Controllers\\AttendanceMappingController@upsert', 'App\\Http\\Controllers\\AttendanceMappingController@index'], true)) unset($filters['user_id']);
             // The report checks operator/manager subjects against its scoped users query.
             if ($controller === 'App\\Http\\Controllers\\CrmReportController@performance') unset($filters['responsible_user_id']);
+            if (in_array($controller, ['App\\Http\\Controllers\\KpiResultController@index', 'App\\Http\\Controllers\\KpiResultController@periodHistory', 'App\\Http\\Controllers\\KpiResultController@adjust'], true)) unset($filters['user_id']);
             $this->validateFilters($filters, $actor, $request->isMethodSafe());
             return RopScopeResponse::headers($next($request), $request);
         };

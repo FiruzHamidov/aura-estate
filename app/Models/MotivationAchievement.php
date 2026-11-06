@@ -32,8 +32,8 @@ class MotivationAchievement extends Model
     protected $casts = [
         'company_scope' => 'boolean',
         'won_at' => 'datetime',
-        'date_from' => 'date',
-        'date_to' => 'date',
+        'date_from' => 'date:Y-m-d',
+        'date_to' => 'date:Y-m-d',
         'snapshot_value' => 'decimal:4',
         'approved_at' => 'datetime',
         'issued_at' => 'datetime',

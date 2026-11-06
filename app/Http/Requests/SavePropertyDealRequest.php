@@ -65,6 +65,9 @@ class SavePropertyDealRequest extends FormRequest
              */
             'actual_sale_price'    => 'required_if:deal_status,sold,rented|numeric|min:0.01',
             'actual_sale_currency' => 'required_if:deal_status,sold,rented|in:TJS,USD',
+            'rental_monthly_amount' => 'nullable|numeric|min:0.01|max:999999999999.99|decimal:0,2',
+            'rental_contract_amount' => 'nullable|numeric|min:0.01|max:999999999999.99|decimal:0,2',
+            'deal_fx_rate' => 'nullable|numeric|min:0.00000001|max:99999999',
 
             'company_commission_amount'   => 'required_if:deal_status,sold,rented|numeric|min:0',
             'company_commission_currency' => 'required_if:deal_status,sold,rented|in:TJS,USD',

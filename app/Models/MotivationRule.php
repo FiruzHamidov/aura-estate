@@ -10,6 +10,7 @@ class MotivationRule extends Model
     use HasFactory;
 
     protected $fillable = [
+        'condition', 'reward_amount', 'reward_currency', 'branch_id', 'branch_group_id', 'version',
         'scope',
         'metric_key',
         'threshold_value',
@@ -26,10 +27,11 @@ class MotivationRule extends Model
     ];
 
     protected $casts = [
+        'condition' => 'array', 'reward_amount' => 'decimal:2', 'version' => 'integer',
         'threshold_value' => 'decimal:4',
         'is_active' => 'boolean',
-        'date_from' => 'date',
-        'date_to' => 'date',
+        'date_from' => 'date:Y-m-d',
+        'date_to' => 'date:Y-m-d',
         'ui_meta' => 'array',
     ];
 

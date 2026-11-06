@@ -64,17 +64,17 @@ use App\Http\Controllers\NewBuildingController;
 use App\Http\Controllers\NewBuildingPhotoController;
 use App\Http\Controllers\NewBuildingPlanController;
 use App\Http\Controllers\NotificationController;
-use App\Http\Controllers\PropertyControlReportController;
 use App\Http\Controllers\ParkingTypeController;
 use App\Http\Controllers\PropertyController;
+use App\Http\Controllers\PropertyControlReportController;
 use App\Http\Controllers\PropertyLiquidityController;
 use App\Http\Controllers\PropertyPhotoController;
 use App\Http\Controllers\PropertyReportController;
 use App\Http\Controllers\PropertyStatusController;
 use App\Http\Controllers\PropertyTypeController;
-use App\Http\Controllers\PushHealthController;
 use App\Http\Controllers\PublicRealtorController;
 use App\Http\Controllers\PublicTeamController;
+use App\Http\Controllers\PushHealthController;
 use App\Http\Controllers\PushSubscriptionController;
 use App\Http\Controllers\ReelController;
 use App\Http\Controllers\ReferenceCatalogController;
@@ -197,7 +197,6 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
         Route::get('/admin/users/{user}/settings', [LocationTrackingController::class, 'settings'])->whereNumber('user');
         Route::patch('/admin/users/{user}/settings', [LocationTrackingController::class, 'updateSettings'])->whereNumber('user');
     });
-
 
     Route::prefix('attendance')->group(function () {
         Route::get('/presence', [AttendanceWebController::class, 'presence']);
@@ -363,8 +362,25 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::patch('/motivation/rules/{rule}', [MotivationController::class, 'updateRule']);
     Route::get('/motivation/achievements', [MotivationController::class, 'achievements']);
     Route::post('/motivation/recalculate', [MotivationController::class, 'recalculate']);
+    Route::post('/motivation/achievements/{achievement}/transition', [MotivationController::class, 'transition']);
+    Route::get('/motivation/achievements/{achievement}/history', [MotivationController::class, 'history']);
     Route::post('/motivation/reward-issues/{achievement}/assign', [MotivationController::class, 'assignRewardIssue']);
     Route::patch('/motivation/reward-issues/{rewardIssue}', [MotivationController::class, 'updateRewardIssue']);
+    Route::get('/kpi/planning/catalog', [\App\Http\Controllers\KpiPlanningController::class, 'catalog']);
+    Route::get('/kpi/planning/readiness', [\App\Http\Controllers\KpiPlanningController::class, 'readiness']);
+    Route::get('/kpi/planning/roster', [\App\Http\Controllers\KpiPlanningController::class, 'roster']);
+    Route::get('/kpi/planning/drafts', [\App\Http\Controllers\KpiPlanningController::class, 'drafts']);
+    Route::post('/kpi/planning/drafts', [\App\Http\Controllers\KpiPlanningController::class, 'save']);
+    Route::put('/kpi/planning/drafts/{draft}', [\App\Http\Controllers\KpiPlanningController::class, 'save'])->whereNumber('draft');
+    Route::post('/kpi/planning/drafts/{draft}/preview', [\App\Http\Controllers\KpiPlanningController::class, 'preview'])->whereNumber('draft');
+    Route::post('/kpi/planning/drafts/{draft}/publish', [\App\Http\Controllers\KpiPlanningController::class, 'publish'])->whereNumber('draft');
+    Route::post('/kpi/planning/copy-month', [\App\Http\Controllers\KpiPlanningController::class, 'copyMonth']);
+    Route::get('/kpi/results', [\App\Http\Controllers\KpiResultController::class, 'index']);
+    Route::get('/kpi/results/goals', [\App\Http\Controllers\KpiResultController::class, 'goals']);
+    Route::post('/kpi/results/goals', [\App\Http\Controllers\KpiResultController::class, 'publish'])->middleware('rop.branch.scope');
+    Route::post('/kpi/results/close', [\App\Http\Controllers\KpiResultController::class, 'close'])->middleware('rop.branch.scope');
+    Route::post('/kpi/results/adjust', [\App\Http\Controllers\KpiResultController::class, 'adjust'])->middleware('rop.branch.scope');
+    Route::get('/kpi/results/period-history', [\App\Http\Controllers\KpiResultController::class, 'periodHistory']);
     Route::get('/kpi-plans', [KpiModuleController::class, 'plans']);
     Route::patch('/kpi-plans', [KpiModuleController::class, 'updatePlans'])->middleware('rop.branch.scope');
     Route::get('/kpi/plans', [KpiModuleController::class, 'plans'])->middleware('rop.branch.scope');

@@ -26,6 +26,7 @@ class BranchGroup extends Model
     protected $casts = ['is_archived' => 'boolean'];
 
     public const CONTACT_VISIBILITY_GROUP_ONLY = 'group_only';
+
     public const CONTACT_VISIBILITY_BRANCH = 'branch';
 
     // Current ownership and historical snapshots both prevent physical deletion.
@@ -41,6 +42,9 @@ class BranchGroup extends Model
         'kpi_acceptance_runs' => 'Приёмки KPI', 'kpi_adjustment_logs' => 'История корректировок KPI',
         'rop_liquidity_results' => 'Результаты ликвидности', 'rop_liquidity_history' => 'История ликвидности',
         'notifications' => 'Уведомления', 'selections' => 'Подборки', 'reels' => 'Reels',
+        'kpi_planning_drafts' => 'Черновики целей и мотивации',
+        'kpi_result_goals' => 'Цели результата', 'kpi_result_facts' => 'Результаты KPI',
+        'motivation_rules' => 'Программы мотивации',
     ];
 
     protected $fillable = [
@@ -75,7 +79,9 @@ class BranchGroup extends Model
     public function hasAssignedData(bool $lock = false): bool
     {
         foreach (array_keys(self::DATA_REFERENCES) as $table) {
-            if (! \Illuminate\Support\Facades\Schema::hasColumn($table, 'branch_group_id')) continue;
+            if (! \Illuminate\Support\Facades\Schema::hasColumn($table, 'branch_group_id')) {
+                continue;
+            }
             $query = \Illuminate\Support\Facades\DB::table($table)->where('branch_group_id', $this->id);
             // In MySQL REPEATABLE READ a plain exists() can retain the snapshot
             // from before waiting for the group lock. Locking reads see committed membership.

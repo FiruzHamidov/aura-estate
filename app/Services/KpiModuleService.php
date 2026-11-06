@@ -1487,6 +1487,7 @@ class KpiModuleService
 
         if ($historical) $select[] = 'branch_group_id';
         $soldProperties = DB::table('properties')->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id'))
+            ->when(Schema::hasTable('kpi_result_facts'), fn ($q) => $q->whereNotIn('properties.id', DB::table('kpi_result_facts')->select('property_id')))
             ->select($select)
             ->where('moderation_status', 'sold')
             ->where(function ($query) use ($from, $to, $includeUndated) {
@@ -1498,6 +1499,21 @@ class KpiModuleService
             })
             ->get();
 
+        if (Schema::hasTable('kpi_result_facts')) {
+            $ledger = app(\App\Services\Kpi\ResultFactService::class)->currentQuery()
+                ->where('state', 'active')->where('kind', 'sale')->whereIn('user_id', $userIds)
+                ->tap(fn ($q) => \App\Support\BranchVisibility::apply($q, 'facts.branch_id'))
+                ->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'facts.branch_group_id'))
+                ->where(function ($q) use ($from, $to, $includeUndated) {
+                    $q->whereBetween('closed_at', [$from->copy()->startOfDay()->utc(), $to->copy()->endOfDay()->utc()]);
+                    if ($includeUndated) $q->orWhereNull('closed_at');
+                })->get()->map(fn ($fact) => (object) [
+                    'id' => $fact->property_id, 'moderation_status' => 'sold', 'sale_user_id' => $fact->user_id,
+                    'agent_id' => null, 'created_by' => null, 'branch_group_id' => $fact->branch_group_id,
+                    'sold_at' => $fact->closed_at ? Carbon::parse($fact->closed_at, 'UTC')->setTimezone((string) config('app.timezone', self::TZ))->toDateTimeString() : null,
+                ]);
+            $soldProperties = $soldProperties->concat($ledger);
+        }
         if ($soldProperties->isEmpty()) {
             return [];
         }

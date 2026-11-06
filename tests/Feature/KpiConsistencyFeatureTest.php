@@ -538,6 +538,36 @@ class KpiConsistencyFeatureTest extends TestCase
         $this->getJson('/api/reports/employees?'.$query)->assertForbidden();
     }
 
+    public function test_legacy_monthly_report_reads_latest_sale_ledger_without_double_counting(): void
+    {
+        [, $agent, $branch, $group] = $this->fixture();
+        $this->employeeReportProperties();
+        (require database_path('migrations/2026_11_05_140000_create_kpi_result_goals_and_facts.php'))->up();
+        $facts = app(\App\Services\Kpi\ResultFactService::class);
+        foreach (['UTC', 'Asia/Dushanbe'] as $timezone) {
+            config(['app.timezone' => $timezone]);
+            \DB::table('kpi_result_facts')->delete();
+            \DB::table('properties')->delete();
+            $ids = [];
+            foreach (['2026-10-31 23:59:59', '2026-11-01 00:00:00', '2026-11-30 23:59:59', '2026-12-01 00:00:00'] as $date) {
+                $ids[] = \DB::table('properties')->insertGetId([
+                    'created_by' => $agent->id, 'agent_id' => $agent->id, 'sale_agent_id' => $agent->id,
+                    'branch_id' => $branch->id, 'branch_group_id' => $group->id, 'moderation_status' => 'sold',
+                    'sold_at' => \Carbon\Carbon::parse($date, 'Asia/Dushanbe')->setTimezone($timezone)->toDateTimeString(),
+                ]);
+            }
+            foreach (\App\Models\Property::all() as $property) $facts->record($property, 'initial-'.$property->id);
+            $monthly = '/api/kpi/monthly?v=2&year=2026&month=11&agent_id='.$agent->id;
+            $this->getJson($monthly)->assertOk()->assertJsonPath('data.0.metrics.sales.fact_value', 2);
+            $this->getJson('/api/kpi/results?month=2026-11&user_id='.$agent->id)->assertOk()->assertJsonPath('rows.0.sale.count', 2);
+            $property = \App\Models\Property::findOrFail($ids[1]);
+            $property->moderation_status = 'approved';
+            $facts->record($property, 'reopened-'.$property->id);
+            $this->getJson($monthly)->assertOk()->assertJsonPath('data.0.metrics.sales.fact_value', 1);
+            $this->getJson('/api/kpi/results?month=2026-11&user_id='.$agent->id)->assertOk()->assertJsonPath('rows.0.sale.count', 1);
+        }
+    }
+
     private function fixture(string $name = 'Agent'): array
     {
         $adminRole = Role::firstOrCreate(['slug' => 'admin'], ['name' => 'Admin']);

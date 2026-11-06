@@ -605,6 +605,34 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
         return [$actor, $property];
     }
 
+    public function test_saving_rental_deal_records_kpi_fact_and_corrections_without_double_counting(): void
+    {
+        [$actor, $property] = $this->workflowFixture();
+        (require database_path('migrations/2026_11_05_140000_create_kpi_result_goals_and_facts.php'))->up();
+        Property::setEventDispatcher(app('events'));
+        $payload = $this->salePayload([
+            'deal_status' => 'rented', 'version' => 1, 'actual_sale_price' => 6000,
+            'actual_sale_currency' => 'TJS', 'rental_monthly_amount' => 6000,
+            'rental_contract_amount' => 72000, 'deal_fx_rate' => 10.5,
+        ]);
+        $this->postJson('/api/properties/'.$property->id.'/deal', $payload)->assertOk();
+        $facts = app(\App\Services\Kpi\ResultFactService::class);
+        $fact = $facts->currentQuery()->sole();
+        $this->assertSame($actor->id, (int) $fact->user_id);
+        $this->assertSame('rental', $fact->kind);
+        $this->assertSame(6000.0, (float) $fact->rental_monthly_amount);
+        $this->assertSame(72000.0, (float) $fact->rental_contract_amount);
+        $this->assertSame(10.5, (float) $fact->fx_rate);
+        $this->assertSame(1, $facts->currentQuery()->count());
+        $this->postJson('/api/properties/'.$property->id.'/deal', array_replace($payload, [
+            'version' => 2, 'rental_contract_amount' => 66000, 'status_comment' => 'Срок договора уточнён',
+        ]))->assertOk();
+        $this->assertDatabaseCount('kpi_result_facts', 2);
+        $this->assertSame(1, $facts->currentQuery()->count());
+        $this->assertSame(66000.0, (float) $facts->currentQuery()->sole()->rental_contract_amount);
+        $this->assertSame((int) $fact->id, (int) $facts->currentQuery()->sole()->supersedes_id);
+    }
+
     public function test_refusal_unpublishes_and_legacy_closed_rows_are_never_public(): void
     {
         [, $property] = $this->workflowFixture();

@@ -86,6 +86,7 @@ class PropertyObserver
         }
 
         $this->recordInitialHistory($property);
+        app(\App\Services\Kpi\ResultFactService::class)->record($property, 'property-log-'.$propertyLog->id, $this->currentUserId());
         if ($this->supportsLiquidity()) {
             RecalculatePropertyLiquidity::dispatch($property->id)->afterCommit();
         }
@@ -144,6 +145,9 @@ class PropertyObserver
             }
 
             $this->recordChangedHistory($property, $changes);
+            if (array_intersect(array_keys($changes), \App\Services\Kpi\ResultFactService::CLOSING_FIELDS)) {
+                app(\App\Services\Kpi\ResultFactService::class)->record($property, 'property-log-'.$propertyLog->id, $this->currentUserId());
+            }
 
             if ($this->supportsLiquidity() && array_intersect(array_keys($changes), self::LIQUIDITY_FIELDS) !== []) {
                 RecalculatePropertyLiquidity::dispatch($property->id)->afterCommit();
@@ -153,12 +157,13 @@ class PropertyObserver
 
     public function deleted(Property $property)
     {
-        PropertyLog::create([
+        $log = PropertyLog::create([
             'property_id' => $property->id,
             'user_id' => $this->currentUserId(),
             'action' => 'deleted',
             'changes' => null,
         ]);
+        app(\App\Services\Kpi\ResultFactService::class)->record($property, 'property-log-'.$log->id, $this->currentUserId(), true);
     }
 
     private function recordInitialHistory(Property $property): void
