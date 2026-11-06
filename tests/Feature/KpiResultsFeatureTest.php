@@ -633,4 +633,90 @@ class KpiResultsFeatureTest extends TestCase
         $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/preview', ['revision' => 1])->assertForbidden();
         $this->assertDatabaseCount('motivation_rules', 0);
     }
+
+    private function bulkPayload(array $ids, array $changes = []): array
+    {
+        return array_replace([
+            'month' => '2026-12', 'kind' => 'sale', 'mode' => 'count_or_amount', 'currency' => 'TJS',
+            'rows' => array_map(fn ($id) => ['user_id' => $id, 'expected_version' => 0, 'count_target' => 3, 'amount_target' => '1000000.00'], $ids),
+        ], $changes);
+    }
+
+    public function test_bulk_goal_preview_is_read_only_and_publication_keeps_individual_values(): void
+    {
+        $second = $this->user('agent', 1);
+        $data = $this->bulkPayload([$this->agent->id, $second->id]);
+        $data['rows'][1]['count_target'] = 5;
+        $preview = $this->postJson('/api/kpi/planning/bulk-goals/preview', $data)->assertOk()->json('data');
+        $this->assertDatabaseCount('kpi_result_goals', 0);
+        $this->assertDatabaseCount('kpi_planning_drafts', 0);
+        $this->postJson('/api/kpi/planning/bulk-goals/publish', $data + ['preview_token' => $preview['preview_token']])
+            ->assertCreated()->assertJsonPath('data.count', 2);
+        $this->assertDatabaseHas('kpi_result_goals', ['user_id' => $second->id, 'count_target' => 5]);
+        $this->postJson('/api/kpi/planning/bulk-goals/publish', $data + ['preview_token' => $preview['preview_token']])->assertConflict();
+        $this->assertDatabaseCount('kpi_result_goals', 2);
+    }
+
+    public function test_bulk_goals_validate_every_row_and_rental_basis(): void
+    {
+        $data = $this->bulkPayload([$this->agent->id], ['kind' => 'rental', 'mode' => 'amount']);
+        $this->postJson('/api/kpi/planning/bulk-goals/preview', $data)->assertUnprocessable();
+        $data['rental_basis'] = 'contract_total';
+        $preview = $this->postJson('/api/kpi/planning/bulk-goals/preview', $data)->assertOk()->json('data');
+        $this->postJson('/api/kpi/planning/bulk-goals/publish', $data + ['preview_token' => $preview['preview_token']])->assertCreated();
+        $this->assertDatabaseHas('kpi_result_goals', ['rental_basis' => 'contract_total', 'count_target' => null]);
+        $duplicate = $this->bulkPayload([$this->agent->id, $this->agent->id]);
+        $this->postJson('/api/kpi/planning/bulk-goals/preview', $duplicate)->assertUnprocessable();
+        $invalid = $this->bulkPayload([$this->agent->id]);
+        $invalid['rows'][0]['count_target'] = null;
+        $this->postJson('/api/kpi/planning/bulk-goals/preview', $invalid)->assertUnprocessable();
+    }
+
+    public function test_bulk_goals_recheck_payload_membership_and_published_goals(): void
+    {
+        $data = $this->bulkPayload([$this->agent->id]);
+        $preview = $this->postJson('/api/kpi/planning/bulk-goals/preview', $data)->assertOk()->json('data');
+        $changed = $data;
+        $changed['rows'][0]['count_target'] = 10;
+        $this->postJson('/api/kpi/planning/bulk-goals/publish', $changed + ['preview_token' => $preview['preview_token']])->assertConflict();
+        DB::table('users')->where('id', $this->agent->id)->update(['branch_group_id' => 2]);
+        $this->postJson('/api/kpi/planning/bulk-goals/publish', $data + ['preview_token' => $preview['preview_token']])->assertConflict();
+        $this->assertDatabaseCount('kpi_result_goals', 0);
+    }
+
+    public function test_bulk_goals_do_not_overwrite_drafts_or_locked_periods(): void
+    {
+        $data = $this->bulkPayload([$this->agent->id]);
+        $preview = $this->postJson('/api/kpi/planning/bulk-goals/preview', $data)->assertOk()->json('data');
+        $this->planningDraft($this->goal(['month' => '2026-12']));
+        $this->postJson('/api/kpi/planning/bulk-goals/publish', $data + ['preview_token' => $preview['preview_token']])->assertUnprocessable();
+        $this->postJson('/api/kpi/results/goals', $this->goal())->assertCreated();
+        $this->postJson('/api/kpi/planning/bulk-goals/preview', $this->bulkPayload([$this->agent->id], ['month' => '2026-11']))->assertConflict();
+        $this->postJson('/api/kpi/planning/bulk-goals/preview', $this->bulkPayload([$this->agent->id], ['month' => '2026-10']))->assertUnprocessable();
+        $this->assertDatabaseCount('kpi_result_goals', 1);
+    }
+
+    public function test_bulk_goals_reject_agents_and_out_of_scope_members(): void
+    {
+        $data = $this->bulkPayload([$this->agent->id]);
+        Sanctum::actingAs($this->agent);
+        $this->postJson('/api/kpi/planning/bulk-goals/preview', $data)->assertForbidden();
+        $director = $this->user('branch_director', 1);
+        $outsider = $this->user('agent', 2);
+        DB::table('branches')->insert(['id' => 2, 'name' => 'Другой филиал']);
+        DB::table('users')->where('id', $outsider->id)->update(['branch_id' => 2]);
+        Sanctum::actingAs($director);
+        $this->postJson('/api/kpi/planning/bulk-goals/preview', $this->bulkPayload([$this->agent->id, $outsider->id]))->assertForbidden();
+        $this->assertDatabaseCount('kpi_result_goals', 0);
+    }
+
+    public function test_bulk_goals_roll_back_all_rows_when_later_insert_fails(): void
+    {
+        $second = $this->user('agent', 1);
+        $data = $this->bulkPayload([$this->agent->id, $second->id]);
+        $preview = $this->postJson('/api/kpi/planning/bulk-goals/preview', $data)->assertOk()->json('data');
+        DB::statement("CREATE TRIGGER fail_bulk_second BEFORE INSERT ON kpi_result_goals WHEN NEW.user_id = {$second->id} BEGIN SELECT RAISE(ABORT, 'test failure'); END");
+        $this->postJson('/api/kpi/planning/bulk-goals/publish', $data + ['preview_token' => $preview['preview_token']])->assertStatus(500);
+        $this->assertDatabaseCount('kpi_result_goals', 0);
+    }
 }

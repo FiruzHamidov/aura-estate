@@ -369,6 +369,8 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::get('/kpi/planning/catalog', [\App\Http\Controllers\KpiPlanningController::class, 'catalog']);
     Route::get('/kpi/planning/readiness', [\App\Http\Controllers\KpiPlanningController::class, 'readiness']);
     Route::get('/kpi/planning/roster', [\App\Http\Controllers\KpiPlanningController::class, 'roster']);
+    Route::post('/kpi/planning/bulk-goals/preview', [\App\Http\Controllers\KpiPlanningController::class, 'bulkPreview']);
+    Route::post('/kpi/planning/bulk-goals/publish', [\App\Http\Controllers\KpiPlanningController::class, 'bulkPublish']);
     Route::get('/kpi/planning/drafts', [\App\Http\Controllers\KpiPlanningController::class, 'drafts']);
     Route::post('/kpi/planning/drafts', [\App\Http\Controllers\KpiPlanningController::class, 'save']);
     Route::put('/kpi/planning/drafts/{draft}', [\App\Http\Controllers\KpiPlanningController::class, 'save'])->whereNumber('draft');
