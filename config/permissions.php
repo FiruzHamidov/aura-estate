@@ -1142,4 +1142,15 @@ $permissions['favorites.site.view'] = ['group' => 'Личный профиль',
 $permissions['favorites.site.menu'] = ['group' => 'Личный профиль', 'name' => 'Избранное в меню профиля', 'description' => 'Показывает пункт избранного при наличии доступа к его странице. По умолчанию: все прежние роли, кроме HR, бухгалтера, службы безопасности и внешнего агента. Само по себе не открывает страницу.', 'roles' => array_values(array_diff($commonProfileRoles, ['hr']))];
 $permissions['wallet.site.view'] = ['group' => 'Личный профиль', 'name' => 'Страница кошелька на сайте', 'description' => 'Открывает существующую страницу-заготовку кошелька по прямому адресу. На странице пока нет финансовых операций. По умолчанию доступна прежним внутренним ролям, кроме бухгалтера и службы безопасности; клиент и внешний агент не имеют доступа. Не даёт доступа к платежам.', 'roles' => array_values(array_diff($commonProfileRoles, ['client']))];
 
+foreach ([
+    'verify' => ['Проверка награды РОП', ['admin', 'superadmin', 'rop', 'branch_director']],
+    'approve' => ['Согласование награды', ['admin', 'superadmin', 'branch_director']],
+    'issue' => ['Фактическая выдача награды', ['admin', 'superadmin']],
+] as $action => [$name, $roles]) {
+    $permissions['motivation.'.$action] = [
+        'group' => 'Мотивация', 'name' => $name, 'description' => $name.' в разрешённой области. Не расширяет доступ к сотрудникам.',
+        'roles' => $roles, 'sensitive' => true,
+    ];
+}
+
 return $permissions;

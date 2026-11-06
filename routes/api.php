@@ -363,8 +363,16 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::patch('/motivation/rules/{rule}', [MotivationController::class, 'updateRule']);
     Route::get('/motivation/achievements', [MotivationController::class, 'achievements']);
     Route::post('/motivation/recalculate', [MotivationController::class, 'recalculate']);
+    Route::post('/motivation/achievements/{achievement}/transition', [MotivationController::class, 'transition']);
+    Route::get('/motivation/achievements/{achievement}/history', [MotivationController::class, 'history']);
     Route::post('/motivation/reward-issues/{achievement}/assign', [MotivationController::class, 'assignRewardIssue']);
     Route::patch('/motivation/reward-issues/{rewardIssue}', [MotivationController::class, 'updateRewardIssue']);
+    Route::get('/kpi/results', [\App\Http\Controllers\KpiResultController::class, 'index']);
+    Route::get('/kpi/results/goals', [\App\Http\Controllers\KpiResultController::class, 'goals']);
+    Route::post('/kpi/results/goals', [\App\Http\Controllers\KpiResultController::class, 'publish'])->middleware('rop.branch.scope');
+    Route::post('/kpi/results/close', [\App\Http\Controllers\KpiResultController::class, 'close'])->middleware('rop.branch.scope');
+    Route::post('/kpi/results/adjust', [\App\Http\Controllers\KpiResultController::class, 'adjust'])->middleware('rop.branch.scope');
+    Route::get('/kpi/results/period-history', [\App\Http\Controllers\KpiResultController::class, 'periodHistory']);
     Route::get('/kpi-plans', [KpiModuleController::class, 'plans']);
     Route::patch('/kpi-plans', [KpiModuleController::class, 'updatePlans'])->middleware('rop.branch.scope');
     Route::get('/kpi/plans', [KpiModuleController::class, 'plans'])->middleware('rop.branch.scope');

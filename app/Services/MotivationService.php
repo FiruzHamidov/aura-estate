@@ -69,113 +69,17 @@ class MotivationService
 
     public function recalculate(array $filters = [], ?User $actor = null): array
     {
-        $rules = MotivationRule::query()
-            ->where('is_active', true)
-            ->when(isset($filters['rule_id']), fn ($q) => $q->where('id', (int) $filters['rule_id']))
-            ->orderBy('id')
-            ->get();
-
-        $created = 0;
-
-        foreach ($rules as $rule) {
-            $from = Carbon::parse($rule->date_from, self::TZ)->startOfDay();
-            $to = Carbon::parse($rule->date_to, self::TZ)->endOfDay();
-
-            if ($rule->scope === 'agent') {
-                $agentCredits = $this->salesCreditsByAgent($from, $to);
-                if (isset($filters['user_id'])) {
-                    $agentCredits = $agentCredits->only([(int) $filters['user_id']]);
-                }
-
-                foreach ($agentCredits as $userId => $credit) {
-                    if ((float) $credit < (float) $rule->threshold_value) {
-                        continue;
-                    }
-
-                    $achievement = MotivationAchievement::query()->firstOrCreate(
-                        [
-                            'rule_id' => $rule->id,
-                            'user_id' => (int) $userId,
-                            'period_type' => $rule->period_type,
-                            'date_from' => $rule->date_from,
-                            'date_to' => $rule->date_to,
-                        ],
-                        [
-                            'company_scope' => null,
-                            'won_at' => Carbon::now(self::TZ),
-                            'snapshot_value' => round((float) $credit, 4),
-                            'status' => 'new',
-                            'meta' => [
-                                'recalculate_reason' => $filters['reason'] ?? 'manual',
-                                'recalculated_by' => $actor?->id,
-                            ],
-                        ]
-                    );
-
-                    if ($achievement->wasRecentlyCreated) {
-                        $created++;
-                    }
-                }
-            }
-
-            if ($rule->scope === 'company') {
-                $total = round((float) $this->salesCreditsByAgent($from, $to)->sum(), 4);
-                if ($total < (float) $rule->threshold_value) {
-                    continue;
-                }
-
-                $achievement = MotivationAchievement::query()->firstOrCreate(
-                    [
-                        'rule_id' => $rule->id,
-                        'company_scope' => true,
-                        'period_type' => $rule->period_type,
-                        'date_from' => $rule->date_from,
-                        'date_to' => $rule->date_to,
-                    ],
-                    [
-                        'user_id' => null,
-                        'won_at' => Carbon::now(self::TZ),
-                        'snapshot_value' => $total,
-                        'status' => 'new',
-                        'meta' => [
-                            'recalculate_reason' => $filters['reason'] ?? 'manual',
-                            'recalculated_by' => $actor?->id,
-                        ],
-                    ]
-                );
-
-                if ($achievement->wasRecentlyCreated) {
-                    $created++;
-                }
-            }
-        }
-
-        return [
-            'rules_processed' => $rules->count(),
-            'achievements_created' => $created,
-        ];
+        return app(\App\Services\Kpi\MotivationRecalculation::class)->run($filters, $actor);
     }
 
     public function upsertRewardIssue(int $achievementId, array $data): MotivationRewardIssue
     {
-        $payload = [];
-        if (array_key_exists('assignee_id', $data)) {
-            $payload['assignee_id'] = $data['assignee_id'];
-        }
-        if (array_key_exists('status', $data)) {
-            $payload['status'] = $data['status'];
-        }
-        if (array_key_exists('comment', $data)) {
-            $payload['comment'] = $data['comment'];
-        }
-        if (($data['status'] ?? null) === 'issued') {
-            $payload['issued_at'] = Carbon::now(self::TZ);
-        }
-
-        return MotivationRewardIssue::query()->updateOrCreate(
-            ['achievement_id' => $achievementId],
-            $payload
-        );
+        return DB::transaction(function () use ($achievementId, $data) {
+            $achievement = MotivationAchievement::whereKey($achievementId)->lockForUpdate()->firstOrFail();
+            abort_unless($achievement->status === 'approved', 409, 'Награда ещё не согласована или уже выдана.');
+            abort_if(($data['status'] ?? null) === 'issued', 422, 'Используйте подтверждение выдачи с датой и подтверждающим документом.');
+            return MotivationRewardIssue::updateOrCreate(['achievement_id' => $achievementId], $data);
+        }, 3);
     }
 
     public function applyUiMetaFallback(MotivationRule $rule): array
@@ -228,9 +132,6 @@ class MotivationService
     public function buildOverview(User $actor, string $periodType, string $dateFrom, string $dateTo): array
     {
         [$from, $to] = $this->validatePeriod($periodType, $dateFrom, $dateTo);
-        $credits = $this->salesCreditsByAgent($from, $to);
-        $actorFact = (float) ($credits[(int) $actor->id] ?? 0);
-        $companyFact = (float) $credits->sum();
 
         $rules = MotivationRule::query()
             ->where('is_active', true)
@@ -244,21 +145,21 @@ class MotivationService
         $agentRules = $rules->where('scope', 'agent')->values();
         $companyRules = $rules->where('scope', 'company')->values();
 
-        $agentAchievements = $this->loadAchievements($agentRules, $actor->id, false, $periodType, $dateFrom, $dateTo);
-        $companyAchievements = $this->loadAchievements($companyRules, null, true, $periodType, $dateFrom, $dateTo);
+        $agentAchievements = $this->loadAchievements($agentRules, $actor->id, false, $periodType);
+        $companyAchievements = $this->loadAchievements($companyRules, null, true, $periodType);
 
-        $cards = $agentRules->map(function (MotivationRule $rule) use ($actorFact, $agentAchievements) {
-            return $this->buildCard($rule, $actorFact, $agentAchievements->get($rule->id));
-        })->values();
+        $cards = $agentRules->filter(fn ($rule) => (! $rule->branch_id || (int) $rule->branch_id === (int) $actor->branch_id)
+            && (! $rule->branch_group_id || (int) $rule->branch_group_id === (int) $actor->branch_group_id))
+            ->map(fn ($rule) => $this->buildCard($rule, $actor, $agentAchievements->get($rule->id)))->values();
 
         $companyCard = $companyRules
-            ->map(fn (MotivationRule $rule) => $this->buildCard($rule, $companyFact, $companyAchievements->get($rule->id)))
-            ->sortBy('remaining')
+            ->map(fn (MotivationRule $rule) => $this->buildCard($rule, null, $companyAchievements->get($rule->id)))
+            ->sortByDesc('progress.progress_percent')
             ->first();
 
         $nextRewardCard = collect($cards)
             ->where('status', 'in_progress')
-            ->sortBy('remaining')
+            ->sortByDesc('progress.progress_percent')
             ->first();
 
         return [
@@ -276,83 +177,32 @@ class MotivationService
         ];
     }
 
-    private function salesCreditsByAgent(Carbon $fromTz, Carbon $toTz): Collection
+    private function buildCard(MotivationRule $rule, ?User $user, ?MotivationAchievement $achievement): array
     {
-        $startUtc = $fromTz->copy()->setTimezone('UTC');
-        $endUtc = $toTz->copy()->setTimezone('UTC');
-
-        $soldProperties = DB::table('properties')
-            ->select(['id', 'agent_id', 'sale_user_id'])
-            ->whereIn('moderation_status', ['sold', 'rented', 'sold_by_owner'])
-            ->whereBetween('sold_at', [$startUtc->toDateTimeString(), $endUtc->toDateTimeString()])
-            ->get();
-
-        if ($soldProperties->isEmpty()) {
-            return collect();
-        }
-
-        $propertyIds = $soldProperties->pluck('id')->all();
-        $saleAgentsRows = DB::table('property_agent_sales')
-            ->select(['property_id', 'agent_id'])
-            ->whereIn('property_id', $propertyIds)
-            ->get()
-            ->groupBy('property_id');
-
-        $credits = collect();
-
-        foreach ($soldProperties as $property) {
-            $rawParticipants = collect($saleAgentsRows->get($property->id, []))->pluck('agent_id')->values();
-            $participants = $rawParticipants->filter(fn ($id) => ! is_null($id))->unique()->values();
-
-            if ($participants->isNotEmpty()) {
-                $share = 1 / max(1, $participants->count());
-                foreach ($participants as $participantId) {
-                    $credits[(int) $participantId] = round((float) ($credits[(int) $participantId] ?? 0) + $share, 4);
-                }
-
-                continue;
-            }
-
-            $saleUserId = (int) ($property->sale_user_id ?? 0);
-            if ($saleUserId > 0) {
-                $credits[$saleUserId] = round((float) ($credits[$saleUserId] ?? 0) + 1.0, 4);
-                continue;
-            }
-
-            if ((int) ($property->agent_id ?? 0) > 0) {
-                $agentId = (int) $property->agent_id;
-                $credits[$agentId] = round((float) ($credits[$agentId] ?? 0) + 1.0, 4);
-            }
-        }
-
-        return $credits;
-    }
-
-    private function buildCard(MotivationRule $rule, float $fact, ?MotivationAchievement $achievement): array
-    {
-        $threshold = (float) $rule->threshold_value;
+        $facts = app(\App\Services\Kpi\ResultFactService::class)->forPeriod($rule->date_from->toDateString(), $rule->date_to->toDateString());
+        $progress = app(\App\Services\Kpi\MotivationEligibility::class)->evaluate($rule, $facts, $user, $achievement?->meta['eligibility']['condition'] ?? null);
+        $condition = $progress['condition'];
+        $amountMode = ($condition['mode'] ?? 'count') === 'amount';
+        $fact = $amountMode ? $progress['amount'] : $progress['count'];
+        $threshold = (float) ($amountMode ? ($condition['amount_target'] ?? 0) : ($condition['count_target'] ?? $rule->threshold_value));
         $remaining = max(0, (int) ceil($threshold - $fact));
-        $status = $remaining <= 0 ? 'achieved' : 'in_progress';
-        $achievementStatus = $achievement?->status;
-        if ($achievementStatus === 'issued') {
-            $status = 'issued';
-        }
-
+        $status = $progress['eligible'] ? 'achieved' : 'in_progress';
+        if ($achievement?->status === 'issued') $status = 'issued';
         $uiMeta = $this->applyUiMetaFallback($rule);
-        $messagePreview = $this->buildMessagePreview($uiMeta, $remaining);
-
+        $message = $progress['eligible'] ? 'Условие выполнено. Награда проходит проверку.' : $this->buildMessagePreview($uiMeta, $remaining);
+        if ($amountMode && ! $progress['eligible']) $message = 'До цели осталось '.number_format(max(0, $threshold - $fact), 2, '.', ' ').' '.($condition['currency'] ?? 'TJS').'.';
+        if (($condition['mode'] ?? '') === 'count_or_amount' && ! $progress['eligible']) $message = 'До цели: ещё '.$progress['remaining_count'].' '.$this->pluralizeRu((int) $progress['remaining_count'], $this->unitLabels($uiMeta)).' или '.number_format($progress['remaining_amount'], 2, '.', ' ').' '.($condition['currency'] ?? 'TJS').'.';
+        if ($progress['status'] === 'no_plan') $message = 'Руководитель ещё не назначил цель KPI на этот период.';
+        if ($progress['progress_is_lower_bound']) $message = 'Не все суммы подтверждены. Результат может увеличиться.';
+        if ($status === 'issued') $message = 'Награда выдана.';
         return [
-            'rule_id' => (int) $rule->id,
-            'scope' => (string) $rule->scope,
-            'reward_type' => (string) $rule->reward_type,
-            'name' => (string) $rule->name,
-            'fact' => round($fact, 4),
-            'threshold' => round($threshold, 4),
-            'remaining' => $remaining,
-            'status' => $status,
-            'achievement_status' => $achievementStatus,
-            'ui_meta' => $uiMeta,
-            'message_preview' => $messagePreview,
+            'rule_id' => (int) $rule->id, 'scope' => $rule->scope, 'reward_type' => $rule->reward_type, 'name' => $rule->name,
+            'description' => $rule->description, 'fact' => $fact, 'threshold' => $threshold, 'remaining' => $remaining,
+            'status' => $status, 'achievement_status' => $achievement?->meta['workflow'] ?? $achievement?->status,
+            'achievement_id' => $achievement?->id, 'ui_meta' => $uiMeta, 'message_preview' => $message,
+            'progress' => $progress, 'condition' => $condition, 'reward_amount' => $rule->reward_amount,
+            'reward_currency' => $rule->reward_currency, 'date_from' => $rule->date_from->toDateString(),
+            'date_to' => $rule->date_to->toDateString(), 'review_required' => $achievement?->meta['review_required'] ?? false,
         ];
     }
 
@@ -360,9 +210,7 @@ class MotivationService
         EloquentCollection $rules,
         ?int $userId,
         bool $companyScope,
-        string $periodType,
-        string $dateFrom,
-        string $dateTo
+        string $periodType
     ): Collection {
         if ($rules->isEmpty()) {
             return collect();
@@ -371,8 +219,11 @@ class MotivationService
         return MotivationAchievement::query()
             ->whereIn('rule_id', $rules->pluck('id')->all())
             ->where('period_type', $periodType)
-            ->whereDate('date_from', $dateFrom)
-            ->whereDate('date_to', $dateTo)
+            // An award belongs to its program's period, even when the report
+            // shows a wider or narrower overlapping date range.
+            ->whereHas('rule', fn ($query) => $query
+                ->whereColumn('motivation_rules.date_from', 'motivation_achievements.date_from')
+                ->whereColumn('motivation_rules.date_to', 'motivation_achievements.date_to'))
             ->when($companyScope, fn ($q) => $q->where('company_scope', true))
             ->when(! $companyScope, fn ($q) => $q->where('user_id', $userId))
             ->get()

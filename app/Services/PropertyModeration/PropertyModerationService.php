@@ -64,6 +64,9 @@ final class PropertyModerationService
         'company_commission_amount',
         'company_commission_currency',
         'actual_sale_price',
+        'rental_monthly_amount',
+        'rental_contract_amount',
+        'deal_fx_rate',
         'actual_sale_currency',
         'planned_contract_signed_at',
         'sale_user_id',
@@ -1697,6 +1700,7 @@ final class PropertyModerationService
             $dealFields = [
                 'sold_at', 'sale_user_id', 'sale_agent_id', 'buyer_client_id', 'buyer_full_name', 'buyer_phone',
                 'actual_sale_price', 'actual_sale_currency', 'company_commission_amount', 'company_commission_currency',
+                'rental_monthly_amount', 'rental_contract_amount', 'deal_fx_rate',
                 'money_holder', 'money_received_at', 'contract_signed_at', 'deposit_amount', 'deposit_currency',
                 'deposit_received_at', 'deposit_taken_at', 'deposit_user_id', 'planned_contract_signed_at',
                 'company_expected_income', 'company_expected_income_currency', 'status_comment',

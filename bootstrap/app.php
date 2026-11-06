@@ -174,6 +174,7 @@ return Application::configure(basePath: dirname(__DIR__))
         });
     })
     ->withSchedule(function (Schedule $schedule) {
+        $schedule->command('motivation:refresh')->everyFiveMinutes()->withoutOverlapping();
         $schedule->command('notifications:dispatch-reminders')->everyFiveMinutes();
         $schedule->command('stories:expire')->everyFiveMinutes();
         $schedule->command('audit:prune-api-request-logs')->dailyAt('03:30');
