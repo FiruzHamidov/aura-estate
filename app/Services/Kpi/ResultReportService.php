@@ -79,7 +79,9 @@ final class ResultReportService
         $row = ['user_id' => $user->id, 'name' => $user->name, 'branch_id' => $user->branch_id, 'branch_group_id' => $user->branch_group_id];
         foreach (['sale', 'rental'] as $kind) {
             $goal = $this->goals->resolve($user->id, $user->branch_group_id, $month, $kind);
-            if ($goal && $actor && ! $this->access->visible($actor, $goal)) {
+            // A group template applies to this employee's result; authorize that
+            // personal projection while retaining the goal's branch/group scope.
+            if ($goal && $actor && ! $this->access->visible($actor, array_replace($goal, ['user_id' => $goal['user_id'] ?? $user->id]))) {
                 $goal = null;
             }
             $items = $facts->where('kind', $kind);
