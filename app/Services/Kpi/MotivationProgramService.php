@@ -33,7 +33,7 @@ final class MotivationProgramService
             'expected_version' => ($update ? 'required' : 'sometimes').'|integer|min:1',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'branch_id' => 'nullable|integer|exists:branches,id',
-            'condition' => 'nullable|array:source,kind,mode,count_target,amount_target,currency,rental_basis,goal_id',
+            'condition' => 'nullable|array:source,kind,mode,count_target,amount_target,currency,rental_basis,amount_basis,goal_id',
             'condition.source' => ['nullable', Rule::in(['independent', 'kpi_goal'])],
             'condition.goal_id' => 'nullable|integer|exists:kpi_result_goals,id',
             'condition.kind' => ['required_with:condition', Rule::in(['sale', 'rental'])],
@@ -41,7 +41,10 @@ final class MotivationProgramService
             'condition.count_target' => ['nullable', Rule::requiredIf(fn () => data_get($data, 'condition.source') !== 'kpi_goal' && in_array(data_get($data, 'condition.mode'), ['count', 'count_or_amount'])), 'integer', 'min:1', 'max:1000000'],
             'condition.amount_target' => ['nullable', Rule::requiredIf(fn () => data_get($data, 'condition.source') !== 'kpi_goal' && in_array(data_get($data, 'condition.mode'), ['amount', 'count_or_amount'])), 'numeric', 'min:0.01', 'max:999999999999.99', 'decimal:0,2'],
             'condition.currency' => ['required_with:condition', Rule::in(['TJS', 'USD'])],
-            'condition.rental_basis' => ['nullable', 'required_if:condition.kind,rental', Rule::in(['monthly_rent', 'contract_total'])],
+            'condition.amount_basis' => ['nullable', Rule::requiredIf(fn () => data_get($data, 'condition.source') !== 'kpi_goal' && in_array(data_get($data, 'condition.mode'), ['amount', 'count_or_amount'])), Rule::in(ResultAmount::BASES)],
+            'condition.rental_basis' => ['nullable', Rule::requiredIf(fn () => data_get($data, 'condition.source') !== 'kpi_goal'
+                && data_get($data, 'condition.kind') === 'rental' && data_get($data, 'condition.amount_basis', 'deal_value') === 'deal_value'
+                && data_get($data, 'condition.mode') !== 'count'), Rule::in(['monthly_rent', 'contract_total'])],
             'reward_amount' => 'nullable|required_if:reward_type,cash|numeric|min:0.01|max:999999999999.99|decimal:0,2',
             'reward_currency' => ['nullable', 'required_with:reward_amount', Rule::in(['TJS', 'USD'])],
         ];

@@ -602,6 +602,7 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
             PropertyStatus::create(['name' => 'Available', 'slug' => 'available']));
         $property->refresh()->forceFill(['publication_status' => 'published', 'deal_status' => 'available', 'moderation_version' => 1])->saveQuietly();
         Sanctum::actingAs($actor);
+
         return [$actor, $property];
     }
 
@@ -609,6 +610,7 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
     {
         [$actor, $property] = $this->workflowFixture();
         (require database_path('migrations/2026_11_05_140000_create_kpi_result_goals_and_facts.php'))->up();
+        (require database_path('migrations/2026_11_07_150000_add_kpi_amount_bases.php'))->up();
         Property::setEventDispatcher(app('events'));
         $payload = $this->salePayload([
             'deal_status' => 'rented', 'version' => 1, 'actual_sale_price' => 6000,
@@ -631,6 +633,26 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
         $this->assertSame(1, $facts->currentQuery()->count());
         $this->assertSame(66000.0, (float) $facts->currentQuery()->sole()->rental_contract_amount);
         $this->assertSame((int) $fact->id, (int) $facts->currentQuery()->sole()->supersedes_id);
+    }
+
+    public function test_participant_payout_only_edit_records_complete_financial_snapshot(): void
+    {
+        [$actor, $property] = $this->workflowFixture();
+        (require database_path('migrations/2026_11_05_140000_create_kpi_result_goals_and_facts.php'))->up();
+        (require database_path('migrations/2026_11_07_150000_add_kpi_amount_bases.php'))->up();
+        Property::setEventDispatcher(app('events'));
+        $payload = $this->salePayload(['version' => 1, 'deal_fx_rate' => 10,
+            'agents' => [['agent_id' => $actor->id, 'role' => 'partner', 'commission_amount' => 1000, 'commission_currency' => 'USD']]]);
+        $this->postJson('/api/properties/'.$property->id.'/deal', $payload)->assertOk();
+        $facts = app(\App\Services\Kpi\ResultFactService::class);
+        $this->assertSame(40000.0, $facts->amount($facts->currentQuery()->sole(), 'TJS', null, 'company_and_agents'));
+        $previousId = $facts->currentQuery()->sole()->id;
+        $payload['version'] = 2;
+        $payload['agents'][0]['commission_amount'] = 500;
+        $this->postJson('/api/properties/'.$property->id.'/deal', $payload)->assertOk();
+        $this->assertSame(35000.0, $facts->amount($facts->currentQuery()->sole(), 'TJS', null, 'company_and_agents'));
+        $this->assertSame((int) $previousId, (int) $facts->currentQuery()->sole()->supersedes_id);
+        $this->assertSame(1, $facts->currentQuery()->count());
     }
 
     public function test_refusal_unpublishes_and_legacy_closed_rows_are_never_public(): void

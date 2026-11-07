@@ -39,7 +39,7 @@ final class PlanningDraftService
     {
         $payload = $input['payload'];
         $type = $input['type'];
-        $rules = $type === 'goal' ? ResultGoalService::rules() : MotivationProgramService::rules($payload);
+        $rules = $type === 'goal' ? ResultGoalService::rules($payload) : MotivationProgramService::rules($payload);
         // A draft may be incomplete; unknown fields and unbounded free-form values are not persisted.
         foreach ($rules as $field => $rule) {
             $parts = is_array($rule) ? $rule : explode('|', $rule);
@@ -153,10 +153,10 @@ final class PlanningDraftService
     {
         $data = $draft->payload;
         $this->scope->authorize($actor, $draft->type, $data, $draft->created_by);
-        $rules = $draft->type === 'goal' ? ResultGoalService::rules() : MotivationProgramService::rules($data, (bool) $draft->entity_id);
+        $rules = $draft->type === 'goal' ? ResultGoalService::rules($data) : MotivationProgramService::rules($data, (bool) $draft->entity_id);
         if ($draft->type === 'program') {
             // This editor always creates explicit result-based programs, never a legacy rule by accident.
-            $rules['condition'] = 'required|array:source,kind,mode,count_target,amount_target,currency,rental_basis';
+            $rules['condition'] = 'required|array:source,kind,mode,count_target,amount_target,currency,rental_basis,amount_basis';
             $rules['condition.source'] = 'required|in:kpi_goal,independent';
             if (($data['reward_type'] ?? null) !== 'cash') {
                 $rules['ui_meta.reward_details.title'] = 'required|string|max:255';

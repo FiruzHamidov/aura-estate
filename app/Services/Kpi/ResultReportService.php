@@ -87,15 +87,17 @@ final class ResultReportService
             $items = $facts->where('kind', $kind);
             $basis = $goal['rental_basis'] ?? ($kind === 'rental' ? 'monthly_rent' : null);
             $currency = $goal['currency'] ?? 'TJS';
-            $amounts = $items->map(fn ($fact) => $this->facts->amount($fact, $currency, $basis));
+            $amountBasis = $goal ? ResultAmount::basis($goal) : 'company_income';
+            $amounts = $items->map(fn ($fact) => $this->facts->amount($fact, $currency, $basis, $amountBasis));
             $row[$kind] = ResultProgress::calculate($goal, $items->count(), $amounts->filter(fn ($n) => $n !== null)->sum(), $amounts->filter(fn ($n) => $n === null)->count())
-                + ['goal' => $goal, 'currency' => $currency, 'rental_basis' => $basis];
+                + ['goal' => $goal, 'currency' => $currency, 'rental_basis' => $basis, 'amount_basis' => $amountBasis];
         }
         $row['deals'] = $facts->map(fn ($fact) => [
             'user_id' => $fact->user_id, 'branch_id' => $fact->branch_id, 'branch_group_id' => $fact->branch_group_id,
             'source_event' => $fact->source_event, 'property_id' => $fact->property_id,
             'kind' => $fact->kind, 'closed_at' => $fact->closed_at, 'amount' => $fact->amount,
-            'kpi_amount' => $this->facts->amount($fact, $row[$fact->kind]['currency'], $row[$fact->kind]['rental_basis']),
+            'kpi_amount' => $this->facts->amount($fact, $row[$fact->kind]['currency'], $row[$fact->kind]['rental_basis'], $row[$fact->kind]['amount_basis']),
+            'amount_basis' => $row[$fact->kind]['amount_basis'],
             'kpi_currency' => $row[$fact->kind]['currency'], 'rental_basis' => $row[$fact->kind]['rental_basis'],
             'currency' => $fact->currency, 'rental_monthly_amount' => $fact->rental_monthly_amount,
             'rental_contract_amount' => $fact->rental_contract_amount, 'fx_rate' => $fact->fx_rate,

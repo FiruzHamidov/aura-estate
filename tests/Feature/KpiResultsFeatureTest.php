@@ -68,6 +68,8 @@ class KpiResultsFeatureTest extends TestCase
             $t->decimal('actual_sale_price', 16, 2)->nullable();
             $t->string('actual_sale_currency')->nullable();
             $t->string('status_comment')->nullable();
+            $t->decimal('company_commission_amount', 16, 2)->nullable();
+            $t->string('company_commission_currency', 3)->nullable();
             $t->softDeletes();
             $t->timestamps();
         });
@@ -79,6 +81,7 @@ class KpiResultsFeatureTest extends TestCase
             '2026_11_05_140000_create_kpi_result_goals_and_facts',
             '2026_11_05_150000_extend_motivation_programs',
             '2026_11_06_100000_create_kpi_planning_drafts',
+            '2026_11_07_150000_add_kpi_amount_bases',
         ] as $migration) {
             (require database_path('migrations/'.$migration.'.php'))->up();
         }
@@ -118,6 +121,7 @@ class KpiResultsFeatureTest extends TestCase
         return array_replace([
             'month' => '2026-11', 'kind' => 'sale', 'user_id' => $this->agent->id, 'expected_version' => 0,
             'mode' => 'count_or_amount', 'count_target' => 3, 'amount_target' => 1000, 'currency' => 'TJS',
+            'amount_basis' => 'deal_value',
         ], $changes);
     }
 
@@ -666,6 +670,7 @@ class KpiResultsFeatureTest extends TestCase
     {
         return array_replace([
             'month' => '2026-12', 'kind' => 'sale', 'mode' => 'count_or_amount', 'currency' => 'TJS',
+            'amount_basis' => 'deal_value',
             'rows' => array_map(fn ($id) => ['user_id' => $id, 'expected_version' => 0, 'count_target' => 3, 'amount_target' => '1000000.00'], $ids),
         ], $changes);
     }
@@ -746,5 +751,123 @@ class KpiResultsFeatureTest extends TestCase
         DB::statement("CREATE TRIGGER fail_bulk_second BEFORE INSERT ON kpi_result_goals WHEN NEW.user_id = {$second->id} BEGIN SELECT RAISE(ABORT, 'test failure'); END");
         $this->postJson('/api/kpi/planning/bulk-goals/publish', $data + ['preview_token' => $preview['preview_token']])->assertStatus(500);
         $this->assertDatabaseCount('kpi_result_goals', 0);
+    }
+
+    public function test_income_basis_is_consistent_in_report_deal_and_motivation(): void
+    {
+        $condition = $this->goal(['amount_basis' => 'company_income', 'count_target' => 2, 'amount_target' => 20000]);
+        $this->postJson('/api/kpi/results/goals', $condition)->assertCreated();
+        $this->property(['actual_sale_price' => 280000, 'actual_sale_currency' => 'TJS',
+            'company_commission_amount' => 12000, 'company_commission_currency' => 'TJS']);
+        $row = $this->getJson('/api/kpi/results?month=2026-11&user_id='.$this->agent->id)->assertOk()->json('rows.0');
+        $this->assertEquals(12000, $row['sale']['amount']);
+        $this->assertEquals(60, $row['sale']['progress_percent']);
+        $this->assertFalse($row['sale']['achieved']);
+        $this->assertEquals(12000, $row['deals'][0]['kpi_amount']);
+        $this->assertSame('company_income', $row['deals'][0]['amount_basis']);
+        $rule = $this->program();
+        $facts = app(ResultFactService::class)->forPeriod('2026-11-01', '2026-11-30');
+        foreach ([$condition, ['source' => 'kpi_goal', 'kind' => 'sale']] as $criteria) {
+            $rule->condition = $criteria;
+            $progress = app(\App\Services\Kpi\MotivationEligibility::class)->evaluate($rule, $facts, $this->agent);
+            $this->assertEquals(60, $progress['progress_percent']);
+            $this->assertFalse($progress['eligible']);
+        }
+    }
+
+    public function test_financial_revisions_preserve_zero_missing_and_participant_only_changes(): void
+    {
+        Schema::create('property_agent_sales', function (Blueprint $t) {
+            $t->unsignedBigInteger('property_id');
+            $t->unsignedBigInteger('agent_id');
+            $t->decimal('agent_commission_amount', 16, 2)->nullable();
+            $t->string('agent_commission_currency')->nullable();
+        });
+        $p = $this->property(['company_commission_amount' => 12000, 'company_commission_currency' => 'TJS', 'deal_fx_rate' => 10]);
+        $facts = app(ResultFactService::class);
+        $facts->record($p, 'company-only');
+        DB::table('property_agent_sales')->insert(['property_id' => $p->id, 'agent_id' => $this->agent->id,
+            'agent_commission_amount' => 800, 'agent_commission_currency' => 'USD']);
+        $facts->record($p, 'participant-added', financialChangeOnly: true);
+        $this->assertEquals(20000, $facts->amount($facts->currentQuery()->sole(), 'TJS', null, 'company_and_agents'));
+        $facts->record($p, 'no-change', financialChangeOnly: true);
+        $this->assertDatabaseCount('kpi_result_facts', 2);
+        DB::table('property_agent_sales')->update(['agent_commission_amount' => 0]);
+        $facts->record($p, 'zero', financialChangeOnly: true);
+        $this->assertEquals(12000, $facts->amount($facts->currentQuery()->sole(), 'TJS', null, 'company_and_agents'));
+        DB::table('property_agent_sales')->update(['agent_commission_amount' => null]);
+        $facts->record($p, 'unknown', financialChangeOnly: true);
+        $this->assertNull($facts->amount($facts->currentQuery()->sole(), 'TJS', null, 'company_and_agents'));
+        $this->assertDatabaseCount('kpi_result_facts', 4);
+        $this->assertCount(1, $facts->forPeriod('2026-11-01', '2026-11-30'));
+        $this->assertSame('[]', DB::table('kpi_result_facts')->orderBy('id')->first()->participant_commissions);
+    }
+
+    public function test_upgrade_versions_only_current_goals_and_preserves_closed_reports_and_rewards(): void
+    {
+        $goalId = $this->postJson('/api/kpi/results/goals', $this->goal(['count_target' => 2, 'amount_target' => 20000]))->assertCreated()->json('data.id');
+        $futureId = $this->postJson('/api/kpi/results/goals', $this->goal(['month' => '2026-12']))->assertCreated()->json('data.id');
+        $p = $this->property(['actual_sale_price' => 280000, 'actual_sale_currency' => 'TJS',
+            'company_commission_amount' => 12000, 'company_commission_currency' => 'TJS']);
+        app(ResultFactService::class)->record($p, 'pre-upgrade');
+        DB::table('kpi_result_facts')->update(['company_commission_amount' => null, 'company_commission_currency' => null, 'participant_commissions' => null]);
+        $rule = $this->program();
+        $original = (array) DB::table('kpi_result_goals')->find($goalId);
+        $award = MotivationAchievement::create(['rule_id' => $rule->id, 'user_id' => $this->agent->id, 'company_scope' => false,
+            'won_at' => now(), 'period_type' => 'month', 'date_from' => '2026-11-01', 'date_to' => '2026-11-30',
+            'snapshot_value' => 1, 'status' => 'issued', 'issued_at' => now(), 'meta' => ['eligibility' => ['condition' => $original]]]);
+        DB::table('kpi_result_periods')->insert(['month' => '2026-10-01', 'user_id' => $this->agent->id,
+            'branch_id' => 1, 'branch_group_id' => 1, 'snapshot' => '{"sale":{"amount":280000}}', 'closed_by' => $this->admin->id]);
+        $savedAward = $award->fresh()->getRawOriginal();
+        $savedPeriod = (array) DB::table('kpi_result_periods')->sole();
+        $upgrade = app(\App\Services\Kpi\ResultAmountUpgrade::class);
+        $result = $upgrade->run('2026-11');
+        $this->assertCount(1, $result['goal_revisions']);
+        $this->assertSame(1, $result['financial_snapshots']);
+        $goal = app(\App\Services\Kpi\ResultGoalService::class)->resolve($this->agent->id, 1, '2026-11', 'sale');
+        $this->assertSame('company_income', $goal['amount_basis']);
+        $this->assertEquals(2, $goal['count_target']);
+        $this->assertEquals(20000, $goal['amount_target']);
+        $this->assertSame($original, (array) DB::table('kpi_result_goals')->find($goalId));
+        $this->assertSame('deal_value', DB::table('kpi_result_goals')->find($futureId)->amount_basis);
+        $this->assertSame($savedAward, $award->fresh()->getRawOriginal());
+        $this->postJson('/api/motivation/recalculate', ['rule_id' => $rule->id, 'preview' => true])->assertOk()->assertJsonCount(0, 'data.changes');
+        $this->assertSame($savedPeriod, (array) DB::table('kpi_result_periods')->sole());
+        $this->assertSame(['month' => '2026-11', 'financial_snapshots' => 0, 'goal_revisions' => []], $upgrade->run('2026-11'));
+    }
+
+    public function test_amount_basis_is_required_and_survives_draft_and_bulk_publication(): void
+    {
+        $payload = $this->goal(['month' => '2026-12', 'kind' => 'rental', 'amount_basis' => 'company_income']);
+        $this->postJson('/api/kpi/results/goals', array_replace($payload, ['amount_basis' => null]))->assertUnprocessable();
+        $this->postJson('/api/kpi/results/goals', array_replace($payload, ['amount_basis' => 'net_profit']))->assertUnprocessable();
+        $draft = $this->planningDraft($payload);
+        $this->assertSame('company_income', $draft['payload']['amount_basis']);
+        $preview = $this->planningPreview($draft);
+        $this->assertSame('company_income', $preview['condition']['amount_basis']);
+        $other = $this->user('agent', 1);
+        $bulk = $this->bulkPayload([$other->id], ['kind' => 'rental', 'amount_basis' => 'company_and_agents']);
+        $preview = $this->postJson('/api/kpi/planning/bulk-goals/preview', $bulk)->assertOk()->json('data');
+        $this->postJson('/api/kpi/planning/bulk-goals/publish', $bulk + ['preview_token' => $preview['preview_token']])->assertCreated();
+        $this->assertDatabaseHas('kpi_result_goals', ['user_id' => $other->id, 'amount_basis' => 'company_and_agents', 'rental_basis' => null]);
+    }
+
+    public function test_new_independent_rental_program_uses_commission_without_contract_period(): void
+    {
+        $condition = ['source' => 'independent', 'kind' => 'rental', 'mode' => 'amount',
+            'amount_target' => 10000, 'currency' => 'TJS', 'amount_basis' => 'company_and_agents'];
+        $payload = $this->planningProgram(['condition' => $condition]);
+        $draft = $this->planningDraft($payload, 'program', 3);
+        $preview = $this->planningPreview($draft);
+        $this->assertSame('company_and_agents', $preview['program']['condition']['amount_basis']);
+        $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/publish', [
+            'revision' => $draft['revision'], 'preview_token' => $preview['preview_token'],
+        ])->assertCreated();
+        $this->assertSame('company_and_agents', MotivationRule::sole()->condition['amount_basis']);
+        $incomeGoal = $this->goal(['amount_basis' => 'company_income']);
+        $this->postJson('/api/kpi/results/goals', $incomeGoal)->assertCreated();
+        $this->postJson('/api/kpi/planning/copy-month', ['from' => '2026-11', 'to' => '2026-12', 'branch_group_id' => 1])->assertOk();
+        $copy = \App\Models\KpiPlanningDraft::where('type', 'goal')->sole();
+        $this->assertSame('company_income', $copy->payload['amount_basis']);
     }
 }

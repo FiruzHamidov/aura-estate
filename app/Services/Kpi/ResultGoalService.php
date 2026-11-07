@@ -12,7 +12,7 @@ use Illuminate\Validation\ValidationException;
 
 final class ResultGoalService
 {
-    public static function rules(): array
+    public static function rules(array $data = []): array
     {
         return [
             'month' => 'required|date_format:Y-m', 'kind' => ['required', Rule::in(['sale', 'rental'])],
@@ -23,7 +23,9 @@ final class ResultGoalService
             'count_target' => 'nullable|required_if:mode,count,count_or_amount|integer|min:1|max:1000000',
             'amount_target' => 'nullable|required_if:mode,amount,count_or_amount|numeric|min:0.01|max:999999999999.99|decimal:0,2',
             'currency' => ['required', Rule::in(['TJS', 'USD'])],
-            'rental_basis' => ['nullable', 'required_if:kind,rental', Rule::in(['monthly_rent', 'contract_total'])],
+            'amount_basis' => ['nullable', 'required_unless:mode,count', Rule::in(ResultAmount::BASES)],
+            'rental_basis' => ['nullable', Rule::requiredIf(fn () => ($data['kind'] ?? null) === 'rental'
+                && ($data['amount_basis'] ?? 'deal_value') === 'deal_value' && ($data['mode'] ?? null) !== 'count'), Rule::in(['monthly_rent', 'contract_total'])],
             'comment' => 'nullable|string|max:500',
         ];
     }
@@ -62,7 +64,8 @@ final class ResultGoalService
                 'count_target' => $mode === 'amount' ? null : $data['count_target'],
                 'amount_target' => $mode === 'count' ? null : $data['amount_target'],
                 'currency' => $data['currency'] ?? 'TJS',
-                'rental_basis' => $data['kind'] === 'rental' ? $data['rental_basis'] : null,
+                'amount_basis' => $data['amount_basis'] ?? 'company_income',
+                'rental_basis' => $data['kind'] === 'rental' && ($data['amount_basis'] ?? 'company_income') === 'deal_value' ? ($data['rental_basis'] ?? null) : null,
                 'comment' => $data['comment'] ?? null, 'created_by' => $actor->id,
                 'created_at' => now(), 'updated_at' => now(),
             ];

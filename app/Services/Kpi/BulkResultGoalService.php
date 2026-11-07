@@ -21,7 +21,8 @@ final class BulkResultGoalService
             'kind' => 'required|in:sale,rental',
             'mode' => 'required|in:count,amount,count_or_amount',
             'currency' => 'required|in:TJS,USD',
-            'rental_basis' => 'nullable|required_if:kind,rental|in:monthly_rent,contract_total',
+            'amount_basis' => ['nullable', 'required_unless:mode,count', \Illuminate\Validation\Rule::in(ResultAmount::BASES)],
+            'rental_basis' => 'nullable|in:monthly_rent,contract_total',
             'rows' => 'required|array|min:1|max:200',
             'rows.*.user_id' => 'required|integer|distinct|exists:users,id',
             'rows.*.expected_version' => 'required|integer|min:0',
@@ -44,7 +45,7 @@ final class BulkResultGoalService
             $review = [];
             foreach ($data['rows'] as $index => $row) {
                 $payload = array_diff_key($data, ['rows' => true]) + $row;
-                $validator = Validator::make($payload, ResultGoalService::rules());
+                $validator = Validator::make($payload, ResultGoalService::rules($payload));
                 if ($validator->fails()) {
                     throw ValidationException::withMessages(collect($validator->errors()->messages())
                         ->mapWithKeys(fn ($messages, $field) => ['rows.'.$index.'.'.$field => $messages])->all());
