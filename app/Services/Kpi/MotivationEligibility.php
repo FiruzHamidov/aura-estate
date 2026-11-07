@@ -40,7 +40,7 @@ final class MotivationEligibility
         if ($rule->branch_group_id) {
             $items = $items->where('branch_group_id', $rule->branch_group_id);
         }
-        $amounts = $items->map(fn ($fact) => app(ResultFactService::class)->amount($fact, $condition['currency'] ?? 'TJS', $condition['rental_basis'] ?? null));
+        $amounts = $items->map(fn ($fact) => app(ResultFactService::class)->amount($fact, $condition['currency'] ?? 'TJS', $condition['rental_basis'] ?? null, ResultAmount::basis($condition)));
         $progress = ResultProgress::calculate($condition, $items->count(), $amounts->filter(fn ($n) => $n !== null)->sum(), $amounts->filter(fn ($n) => $n === null)->count());
 
         return $progress + [

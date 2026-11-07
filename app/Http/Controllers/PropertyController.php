@@ -3458,6 +3458,10 @@ class PropertyController extends Controller
             if ($request->has('agents')) {
                 $locked->saleAgents()->sync($this->saleAgentsSyncPayload($request->input('agents', [])));
             }
+            // The property observer runs before pivot sync. Capture the complete
+            // financial state inside this same transaction, including pivot-only edits.
+            app(\App\Services\Kpi\ResultFactService::class)->record($locked,
+                'deal-financials-'.\Illuminate\Support\Str::uuid(), $user->id, financialChangeOnly: true);
             $this->moderation->auditPropertyEvent($locked, $user, 'property_deal_status_changed', [
                 'status_comment' => $request->status_comment,
             ]);

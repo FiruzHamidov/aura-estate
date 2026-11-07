@@ -53,7 +53,7 @@ final class KpiResultController extends Controller
 
     public function publish(Request $request, ResultGoalService $service)
     {
-        $data = $request->validate(ResultGoalService::rules());
+        $data = $request->validate(ResultGoalService::rules($request->all()));
 
         return response()->json(['data' => $service->publish($request->user(), $data)], 201);
     }
