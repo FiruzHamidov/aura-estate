@@ -197,6 +197,34 @@ class KpiResultsFeatureTest extends TestCase
         $this->postJson('/api/kpi/results/goals', $groupGoal)->assertForbidden();
     }
 
+    public function test_own_result_report_applies_group_goal_without_exposing_other_employees(): void
+    {
+        $other = $this->user('agent', 2);
+        $goal = $this->goal(['branch_group_id' => 1, 'mode' => 'count', 'count_target' => 2]);
+        unset($goal['user_id']);
+        $goalId = $this->postJson('/api/kpi/results/goals', $goal)->assertCreated()->json('data.id');
+        $this->postJson('/api/kpi/results/goals', array_replace($goal, ['branch_group_id' => 2, 'count_target' => 5]))->assertCreated();
+        $this->property();
+
+        // A personal report reader does not need access to group plan administration.
+        $readerRole = Role::create(['name' => 'Personal report reader', 'slug' => 'personal-report-reader']);
+        $readerRole->forceFill(['permissions' => ['kpi.reports.view', 'kpi.reports.scope.own']])->save();
+        foreach ([$this->agent->role_id, $readerRole->id] as $roleId) {
+            $this->agent->forceFill(['role_id' => $roleId])->save();
+            Sanctum::actingAs($this->agent->fresh());
+            $this->getJson('/api/kpi/results?month=2026-11')->assertOk()
+                ->assertJsonCount(1, 'rows')->assertJsonPath('rows.0.user_id', $this->agent->id)
+                ->assertJsonPath('rows.0.sale.goal.id', $goalId)
+                ->assertJsonPath('rows.0.sale.goal.scope_key', 'group:1')
+                ->assertJsonPath('rows.0.sale.count', 1)
+                ->assertJsonPath('rows.0.sale.progress_percent', 50)
+                ->assertJsonPath('rows.0.sale.remaining_count', 1);
+            $this->getJson('/api/kpi/results?month=2026-11&user_id='.$other->id)
+                ->assertOk()->assertJsonCount(0, 'rows');
+        }
+        $this->getJson('/api/kpi/results/goals?month=2026-11')->assertForbidden();
+    }
+
     public function test_branch_director_can_publish_branch_program_but_not_global_or_foreign_branch(): void
     {
         $director = $this->user('branch_director', 1);
