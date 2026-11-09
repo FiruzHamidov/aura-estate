@@ -2034,6 +2034,76 @@ class RopGroupAssignmentsTest extends TestCase
         $this->assertFalse(app(\App\Services\GroupAccess\UserOrganizationService::class)->hasActiveRecords($employee->id));
     }
 
+    public static function supervisorPromotionRoles(): array
+    {
+        return [['agent', false], ['mop', false], ['agent', true]];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('supervisorPromotionRoles')]
+    public function test_promotion_to_group_supervisor_preserves_work_without_granting_groups(string $role, bool $custom): void
+    {
+        $employee = $this->user($role, $this->a);
+        $nextRole = $this->rop->role;
+        if ($custom) {
+            Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+            $nextRole = Role::create(['name' => 'Supervisor', 'slug' => 'custom_supervisor']);
+            $nextRole->forceFill(['permissions' => ['data.scope.assigned_groups', 'users.subject.group_assignment']])->save();
+        }
+        $client = Client::create(['full_name' => 'Active record', 'status' => 'active',
+            'branch_id' => $this->branch->id, 'branch_group_id' => $this->a->id, 'responsible_agent_id' => $employee->id]);
+        foreach (['properties' => 'agent_id', 'leads' => 'responsible_agent_id', 'crm_deals' => 'responsible_agent_id',
+            'bookings' => 'agent_id', 'crm_tasks' => 'assignee_id'] as $table => $responsible) {
+            Schema::create($table, function (Blueprint $schema) use ($responsible, $table) {
+                $schema->id(); $schema->unsignedBigInteger($responsible);
+                $schema->unsignedBigInteger('branch_group_id'); $schema->timestamps();
+                if ($table === 'properties') { $schema->unsignedBigInteger('created_by'); $schema->string('moderation_status')->nullable(); }
+                if (in_array($table, ['leads', 'crm_deals'])) $schema->timestamp('closed_at')->nullable();
+                if ($table === 'bookings') $schema->timestamp('end_time');
+                if ($table === 'crm_tasks') { $schema->string('status'); $schema->timestamp('completed_at')->nullable(); }
+            });
+            $attributes = [$responsible => $employee->id, 'branch_group_id' => $this->a->id];
+            if ($table === 'properties') $attributes += ['created_by' => $employee->id, 'moderation_status' => 'approved'];
+            if ($table === 'bookings') $attributes += ['end_time' => now()->addDay()];
+            if ($table === 'crm_tasks') $attributes += ['status' => 'todo'];
+            DB::table($table)->insert($attributes);
+        }
+        $tables = ['properties', 'clients', 'leads', 'crm_deals', 'bookings', 'crm_tasks'];
+        $before = collect($tables)->mapWithKeys(fn ($table) => [$table => DB::table($table)->get()->toJson()]);
+        Sanctum::actingAs($this->admin);
+        $this->patchJson('/api/user/'.$employee->id, ['role_id' => $nextRole->id])->assertOk()
+            ->assertJsonPath('role_id', $nextRole->id)->assertJsonPath('branch_group_id', $this->a->id);
+        foreach ($tables as $table) $this->assertSame($before[$table], DB::table($table)->get()->toJson(), $table);
+        $promoted = $employee->fresh();
+        $this->assertSame(1, (int) $promoted->access_scope_version);
+        $this->assertSame([], app(RopGroupAccess::class)->groupIds($promoted));
+        $this->assertFalse(app(RopGroupAccess::class)->allows($promoted, $client));
+        $this->assertFalse($promoted->hasPermission('users.subject.record_recipient'));
+        $this->assertDatabaseHas('group_access_audit_logs', ['event' => 'user_organization_changed', 'subject_id' => $employee->id]);
+    }
+
+    public function test_supervisor_promotion_cannot_bypass_status_group_branch_or_revoked_scope_checks(): void
+    {
+        $employee = $this->user('agent', $this->a);
+        Client::create(['full_name' => 'Active record', 'status' => 'active',
+            'branch_id' => $this->branch->id, 'branch_group_id' => $this->a->id, 'responsible_agent_id' => $employee->id]);
+        $other = Branch::create(['name' => 'Other']);
+        $foreign = BranchGroup::create(['name' => 'Foreign', 'branch_id' => $other->id]);
+        Sanctum::actingAs($this->admin);
+        foreach ([['status' => 'inactive'], ['branch_group_id' => $this->b->id],
+            ['branch_id' => $other->id, 'branch_group_id' => $foreign->id], ['branch_group_id' => null]] as $patch) {
+            $this->patchJson('/api/user/'.$employee->id, ['role_id' => $this->rop->role_id, ...$patch])
+                ->assertConflict()->assertJsonPath('code', 'EMPLOYEE_TRANSFER_REQUIRED');
+            $this->assertSame('agent', $employee->fresh()->role->slug);
+            $this->assertSame($this->a->id, $employee->fresh()->branch_group_id);
+            $this->assertSame('active', $employee->fresh()->status);
+        }
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $this->rop->role->forceFill(['permissions' => ['users.subject.group_assignment']])->save();
+        $this->patchJson('/api/user/'.$employee->id, ['role_id' => $this->rop->role_id])
+            ->assertConflict()->assertJsonPath('code', 'EMPLOYEE_TRANSFER_REQUIRED');
+        $this->assertDatabaseCount('group_access_audit_logs', 0);
+    }
+
     public function test_status_or_role_patch_cannot_bypass_required_active_record_handover(): void
     {
         $employee = $this->user('agent', $this->a);
