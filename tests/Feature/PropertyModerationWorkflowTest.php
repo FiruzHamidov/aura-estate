@@ -1846,6 +1846,58 @@ class PropertyModerationWorkflowTest extends TestCase
         return ['branch director' => ['branch_director'], 'ROP' => ['rop']];
     }
 
+    public static function promotedRopTransferActors(): array
+    {
+        return [['self'], ['admin'], ['branch_director']];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('promotedRopTransferActors')]
+    public function test_promoted_rop_can_keep_properties_then_redistribute_them_by_choice(string $actorRole): void
+    {
+        Schema::table('users', fn (Blueprint $table) => $table->softDeletes());
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedBigInteger('co_owner_user_id')->nullable());
+        [$employee, $rop, $director] = $this->users();
+        $adminRole = Role::create(['name' => 'Admin', 'slug' => 'admin']);
+        $admin = User::forceCreate(['name' => 'Admin', 'phone' => '900000005', 'role_id' => $adminRole->id, 'status' => 'active']);
+        $recipient = User::forceCreate(['name' => 'Recipient', 'phone' => '900000004',
+            'role_id' => $employee->role_id, 'branch_id' => 1, 'branch_group_id' => 1, 'status' => 'active']);
+        $property = Property::create($this->propertyPayload($employee, [
+            'moderation_status' => 'approved', 'publication_status' => 'published', 'moderation_version' => 1,
+        ]));
+        $kept = Property::create($this->propertyPayload($employee));
+        $propertyBefore = $property->fresh()->getAttributes();
+        $keptBefore = $kept->fresh()->getAttributes();
+        \Laravel\Sanctum\Sanctum::actingAs($admin);
+        $this->patchJson('/api/user/'.$employee->id, ['role_id' => $rop->role_id])->assertOk();
+        $employee = $employee->fresh();
+        $this->assertSame($propertyBefore, $property->fresh()->getAttributes());
+        $this->assertSame($keptBefore, $kept->fresh()->getAttributes());
+        $url = '/api/group-transfers/properties/'.$property->id;
+        \Laravel\Sanctum\Sanctum::actingAs($employee);
+        $this->getJson($url)->assertNotFound();
+        \Laravel\Sanctum\Sanctum::actingAs($admin);
+        $this->putJson('/api/users/'.$employee->id.'/supervised-groups', [
+            'branch_group_ids' => [1], 'version' => $employee->access_scope_version,
+        ])->assertOk();
+        Schema::create('crm_deals', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('primary_property_id')->nullable();
+            $table->string('control_kind')->nullable(); $table->timestamp('closed_at')->nullable(); $table->softDeletes();
+        });
+        $actor = match ($actorRole) { 'self' => $employee->fresh(), 'admin' => $admin, default => $director };
+        \Laravel\Sanctum\Sanctum::actingAs($actor);
+        $preview = $this->getJson($url)->assertOk()->assertJsonPath('responsible_user_id', $employee->id)->json();
+        $this->postJson($url, ['branch_group_id' => 1, 'responsible_user_id' => $recipient->id,
+            'revision' => $preview['revision'], 'reason' => 'Распределение объектов после повышения'])->assertOk();
+        $this->assertDatabaseHas('properties', ['id' => $property->id, 'agent_id' => $recipient->id,
+            'created_by' => $employee->id, 'branch_group_id' => 1, 'moderation_status' => 'approved',
+            'publication_status' => 'published', 'moderation_version' => 2]);
+        $this->assertSame($keptBefore, $kept->fresh()->getAttributes());
+        $this->assertDatabaseHas('property_moderation_events', ['property_id' => $property->id,
+            'actor_id' => $actor->id, 'event_type' => 'property_transferred']);
+        $this->assertDatabaseHas('group_access_audit_logs', ['subject_type' => 'properties',
+            'subject_id' => $property->id, 'actor_id' => $actor->id, 'event' => 'record_group_transferred']);
+    }
+
     #[\PHPUnit\Framework\Attributes\DataProvider('sameGroupTransferRoles')]
     public function test_manager_can_transfer_property_within_current_group(string $role): void
     {

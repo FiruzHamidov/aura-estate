@@ -24,8 +24,16 @@ final class UserOrganizationService
             $subject->fill($data);
             $nextRole = $subject->isDirty('role_id')
                 ? \App\Models\Role::find($subject->role_id) : $previousRole;
+            // Promotion within the same team preserves existing responsibility.
+            // Supervised groups are still assigned explicitly; this does not make
+            // the new supervisor eligible to receive other employees' records.
+            $keepsRecordsAsSupervisor = $previousRole?->hasPermission('users.subject.record_recipient')
+                && $nextRole?->usesAssignedGroupScope()
+                && $subject->status === User::STATUS_ACTIVE
+                && $subject->branch_group_id !== null
+                && ! $subject->isDirty(['branch_id', 'branch_group_id', 'status']);
             // Existing work still needs a handover even after recipient eligibility is revoked.
-            if (($subject->isDirty('role_id') && ! $nextRole?->hasPermission('users.subject.record_recipient'))
+            if (($subject->isDirty('role_id') && ! $nextRole?->hasPermission('users.subject.record_recipient') && ! $keepsRecordsAsSupervisor)
                 || ($subject->isDirty('status') && $subject->status !== User::STATUS_ACTIVE)) {
                 abort_if($this->hasActiveRecords($subject->id, lock: true),
                     409, 'EMPLOYEE_TRANSFER_REQUIRED');
