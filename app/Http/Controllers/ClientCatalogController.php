@@ -6,7 +6,6 @@ use App\Models\Client;
 use App\Models\ClientNeed;
 use App\Models\User;
 use App\Services\Crm\AuditLogger;
-use App\Services\Crm\UnattendedCatalogClients;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -15,8 +14,6 @@ use Illuminate\Validation\Rule;
 /** Shared needs catalog. Never reuse the full CRM client serializer here. */
 final class ClientCatalogController extends Controller
 {
-    public function __construct(private readonly UnattendedCatalogClients $unattended) {}
-
     private function lists(User $user): array
     {
         abort_unless($user->hasPermission('clients.catalog.view'), 403);
@@ -44,14 +41,16 @@ final class ClientCatalogController extends Controller
     private function clients(array $lists): Builder
     {
         // Deliberately shared across branches; all normal CRM read/write scopes stay intact.
-        return Client::query()->whereNotIn('id', DB::table('client_catalog_claims')->select('client_id'))->where('status', 'active')->whereIn('contact_kind', ['buyer', 'both'])
+        return Client::query()->whereNotIn('id', DB::table('client_catalog_claims')->select('client_id'))->where('status', 'active')
             ->where(function (Builder $clients) use ($lists) {
                 $budgetLists = array_values(array_diff($lists, ['unattended']));
                 if ($budgetLists !== []) {
-                    $clients->whereHas('needs', fn (Builder $needs) => $this->needs($needs, $budgetLists));
+                    $clients->where(fn (Builder $budget) => $budget->whereIn('contact_kind', ['buyer', 'both'])
+                        ->whereHas('needs', fn (Builder $needs) => $this->needs($needs, $budgetLists)));
                 }
                 if (in_array('unattended', $lists, true)) {
-                    $clients->orWhere(fn (Builder $unattended) => $this->unattended->apply($unattended));
+                    // Keep the existing API/permission key; this list now includes all clients without needs.
+                    $clients->orWhereDoesntHave('needs');
                 }
             });
     }
@@ -64,7 +63,7 @@ final class ClientCatalogController extends Controller
             $counts[$list] = $this->clients([$list])->count();
         }
 
-        // Clients without needs cannot overlap either budget list. Avoid the expensive inactivity query twice.
+        // Clients without needs cannot overlap either budget list.
         $budgetLists = array_values(array_diff($lists, ['unattended']));
         $total = ($budgetLists === [] ? 0 : $this->clients($budgetLists)->count()) + ($counts['unattended'] ?? 0);
 
@@ -105,7 +104,7 @@ final class ClientCatalogController extends Controller
             'data' => $page->getCollection()->map(fn (Client $client) => $this->clientPayload($client))->values(),
             'meta' => ['list' => $list, 'total' => $page->total(), 'current_page' => $page->currentPage(),
                 'last_page' => $page->lastPage(), 'per_page' => $page->perPage(),
-                'inactive_days' => $list === 'unattended' ? $this->unattended->days() : null],
+                'inactive_days' => null],
         ])->header('Cache-Control', 'private, no-store');
     }
 

@@ -792,7 +792,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         $this->catalogNeed($deleted, 1200000);
         $deleted->delete();
         Sanctum::actingAs($agent);
-        $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 1, 'lists' => ['agents' => 1, 'interns' => 1, 'unattended' => 0]]);
+        $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 2, 'lists' => ['agents' => 1, 'interns' => 1, 'unattended' => 1]]);
         $this->getJson('/api/client-catalog?list=interns')->assertOk()->assertJsonCount(1, 'data.0.needs');
     }
 
@@ -986,7 +986,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         $this->assertDatabaseCount('client_catalog_claims', 1);
     }
 
-    public function test_unattended_catalog_requires_no_need_and_fourteen_full_days_without_activity(): void
+    public function test_all_clients_catalog_includes_new_and_recent_clients_without_any_need(): void
     {
         $this->travelTo(now()->startOfSecond());
         [$agent, $branch] = $this->prepareAgentContext();
@@ -995,39 +995,46 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         DB::table('clients')->where('id', $boundary->id)->update(['created_at' => now()->subDays(14), 'updated_at' => now()->subDays(14)]);
         $recent = $this->unattendedClient($branch, $agent, 'Недавний');
         DB::table('clients')->where('id', $recent->id)->update(['updated_at' => now()->subDays(14)->addSecond()]);
-        $this->createClient($branch, $agent, 'Новый');
+        $new = $this->createClient($branch, $agent, 'Новый');
+        $seller = $this->createClient($branch, $agent, 'Продавец');
+        $seller->update(['contact_kind' => 'seller']);
         foreach ([['has_cash_on_hand' => false, 'cash_on_hand_amount' => null], ['closed_at' => now()->subDays(20)], ['status_id' => 2]] as $attributes) {
             $client = $this->unattendedClient($branch, $agent, 'С потребностью');
             $this->catalogNeed($client, 100, $attributes + ['created_at' => now()->subDays(30), 'updated_at' => now()->subDays(30)]);
         }
-        foreach (['inactive', 'seller', 'deleted'] as $excluded) {
+        $sellerWithNeed = $this->createClient($branch, $agent, 'Продавец с потребностью');
+        $sellerWithNeed->update(['contact_kind' => 'seller']);
+        $this->catalogNeed($sellerWithNeed, 1200000);
+        foreach (['inactive', 'deleted'] as $excluded) {
             $client = $this->unattendedClient($branch, $agent, $excluded);
             DB::table('clients')->where('id', $client->id)->update(match ($excluded) {
-                'inactive' => ['status' => 'inactive'], 'seller' => ['contact_kind' => 'seller'], 'deleted' => ['deleted_at' => now()],
+                'inactive' => ['status' => 'inactive'], 'deleted' => ['deleted_at' => now()],
             });
         }
         Sanctum::actingAs($agent);
         $this->getJson('/api/client-catalog?list=unattended&per_page=1')->assertOk()
-            ->assertJsonPath('meta.total', 2)->assertJsonPath('meta.inactive_days', 14)->assertJsonPath('meta.last_page', 2)
+            ->assertJsonPath('meta.total', 5)->assertJsonPath('meta.inactive_days', null)->assertJsonPath('meta.last_page', 5)
             ->assertJsonPath('data.0.id', $old->id)->assertJsonCount(0, 'data.0.needs')
             ->assertJsonMissingPath('data.0.phone')->assertJsonMissingPath('data.0.note');
-        $this->getJson('/api/client-catalog?list=unattended&per_page=1&page=2')->assertOk()->assertJsonPath('data.0.id', $boundary->id);
+        $this->getJson('/api/client-catalog?list=unattended&per_page=1&page=2')->assertOk()->assertJsonPath('data.0.id', $recent->id);
+        $this->getJson('/api/client-catalog?list=unattended')->assertOk()->assertJsonPath('data.2.id', $boundary->id)
+            ->assertJsonPath('data.3.id', $new->id)->assertJsonPath('data.4.id', $seller->id);
         $this->getJson('/api/client-catalog?list=unattended&search='.urlencode('Старый'))->assertOk()->assertJsonPath('meta.total', 1);
         $this->getJson('/api/client-catalog?list=unattended&search='.$old->phone)->assertUnprocessable();
-        $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 2, 'lists' => ['agents' => 0, 'interns' => 0, 'unattended' => 2]]);
+        $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 5, 'lists' => ['agents' => 0, 'interns' => 0, 'unattended' => 5]]);
     }
 
-    public function test_unattended_catalog_respects_crm_work_and_planned_contact_before_listing_and_claiming(): void
+    public function test_all_clients_catalog_ignores_recent_and_planned_activity_when_no_need_exists(): void
     {
         [$agent, $branch] = $this->prepareAgentContext();
         $available = $this->unattendedClient($branch, $agent, 'Available');
         $old = ['created_at' => now()->subDays(30), 'updated_at' => now()->subDays(30)];
-        // Old completed work must not exclude the client forever.
+        // Activity never excludes a client whose needs are absent.
         DB::table('crm_tasks')->insert($old + ['related_entity_type' => 'client', 'related_entity_id' => $available->id, 'status' => 'done', 'completed_at' => now()->subDays(20)]);
-        $blocked = [];
+        $withActivity = [];
         foreach (['audit', 'booking', 'planned_booking', 'task', 'planned_task', 'deleted_need', 'deal', 'lead', 'deal_audit', 'lead_audit', 'deal_task', 'lead_task', 'showing_task'] as $activity) {
             $client = $this->unattendedClient($branch, $agent, $activity);
-            $blocked[] = $client;
+            $withActivity[] = $client;
             if ($activity === 'audit') {
                 DB::table('crm_audit_logs')->insert(['auditable_type' => Client::class, 'auditable_id' => $client->id, 'event' => 'comment', 'created_at' => now(), 'updated_at' => now()]);
             } elseif ($activity === 'deleted_need') {
@@ -1051,15 +1058,18 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             }
         }
         Sanctum::actingAs($agent);
-        $this->getJson('/api/client-catalog?list=unattended')->assertOk()->assertJsonPath('meta.total', 1)->assertJsonPath('data.0.id', $available->id);
-        $this->getJson('/api/client-catalog/counts')->assertOk()->assertJsonPath('lists.unattended', 1);
-        foreach ($blocked as $client) {
-            $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertConflict()->assertJsonMissingPath('data.phone');
+        $this->getJson('/api/client-catalog?list=unattended')->assertOk()->assertJsonPath('meta.total', 14)->assertJsonCount(14, 'data');
+        $this->getJson('/api/client-catalog/counts')->assertOk()->assertJsonPath('lists.unattended', 14);
+        foreach ($withActivity as $client) {
+            $claimant = $this->createUser($agent->role, $branch, 'Claimant '.$client->id);
+            Sanctum::actingAs($claimant);
+            $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertOk()->assertJsonPath('data.phone', $client->phone);
         }
-        $this->assertDatabaseCount('client_catalog_claims', 0);
-        // Revalidate a card that was eligible when first shown.
+        $this->assertDatabaseCount('client_catalog_claims', 13);
+        // A freshly updated client is still eligible when the claim is rechecked.
+        Sanctum::actingAs($agent);
         DB::table('clients')->where('id', $available->id)->update(['updated_at' => now()]);
-        $this->postJson('/api/client-catalog/'.$available->id.'/claim')->assertConflict();
+        $this->postJson('/api/client-catalog/'.$available->id.'/claim')->assertOk();
     }
 
     public function test_unattended_claim_uses_the_shared_daily_limit_and_hides_claimed_clients(): void
@@ -1067,7 +1077,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         [$agent, $branch] = $this->prepareAgentContext();
         $other = Branch::create(['name' => 'Other branch']);
         $owner = $this->createUser($agent->role, $other, 'Other agent');
-        $client = $this->unattendedClient($other, $owner, 'Claim without need');
+        $client = $this->createClient($other, $owner, 'Claim without need');
         $budget = $this->createClient($branch, $owner, 'Budget');
         $this->catalogNeed($budget, 1200000);
         Sanctum::actingAs($agent);
@@ -1080,6 +1090,23 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         $this->assertDatabaseCount('client_catalog_claims', 1);
         Sanctum::actingAs($owner);
         $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertConflict();
+    }
+
+    public function test_agents_and_interns_can_claim_new_clients_from_any_branch(): void
+    {
+        [$owner, $sourceBranch] = $this->prepareAgentContext();
+        $targetBranch = Branch::create(['name' => 'Receiving branch']);
+        foreach (['agent', 'intern'] as $slug) {
+            $role = $slug === 'agent' ? $owner->role : Role::create(['name' => 'Intern', 'slug' => 'intern']);
+            $claimant = $this->createUser($role, $targetBranch, $slug);
+            $client = $this->createClient($sourceBranch, $owner, 'New seller '.$slug);
+            $client->update(['contact_kind' => 'seller']);
+            Sanctum::actingAs($claimant);
+            $this->getJson('/api/client-catalog?list=unattended')->assertOk()->assertJsonPath('data.0.id', $client->id);
+            $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertOk()->assertJsonPath('data.phone', $client->phone);
+            $this->assertDatabaseHas('clients', ['id' => $client->id, 'responsible_agent_id' => $claimant->id, 'branch_id' => $targetBranch->id]);
+            $this->getJson('/api/client-catalog/claim-status')->assertOk()->assertJsonPath('used_today', true)->assertJsonPath('can_claim', false);
+        }
     }
 
     public function test_unattended_list_requires_its_own_permission_and_rechecks_added_needs(): void
