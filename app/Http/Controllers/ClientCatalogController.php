@@ -6,6 +6,7 @@ use App\Models\Client;
 use App\Models\ClientNeed;
 use App\Models\User;
 use App\Services\Crm\AuditLogger;
+use App\Services\Crm\UnattendedCatalogClients;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -14,11 +15,13 @@ use Illuminate\Validation\Rule;
 /** Shared needs catalog. Never reuse the full CRM client serializer here. */
 final class ClientCatalogController extends Controller
 {
+    public function __construct(private readonly UnattendedCatalogClients $unattended) {}
+
     private function lists(User $user): array
     {
         abort_unless($user->hasPermission('clients.catalog.view'), 403);
 
-        $lists = array_values(array_filter(['agents', 'interns'], fn (string $list) => $user->hasPermission('clients.catalog.list.'.$list)));
+        $lists = array_values(array_filter(['agents', 'interns', 'unattended'], fn (string $list) => $user->hasPermission('clients.catalog.list.'.$list)));
         abort_unless($lists !== [], 403, 'Нет доступных подборок каталога.');
         return $lists;
     }
@@ -42,7 +45,15 @@ final class ClientCatalogController extends Controller
     {
         // Deliberately shared across branches; all normal CRM read/write scopes stay intact.
         return Client::query()->whereNotIn('id', DB::table('client_catalog_claims')->select('client_id'))->where('status', 'active')->whereIn('contact_kind', ['buyer', 'both'])
-            ->whereHas('needs', fn (Builder $needs) => $this->needs($needs, $lists));
+            ->where(function (Builder $clients) use ($lists) {
+                $budgetLists = array_values(array_diff($lists, ['unattended']));
+                if ($budgetLists !== []) {
+                    $clients->whereHas('needs', fn (Builder $needs) => $this->needs($needs, $budgetLists));
+                }
+                if (in_array('unattended', $lists, true)) {
+                    $clients->orWhere(fn (Builder $unattended) => $this->unattended->apply($unattended));
+                }
+            });
     }
 
     public function counts(Request $request)
@@ -53,7 +64,11 @@ final class ClientCatalogController extends Controller
             $counts[$list] = $this->clients([$list])->count();
         }
 
-        return response()->json(['total' => $this->clients($lists)->count(), 'lists' => $counts])
+        // Clients without needs cannot overlap either budget list. Avoid the expensive inactivity query twice.
+        $budgetLists = array_values(array_diff($lists, ['unattended']));
+        $total = ($budgetLists === [] ? 0 : $this->clients($budgetLists)->count()) + ($counts['unattended'] ?? 0);
+
+        return response()->json(['total' => $total, 'lists' => $counts])
             ->header('Cache-Control', 'private, no-store');
     }
 
@@ -72,7 +87,9 @@ final class ClientCatalogController extends Controller
         ])->with([
             'branch:id,name', 'responsibleAgent:id,name', 'type:id,name',
             'needs' => function (\Illuminate\Database\Eloquent\Relations\HasMany $needs) use ($list) {
-                $this->needs($needs->getQuery(), [$list]);
+                if ($list !== 'unattended') {
+                    $this->needs($needs->getQuery(), [$list]);
+                }
                 $needs->with(['type:id,name', 'status:id,name', 'location:id,city',
                     'propertyTypes:id,name', 'propertyType:id,name', 'repairTypes:id,name', 'repairType:id,name']);
             },
@@ -81,13 +98,14 @@ final class ClientCatalogController extends Controller
             // Do not allow phone/email searches to act as an oracle for hidden contacts.
             $query->where('full_name', 'like', '%'.addcslashes(trim($data['search']), '%_\\').'%');
         }
-        $page = $query->orderBy('created_at', $list === 'interns' ? 'asc' : 'desc')->orderBy('id')
+        $page = $query->orderBy('created_at', $list === 'agents' ? 'desc' : 'asc')->orderBy('id')
             ->paginate($data['per_page'] ?? 20);
 
         return response()->json([
             'data' => $page->getCollection()->map(fn (Client $client) => $this->clientPayload($client))->values(),
             'meta' => ['list' => $list, 'total' => $page->total(), 'current_page' => $page->currentPage(),
-                'last_page' => $page->lastPage(), 'per_page' => $page->perPage()],
+                'last_page' => $page->lastPage(), 'per_page' => $page->perPage(),
+                'inactive_days' => $list === 'unattended' ? $this->unattended->days() : null],
         ])->header('Cache-Control', 'private, no-store');
     }
 

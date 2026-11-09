@@ -207,6 +207,39 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             $table->timestamps();
         });
 
+        Schema::create('bookings', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('crm_client_id');
+            $table->string('status')->default('pending');
+            $table->dateTime('start_time')->nullable();
+            $table->dateTime('end_time')->nullable();
+            $table->timestamps();
+        });
+        foreach (['crm_deals', 'leads'] as $name) {
+            Schema::create($name, function (Blueprint $table) use ($name) {
+                $table->id();
+                $table->unsignedBigInteger('client_id');
+                $table->dateTime('next_activity_at')->nullable();
+                $table->dateTime('closed_at')->nullable();
+                if ($name === 'leads') {
+                    $table->dateTime('last_activity_at')->nullable();
+                    $table->dateTime('first_contacted_at')->nullable();
+                    $table->dateTime('next_follow_up_at')->nullable();
+                }
+                $table->softDeletes();
+                $table->timestamps();
+            });
+        }
+        Schema::create('crm_tasks', function (Blueprint $table) {
+            $table->id();
+            $table->string('related_entity_type');
+            $table->unsignedBigInteger('related_entity_id');
+            $table->string('status')->default('new');
+            $table->dateTime('due_at')->nullable();
+            $table->dateTime('completed_at')->nullable();
+            $table->timestamps();
+        });
+
         DB::table('client_types')->insert([
             'id' => 1,
             'name' => 'Физлицо',
@@ -728,7 +761,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         $client->update(['phone' => '073287321', 'email' => 'private@example.com', 'note' => 'secret note']);
         $this->catalogNeed($client, 1200000, ['comment' => 'Ищет квартиру. Звонить +992 073 287 321 или private@example.com', 'meta' => json_encode(['phone' => '073287321'])]);
         Sanctum::actingAs($agent);
-        $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 1, 'lists' => ['agents' => 1, 'interns' => 0]]);
+        $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 1, 'lists' => ['agents' => 1, 'interns' => 0, 'unattended' => 0]]);
         $response = $this->getJson('/api/client-catalog?list=agents')->assertOk()
             ->assertJsonPath('data.0.id', $client->id)
             ->assertJsonPath('data.0.responsible_agent_name', 'Other owner')
@@ -759,7 +792,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         $this->catalogNeed($deleted, 1200000);
         $deleted->delete();
         Sanctum::actingAs($agent);
-        $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 1, 'lists' => ['agents' => 1, 'interns' => 1]]);
+        $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 1, 'lists' => ['agents' => 1, 'interns' => 1, 'unattended' => 0]]);
         $this->getJson('/api/client-catalog?list=interns')->assertOk()->assertJsonCount(1, 'data.0.needs');
     }
 
@@ -776,7 +809,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
                 $this->getJson('/api/client-catalog/counts')->assertForbidden();
                 $this->getJson('/api/client-catalog')->assertForbidden();
             } elseif ($slug === 'intern') {
-                $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 0, 'lists' => ['interns' => 0]]);
+                $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 0, 'lists' => ['interns' => 0, 'unattended' => 0]]);
                 $this->getJson('/api/client-catalog?list=agents')->assertUnprocessable();
                 $this->getJson('/api/client-catalog')->assertOk()->assertJsonCount(0, 'data');
             } else {
@@ -951,6 +984,127 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             }
         }
         $this->assertDatabaseCount('client_catalog_claims', 1);
+    }
+
+    public function test_unattended_catalog_requires_no_need_and_fourteen_full_days_without_activity(): void
+    {
+        $this->travelTo(now()->startOfSecond());
+        [$agent, $branch] = $this->prepareAgentContext();
+        $old = $this->unattendedClient($branch, $agent, 'Старый клиент');
+        $boundary = $this->unattendedClient($branch, $agent, 'Граница');
+        DB::table('clients')->where('id', $boundary->id)->update(['created_at' => now()->subDays(14), 'updated_at' => now()->subDays(14)]);
+        $recent = $this->unattendedClient($branch, $agent, 'Недавний');
+        DB::table('clients')->where('id', $recent->id)->update(['updated_at' => now()->subDays(14)->addSecond()]);
+        $this->createClient($branch, $agent, 'Новый');
+        foreach ([['has_cash_on_hand' => false, 'cash_on_hand_amount' => null], ['closed_at' => now()->subDays(20)], ['status_id' => 2]] as $attributes) {
+            $client = $this->unattendedClient($branch, $agent, 'С потребностью');
+            $this->catalogNeed($client, 100, $attributes + ['created_at' => now()->subDays(30), 'updated_at' => now()->subDays(30)]);
+        }
+        foreach (['inactive', 'seller', 'deleted'] as $excluded) {
+            $client = $this->unattendedClient($branch, $agent, $excluded);
+            DB::table('clients')->where('id', $client->id)->update(match ($excluded) {
+                'inactive' => ['status' => 'inactive'], 'seller' => ['contact_kind' => 'seller'], 'deleted' => ['deleted_at' => now()],
+            });
+        }
+        Sanctum::actingAs($agent);
+        $this->getJson('/api/client-catalog?list=unattended&per_page=1')->assertOk()
+            ->assertJsonPath('meta.total', 2)->assertJsonPath('meta.inactive_days', 14)->assertJsonPath('meta.last_page', 2)
+            ->assertJsonPath('data.0.id', $old->id)->assertJsonCount(0, 'data.0.needs')
+            ->assertJsonMissingPath('data.0.phone')->assertJsonMissingPath('data.0.note');
+        $this->getJson('/api/client-catalog?list=unattended&per_page=1&page=2')->assertOk()->assertJsonPath('data.0.id', $boundary->id);
+        $this->getJson('/api/client-catalog?list=unattended&search='.urlencode('Старый'))->assertOk()->assertJsonPath('meta.total', 1);
+        $this->getJson('/api/client-catalog?list=unattended&search='.$old->phone)->assertUnprocessable();
+        $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 2, 'lists' => ['agents' => 0, 'interns' => 0, 'unattended' => 2]]);
+    }
+
+    public function test_unattended_catalog_respects_crm_work_and_planned_contact_before_listing_and_claiming(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $available = $this->unattendedClient($branch, $agent, 'Available');
+        $old = ['created_at' => now()->subDays(30), 'updated_at' => now()->subDays(30)];
+        // Old completed work must not exclude the client forever.
+        DB::table('crm_tasks')->insert($old + ['related_entity_type' => 'client', 'related_entity_id' => $available->id, 'status' => 'done', 'completed_at' => now()->subDays(20)]);
+        $blocked = [];
+        foreach (['audit', 'booking', 'planned_booking', 'task', 'planned_task', 'deleted_need', 'deal', 'lead', 'deal_audit', 'lead_audit', 'deal_task', 'lead_task', 'showing_task'] as $activity) {
+            $client = $this->unattendedClient($branch, $agent, $activity);
+            $blocked[] = $client;
+            if ($activity === 'audit') {
+                DB::table('crm_audit_logs')->insert(['auditable_type' => Client::class, 'auditable_id' => $client->id, 'event' => 'comment', 'created_at' => now(), 'updated_at' => now()]);
+            } elseif ($activity === 'deleted_need') {
+                $this->catalogNeed($client, 100, $old + ['deleted_at' => now()]);
+            } elseif (in_array($activity, ['booking', 'planned_booking'])) {
+                DB::table('bookings')->insert($old + ['crm_client_id' => $client->id, 'end_time' => $activity === 'booking' ? now()->subDay() : now()->addDay()]);
+            } elseif (in_array($activity, ['task', 'planned_task'])) {
+                DB::table('crm_tasks')->insert($old + ['related_entity_type' => 'client', 'related_entity_id' => $client->id,
+                    'completed_at' => $activity === 'task' ? now() : null, 'due_at' => $activity === 'planned_task' ? now()->addDay() : null]);
+            } else {
+                $type = explode('_', $activity)[0];
+                $table = ['deal' => 'crm_deals', 'lead' => 'leads', 'showing' => 'bookings'][$type];
+                $id = DB::table($table)->insertGetId(array_merge($old, [$type === 'showing' ? 'crm_client_id' : 'client_id' => $client->id],
+                    in_array($activity, ['deal', 'lead']) ? ['updated_at' => now()] : []));
+                if (str_ends_with($activity, '_audit')) {
+                    DB::table('crm_audit_logs')->insert(['auditable_type' => $type === 'deal' ? \App\Models\Deal::class : \App\Models\Lead::class,
+                        'auditable_id' => $id, 'event' => 'comment', 'created_at' => now(), 'updated_at' => now()]);
+                } elseif (str_ends_with($activity, '_task')) {
+                    DB::table('crm_tasks')->insert(['related_entity_type' => $type, 'related_entity_id' => $id, 'created_at' => now(), 'updated_at' => now()]);
+                }
+            }
+        }
+        Sanctum::actingAs($agent);
+        $this->getJson('/api/client-catalog?list=unattended')->assertOk()->assertJsonPath('meta.total', 1)->assertJsonPath('data.0.id', $available->id);
+        $this->getJson('/api/client-catalog/counts')->assertOk()->assertJsonPath('lists.unattended', 1);
+        foreach ($blocked as $client) {
+            $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertConflict()->assertJsonMissingPath('data.phone');
+        }
+        $this->assertDatabaseCount('client_catalog_claims', 0);
+        // Revalidate a card that was eligible when first shown.
+        DB::table('clients')->where('id', $available->id)->update(['updated_at' => now()]);
+        $this->postJson('/api/client-catalog/'.$available->id.'/claim')->assertConflict();
+    }
+
+    public function test_unattended_claim_uses_the_shared_daily_limit_and_hides_claimed_clients(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $other = Branch::create(['name' => 'Other branch']);
+        $owner = $this->createUser($agent->role, $other, 'Other agent');
+        $client = $this->unattendedClient($other, $owner, 'Claim without need');
+        $budget = $this->createClient($branch, $owner, 'Budget');
+        $this->catalogNeed($budget, 1200000);
+        Sanctum::actingAs($agent);
+        $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertOk()->assertJsonPath('data.phone', $client->phone)->assertJsonCount(0, 'data.needs');
+        $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertOk();
+        $this->assertDatabaseHas('clients', ['id' => $client->id, 'responsible_agent_id' => $agent->id, 'branch_id' => $branch->id, 'created_by' => $owner->id]);
+        $this->getJson('/api/client-catalog/counts')->assertOk()->assertJsonPath('total', 1)->assertJsonPath('lists.unattended', 0);
+        $this->getJson('/api/client-catalog/mine')->assertOk()->assertJsonPath('data.0.phone', $client->phone);
+        $this->postJson('/api/client-catalog/'.$budget->id.'/claim')->assertConflict();
+        $this->assertDatabaseCount('client_catalog_claims', 1);
+        Sanctum::actingAs($owner);
+        $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertConflict();
+    }
+
+    public function test_unattended_list_requires_its_own_permission_and_rechecks_added_needs(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $client = $this->unattendedClient($branch, $agent, 'Unattended');
+        $role = $agent->role;
+        $role->forceFill(['permissions' => ['clients.catalog.view', 'clients.catalog.list.agents', 'clients.catalog.claim']])->save();
+        Sanctum::actingAs($agent->fresh());
+        $this->getJson('/api/client-catalog?list=unattended')->assertUnprocessable();
+        $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertConflict();
+        $role->forceFill(['permissions' => ['clients.catalog.view', 'clients.catalog.list.unattended', 'clients.catalog.claim']])->save();
+        Sanctum::actingAs($agent->fresh());
+        $this->getJson('/api/client-catalog')->assertOk()->assertJsonPath('meta.list', 'unattended')->assertJsonPath('data.0.id', $client->id);
+        $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 1, 'lists' => ['unattended' => 1]]);
+        $this->catalogNeed($client, 100);
+        $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertConflict();
+        $this->assertDatabaseCount('client_catalog_claims', 0);
+    }
+
+    private function unattendedClient(Branch $branch, User $agent, string $name): Client
+    {
+        $client = $this->createClient($branch, $agent, $name);
+        DB::table('clients')->where('id', $client->id)->update(['created_at' => now()->subDays(30), 'updated_at' => now()->subDays(30)]);
+        return $client;
     }
 
     private function catalogNeed(Client $client, int $amount, array $attributes = []): void

@@ -29,6 +29,35 @@ class RolePermissionsTest extends TestCase
         (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
     }
 
+    public function test_unattended_catalog_permission_migration_preserves_existing_access_and_audits_once(): void
+    {
+        Role::query()->update(['permissions' => '[]']);
+        $agent = Role::where('slug', 'agent')->firstOrFail();
+        $before = ['clients.catalog.view', 'clients.catalog.list.interns', 'clients.catalog.claim'];
+        $agent->forceFill(['permissions' => $before])->save();
+        $custom = Role::create(['name' => 'Custom catalog', 'slug' => 'custom_catalog']);
+        $custom->forceFill(['permissions' => ['clients.catalog.view', 'clients.catalog.list.agents']])->save();
+        $noList = Role::where('slug', 'rop')->firstOrFail();
+        $noList->forceFill(['permissions' => ['clients.catalog.view']])->save();
+        $noView = Role::where('slug', 'mop')->firstOrFail();
+        $noView->forceFill(['permissions' => ['clients.catalog.list.interns']])->save();
+        $migration = require database_path('migrations/2026_11_09_120000_add_unattended_client_catalog_permission.php');
+        $migration->up();
+        $this->assertSame([...$before, 'clients.catalog.list.unattended'], $agent->fresh()->permissions);
+        $this->assertTrue($custom->fresh()->hasPermission('clients.catalog.list.unattended'));
+        $this->assertFalse($custom->fresh()->hasPermission('clients.catalog.claim'));
+        $this->assertSame(['clients.catalog.view'], $noList->fresh()->permissions);
+        $this->assertSame(['clients.catalog.list.interns'], $noView->fresh()->permissions);
+        $this->assertFalse(Role::where('slug', 'intern')->firstOrFail()->hasPermission('clients.catalog.list.unattended'));
+        $this->assertDatabaseCount('role_permission_audits', 2);
+        $this->assertDatabaseHas('role_permission_audits', ['role_id' => $agent->id, 'version' => $agent->permissions_version + 1]);
+        $migration->up();
+        $this->assertDatabaseCount('role_permission_audits', 2);
+        $agent->forceFill(['permissions' => []])->save();
+        $migration->down();
+        $this->assertSame([], $agent->fresh()->permissions);
+    }
+
     public function test_dismissal_employee_records_grant_migration_is_audited_and_preserves_revocation(): void
     {
         $rop = Role::where('slug', 'rop')->firstOrFail();
