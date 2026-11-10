@@ -45,8 +45,9 @@ final class ClientCatalogService
                         ->whereHas('needs', fn (Builder $needs) => $this->needs($needs, $budgetLists)));
                 }
                 if (in_array('unattended', $lists, true)) {
-                    // Keep the existing API/permission key; this list now includes all clients without needs.
-                    $clients->orWhereDoesntHave('needs');
+                    // Match the CRM buyer list; seller-only contacts are not available for intake.
+                    $clients->orWhere(fn (Builder $buyers) => $buyers->whereIn('contact_kind', ['buyer', 'both'])
+                        ->whereDoesntHave('needs'));
                 }
             });
     }

@@ -1015,15 +1015,37 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         }
         Sanctum::actingAs($agent);
         $this->getJson('/api/client-catalog?list=unattended&per_page=1')->assertOk()
-            ->assertJsonPath('meta.total', 5)->assertJsonPath('meta.inactive_days', null)->assertJsonPath('meta.last_page', 5)
+            ->assertJsonPath('meta.total', 4)->assertJsonPath('meta.inactive_days', null)->assertJsonPath('meta.last_page', 4)
             ->assertJsonPath('data.0.id', $old->id)->assertJsonCount(0, 'data.0.needs')
             ->assertJsonPath('data.0.phone', $old->phone)->assertJsonMissingPath('data.0.note');
         $this->getJson('/api/client-catalog?list=unattended&per_page=1&page=2')->assertOk()->assertJsonPath('data.0.id', $recent->id);
         $this->getJson('/api/client-catalog?list=unattended')->assertOk()->assertJsonPath('data.2.id', $boundary->id)
-            ->assertJsonPath('data.3.id', $new->id)->assertJsonPath('data.4.id', $seller->id);
+            ->assertJsonPath('data.3.id', $new->id)->assertJsonCount(4, 'data');
         $this->getJson('/api/client-catalog?list=unattended&search='.urlencode('Старый'))->assertOk()->assertJsonPath('meta.total', 1);
         $this->getJson('/api/client-catalog?list=unattended&search='.$old->phone)->assertUnprocessable();
-        $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 5, 'lists' => ['agents' => 0, 'interns' => 0, 'unattended' => 5]]);
+        $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 4, 'lists' => ['agents' => 0, 'interns' => 0, 'unattended' => 4]]);
+    }
+
+    public function test_all_clients_catalog_excludes_sellers_from_search_counts_and_intake(): void
+    {
+        [$owner, $branch] = $this->prepareAgentContext();
+        $agent = $this->createUser($owner->role, $branch, 'Catalog buyer agent');
+        $seller = $this->createClient($branch, $owner, 'Seller only');
+        $seller->update(['contact_kind' => 'seller']);
+        $buyer = $this->createClient($branch, $owner, 'Buyer');
+        $both = $this->createClient($branch, $owner, 'Mixed contact');
+        $both->update(['contact_kind' => 'both']);
+        Sanctum::actingAs($agent);
+
+        $response = $this->getJson('/api/client-catalog?list=unattended')->assertOk()->assertJsonPath('meta.total', 2);
+        $this->assertEqualsCanonicalizing([$buyer->id, $both->id], array_column($response->json('data'), 'id'));
+        $this->getJson('/api/client-catalog?list=unattended&search=Seller')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/client-catalog/counts')->assertOk()->assertExactJson(['total' => 2, 'lists' => ['agents' => 0, 'interns' => 0, 'unattended' => 2]]);
+        $this->postJson('/api/client-catalog/'.$seller->id.'/claim')->assertConflict();
+        $this->postJson('/api/client-catalog/'.$seller->id.'/needs', ['type_id' => 1, 'status_id' => 1])->assertConflict();
+        $this->assertDatabaseCount('client_catalog_claims', 0);
+        $this->assertDatabaseCount('client_needs', 0);
+        $this->assertEquals($owner->id, $seller->fresh()->responsible_agent_id);
     }
 
     public function test_all_clients_catalog_ignores_recent_and_planned_activity_when_no_need_exists(): void
@@ -1101,8 +1123,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         foreach (['agent', 'intern'] as $slug) {
             $role = $slug === 'agent' ? $owner->role : Role::create(['name' => 'Intern', 'slug' => 'intern']);
             $claimant = $this->createUser($role, $targetBranch, $slug);
-            $client = $this->createClient($sourceBranch, $owner, 'New seller '.$slug);
-            $client->update(['contact_kind' => 'seller']);
+            $client = $this->createClient($sourceBranch, $owner, 'New buyer '.$slug);
             Sanctum::actingAs($claimant);
             $this->getJson('/api/client-catalog?list=unattended')->assertOk()->assertJsonPath('data.0.id', $client->id);
             $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertOk()->assertJsonPath('data.phone', $client->phone);
