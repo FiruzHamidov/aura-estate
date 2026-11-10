@@ -50,14 +50,6 @@ class PropertyReportQuery
             'sold_at_from' => 'nullable|date_format:Y-m-d', 'sold_at_to' => 'nullable|date_format:Y-m-d|after_or_equal:sold_at_from',
             'deposit_received_at_from' => 'nullable|date_format:Y-m-d', 'deposit_received_at_to' => 'nullable|date_format:Y-m-d|after_or_equal:deposit_received_at_from',
             'from' => 'nullable|date_format:Y-m-d', 'to' => 'nullable|date_format:Y-m-d|after_or_equal:from']);
-        abort_if($request->boolean('include_inactive') && ! $request->user()?->hasPermission('kpi.inactive.view'), 403);
-        if (! $request->boolean('include_inactive')) {
-            // Retain unattributed records and non-KPI employees. Only the explicit
-            // inactive status is excluded, identically in every report surface.
-            $owner = $this->ownerExpression();
-            $query->where(fn ($q) => $q->whereNull(DB::raw($owner))->orWhereNotIn(DB::raw($owner),
-                User::query()->where('status', 'inactive')->select('id')));
-        }
         $from = $request->input('from', $request->input('date_from'));
         $to = $request->input('to', $request->input('date_to'));
         $soldFrom = $request->input('sold_at_from') ?: $from;
@@ -455,6 +447,18 @@ class PropertyReportQuery
                 .$this->salesAttributionService->primarySellerExpression().' ELSE '.$this->propertyAuthorExpression().' END'
             : null;
         $this->applyBranchAccessFilter($request, $query, $scopeColumn, $reportOwnerExpression);
+
+        $request->validate(['include_inactive' => 'nullable|boolean']);
+        $actor = $request->user() ?? auth()->user();
+        abort_if($request->boolean('include_inactive') && ! $actor?->hasPermission('kpi.inactive.view'), 403);
+        if (! $request->boolean('include_inactive')) {
+            // Every report excludes the same inactive owner: primary seller for
+            // closed properties, author for open properties and bookings.
+            // Keep unattributed records and employees outside the KPI roster.
+            $owner = $reportOwnerExpression ?? $creatorColumn;
+            $query->where(fn ($q) => $q->whereNull(DB::raw($owner))->orWhereNotIn(DB::raw($owner),
+                User::query()->where('status', 'inactive')->select('id')));
+        }
 
         // Диапазоны
         foreach ([

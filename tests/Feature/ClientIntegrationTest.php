@@ -1774,6 +1774,55 @@ class ClientIntegrationTest extends TestCase
         $this->assertSame($a->id, $report[0]['agent_id']);
     }
 
+    public function test_legacy_reports_share_the_inventory_inactive_filter_and_booking_author(): void
+    {
+        $ctx = $this->seedReportBranchScopeContext();
+        $active = $ctx['users']['agentA'];
+        $former = $ctx['users']['agentB'];
+        $former->update(['status' => 'inactive']);
+        (require database_path('migrations/2026_10_15_180000_add_created_by_to_bookings.php'))->up();
+        DB::table('bookings')->where('agent_id', $former->id)->update(['created_by' => $active->id]);
+        DB::table('bookings')->where('agent_id', $active->id)->update(['created_by' => $former->id]);
+        $period = '?date_from=2026-03-01&date_to=2026-03-31';
+
+        foreach (['admin', 'superadmin'] as $role) {
+            Sanctum::actingAs($ctx['users'][$role]);
+            foreach (['' => 1, '&include_inactive=0' => 1, '&include_inactive=1' => 2] as $filter => $expected) {
+                $rows = $this->getJson('/api/reports/agents/properties'.$period.$filter)->assertOk()->json();
+                $this->assertSame($expected, (int) collect($rows)->sum('summary.total_properties'));
+                $this->assertSame($expected, (int) collect($rows)->sum('summary.total_shows'));
+                $this->getJson('/api/reports/properties/summary'.$period.$filter)->assertOk()->assertJsonPath('total', $expected);
+                $this->getJson('/api/reports/agent/shows'.$period.$filter)->assertOk()->assertJsonPath('shows_count', $expected);
+                $this->getJson('/api/reports/agents/'.$former->id.'/properties'.$period.$filter)->assertOk()
+                    ->assertJsonPath('summary.total_properties', $expected - 1)->assertJsonPath('summary.total_shows', $expected - 1);
+            }
+        }
+
+        // A former author's closed property belongs to its active primary seller.
+        DB::table('properties')->where('created_by', $former->id)->update([
+            'moderation_status' => 'sold', 'sale_user_id' => $active->id, 'sold_at' => '2026-03-15 10:00:00',
+        ]);
+        $rows = $this->getJson('/api/reports/agents/properties'.$period)->assertOk()->json();
+        $this->assertSame(2, (int) collect($rows)->sum('summary.total_properties'));
+        $this->getJson('/api/reports/properties/summary'.$period)->assertOk()->assertJsonPath('total', 2);
+    }
+
+    public function test_legacy_report_inactive_filter_preserves_validation_and_permission_errors(): void
+    {
+        $ctx = $this->seedReportBranchScopeContext();
+        Sanctum::actingAs($ctx['users']['superadmin']);
+        foreach (['/api/reports/agents/properties', '/api/reports/agent/shows'] as $url) {
+            $this->getJson($url.'?include_inactive=invalid')->assertUnprocessable()->assertJsonStructure(['details' => ['errors' => ['include_inactive']]]);
+        }
+        Schema::table('roles', fn (Blueprint $table) => $table->json('permissions')->nullable());
+        $role = $ctx['users']['rop']->role;
+        $role->forceFill(['permissions' => ['property_reports.view', 'property_reports.scope.all']])->save();
+        Sanctum::actingAs($ctx['users']['rop']->fresh());
+        foreach (['/api/reports/agents/properties', '/api/reports/agent/shows'] as $url) {
+            $this->getJson($url.'?include_inactive=1')->assertForbidden();
+        }
+    }
+
     public function test_booking_author_migration_restores_audited_creator_and_keeps_legacy_agent(): void
     {
         $ctx = $this->seedReportBranchScopeContext();
