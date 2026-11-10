@@ -210,6 +210,43 @@ class KpiConsistencyFeatureTest extends TestCase
         $this->travelBack();
     }
 
+    public function test_employee_report_accepts_an_independent_result_month_without_changing_activity(): void
+    {
+        [, $agent] = $this->fixture();
+        $this->employeeReportProperties();
+        $this->resultGoal($agent, ['count_target' => 3]);
+        $this->resultGoal($agent, ['month' => '2026-10-01', 'count_target' => 7]);
+        foreach (['2026-10-15', '2026-11-06'] as $date) {
+            \DB::table('properties')->insert(['created_by' => $agent->id, 'agent_id' => $agent->id,
+                'moderation_status' => 'sold', 'created_at' => $date.' 12:00:00', 'sold_at' => $date.' 12:00:00']);
+        }
+        $url = '/api/reports/employees?date_from=2026-10-10&date_to=2026-11-10';
+        $automatic = $this->getJson($url)->assertOk()->assertJsonPath('meta.kpi_month', '2026-11')
+            ->assertJsonPath('data.0.kpi_percent', 33.3)->json();
+        $selected = $this->getJson($url.'&kpi_month=2026-10')->assertOk()->assertJsonPath('meta.kpi_month', '2026-10')
+            ->assertJsonPath('meta.date_from', '2026-10-10')->assertJsonPath('meta.date_to', '2026-11-10')
+            ->assertJsonPath('data.0.kpi_percent', 14.3)->assertJsonPath('data.0.result_kpi.month', '2026-10')->json();
+        foreach (['objects', 'total_properties', 'sales', 'shows', 'clients', 'calls', 'ads', 'metrics', 'properties'] as $field) {
+            $this->assertEquals($automatic['data'][0][$field], $selected['data'][0][$field], $field);
+        }
+        $personal = $this->getJson('/api/kpi/results?month=2026-10&user_id='.$agent->id)->assertOk()->json('rows.0.sale');
+        $this->assertEquals($personal, $selected['data'][0]['result_kpi']['sale']);
+        $this->getJson('/api/reports/employees?kpi_month=2026-10')->assertOk()
+            ->assertJsonPath('meta.date_from', null)->assertJsonPath('meta.kpi_month', '2026-10')
+            ->assertJsonPath('data.0.kpi_percent', 14.3);
+        $this->getJson($url.'&kpi_month=')->assertOk()->assertJsonPath('meta.kpi_month', '2026-11');
+    }
+
+    public function test_employee_report_rejects_invalid_result_months(): void
+    {
+        $this->fixture();
+        $this->employeeReportProperties();
+        foreach (['2026-13', '2026-00', '2026-11-10', 'November', '2026-1'] as $month) {
+            $this->getJson('/api/reports/employees?kpi_month='.$month)->assertUnprocessable()
+                ->assertJsonStructure(['details' => ['errors' => ['kpi_month']]]);
+        }
+    }
+
     public function test_employee_result_preserves_closed_snapshot_and_missing_amount_state(): void
     {
         [$admin, $agent] = $this->fixture();

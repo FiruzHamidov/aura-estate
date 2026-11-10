@@ -37,6 +37,7 @@ class PropertyReportController extends Controller
             'date_from' => 'nullable|date_format:Y-m-d|required_with:date_to',
             'date_to' => 'nullable|date_format:Y-m-d|required_with:date_from|after_or_equal:date_from',
             'interval' => 'nullable|in:day,week,month',
+            'kpi_month' => 'nullable|date_format:Y-m',
             'agent_id' => 'nullable|integer|exists:users,id',
             'branch_id' => 'nullable|integer|exists:branches,id',
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
@@ -114,9 +115,9 @@ class PropertyReportController extends Controller
             ]);
         }
         // The sticky banner uses calendar-month result goals, independently of
-        // activity dates and inventory filters. A range uses its final month;
-        // an unbounded report uses the current month in Dushanbe.
-        $kpiMonth = $to->format('Y-m');
+        // activity dates and inventory filters. Allow an explicit result month;
+        // by default use the range's final month (current month when unbounded).
+        $kpiMonth = $filters['kpi_month'] ?? $to->format('Y-m');
         $resultRows = $canReadKpi ? collect(app(\App\Services\Kpi\ResultReportService::class)->report($actor, [
             'month' => $kpiMonth,
             'user_id' => $filters['agent_id'] ?? null,
