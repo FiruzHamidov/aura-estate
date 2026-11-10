@@ -25,6 +25,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
 
         Schema::dropAllTables();
         (require database_path('migrations/2026_09_29_120000_create_client_catalog_claims_table.php'))->up();
+        (require database_path('migrations/2026_11_10_100000_remove_client_catalog_daily_limit.php'))->up();
 
         Schema::create('roles', function (Blueprint $table) {
             $table->id();
@@ -895,7 +896,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         $this->getJson('/api/client-catalog/claim-status')->assertOk()->assertJsonPath('can_claim', true);
     }
 
-    public function test_claim_limit_is_one_per_dushanbe_day_with_idempotent_retries(): void
+    public function test_claims_are_unlimited_on_the_same_day_with_idempotent_retries(): void
     {
         [$agent, $branch] = $this->prepareAgentContext();
         $first = $this->createClient($branch, $agent, 'First');
@@ -907,8 +908,9 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         $this->postJson('/api/client-catalog/'.$first->id.'/claim')->assertOk();
         $this->postJson('/api/client-catalog/'.$first->id.'/claim')->assertOk();
         $this->assertDatabaseCount('client_catalog_claims', 1);
-        $this->getJson('/api/client-catalog/claim-status')->assertOk()->assertJsonPath('used_today', true)->assertJsonPath('next_available_at', '2026-09-30T00:00:00+05:00');
-        $this->postJson('/api/client-catalog/'.$second->id.'/claim')->assertConflict();
+        $this->getJson('/api/client-catalog/claim-status')->assertOk()->assertJsonPath('used_today', true)->assertJsonPath('can_claim', true)->assertJsonPath('next_available_at', null);
+        $this->postJson('/api/client-catalog/'.$second->id.'/claim')->assertOk();
+        $this->assertDatabaseCount('client_catalog_claims', 2);
         $this->travelTo(\Carbon\Carbon::parse('2026-09-29 19:00:00', 'UTC'));
         $this->getJson('/api/client-catalog/claim-status')->assertOk()->assertJsonPath('can_claim', true);
         $this->postJson('/api/client-catalog/'.$second->id.'/claim')->assertOk();
@@ -917,7 +919,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         $this->travelBack();
     }
 
-    public function test_claim_checks_roles_budget_and_branch_before_consuming_quota(): void
+    public function test_claim_checks_roles_budget_and_branch(): void
     {
         [$agent, $branch] = $this->prepareAgentContext();
         $high = $this->createClient($branch, $agent, 'High');
@@ -942,7 +944,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         $this->getJson('/api/client-catalog/mine')->assertOk()->assertJsonPath('data.0.id', $low->id);
     }
 
-    public function test_reassignment_revokes_catalog_phone_but_does_not_reset_quota(): void
+    public function test_reassignment_revokes_access_and_preserves_claim_history(): void
     {
         [$agent, $branch] = $this->prepareAgentContext();
         $other = $this->createUser($agent->role, $branch, 'Next owner');
@@ -954,11 +956,11 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         $this->getJson('/api/client-catalog/mine')->assertOk()->assertJsonCount(0, 'data');
         $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertConflict();
         $client->delete();
-        $this->getJson('/api/client-catalog/claim-status')->assertOk()->assertJsonPath('used_today', true);
+        $this->getJson('/api/client-catalog/claim-status')->assertOk()->assertJsonPath('can_claim', true);
         $this->assertDatabaseCount('client_catalog_claims', 1);
     }
 
-    public function test_failed_transfer_rolls_back_claim_and_daily_quota(): void
+    public function test_failed_transfer_rolls_back_claim(): void
     {
         [$agent, $branch] = $this->prepareAgentContext();
         $owner = $this->createUser($agent->role, $branch, 'Owner');
@@ -975,10 +977,10 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
     public function test_claim_ledger_has_database_uniqueness_guards(): void
     {
         DB::table('client_catalog_claims')->insert(['client_id' => 1, 'user_id' => 1, 'claimed_on' => '2026-09-29', 'created_at' => now()]);
-        foreach ([['client_id' => 2, 'user_id' => 1], ['client_id' => 1, 'user_id' => 2]] as $collision) {
+        foreach ([['client_id' => 1, 'user_id' => 2]] as $collision) {
             try {
                 DB::table('client_catalog_claims')->insert($collision + ['claimed_on' => '2026-09-29', 'created_at' => now()]);
-                $this->fail('The database must reject duplicate client/day claims.');
+                $this->fail('The database must reject duplicate client claims.');
             } catch (\Illuminate\Database\QueryException $exception) {
                 $this->assertStringContainsString('UNIQUE', $exception->getMessage());
             }
@@ -1015,7 +1017,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         $this->getJson('/api/client-catalog?list=unattended&per_page=1')->assertOk()
             ->assertJsonPath('meta.total', 5)->assertJsonPath('meta.inactive_days', null)->assertJsonPath('meta.last_page', 5)
             ->assertJsonPath('data.0.id', $old->id)->assertJsonCount(0, 'data.0.needs')
-            ->assertJsonMissingPath('data.0.phone')->assertJsonMissingPath('data.0.note');
+            ->assertJsonPath('data.0.phone', $old->phone)->assertJsonMissingPath('data.0.note');
         $this->getJson('/api/client-catalog?list=unattended&per_page=1&page=2')->assertOk()->assertJsonPath('data.0.id', $recent->id);
         $this->getJson('/api/client-catalog?list=unattended')->assertOk()->assertJsonPath('data.2.id', $boundary->id)
             ->assertJsonPath('data.3.id', $new->id)->assertJsonPath('data.4.id', $seller->id);
@@ -1072,7 +1074,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         $this->postJson('/api/client-catalog/'.$available->id.'/claim')->assertOk();
     }
 
-    public function test_unattended_claim_uses_the_shared_daily_limit_and_hides_claimed_clients(): void
+    public function test_unattended_and_budget_clients_can_be_claimed_on_the_same_day(): void
     {
         [$agent, $branch] = $this->prepareAgentContext();
         $other = Branch::create(['name' => 'Other branch']);
@@ -1086,8 +1088,8 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         $this->assertDatabaseHas('clients', ['id' => $client->id, 'responsible_agent_id' => $agent->id, 'branch_id' => $branch->id, 'created_by' => $owner->id]);
         $this->getJson('/api/client-catalog/counts')->assertOk()->assertJsonPath('total', 1)->assertJsonPath('lists.unattended', 0);
         $this->getJson('/api/client-catalog/mine')->assertOk()->assertJsonPath('data.0.phone', $client->phone);
-        $this->postJson('/api/client-catalog/'.$budget->id.'/claim')->assertConflict();
-        $this->assertDatabaseCount('client_catalog_claims', 1);
+        $this->postJson('/api/client-catalog/'.$budget->id.'/claim')->assertOk();
+        $this->assertDatabaseCount('client_catalog_claims', 2);
         Sanctum::actingAs($owner);
         $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertConflict();
     }
@@ -1105,7 +1107,7 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
             $this->getJson('/api/client-catalog?list=unattended')->assertOk()->assertJsonPath('data.0.id', $client->id);
             $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertOk()->assertJsonPath('data.phone', $client->phone);
             $this->assertDatabaseHas('clients', ['id' => $client->id, 'responsible_agent_id' => $claimant->id, 'branch_id' => $targetBranch->id]);
-            $this->getJson('/api/client-catalog/claim-status')->assertOk()->assertJsonPath('used_today', true)->assertJsonPath('can_claim', false);
+            $this->getJson('/api/client-catalog/claim-status')->assertOk()->assertJsonPath('used_today', true)->assertJsonPath('can_claim', true);
         }
     }
 
@@ -1125,6 +1127,94 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         $this->catalogNeed($client, 100);
         $this->postJson('/api/client-catalog/'.$client->id.'/claim')->assertConflict();
         $this->assertDatabaseCount('client_catalog_claims', 0);
+    }
+
+    public function test_daily_limit_migration_preserves_history_and_refuses_a_lossy_rollback(): void
+    {
+        $migration = require database_path('migrations/2026_11_10_100000_remove_client_catalog_daily_limit.php');
+        $migration->down();
+        $row = ['client_id' => 1, 'user_id' => 7, 'claimed_on' => '2026-11-10', 'created_at' => now()];
+        DB::table('client_catalog_claims')->insert($row);
+        $migration->up();
+        $this->assertDatabaseHas('client_catalog_claims', $row);
+        DB::table('client_catalog_claims')->insert(array_replace($row, ['client_id' => 2]));
+        try {
+            $migration->down();
+            $this->fail('Rollback must not discard existing assignments.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('Cannot restore the daily limit', $exception->getMessage());
+        }
+        DB::table('client_catalog_claims')->insert(array_replace($row, ['client_id' => 3]));
+        $this->assertDatabaseCount('client_catalog_claims', 3);
+    }
+
+    public function test_catalog_need_creation_claims_and_saves_atomically_and_rejects_retries(): void
+    {
+        [$owner, $sourceBranch] = $this->prepareAgentContext();
+        $branch = Branch::create(['name' => 'Destination']);
+        $agent = $this->createUser($owner->role, $branch, 'New responsible');
+        $client = $this->createClient($sourceBranch, $owner, 'Contact before claim');
+        $this->mock(\App\Services\Crm\ClientNeedDealService::class, fn ($mock) => $mock->shouldReceive('ensureForNeed')->once()->andReturn(new \App\Models\Deal));
+        Sanctum::actingAs($agent);
+        $this->getJson('/api/client-catalog?list=unattended')->assertOk()->assertJsonPath('data.0.phone', $client->phone);
+        $this->getJson('/api/clients/'.$client->id)->assertForbidden();
+        $payload = ['type_id' => 1, 'status_id' => 1, 'comment' => 'Нужна двухкомнатная квартира', 'responsible_agent_id' => $owner->id];
+        $response = $this->postJson('/api/client-catalog/'.$client->id.'/needs', $payload)->assertCreated()
+            ->assertJsonPath('client_id', $client->id)->assertJsonPath('responsible_agent_id', $agent->id)->assertJsonPath('created_by', $agent->id);
+        $this->assertDatabaseHas('clients', ['id' => $client->id, 'responsible_agent_id' => $agent->id, 'branch_id' => $branch->id]);
+        $this->assertDatabaseHas('client_catalog_claims', ['client_id' => $client->id, 'user_id' => $agent->id]);
+        $this->getJson('/api/client-catalog?list=unattended')->assertJsonCount(0, 'data');
+        $this->getJson('/api/client-catalog/mine')->assertOk()->assertJsonPath('data.0.needs.0.id', $response->json('id'));
+        $this->getJson('/api/clients/'.$client->id)->assertOk();
+        $this->postJson('/api/client-catalog/'.$client->id.'/needs', $payload)->assertConflict();
+        Sanctum::actingAs($owner);
+        $this->postJson('/api/client-catalog/'.$client->id.'/needs', $payload)->assertConflict();
+        $this->assertDatabaseCount('client_needs', 1);
+        $this->assertDatabaseCount('client_catalog_claims', 1);
+    }
+
+    public function test_invalid_catalog_need_does_not_transfer_or_consume_client(): void
+    {
+        [$owner, $branch] = $this->prepareAgentContext();
+        $agent = $this->createUser($owner->role, $branch, 'Invalid payload actor');
+        $client = $this->createClient($branch, $owner, 'No partial changes');
+        Sanctum::actingAs($agent);
+        $this->postJson('/api/client-catalog/'.$client->id.'/needs', [])->assertUnprocessable();
+        $this->assertDatabaseCount('client_needs', 0);
+        $this->assertDatabaseCount('client_catalog_claims', 0);
+        $this->assertDatabaseCount('crm_audit_logs', 0);
+        $this->assertEquals($owner->id, $client->fresh()->responsible_agent_id);
+        $this->getJson('/api/client-catalog?list=unattended')->assertJsonPath('data.0.id', $client->id);
+    }
+
+    public function test_catalog_need_creation_rechecks_permissions_and_new_needs(): void
+    {
+        [$agent, $branch] = $this->prepareAgentContext();
+        $client = $this->createClient($branch, $agent, 'Access checks');
+        $base = ['clients.catalog.view', 'clients.catalog.list.unattended', 'clients.catalog.claim', 'client_needs.create'];
+        foreach ($base as $revoked) {
+            $agent->role->forceFill(['permissions' => array_values(array_diff($base, [$revoked]))])->save();
+            Sanctum::actingAs($agent->fresh());
+            $this->postJson('/api/client-catalog/'.$client->id.'/needs', ['type_id' => 1])->assertForbidden();
+        }
+        $agent->role->forceFill(['permissions' => $base])->save();
+        Sanctum::actingAs($agent->fresh());
+        $this->catalogNeed($client, 500000);
+        $this->postJson('/api/client-catalog/'.$client->id.'/needs', ['type_id' => 1])->assertConflict();
+        $this->assertDatabaseCount('client_catalog_claims', 0);
+    }
+
+    public function test_catalog_need_deal_failure_rolls_back_need_and_assignment(): void
+    {
+        [$owner, $branch] = $this->prepareAgentContext();
+        $agent = $this->createUser($owner->role, $branch, 'Failed deal actor');
+        $client = $this->createClient($branch, $owner, 'No partial need');
+        $this->mock(\App\Services\Crm\ClientNeedDealService::class, fn ($mock) => $mock->shouldReceive('ensureForNeed')->once()->andThrow(new \RuntimeException('Deal failure')));
+        Sanctum::actingAs($agent);
+        $this->postJson('/api/client-catalog/'.$client->id.'/needs', ['type_id' => 1, 'status_id' => 1])->assertStatus(500);
+        $this->assertDatabaseCount('client_needs', 0);
+        $this->assertDatabaseCount('client_catalog_claims', 0);
+        $this->assertEquals($owner->id, $client->fresh()->responsible_agent_id);
     }
 
     private function unattendedClient(Branch $branch, User $agent, string $name): Client

@@ -157,6 +157,7 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     Route::get('/client-catalog/claim-status', [\App\Http\Controllers\ClientCatalogController::class, 'claimStatus']);
     Route::get('/client-catalog/mine', [\App\Http\Controllers\ClientCatalogController::class, 'mine']);
     Route::post('/client-catalog/{clientId}/claim', [\App\Http\Controllers\ClientCatalogController::class, 'claim'])->whereNumber('clientId');
+    Route::post('/client-catalog/{clientId}/needs', [\App\Http\Controllers\ClientNeedController::class, 'storeFromCatalog'])->whereNumber('clientId');
     Route::get('/external-request-photos/{photo}', [\App\Http\Controllers\ExternalRequestMediaController::class, 'show'])
         ->whereNumber('photo')->name('external-request-photo');
     Route::get('/employee-transfer-destinations', [\App\Http\Controllers\EmployeeGroupTransferController::class, 'destinations']);
