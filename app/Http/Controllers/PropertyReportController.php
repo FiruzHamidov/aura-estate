@@ -1418,6 +1418,9 @@ class PropertyReportController extends Controller
 
             return response()->json($result->values());
         } catch (\Throwable $e) {
+            if ($e instanceof \Illuminate\Validation\ValidationException || $e instanceof \Symfony\Component\HttpKernel\Exception\HttpExceptionInterface) {
+                throw $e;
+            }
             \Log::error('agentPropertiesReport error: ' . $e->getMessage(), ['exception' => $e]);
             return response()->json(['error' => 'Internal server error'], 500);
         }
