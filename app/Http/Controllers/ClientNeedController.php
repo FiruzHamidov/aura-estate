@@ -332,6 +332,17 @@ class ClientNeedController extends Controller
         );
     }
 
+    public function storeFromCatalog(Request $request, int $clientId)
+    {
+        // Claim, need validation, creation and automatic deal creation succeed or roll back together.
+        return \DB::transaction(function () use ($request, $clientId) {
+            $client = app(\App\Services\Crm\ClientCatalogService::class)->claim($this->authUser(), $clientId, true);
+            $request->merge(['responsible_agent_id' => $client->responsible_agent_id]);
+
+            return $this->store($request, $client);
+        }, 5);
+    }
+
     public function store(Request $request, Client $client)
     {
         return \DB::transaction(function () use ($request, $client) {

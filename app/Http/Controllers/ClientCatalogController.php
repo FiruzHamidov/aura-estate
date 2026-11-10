@@ -5,8 +5,6 @@ namespace App\Http\Controllers;
 use App\Models\Client;
 use App\Models\ClientNeed;
 use App\Models\User;
-use App\Services\Crm\AuditLogger;
-use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
@@ -14,58 +12,19 @@ use Illuminate\Validation\Rule;
 /** Shared needs catalog. Never reuse the full CRM client serializer here. */
 final class ClientCatalogController extends Controller
 {
-    private function lists(User $user): array
-    {
-        abort_unless($user->hasPermission('clients.catalog.view'), 403);
-
-        $lists = array_values(array_filter(['agents', 'interns', 'unattended'], fn (string $list) => $user->hasPermission('clients.catalog.list.'.$list)));
-        abort_unless($lists !== [], 403, 'Нет доступных подборок каталога.');
-        return $lists;
-    }
-
-    private function needs(Builder $query, array $lists): void
-    {
-        $query->where('has_cash_on_hand', true)->where('currency', 'TJS')->whereNull('closed_at')
-            ->where(fn (Builder $status) => $status->whereNull('status_id')
-                ->orWhereHas('status', fn (Builder $statuses) => $statuses->where('is_closed', false)))
-            ->where(function (Builder $amounts) use ($lists) {
-                if (in_array('agents', $lists, true)) {
-                    $amounts->orWhere('cash_on_hand_amount', '>=', 1000000);
-                }
-                if (in_array('interns', $lists, true)) {
-                    $amounts->orWhereBetween('cash_on_hand_amount', [300000, 800000]);
-                }
-            });
-    }
-
-    private function clients(array $lists): Builder
-    {
-        // Deliberately shared across branches; all normal CRM read/write scopes stay intact.
-        return Client::query()->whereNotIn('id', DB::table('client_catalog_claims')->select('client_id'))->where('status', 'active')
-            ->where(function (Builder $clients) use ($lists) {
-                $budgetLists = array_values(array_diff($lists, ['unattended']));
-                if ($budgetLists !== []) {
-                    $clients->where(fn (Builder $budget) => $budget->whereIn('contact_kind', ['buyer', 'both'])
-                        ->whereHas('needs', fn (Builder $needs) => $this->needs($needs, $budgetLists)));
-                }
-                if (in_array('unattended', $lists, true)) {
-                    // Keep the existing API/permission key; this list now includes all clients without needs.
-                    $clients->orWhereDoesntHave('needs');
-                }
-            });
-    }
+    public function __construct(private readonly \App\Services\Crm\ClientCatalogService $catalog) {}
 
     public function counts(Request $request)
     {
-        $lists = $this->lists($request->user());
+        $lists = $this->catalog->lists($request->user());
         $counts = [];
         foreach ($lists as $list) {
-            $counts[$list] = $this->clients([$list])->count();
+            $counts[$list] = $this->catalog->clients([$list])->count();
         }
 
         // Clients without needs cannot overlap either budget list.
         $budgetLists = array_values(array_diff($lists, ['unattended']));
-        $total = ($budgetLists === [] ? 0 : $this->clients($budgetLists)->count()) + ($counts['unattended'] ?? 0);
+        $total = ($budgetLists === [] ? 0 : $this->catalog->clients($budgetLists)->count()) + ($counts['unattended'] ?? 0);
 
         return response()->json(['total' => $total, 'lists' => $counts])
             ->header('Cache-Control', 'private, no-store');
@@ -73,7 +32,7 @@ final class ClientCatalogController extends Controller
 
     public function index(Request $request)
     {
-        $lists = $this->lists($request->user());
+        $lists = $this->catalog->lists($request->user());
         $data = $request->validate([
             'list' => ['sometimes', Rule::in($lists)],
             'search' => ['nullable', 'string', 'max:100', 'regex:/^[\p{L}\p{M}\s.\x{0027}\x{2019}-]*$/u'],
@@ -81,13 +40,14 @@ final class ClientCatalogController extends Controller
             'per_page' => ['sometimes', 'integer', 'between:1,50'],
         ]);
         $list = $data['list'] ?? $lists[0];
-        $query = $this->clients([$list])->select([
+        $query = $this->catalog->clients([$list])->select([
             'id', 'full_name', 'branch_id', 'responsible_agent_id', 'client_type_id', 'contact_kind', 'created_at',
+            ...($list === 'unattended' ? ['phone'] : []),
         ])->with([
             'branch:id,name', 'responsibleAgent:id,name', 'type:id,name',
             'needs' => function (\Illuminate\Database\Eloquent\Relations\HasMany $needs) use ($list) {
                 if ($list !== 'unattended') {
-                    $this->needs($needs->getQuery(), [$list]);
+                    $this->catalog->needs($needs->getQuery(), [$list]);
                 }
                 $needs->with(['type:id,name', 'status:id,name', 'location:id,city',
                     'propertyTypes:id,name', 'propertyType:id,name', 'repairTypes:id,name', 'repairType:id,name']);
@@ -101,7 +61,7 @@ final class ClientCatalogController extends Controller
             ->paginate($data['per_page'] ?? 20);
 
         return response()->json([
-            'data' => $page->getCollection()->map(fn (Client $client) => $this->clientPayload($client))->values(),
+            'data' => $page->getCollection()->map(fn (Client $client) => $this->clientPayload($client, $list === 'unattended'))->values(),
             'meta' => ['list' => $list, 'total' => $page->total(), 'current_page' => $page->currentPage(),
                 'last_page' => $page->lastPage(), 'per_page' => $page->perPage(),
                 'inactive_days' => null],
@@ -119,49 +79,21 @@ final class ClientCatalogController extends Controller
     public function claimStatus(Request $request)
     {
         $user = $this->claimant($request);
-        $now = now('Asia/Dushanbe');
-        $used = DB::table('client_catalog_claims')->where('user_id', $user->id)->where('claimed_on', $now->toDateString())->exists();
-
+        $usedToday = DB::table('client_catalog_claims')->where('user_id', $user->id)
+            ->where('claimed_on', now('Asia/Dushanbe')->toDateString())->exists();
         return response()->json([
-            'can_claim' => ! $used && $user->branch_id !== null,
-            'used_today' => $used,
-            'next_available_at' => $used ? $now->copy()->addDay()->startOfDay()->toIso8601String() : null,
+            'can_claim' => $user->branch_id !== null,
+            'used_today' => $usedToday,
+            'next_available_at' => null,
             'timezone' => 'Asia/Dushanbe',
-            'message' => $used ? 'Сегодня вы уже взяли клиента. Следующего можно взять завтра.' : ($user->branch_id ? 'Можно взять одного клиента сегодня.' : 'Для получения клиента руководитель должен назначить вам филиал.'),
+            'message' => $user->branch_id ? 'Можно брать клиентов без дневного лимита.' : 'Для получения клиента руководитель должен назначить вам филиал.',
         ])->header('Cache-Control', 'private, no-store');
     }
 
     public function claim(Request $request, int $clientId)
     {
         $actor = $this->claimant($request);
-        $client = DB::transaction(function () use ($actor, $clientId) {
-            // Serialize both requests by the same employee and requests for the same client.
-            $user = User::query()->lockForUpdate()->findOrFail($actor->id);
-            abort_unless($user->status === 'active' && $user->hasPermission('clients.catalog.claim'), 403);
-            $client = Client::query()->lockForUpdate()->findOrFail($clientId);
-            $existing = DB::table('client_catalog_claims')->where('client_id', $clientId)->lockForUpdate()->first();
-            if ($existing) {
-                abort_unless((int) $existing->user_id === (int) $user->id && (int) $client->responsible_agent_id === (int) $user->id, 409, 'Этот клиент уже недоступен. Обновите список.');
-
-                return $client; // Safe retry: no second quota charge and no second transfer.
-            }
-            abort_unless($user->branch_id, 422, 'Сначала руководитель должен назначить вам филиал.');
-            $today = now('Asia/Dushanbe')->toDateString();
-            abort_if(DB::table('client_catalog_claims')->where('user_id', $user->id)->where('claimed_on', $today)->lockForUpdate()->exists(), 409, 'Сегодня вы уже взяли клиента. Следующего можно взять завтра.');
-            abort_unless($this->clients($this->lists($user))->whereKey($clientId)->exists(), 409, 'Этот клиент уже недоступен. Обновите список.');
-
-            DB::table('client_catalog_claims')->insert(['client_id' => $clientId, 'user_id' => $user->id, 'claimed_on' => $today, 'created_at' => now()]);
-            $before = $client->only(['responsible_agent_id', 'branch_id', 'branch_group_id']);
-            $client->forceFill(['responsible_agent_id' => $user->id, 'branch_id' => $user->branch_id, 'branch_group_id' => $user->branch_group_id])->save();
-            // Keep open needs with their newly responsible employee; closed history is preserved.
-            $client->needs()->whereNull('closed_at')->where(fn (Builder $q) => $q->whereNull('status_id')->orWhereHas('status', fn (Builder $statuses) => $statuses->where('is_closed', false)))
-                ->update(['responsible_agent_id' => $user->id]);
-            app(AuditLogger::class)->log($client, $user, 'responsible_agent_changed', $before,
-                $client->only(['responsible_agent_id', 'branch_id', 'branch_group_id']),
-                'Клиент взят из общего каталога.', ['source' => 'client_catalog', 'claimed_on' => $today]);
-
-            return $client;
-        }, 5);
+        $client = $this->catalog->claim($actor, $clientId);
         $client->load($this->payloadRelations());
 
         return response()->json(['data' => $this->clientPayload($client, true)])->header('Cache-Control', 'private, no-store');
