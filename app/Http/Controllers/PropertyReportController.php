@@ -113,9 +113,19 @@ class PropertyReportController extends Controller
                 'objects' => null, 'shows' => null, 'clients' => null, 'calls' => null, 'ads' => null, 'sales' => 0,
             ]);
         }
+        // The sticky banner uses calendar-month result goals, independently of
+        // activity dates and inventory filters. A range uses its final month;
+        // an unbounded report uses the current month in Dushanbe.
+        $kpiMonth = $to->format('Y-m');
+        $resultRows = $canReadKpi ? collect(app(\App\Services\Kpi\ResultReportService::class)->report($actor, [
+            'month' => $kpiMonth,
+            'user_id' => $filters['agent_id'] ?? null,
+            'branch_id' => $filters['branch_id'] ?? null,
+            'branch_group_id' => $filters['branch_group_id'] ?? null,
+        ])['rows'])->keyBy('user_id') : collect();
         $statuses = ['draft', 'pending', 'approved', 'deposit', 'sold', 'rented', 'sold_by_owner', 'denied', 'rejected', 'deleted', 'unknown'];
         $contracts = ['alternative', 'exclusive', 'none', 'unspecified'];
-        $rows = $rows->map(function (array $row) use ($byEmployee, $statuses, $contracts, $owners, $liveShows, $visibleShows) {
+        $rows = $rows->map(function (array $row) use ($byEmployee, $statuses, $contracts, $owners, $liveShows, $visibleShows, $resultRows, $kpiMonth) {
             $items = $byEmployee->get($row['employee_id'], collect());
             $byStatus = array_fill_keys($statuses, 0);
             $byContract = array_fill_keys($contracts, 0);
@@ -154,12 +164,19 @@ class PropertyReportController extends Controller
                 foreach ($row['metrics'] as &$metric) { $metric['target_value'] = 0; $metric['weight_used'] = 0; }
                 unset($metric);
             }
-            $hasPlan = collect($row['metrics'])->contains(fn ($m) => ($m['target_value'] ?? 0) > 0 && ($m['weight_used'] ?? 0) > 0);
-            $sourceError = collect($row['metrics'])->contains(fn ($m) => $m['source_error'] ?? false);
-            if (! $hasPlan || $sourceError) {
-                $row['kpi_percent'] = null;
-                $row['status'] = $sourceError ? 'source_error' : 'no_plan';
-            }
+            $result = $resultRows->get($row['employee_id']);
+            // Activity breakdowns remain available, but their old weighted
+            // score must not leak into the result-based report under aliases.
+            unset($row['kpi_value'], $row['overall_progress_pct'], $row['average_kpi_percent'], $row['kpi_trace']);
+            $row['result_kpi'] = $result ? [
+                'month' => $kpiMonth, 'sale' => $result['sale'], 'rental' => $result['rental'],
+                'closed' => $result['closed'],
+            ] : null;
+            // Retain the existing numeric field for sorting/older clients, but
+            // it now means sales progress, exactly as returned to the banner.
+            $row['kpi_percent'] = $result['sale']['progress_percent'] ?? null;
+            $row['rental_kpi_percent'] = $result['rental']['progress_percent'] ?? null;
+            $row['status'] = $result['sale']['status'] ?? 'unavailable';
             return $row;
         })->values();
         $totals = [];
@@ -173,12 +190,16 @@ class PropertyReportController extends Controller
             }
         }
         $scored = $rows->whereNotNull('kpi_percent');
+        $rentalScored = $rows->whereNotNull('rental_kpi_percent');
         $totals['kpi_percent'] = $scored->isEmpty() ? null : round($scored->avg('kpi_percent'), 2);
+        $totals['rental_kpi_percent'] = $rentalScored->isEmpty() ? null : round($rentalScored->avg('rental_kpi_percent'), 2);
         return response()->json(['data' => $rows, 'totals' => $totals,
             'summary' => $this->reportQuery->summary($properties), 'rooms' => $this->reportQuery->rooms($properties), 'meta' => [
             'date_from' => $allPeriod ? null : $from->toDateString(), 'date_to' => $allPeriod ? null : $to->toDateString(),
             'timezone' => 'Asia/Dushanbe', 'generated_at' => Carbon::now('Asia/Dushanbe')->toIso8601String(),
             'employees_count' => $rows->count(), 'scored_employees_count' => $scored->count(),
+            'scored_rental_employees_count' => $rentalScored->count(),
+            'kpi_month' => $kpiMonth, 'kpi_basis' => 'monthly_results',
             'quality' => $payload['meta']['quality'], 'sales_attribution' => 'primary_seller',
             'property_filters' => $request->only(['offer_type', 'moderation_status', 'type_id', 'location_id', 'sold_at_from', 'sold_at_to']),
         ]]);

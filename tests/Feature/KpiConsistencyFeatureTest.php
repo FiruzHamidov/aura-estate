@@ -112,7 +112,11 @@ class KpiConsistencyFeatureTest extends TestCase
             $table->unsignedBigInteger('contract_type_id')->nullable(); $table->string('moderation_status')->nullable();
             $table->string('offer_type')->default('sale'); $table->integer('rooms')->nullable();
             $table->timestamp('sold_at')->nullable(); $table->timestamp('deposit_received_at')->nullable(); $table->timestamps();
+            $table->decimal('company_commission_amount', 16, 2)->nullable();
+            $table->string('company_commission_currency', 3)->nullable();
         });
+        (require database_path('migrations/2026_11_05_140000_create_kpi_result_goals_and_facts.php'))->up();
+        (require database_path('migrations/2026_11_07_150000_add_kpi_amount_bases.php'))->up();
     }
 
     public function test_unified_employee_report_counts_same_complete_rows_and_preserves_canonical_kpi(): void
@@ -143,7 +147,8 @@ class KpiConsistencyFeatureTest extends TestCase
         $canonical = $this->getJson('/api/kpi/monthly?v=2&year=2026&month=10')->assertOk();
         foreach ($result->json('data') as $row) {
             $expected = collect($canonical->json('data'))->firstWhere('employee_id', $row['employee_id']);
-            foreach (['objects', 'shows', 'clients', 'calls', 'ads', 'sales', 'kpi_percent'] as $key) $this->assertEquals($expected[$key], $row[$key]);
+            foreach (['objects', 'shows', 'clients', 'calls', 'ads', 'sales'] as $key) $this->assertEquals($expected[$key], $row[$key]);
+            $this->assertNull($row['kpi_percent']); // Activity plans are not result goals.
             $this->assertSame($row['total_properties'], array_sum($row['by_status']));
             $this->assertSame($row['total_properties'], array_sum($row['contracts']));
         }
@@ -153,6 +158,100 @@ class KpiConsistencyFeatureTest extends TestCase
             ->assertJsonPath('totals.total_properties', 1)->assertJsonPath('totals.sales', 0)->assertJsonPath('totals.calls', 31);
         $this->getJson('/api/reports/employees')->assertOk()->assertJsonPath('totals.total_properties', 6)
             ->assertJsonPath('totals.sales', 2)->assertJsonPath('meta.quality.undated_sales_count', 1);
+    }
+
+    public function test_employee_result_percent_matches_personal_banner_and_ignores_inventory_filters(): void
+    {
+        [$admin, $agent, $branch, $group] = $this->fixture();
+        $this->employeeReportProperties();
+        $this->resultGoal($agent, ['mode' => 'count_or_amount', 'count_target' => 3, 'amount_target' => 30000]);
+        $this->resultGoal($agent, ['kind' => 'rental', 'mode' => 'count', 'count_target' => 2]);
+        foreach (['sold', 'rented'] as $status) {
+            \DB::table('properties')->insert(['created_by' => $agent->id, 'agent_id' => $agent->id,
+                'branch_id' => $branch->id, 'branch_group_id' => $group->id,
+                'moderation_status' => $status, 'created_at' => '2026-10-01 12:00:00', 'sold_at' => '2026-11-06 12:00:00',
+                'company_commission_amount' => $status === 'sold' ? 21500 : 500, 'company_commission_currency' => 'TJS']);
+        }
+        Sanctum::actingAs($agent);
+        $personal = $this->getJson('/api/kpi/results?month=2026-11&user_id='.$agent->id)->assertOk()->json('rows.0');
+        Sanctum::actingAs($admin);
+        foreach (['', '&moderation_status=approved', '&sold_at_from=2026-11-09&sold_at_to=2026-11-10'] as $filter) {
+            $response = $this->getJson('/api/reports/employees?date_from=2026-10-10&date_to=2026-11-10&agent_id='.$agent->id.$filter)
+                ->assertOk()->assertJsonPath('meta.kpi_month', '2026-11')->assertJsonPath('meta.kpi_basis', 'monthly_results')
+                ->assertJsonPath('data.0.kpi_percent', 71.7)->assertJsonPath('data.0.rental_kpi_percent', 50)
+                ->assertJsonPath('totals.kpi_percent', 71.7)->assertJsonPath('totals.rental_kpi_percent', 50)
+                ->assertJsonPath('meta.scored_employees_count', 1)->assertJsonPath('meta.scored_rental_employees_count', 1);
+            $this->assertEquals($personal['sale'], $response->json('data.0.result_kpi.sale'));
+            $this->assertEquals($personal['rental'], $response->json('data.0.result_kpi.rental'));
+            foreach (['kpi_value', 'overall_progress_pct', 'average_kpi_percent', 'kpi_trace'] as $legacyScore) {
+                $this->assertArrayNotHasKey($legacyScore, $response->json('data.0'));
+            }
+            if ($filter !== '') $response->assertJsonPath('data.0.sales', 0);
+        }
+    }
+
+    public function test_employee_result_uses_calendar_month_for_day_ranges_and_unbounded_report(): void
+    {
+        [, $agent] = $this->fixture();
+        $this->employeeReportProperties();
+        $this->resultGoal($agent, ['count_target' => 3]);
+        $this->resultGoal($agent, ['month' => '2026-10-01', 'count_target' => 7]);
+        foreach (['2026-10-15', '2026-11-06'] as $date) {
+            \DB::table('properties')->insert(['created_by' => $agent->id, 'agent_id' => $agent->id,
+                'moderation_status' => 'sold', 'created_at' => $date.' 12:00:00', 'sold_at' => $date.' 12:00:00']);
+        }
+        foreach (['2026-10-01' => ['2026-10', 14.3], '2026-10-10' => ['2026-10', 14.3], '2026-11-10' => ['2026-11', 33.3]] as $date => [$month, $percent]) {
+            $this->getJson('/api/reports/employees?date_from='.$date.'&date_to='.$date)->assertOk()
+                ->assertJsonPath('meta.kpi_month', $month)->assertJsonPath('data.0.kpi_percent', $percent);
+        }
+        $this->travelTo(\Illuminate\Support\Carbon::parse('2026-11-10 12:00:00', 'Asia/Dushanbe'));
+        $this->getJson('/api/reports/employees')->assertOk()->assertJsonPath('meta.kpi_month', '2026-11')
+            ->assertJsonPath('data.0.kpi_percent', 33.3);
+        $this->travelBack();
+    }
+
+    public function test_employee_result_preserves_closed_snapshot_and_missing_amount_state(): void
+    {
+        [$admin, $agent] = $this->fixture();
+        $this->employeeReportProperties();
+        $this->resultGoal($agent, ['mode' => 'amount', 'amount_target' => 30000, 'count_target' => null]);
+        \DB::table('properties')->insert(['created_by' => $agent->id, 'agent_id' => $agent->id,
+            'moderation_status' => 'sold', 'created_at' => '2026-11-02 12:00:00', 'sold_at' => '2026-11-06 12:00:00']);
+        $url = '/api/reports/employees?date_from=2026-11-01&date_to=2026-11-30';
+        $this->getJson($url)->assertOk()->assertJsonPath('data.0.result_kpi.sale.progress_is_lower_bound', true)
+            ->assertJsonPath('data.0.status', 'incomplete')->assertJsonPath('data.0.result_kpi.rental.status', 'no_plan');
+        $snapshot = $this->getJson('/api/kpi/results?month=2026-11')->assertOk()->json('rows.0');
+        unset($snapshot['closed']);
+        \DB::table('kpi_result_periods')->insert(['month' => '2026-11-01', 'user_id' => $agent->id,
+            'branch_id' => $agent->branch_id, 'branch_group_id' => $agent->branch_group_id,
+            'snapshot' => json_encode($snapshot), 'closed_by' => $admin->id, 'version' => 1]);
+        \DB::table('properties')->update(['company_commission_amount' => 30000, 'company_commission_currency' => 'TJS']);
+        $row = $this->getJson($url)->assertOk()->assertJsonPath('data.0.result_kpi.closed', true)->json('data.0');
+        $this->assertEquals($snapshot['sale'], $row['result_kpi']['sale']);
+    }
+
+    public function test_employee_result_does_not_expand_kpi_access_to_property_report_scope(): void
+    {
+        [$admin, $agent] = $this->fixture();
+        $this->employeeReportProperties();
+        $this->resultGoal($agent, ['count_target' => 3]);
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $admin->role->forceFill(['permissions' => ['property_reports.view', 'property_reports.scope.all',
+            'kpi.reports.view', 'kpi.reports.scope.own']])->save();
+        Sanctum::actingAs($admin->fresh());
+        \DB::table('properties')->insert(['created_by' => $agent->id, 'agent_id' => $agent->id,
+            'moderation_status' => 'approved', 'created_at' => '2026-11-02 12:00:00']);
+        $this->getJson('/api/reports/employees?date_from=2026-11-01&date_to=2026-11-30')->assertOk()
+            ->assertJsonPath('data.0.employee_id', $agent->id)->assertJsonPath('data.0.result_kpi', null)
+            ->assertJsonPath('data.0.kpi_percent', null)->assertJsonPath('data.0.status', 'unavailable');
+    }
+
+    private function resultGoal(User $agent, array $values = []): void
+    {
+        \DB::table('kpi_result_goals')->insert($values + ['scope_key' => 'user:'.$agent->id,
+            'user_id' => $agent->id, 'branch_id' => $agent->branch_id, 'branch_group_id' => $agent->branch_group_id,
+            'month' => '2026-11-01', 'kind' => 'sale', 'version' => 1, 'mode' => 'count', 'count_target' => 3,
+            'amount_target' => null, 'amount_basis' => 'company_income', 'currency' => 'TJS', 'created_by' => $agent->id]);
     }
 
     public function test_unified_report_uses_dushanbe_boundaries_and_keeps_zero_activity_people(): void
@@ -509,7 +608,7 @@ class KpiConsistencyFeatureTest extends TestCase
         $query = 'date_from=2026-10-01&date_to=2026-10-31&interval=month&agent_id='.$agent->id;
         $monthly = '/api/kpi/monthly?v=2&year=2026&month=10&agent_id='.$agent->id;
         $expected = $this->getJson('/api/reports/employees?'.$query)->assertOk()
-            ->assertJsonPath('data.0.shows', 15)->assertJsonPath('data.0.kpi_percent', 85)->json('data.0');
+            ->assertJsonPath('data.0.shows', 15)->assertJsonPath('data.0.kpi_percent', null)->json('data.0');
         Sanctum::actingAs($agent);
         $self = $this->getJson($monthly)->assertOk()->json('data.0');
         $this->assertEquals($expected['metrics'], $self['metrics']);
@@ -517,7 +616,7 @@ class KpiConsistencyFeatureTest extends TestCase
         foreach (['', '&branch_group_id='.$group->id] as $scope) {
             $report = $this->getJson('/api/reports/employees?'.$query.$scope)->assertOk()
                 ->assertJsonPath('data.0.shows', 15)->assertJsonPath('data.0.shows_visible', 1)
-                ->assertJsonPath('data.0.kpi_percent', 85)->json('data.0');
+                ->assertJsonPath('data.0.kpi_percent', null)->json('data.0');
             $kpi = $this->getJson($monthly.$scope)->assertOk()->assertJsonPath('data.0.kpi_percent', 85)->json('data.0');
             $this->assertEquals($expected['metrics'], $report['metrics']);
             $this->assertEquals($self['metrics'], $kpi['metrics']);
@@ -542,7 +641,6 @@ class KpiConsistencyFeatureTest extends TestCase
     {
         [, $agent, $branch, $group] = $this->fixture();
         $this->employeeReportProperties();
-        (require database_path('migrations/2026_11_05_140000_create_kpi_result_goals_and_facts.php'))->up();
         $facts = app(\App\Services\Kpi\ResultFactService::class);
         foreach (['UTC', 'Asia/Dushanbe'] as $timezone) {
             config(['app.timezone' => $timezone]);
