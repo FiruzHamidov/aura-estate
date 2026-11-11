@@ -2111,6 +2111,91 @@ class PropertyConstructionFieldsTest extends TestCase
         }
     }
 
+    public function test_freehand_search_uses_the_concave_ring_for_catalog_count_and_clusters(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = User::forceCreate(['name' => 'Agent', 'phone' => '930000248', 'role_id' => $role->id, 'status' => 'active']);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $base = ['type_id' => $type->id, 'price' => 120000, 'currency' => 'TJS',
+            'moderation_status' => 'approved', 'created_by' => $agent->id];
+
+        $ring = ['38.550,68.750', '38.550,68.759', '38.559,68.759', '38.553,68.756', '38.559,68.750'];
+        $expected = [];
+        foreach ([
+            ['38.551', '68.754', 'sale', true],       // Interior
+            ['38.557', '68.7589', 'sale', true],      // Narrow right arm
+            ['38.556', '68.753', 'sale', true],       // Sloping left edge
+            ['38.55', '68.751', 'sale', true],        // Horizontal edge
+            ['38.552', '68.75', 'sale', true],        // Vertical edge
+            ['38.553', '68.756', 'sale', true],       // Concave vertex
+            ['38.557', '68.755', 'sale', false],      // In the notch, inside bounding box
+            ['38.556', '68.75300001', 'sale', false], // Just over the sloping edge
+            ['38.549999', '68.751', 'sale', false],   // Outside bounding box
+            ['38.551', '68.754', 'rent', false],
+            [null, null, 'sale', false],
+        ] as [$latitude, $longitude, $offer, $include]) {
+            $property = \App\Models\Property::create($base + ['latitude' => $latitude, 'longitude' => $longitude, 'offer_type' => $offer]);
+            if ($include) {
+                $expected[] = $property->id;
+            }
+        }
+
+        foreach ([$ring, array_reverse($ring)] as $vertices) {
+            $query = http_build_query(['area' => 'p:'.implode(';', $vertices), 'offer_type' => 'sale']);
+            $catalog = $this->getJson('/api/properties?'.$query)->assertOk();
+            $this->assertEqualsCanonicalizing($expected, array_column($catalog->json('data'), 'id'));
+            $this->getJson('/api/properties?per_page=2&page=3&'.$query)->assertOk()
+                ->assertJsonCount(2, 'data')->assertJsonPath('total', count($expected));
+            $this->getJson('/api/properties/count?'.$query)->assertOk()->assertExactJson(['count' => count($expected)]);
+            $map = '/api/properties/map?bbox=38.54,68.74,38.57,68.76&'.$query;
+            $points = $this->getJson($map.'&zoom=16')->assertOk();
+            $this->assertEqualsCanonicalizing($expected, collect($points->json('features'))->pluck('properties.id')->all());
+            $this->getJson($map.'&zoom=8')->assertOk()->assertJsonCount(1, 'features')
+                ->assertJsonPath('features.0.properties.point_count', count($expected));
+        }
+    }
+
+    public function test_freehand_cluster_anchor_stays_inside_a_concave_contour(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = User::forceCreate(['name' => 'Agent', 'phone' => '930000248', 'role_id' => $role->id, 'status' => 'active']);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        foreach ([68.7501, 68.7589] as $lng) {
+            \App\Models\Property::create(['type_id' => $type->id, 'price' => 120000, 'currency' => 'TJS',
+                'offer_type' => 'sale', 'moderation_status' => 'approved', 'created_by' => $agent->id,
+                'latitude' => 38.558, 'longitude' => $lng]);
+        }
+
+        // Both arms of the shape occupy the same low-zoom cell. Their midpoint is in the notch.
+        $query = http_build_query(['area' => 'p:38.55,68.75;38.55,68.759;38.559,68.759;38.553,68.756;38.559,68.75',
+            'bbox' => '38.54,68.74,38.57,68.76', 'zoom' => 8]);
+        $this->getJson('/api/properties/map?'.$query)->assertOk()->assertJsonCount(1, 'features')
+            ->assertJsonPath('features.0.properties.point_count', 2)
+            ->assertJsonPath('features.0.geometry.coordinates', [38.558, 68.7501]);
+    }
+
+    public function test_freehand_search_validates_ring_geometry_and_vertex_limit(): void
+    {
+        $ring = [];
+        for ($i = 0; $i < 64; $i++) {
+            $angle = 2 * pi() * $i / 64;
+            $ring[] = sprintf('%.6F,%.6F', 38.55 + cos($angle) / 100, 68.75 + sin($angle) / 100);
+        }
+        $this->getJson('/api/properties/count?'.http_build_query(['area' => 'p:'.implode(';', $ring)]))
+            ->assertOk()->assertJsonPath('count', 0);
+
+        foreach ([
+            '0,0;0,1', '0,0;0,1;0,2', '0,0;1,1;0,1;1,0', '0,0;1,0;0,1;0,0',
+            '0,0;0,4;0,2;2,2;2,0', '0,0;0,4;4,4;0,2;4,0',
+            '0,0;0,181;1,0', '-91,0;0,1;1,0', '0,0;0,NaN;1,0', '0,0;1e2,1;1,0',
+            '10,179;10,-179;11,-179', '0,-100;0,0;1,100',
+            implode(';', $ring).';38.55,68.75',
+        ] as $invalid) {
+            $this->getJson('/api/properties/count?'.http_build_query(['area' => 'p:'.$invalid]))
+                ->assertUnprocessable()->assertJsonValidationErrors(['area'], 'details.errors');
+        }
+    }
+
     public function test_public_map_exposes_the_listing_id_only_for_singleton_clusters(): void
     {
         $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
