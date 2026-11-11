@@ -795,6 +795,32 @@ class ExternalPropertyRequestFeatureTest extends TestCase
         \Illuminate\Support\Facades\Storage::disk('public')->assertMissing($sourcePath);
     }
 
+    public function test_conversion_checks_the_map_pin_before_creating_a_listing(): void
+    {
+        Schema::table('properties', function (Blueprint $table) {
+            $table->decimal('latitude', 10, 8)->nullable();
+            $table->decimal('longitude', 11, 8)->nullable();
+        });
+        $external = $this->user($this->externalRole, '930009981', branchId: 1, branchGroupId: 1);
+        $actor = $this->user($this->agentRole, '930009982', branchId: 1, branchGroupId: 1);
+        $type = PropertyType::create(['name' => 'Квартира', 'slug' => 'apartment']);
+        PropertyStatus::create(['name' => 'Доступен', 'slug' => 'available']);
+        $request = ExternalPropertyRequest::create([
+            'external_agent_id' => $external->id, 'branch_id' => 1, 'branch_group_id' => 1,
+            'status' => ExternalPropertyRequest::STATUS_SUBMITTED, 'offer_type' => 'sale',
+            'type_id' => $type->id, 'price' => 85000, 'currency' => 'TJS', 'owner_phone' => '930009983',
+        ]);
+        Sanctum::actingAs($actor);
+        $url = "/api/external-agent-requests/{$request->id}/convert";
+        $this->postJson($url, ['latitude' => 40.06, 'longitude' => 70.82])
+            ->assertUnprocessable()->assertJsonStructure(['details' => ['errors' => ['latitude']]]);
+        $this->assertDatabaseCount('properties', 0);
+        $this->assertSame(ExternalPropertyRequest::STATUS_SUBMITTED, $request->fresh()->status);
+        $vorukh = ['latitude' => 39.85, 'longitude' => 70.57];
+        $this->postJson($url, $vorukh)->assertCreated();
+        $this->assertDatabaseHas('properties', ['external_property_request_id' => $request->id] + $vorukh);
+    }
+
     public function test_duplicate_request_requires_force_before_conversion(): void
     {
         $externalAgent = $this->user($this->externalRole, '930000021', branchId: 1, branchGroupId: 1);

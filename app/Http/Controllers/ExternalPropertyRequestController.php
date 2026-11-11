@@ -441,6 +441,8 @@ class ExternalPropertyRequestController extends Controller
             'status_id' => ['sometimes', 'nullable', 'integer', 'exists:property_statuses,id'],
             'building_type_id' => ['sometimes', 'nullable', 'integer', 'exists:building_types,id'],
             'location_id' => ['nullable', 'integer', 'exists:locations,id'],
+            'latitude' => ['nullable', 'numeric', 'between:-90,90'],
+            'longitude' => ['nullable', 'numeric', 'between:-180,180'],
             'repair_type_id' => ['nullable', 'integer', 'exists:repair_types,id'],
             'price' => ['required', 'numeric', 'min:0'],
             'currency' => ['required', Rule::in(['TJS', 'USD'])],

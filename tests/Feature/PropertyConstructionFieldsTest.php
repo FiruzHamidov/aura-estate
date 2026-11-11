@@ -1331,6 +1331,36 @@ class PropertyConstructionFieldsTest extends TestCase
         $this->assertDatabaseCount('properties', 1);
     }
 
+    public function test_listing_map_accepts_tajikistan_and_checks_partial_edits_against_stored_coordinates(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = User::forceCreate(['name' => 'Agent', 'phone' => '930000127', 'role_id' => $role->id, 'status' => 'active']);
+        Sanctum::actingAs($agent);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $payload = ['type_id' => $type->id, 'price' => 100000, 'currency' => 'TJS', 'offer_type' => 'sale'];
+        $foreign = ['latitude' => 40.06, 'longitude' => 70.82]; // Batken lies inside the country's bounding box.
+        $this->postJson('/api/properties', $payload + $foreign)
+            ->assertUnprocessable()->assertJsonStructure(['details' => ['errors' => ['latitude', 'longitude']]]);
+        $this->postJson('/api/properties', $payload + ['latitude' => 38.56])
+            ->assertUnprocessable()->assertJsonStructure(['details' => ['errors' => ['longitude']]]);
+        $this->assertDatabaseCount('properties', 0);
+
+        $dushanbe = ['latitude' => 38.56, 'longitude' => 68.78];
+        $id = $this->postJson('/api/properties', $payload + $dushanbe)->assertOk()->json('id');
+        $url = '/api/properties/'.$id;
+        $this->putJson($url, ['longitude' => 50])->assertUnprocessable();
+        $this->assertDatabaseHas('properties', ['id' => $id] + $dushanbe);
+        $this->putJson($url, ['longitude' => 68.79])->assertOk();
+        $this->assertDatabaseHas('properties', ['id' => $id, 'latitude' => 38.56, 'longitude' => 68.79]);
+
+        // Old listings can still be edited without touching their map position.
+        \Illuminate\Support\Facades\DB::table('properties')->where('id', $id)->update($foreign);
+        $this->putJson($url, ['description' => 'Новое описание'])->assertOk();
+        $this->putJson($url, ['description' => 'Уточнение', 'latitude' => '40.060', 'longitude' => '70.820'])->assertOk();
+        $this->putJson($url, ['latitude' => null, 'longitude' => null])->assertOk();
+        $this->assertDatabaseHas('properties', ['id' => $id, 'latitude' => null, 'longitude' => null]);
+    }
+
     public function test_property_store_warns_when_coordinates_are_far_from_selected_location(): void
     {
         $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
@@ -2047,6 +2077,25 @@ class PropertyConstructionFieldsTest extends TestCase
 
         $this->getJson('/api/properties?per_page=1000')
             ->assertUnprocessable();
+    }
+
+    public function test_public_map_exposes_the_listing_id_only_for_singleton_clusters(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::forceCreate(['name' => 'Agent', 'phone' => '930000248', 'role_id' => $role->id, 'status' => 'active']);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $base = ['type_id' => $type->id, 'price' => 125000, 'currency' => 'TJS', 'offer_type' => 'sale',
+            'moderation_status' => 'approved', 'created_by' => $user->id];
+        $single = \App\Models\Property::create($base + ['latitude' => 48.85, 'longitude' => 2.35]);
+        foreach ([2.311, 2.312] as $longitude) {
+            \App\Models\Property::create($base + ['latitude' => 48.85, 'longitude' => $longitude]);
+        }
+
+        $map = $this->getJson('/api/properties/map?bbox=48.8,2.3,48.9,2.4&zoom=4')
+            ->assertOk()->assertJsonCount(2, 'features');
+        $clusters = collect($map->json('features'))->pluck('properties')->keyBy('point_count');
+        $this->assertSame([$single->id], $clusters[1]['member_ids']);
+        $this->assertArrayNotHasKey('member_ids', $clusters[2]);
     }
 
     public function test_map_cache_and_count_respect_authenticated_property_scope(): void
