@@ -58,8 +58,8 @@ final class BulkResultGoalService
                 if ($personalVersion !== (int) $row['expected_version']) {
                     $this->conflict();
                 }
-                if ($current && $data['month'] === $month) {
-                    throw ValidationException::withMessages(['rows.'.$index => $user->name.': цель текущего месяца уже зафиксирована.']);
+                if ($current && ResultGoalService::publishedGoalIsLocked($data['month'], $data['kind'])) {
+                    throw ValidationException::withMessages(['rows.'.$index => $user->name.': план по аренде текущего месяца зафиксирован.']);
                 }
                 $draft = KpiPlanningDraft::where('type', 'goal')->where('month', $data['month'])
                     ->where('payload->kind', $data['kind'])

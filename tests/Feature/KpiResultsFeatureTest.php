@@ -264,17 +264,24 @@ class KpiResultsFeatureTest extends TestCase
         $this->assertEquals(1, $award->fresh()->meta['scope']['branch_group_id']);
     }
 
-    public function test_goals_are_versioned_and_agent_cannot_publish_or_change_current_period(): void
+    public function test_managers_can_revise_current_sales_but_not_past_sales_or_current_rentals(): void
     {
         $this->postJson('/api/kpi/results/goals', $this->goal())->assertCreated()->assertJsonPath('data.version', 1);
         $this->postJson('/api/kpi/results/goals', $this->goal())->assertConflict();
-        $this->postJson('/api/kpi/results/goals', $this->goal(['expected_version' => 1]))->assertUnprocessable();
+        $this->postJson('/api/kpi/results/goals', $this->goal(['expected_version' => 1, 'count_target' => 5]))
+            ->assertCreated()->assertJsonPath('data.version', 2);
+        $this->postJson('/api/kpi/results/goals', $this->goal(['expected_version' => 1]))->assertConflict();
+        $this->postJson('/api/kpi/results/goals', $this->goal(['month' => '2026-10']))->assertUnprocessable();
+        $rental = $this->goal(['kind' => 'rental', 'mode' => 'count']);
+        $this->postJson('/api/kpi/results/goals', $rental)->assertCreated();
+        $this->postJson('/api/kpi/results/goals', array_replace($rental, ['expected_version' => 1]))->assertUnprocessable();
         $future = $this->goal(['month' => '2026-12']);
         $this->postJson('/api/kpi/results/goals', $future)->assertCreated();
         $this->postJson('/api/kpi/results/goals', array_replace($future, ['expected_version' => 1, 'count_target' => 5]))
             ->assertCreated()->assertJsonPath('data.version', 2);
-        $this->assertDatabaseCount('kpi_result_goals', 3);
+        $this->assertDatabaseCount('kpi_result_goals', 5);
         Sanctum::actingAs($this->agent);
+        $this->postJson('/api/kpi/results/goals', $this->goal(['expected_version' => 2]))->assertForbidden();
         $this->postJson('/api/kpi/results/goals', $this->goal(['month' => '2027-01']))->assertForbidden();
     }
 
@@ -597,10 +604,10 @@ class KpiResultsFeatureTest extends TestCase
         $this->assertDatabaseCount('kpi_result_goals', 0);
     }
 
-    public function test_planning_started_program_and_current_goal_are_immutable(): void
+    public function test_planning_started_program_and_current_rental_goal_are_immutable(): void
     {
-        $this->postJson('/api/kpi/results/goals', $this->goal())->assertCreated();
-        $draft = $this->planningDraft($this->goal(['expected_version' => 1]));
+        $this->postJson('/api/kpi/results/goals', $this->goal(['kind' => 'rental', 'mode' => 'count']))->assertCreated();
+        $draft = $this->planningDraft($this->goal(['kind' => 'rental', 'mode' => 'count', 'expected_version' => 1]));
         $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/preview', ['revision' => 1])->assertUnprocessable();
         $program = $this->program();
         $payload = $this->planningProgram(['expected_version' => $program->version]);
@@ -643,15 +650,31 @@ class KpiResultsFeatureTest extends TestCase
         $this->planningPreview($own);
     }
 
-    public function test_planning_current_inherited_goal_cannot_be_replaced_by_a_new_personal_exception(): void
+    public function test_current_group_sale_can_be_revised_then_overridden_for_one_employee(): void
     {
-        $payload = $this->goal(['branch_group_id' => 1]);
-        unset($payload['user_id']);
-        $this->postJson('/api/kpi/results/goals', $payload)->assertCreated();
-        $this->postJson('/api/kpi/results/goals', $this->goal())->assertUnprocessable();
-        $draft = $this->planningDraft($this->goal());
-        $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/preview', ['revision' => 1])->assertUnprocessable();
-        $this->assertDatabaseCount('kpi_result_goals', 1);
+        $group = $this->goal(['branch_group_id' => 1, 'mode' => 'count', 'count_target' => 2]);
+        unset($group['user_id']);
+        $this->postJson('/api/kpi/results/goals', $group)->assertCreated();
+        $this->property();
+        $other = $this->user('agent', 1);
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
+        $rop = $this->user('rop', 1);
+        DB::table('rop_branch_groups')->insert(['rop_id' => $rop->id, 'branch_group_id' => 1]);
+        Sanctum::actingAs($rop);
+        $draft = $this->planningDraft(array_replace($group, ['expected_version' => 1, 'count_target' => 4]));
+        $preview = $this->planningPreview($draft);
+        $this->assertEquals(2, $preview['current']['count_target']);
+        $this->assertEquals(4, $preview['condition']['count_target']);
+        $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/publish', ['revision' => 1, 'preview_token' => $preview['preview_token']])->assertCreated();
+        $report = '/api/kpi/results?month=2026-11&user_id='.$this->agent->id;
+        $this->getJson($report)->assertOk()->assertJsonPath('rows.0.sale.progress_percent', 25);
+        $draft = $this->planningDraft($this->goal(['mode' => 'count', 'count_target' => 5]));
+        $preview = $this->planningPreview($draft);
+        $this->assertEquals(4, $preview['effective'][0]['goal']['count_target']);
+        $this->postJson('/api/kpi/planning/drafts/'.$draft['id'].'/publish', ['revision' => 1, 'preview_token' => $preview['preview_token']])->assertCreated();
+        $this->getJson($report)->assertOk()->assertJsonPath('rows.0.sale.count', 1)->assertJsonPath('rows.0.sale.progress_percent', 20);
+        $this->getJson('/api/kpi/results?month=2026-11&user_id='.$other->id)->assertOk()->assertJsonPath('rows.0.sale.goal.count_target', 4);
+        $this->assertDatabaseHas('kpi_result_goals', ['scope_key' => 'group:1', 'version' => 1, 'count_target' => 2]);
     }
 
     public function test_planning_private_unassigned_program_resumes_without_becoming_global(): void
@@ -726,7 +749,13 @@ class KpiResultsFeatureTest extends TestCase
         $this->postJson('/api/kpi/results/goals', $this->goal())->assertCreated();
         $this->postJson('/api/kpi/planning/bulk-goals/preview', $this->bulkPayload([$this->agent->id], ['month' => '2026-11']))->assertConflict();
         $this->postJson('/api/kpi/planning/bulk-goals/preview', $this->bulkPayload([$this->agent->id], ['month' => '2026-10']))->assertUnprocessable();
-        $this->assertDatabaseCount('kpi_result_goals', 1);
+        $current = $this->bulkPayload([$this->agent->id], ['month' => '2026-11']);
+        $current['rows'][0]['expected_version'] = 1;
+        $current['rows'][0]['count_target'] = 8;
+        $token = $this->postJson('/api/kpi/planning/bulk-goals/preview', $current)->assertOk()->json('data.preview_token');
+        $this->postJson('/api/kpi/planning/bulk-goals/publish', $current + ['preview_token' => $token])
+            ->assertCreated()->assertJsonPath('data.published.0.version', 2);
+        $this->assertDatabaseCount('kpi_result_goals', 2);
     }
 
     public function test_bulk_goals_reject_agents_and_out_of_scope_members(): void
