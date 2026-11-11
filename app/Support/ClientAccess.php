@@ -309,11 +309,10 @@ class ClientAccess
         User $authUser,
         Client $client,
         array $data,
-        string $ability = 'client_needs.create'
+        string $ability = 'client_needs.create',
+        ?int $previousResponsibleId = null
     ): void {
         $this->ensureVisible($authUser, $client);
-
-        $roleSlug = $this->roleSlug($authUser);
 
         if ($authUser?->usesAssignedGroupScope()) {
             if (! empty($data['responsible_agent_id'])) {
@@ -323,27 +322,33 @@ class ClientAccess
             return;
         }
 
-        if (! $this->isBranchScoped($authUser)) {
-            return;
+        if ($this->isBranchScoped($authUser)) {
+            foreach (['created_by', 'responsible_agent_id'] as $field) {
+                if (empty($data[$field])) {
+                    continue;
+                }
+
+                $targetUser = User::query()->find($data[$field]);
+
+                if (! $targetUser || (int) $targetUser->branch_id !== (int) $client->branch_id) {
+                    $this->denyWithCode(
+                        'RBAC_VALIDATION_FAILED',
+                        sprintf('%s must belong to the client branch.', $field),
+                        422,
+                        $authUser,
+                        $ability,
+                        ['field' => $field]
+                    );
+                }
+            }
         }
 
-        foreach (['created_by', 'responsible_agent_id'] as $field) {
-            if (empty($data[$field])) {
-                continue;
-            }
-
-            $targetUser = User::query()->find($data[$field]);
-
-            if (! $targetUser || (int) $targetUser->branch_id !== (int) $client->branch_id) {
-                $this->denyWithCode(
-                    'RBAC_VALIDATION_FAILED',
-                    sprintf('%s must belong to the client branch.', $field),
-                    422,
-                    $authUser,
-                    $ability,
-                    ['field' => $field]
-                );
-            }
+        $responsibleId = (int) ($data['responsible_agent_id'] ?? 0);
+        if ($responsibleId && $responsibleId !== $previousResponsibleId
+            && ! User::query()->activeForSelection()->whereKey($responsibleId)->lockForUpdate()->first(['users.id'])) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'responsible_agent_id' => 'Выберите действующего сотрудника.',
+            ]);
         }
     }
 

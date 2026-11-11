@@ -37,7 +37,10 @@ class ExternalAgentController extends Controller
             });
         }
 
-        $query->where('status', $validated['status'] ?? User::STATUS_ACTIVE);
+        $query->activeForSelection();
+        if (($validated['status'] ?? null) === User::STATUS_INACTIVE) {
+            $query->whereRaw('1 = 0');
+        }
 
         return response()->json($query->latest('id')->paginate((int) ($validated['per_page'] ?? 20)));
     }

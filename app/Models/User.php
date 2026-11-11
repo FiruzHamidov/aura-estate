@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
@@ -54,6 +55,13 @@ class User extends Authenticatable
         return in_array($value, [self::STATUS_ACTIVE, self::STATUS_INACTIVE], true)
             ? $value
             : self::STATUS_ACTIVE;
+    }
+
+    /** Older personnel records with no status are active, as in the directory. */
+    public function scopeActiveForSelection(Builder $query): Builder
+    {
+        return $query->where(fn (Builder $status) => $status
+            ->where('users.status', self::STATUS_ACTIVE)->orWhereNull('users.status'));
     }
 
     public static function accountDeletionPhoneHash(string $phone): string

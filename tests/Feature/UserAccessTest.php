@@ -585,14 +585,17 @@ class UserAccessTest extends TestCase
 
         $response = $this->getJson('/api/user?include_unassigned=1');
         $response->assertOk();
-        $response->assertJsonCount(3, 'data');
+        $response->assertJsonCount(2, 'data');
         $response->assertJsonFragment(['id' => $sameBranchUser->id]);
-        $response->assertJsonFragment(['id' => $unassignedUser->id]);
+        $response->assertJsonMissing(['phone' => $unassignedUser->phone]);
         $response->assertJsonMissing(['phone' => '900000122']);
-        $response->assertJsonPath('total', 3);
+        $response->assertJsonPath('total', 2);
         $response->assertJsonPath('last_page', 1);
         $response->assertJsonPath('active_count', 2);
         $response->assertJsonPath('inactive_count', 1);
+
+        $this->getJson('/api/user?include_unassigned=1&status=inactive')
+            ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $unassignedUser->id);
     }
 
     public function test_rop_cannot_create_privileged_roles_or_users_in_other_branches(): void
@@ -1771,18 +1774,14 @@ class UserAccessTest extends TestCase
 
         Sanctum::actingAs($superadmin);
 
-        $response = $this->getJson('/api/user?status=all&branch_id='.$branchA->id.'&branch_group_id='.$groupA1->id.'&page=1&per_page=100');
-
-        $response->assertOk();
-        $response->assertJsonCount(2, 'data');
-        $response->assertJsonFragment(['id' => $activeAgent->id]);
-        $response->assertJsonFragment(['id' => $inactiveManager->id]);
-        $response->assertJsonPath('meta.current_page', 1);
-        $response->assertJsonPath('meta.last_page', 1);
-        $response->assertJsonPath('meta.per_page', 100);
-        $response->assertJsonPath('meta.total', 2);
-        $response->assertJsonPath('data.0.role.slug', $inactiveManager->role->slug);
-        $response->assertJsonPath('data.0.role.name', $inactiveManager->role->name);
+        $scope = 'branch_id='.$branchA->id.'&branch_group_id='.$groupA1->id.'&per_page=100';
+        foreach (['', 'status=all&', 'status=active&'] as $status) {
+            $this->getJson('/api/user?'.$status.$scope)->assertOk()->assertJsonCount(1, 'data')
+                ->assertJsonPath('data.0.id', $activeAgent->id)->assertJsonPath('meta.total', 1)
+                ->assertJsonPath('active_count', 1)->assertJsonPath('inactive_count', 1);
+        }
+        $this->getJson('/api/user?status=inactive&'.$scope)->assertOk()->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $inactiveManager->id);
     }
 
     public function test_branch_director_cannot_assign_group_from_another_branch_and_user_payload_includes_group(): void
@@ -2166,7 +2165,7 @@ class UserAccessTest extends TestCase
         $employee->forceFill(['status' => 'inactive'])->save();
         $this->getJson('/api/user/agents')->assertOk()->assertJsonCount(0);
         $this->getJson('/api/mobile/clients/filters')->assertOk()->assertJsonCount(0, 'responsible_agents');
-        $this->getJson('/api/user/agents?status=inactive')->assertOk()->assertJsonPath('0.id', $employee->id);
+        $this->getJson('/api/user/agents?status=inactive')->assertOk()->assertExactJson([]);
         $this->assertNotNull($employee->fresh());
     }
 
@@ -2252,12 +2251,13 @@ class UserAccessTest extends TestCase
 
         Sanctum::actingAs($superadmin);
 
-        $response = $this->getJson('/api/user?report_agents=1&status=inactive&email=mop@example.com&page=1&per_page=100');
+        $this->getJson('/api/user?report_agents=1&status=inactive')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/user?status=inactive&email=mop@example.com')->assertOk()->assertJsonPath('data.0.id', $inactiveMop->id);
+        $response = $this->getJson('/api/user?report_agents=1&status=all&email=agent@example.com&page=1&per_page=100');
 
         $response->assertOk();
         $response->assertJsonCount(1, 'data');
-        $response->assertJsonPath('data.0.id', $inactiveMop->id);
-        $response->assertJsonPath('data.0.role.slug', 'mop');
+        $response->assertJsonPath('data.0.role.slug', 'agent');
         $response->assertJsonPath('data.0.branch_id', $branch->id);
         $response->assertJsonPath('data.0.branch_group_id', $group->id);
         $response->assertJsonPath('data.0.branch.name', 'Branch A');
@@ -2444,15 +2444,15 @@ class UserAccessTest extends TestCase
 
         Sanctum::actingAs($manager);
         $directoryResponse = $this->getJson('/api/user/agents?status=all')->assertOk();
-        $directoryResponse->assertJsonCount(4);
+        $directoryResponse->assertJsonCount(2);
         $directory = collect($directoryResponse->json())->keyBy('id');
         $this->assertEqualsCanonicalizing(
             ['id', 'name', 'phone', 'photo', 'role_id', 'branch_id', 'branch_group_id', 'status', 'role'],
-            array_keys($directory[$inactiveAgent->id])
+            array_keys($directory[$activeAgent->id])
         );
-        $this->assertSame('inactive', $directory[$inactiveAgent->id]['status']);
-        $this->assertSame($branch->id, $directory[$inactiveAgent->id]['branch_id']);
-        $this->assertSame($group->id, $directory[$inactiveAgent->id]['branch_group_id']);
+        $this->assertSame('active', $directory[$activeAgent->id]['status']);
+        $this->assertSame($branch->id, $directory[$activeAgent->id]['branch_id']);
+        $this->assertSame($group->id, $directory[$activeAgent->id]['branch_group_id']);
         $directoryResponse->assertJsonMissingPath('0.email')
             ->assertJsonMissingPath('0.auth_method')
             ->assertJsonMissingPath('0.telegram_id');
@@ -2467,10 +2467,7 @@ class UserAccessTest extends TestCase
         Sanctum::actingAs($admin);
         $this->getJson('/api/user/agents?status=inactive')
             ->assertOk()
-            ->assertJsonCount(2)
-            ->assertJsonPath('0.id', $inactiveMop->id)
-            ->assertJsonPath('1.id', $inactiveAgent->id)
-            ->assertJsonPath('0.status', 'inactive');
+            ->assertExactJson([]);
     }
 
     public function test_minimal_agent_directory_uses_branch_and_assigned_group_boundaries(): void
@@ -2524,7 +2521,7 @@ class UserAccessTest extends TestCase
         Sanctum::actingAs($directoryActor);
         $branchDirectory = $this->getJson('/api/user/agents?status=all')->assertOk();
         $this->assertEqualsCanonicalizing(
-            [$allowed->id, $allowedInactive->id, $peer->id],
+            [$allowed->id, $peer->id],
             array_column($branchDirectory->json(), 'id')
         );
         $branchDirectory->assertJsonMissing(['id' => $foreign->id]);
@@ -2543,9 +2540,9 @@ class UserAccessTest extends TestCase
         Sanctum::actingAs($groupActor);
         $this->getJson('/api/user/agents?status=all')
             ->assertOk()
-            ->assertJsonCount(2)
+            ->assertJsonCount(1)
             ->assertJsonFragment(['id' => $allowed->id])
-            ->assertJsonFragment(['id' => $allowedInactive->id])
+            ->assertJsonMissing(['id' => $allowedInactive->id])
             ->assertJsonMissing(['id' => $peer->id])
             ->assertJsonMissing(['id' => $foreign->id]);
 
@@ -2930,6 +2927,10 @@ class UserAccessTest extends TestCase
             ->assertJsonFragment(['id' => $agentCreatedId])
             ->assertJsonFragment(['id' => $mopCreatedId])
             ->assertJsonMissing(['id' => $foreignExternal->id]);
+
+        User::whereKey($agentCreatedId)->update(['status' => User::STATUS_INACTIVE]);
+        $this->getJson('/api/external-agents')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $mopCreatedId);
+        $this->getJson('/api/external-agents?status=inactive')->assertOk()->assertJsonCount(0, 'data');
 
         Sanctum::actingAs($rop);
         $this->getJson('/api/external-agents')->assertForbidden();

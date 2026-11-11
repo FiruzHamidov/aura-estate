@@ -319,7 +319,7 @@ class KpiAdjustmentsAndTasksValidationTest extends TestCase
 
         Sanctum::actingAs($admin);
 
-        $response = $this->getJson('/api/kpi/adjustments/entities?role=agent,mop,rop&active=1');
+        $response = $this->getJson('/api/kpi/adjustments/entities?role=agent,mop,rop');
 
         $response->assertOk();
         $response->assertJsonFragment([
