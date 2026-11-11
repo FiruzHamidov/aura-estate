@@ -1723,6 +1723,24 @@ class PropertyController extends Controller
             return;
         }
 
+        if ($request->filled('area')) {
+            $area = $request->input('area');
+            $parts = is_string($area) ? explode(',', $area) : [];
+            if (count($parts) !== 4 || count(array_filter($parts, 'is_numeric')) !== 4) {
+                throw \Illuminate\Validation\ValidationException::withMessages([
+                    'area' => 'Укажите четыре координаты области поиска: юг, запад, север, восток.',
+                ]);
+            }
+            [$south, $west, $north, $east] = array_map('floatval', $parts);
+            if ($south < -90 || $north > 90 || $west < -180 || $east > 180 || $south >= $north || $west >= $east) {
+                throw \Illuminate\Validation\ValidationException::withMessages([
+                    'area' => 'Укажите корректные границы области поиска.',
+                ]);
+            }
+            $query->whereBetween('properties.latitude', [$south, $north])
+                ->whereBetween('properties.longitude', [$west, $east]);
+        }
+
         $toArray = function ($value) {
             if ($value === null || $value === '') {
                 return [];

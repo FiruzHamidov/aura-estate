@@ -2079,6 +2079,38 @@ class PropertyConstructionFieldsTest extends TestCase
             ->assertUnprocessable();
     }
 
+    public function test_search_area_filters_catalog_count_and_map_before_clustering(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::forceCreate(['name' => 'Agent', 'phone' => '930000248', 'role_id' => $role->id, 'status' => 'active']);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        $base = ['type_id' => $type->id, 'price' => 125000, 'currency' => 'TJS',
+            'moderation_status' => 'approved', 'created_by' => $user->id];
+        $rows = [];
+        foreach ([
+            [38.55, 68.75, 'sale'], [38.553, 68.753, 'sale'], [38.554, 68.754, 'sale'],
+            [38.551, 68.751, 'rent'], [null, null, 'sale'],
+        ] as [$lat, $lng, $offer]) {
+            $rows[] = \App\Models\Property::create($base + ['latitude' => $lat, 'longitude' => $lng, 'offer_type' => $offer]);
+        }
+
+        $query = 'area=38.55,68.75,38.553,68.753&offer_type=sale';
+        $expected = [$rows[0]->id, $rows[1]->id];
+        $catalog = $this->getJson('/api/properties?'.$query)->assertOk();
+        $this->assertEqualsCanonicalizing($expected, array_column($catalog->json('data'), 'id'));
+        $this->getJson('/api/properties/count?'.$query)->assertOk()->assertExactJson(['count' => 2]);
+        $visibleMap = '/api/properties/map?bbox=38.5,68.7,38.6,68.8&'.$query;
+        $points = $this->getJson($visibleMap.'&zoom=15')->assertOk();
+        $this->assertEqualsCanonicalizing($expected, collect($points->json('features'))->pluck('properties.id')->all());
+        $this->getJson($visibleMap.'&zoom=9')->assertOk()->assertJsonCount(1, 'features')
+            ->assertJsonPath('features.0.properties.point_count', 2);
+        $this->getJson('/api/properties/map?bbox=39,68,40,70&zoom=9&'.$query)->assertOk()->assertJsonCount(0, 'features');
+        foreach (['1,2,0,3', '1,2,3,181', 'x,2,3,4', '1,2,1,2', ['wrong']] as $invalid) {
+            $this->getJson('/api/properties/count?'.http_build_query(['area' => $invalid]))
+                ->assertStatus(422)->assertJsonValidationErrors(['area'], 'details.errors');
+        }
+    }
+
     public function test_public_map_exposes_the_listing_id_only_for_singleton_clusters(): void
     {
         $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
