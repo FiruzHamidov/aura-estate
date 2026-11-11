@@ -12,6 +12,7 @@ use App\Services\Crm\ClientAttachService;
 use App\Services\Crm\Matching\ClientPropertyMatcher;
 use App\Services\PropertyBuildingType;
 use App\Services\PropertyDuplicateService;
+use App\Services\PropertyMapLocation;
 use App\Services\PropertyModeration\PropertyModerationAccess;
 use App\Services\PropertyModeration\PropertyModerationService;
 use App\Services\PropertyPublicationVisibility;
@@ -1557,6 +1558,7 @@ class PropertyController extends Controller
                         FLOOR(latitude  / {$cell}) as gx,
                         FLOOR(longitude / {$cell}) as gy,
                         COUNT(*) as cnt,
+                        MIN(properties.id) as member_id,
                         MIN({$effectivePriceSql}) as min_price,
                         COUNT(DISTINCT currency) as currency_count,
                         MIN(currency) as currency_single,
@@ -1582,6 +1584,7 @@ class PropertyController extends Controller
                         'properties' => [
                             'cluster' => true,
                             'point_count' => (int) $r->cnt,
+                            ...((int) $r->cnt === 1 ? ['member_ids' => [(int) $r->member_id]] : []),
                             'min_price' => $minPrice,
                             'currency' => $currency,
                             'price_from_label' => $priceFromLabel,
@@ -2448,6 +2451,7 @@ class PropertyController extends Controller
         unset($validated['tags']);
         [$property, $dups, $qualityWarnings, $user] = DB::transaction(function () use ($request, $validated, $featureIds, $tagIds, $user, $requiresReview, $requestedType) {
             [$user] = $this->lockPropertyWrite($user, null, $validated);
+            PropertyMapLocation::validate($validated);
             $this->assertCanWriteOwnerPrice($user, $validated);
             $validated = app(PropertyBuildingType::class)->normalizeWrite($validated);
             $this->moderation->assertCanCreate($user);
@@ -2540,6 +2544,7 @@ class PropertyController extends Controller
             $user
         ): void {
             [$user, $property] = $this->lockPropertyWrite($user, $property, $validated);
+            PropertyMapLocation::validate($validated, $property);
             $this->assertCanWriteOwnerPrice($user, $validated);
             $validated = app(PropertyBuildingType::class)->normalizeWrite($validated, $property);
             $validated = $this->normalizePropertyWriteGroup($user, $validated);

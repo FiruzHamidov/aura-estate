@@ -292,6 +292,7 @@ class ExternalPropertyRequestService
 
             $propertyPayload = array_merge($this->prefillPayload($request, $actor),
                 app(\App\Services\PropertyBuildingType::class)->normalizeWrite($payload));
+            PropertyMapLocation::validate($propertyPayload);
             $propertyPayload['created_by'] = $actor->id;
             $propertyPayload['agent_id'] = $propertyPayload['agent_id'] ?? $request->assigned_agent_id ?? $actor->id;
             $propertyPayload['branch_id'] = $propertyPayload['branch_id'] ?? $request->branch_id ?? $actor->branch_id;
