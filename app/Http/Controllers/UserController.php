@@ -72,16 +72,7 @@ class UserController extends Controller
 
     private function applyStatusFilter(Builder $query, string $status): Builder
     {
-        return $query->where(function (Builder $statusQuery) use ($status) {
-            if ($status === 'active') {
-                $statusQuery->where('status', 'active')
-                    ->orWhereNull('status');
-
-                return;
-            }
-
-            $statusQuery->where('status', 'inactive');
-        });
+        return $status === 'active' ? $query->activeForSelection() : $query->where('users.status', User::STATUS_INACTIVE);
     }
 
     private function parseBooleanQueryFlag(Request $request, string $key): bool
@@ -116,7 +107,6 @@ class UserController extends Controller
         Builder $query,
         array $validated,
         User $authUser,
-        bool $applyStatusFilter = true,
         bool $includeUnassigned = false
     ): Builder
     {
@@ -162,10 +152,6 @@ class UserController extends Controller
 
         if (! empty($validated['report_agents'])) {
             $query->whereHas('role', fn ($roleQuery) => $roleQuery->withPermission('users.subject.report_selection'));
-        }
-
-        if ($applyStatusFilter && ! empty($validated['status']) && $validated['status'] !== 'all') {
-            $this->applyStatusFilter($query, $validated['status']);
         }
 
         return $query;
@@ -465,12 +451,16 @@ class UserController extends Controller
         $query = $authUser->hasPermission('users.report_agents.view_all') && ! empty($validated['report_agents'])
             ? User::query()->select(['id', 'name', 'role_id', 'branch_id', 'branch_group_id', 'status'])->with('role:id,name,slug')
             : $this->visibleUsersQuery($authUser, $includeUnassigned);
-        $baseQuery = $this->applyIndexFilters($query, $validated, $authUser, false, $includeUnassigned);
+        $baseQuery = $this->applyIndexFilters($query, $validated, $authUser, $includeUnassigned);
         $tabCounts = $this->statusCountsForIndex(clone $baseQuery);
         $query = clone $baseQuery;
 
-        if (! empty($validated['status']) && $validated['status'] !== 'all') {
-            $this->applyStatusFilter($query, $validated['status']);
+        // The personnel directory's explicit inactive tab is the only archive.
+        // Old clients requesting "all" must not put former staff into pickers.
+        $isArchive = ($validated['status'] ?? null) === 'inactive';
+        $this->applyStatusFilter($query, $isArchive ? 'inactive' : 'active');
+        if ($isArchive && ! empty($validated['report_agents'])) {
+            $query->whereRaw('1 = 0');
         }
 
         $users = $query
@@ -795,7 +785,7 @@ class UserController extends Controller
             && ! $actor->isDeletedAccount()
             && $actor->hasPermission('users.agents.directory');
 
-        if (! $scoped && ! $directory && $status !== 'active') {
+        if ($status === 'inactive' || (! $scoped && ! $directory && $status !== 'active')) {
             return response()->json([]);
         }
 
@@ -818,12 +808,9 @@ class UserController extends Controller
             }
         }
 
-        $agents = $query
+        $agents = $query->activeForSelection()
             ->whereHas('role', function ($q) {
                 $q->withPermission('users.subject.public_agent');
-            })
-            ->when($scoped ? $status !== 'all' : (! $directory || $status !== 'all'), function ($q) use ($scoped, $directory, $status) {
-                $this->applyStatusFilter($q, ($scoped || $directory) ? $status : 'active');
             })
             ->get()
             ->sortBy(function (User $user) {

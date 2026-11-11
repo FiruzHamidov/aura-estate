@@ -167,9 +167,9 @@ class KpiPeriodLockController extends Controller
 
         $entities = [];
         if ($user->usesAssignedGroupScope()) {
-            $entities = \Illuminate\Support\Facades\DB::table('users')->select(['id', 'name'])
+            $entities = User::query()->activeForSelection()->select(['id', 'name'])
                 ->whereIn('id', (clone $query)->reorder()->select('entity_id'))
-                ->orderBy('name')->orderBy('id')->get()->all();
+                ->orderBy('name')->orderBy('id')->toBase()->get()->all();
         }
 
         if (! empty($validated['entity_id'])) {
@@ -193,11 +193,11 @@ class KpiPeriodLockController extends Controller
         $this->validatePeriodKeyFormat($validated['period_type'], $validated['period_key']);
         $groupId = app(\App\Support\RopGroupAccess::class)->creationGroup($actor, $validated['branch_group_id'] ?? null);
         [$from, $to] = $this->resolveDateRange($validated['period_type'], $validated['period_key']);
-        $rows = \Illuminate\Support\Facades\DB::table('users')->select(['users.id', 'users.name'])->whereExists(function ($query) use ($groupId, $from, $to) {
+        $rows = User::query()->activeForSelection()->select(['users.id', 'users.name'])->whereExists(function ($query) use ($groupId, $from, $to) {
             $query->selectRaw('1')->from('daily_reports')->whereColumn('daily_reports.user_id', 'users.id')
                 ->where('daily_reports.branch_group_id', $groupId)->whereIn('daily_reports.role_slug', \App\Models\Role::query()->withPermission('kpi.subject.assigned_groups')->select('slug'))
                 ->whereBetween('daily_reports.report_date', [$from, $to]);
-        })->orderBy('users.name')->orderBy('users.id')->get();
+        })->orderBy('users.name')->orderBy('users.id')->toBase()->get();
         return response()->json(['data' => $rows]);
     }
 

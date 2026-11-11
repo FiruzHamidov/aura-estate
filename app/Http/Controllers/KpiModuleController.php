@@ -905,19 +905,12 @@ class KpiModuleController extends Controller
             ->values()
             ->all();
 
-        $query = User::query()
+        $query = User::query()->activeForSelection()
             ->select(['users.id', 'users.name', 'users.branch_id', 'users.role_id'])
             ->with('role:id,slug')
             ->whereHas('role', fn ($q) => isset($validated['role'])
                 ? $q->whereIn('slug', $roles)
                 : $q->withPermission('kpi.subject.adjustment_default_filter'));
-
-        if (array_key_exists('active', $validated) && (bool) $validated['active']) {
-            $query->where(function ($q) {
-                $q->where('status', User::STATUS_ACTIVE)
-                    ->orWhereNull('status');
-            });
-        }
 
         $rows = $query->orderBy('users.name')
             ->get()

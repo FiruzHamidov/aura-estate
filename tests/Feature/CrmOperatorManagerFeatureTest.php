@@ -940,6 +940,10 @@ class CrmOperatorManagerFeatureTest extends TestCase
         $this->getJson($url.'&branch_group_id='.$groups[2])->assertForbidden();
         $this->getJson('/api/crm/reports/performance?role_type=manager&responsible_user_id='.$employees[0]->id)->assertForbidden();
 
+        $employees[1]->forceFill(['status' => User::STATUS_INACTIVE])->saveQuietly();
+        $this->getJson($url)->assertOk()->assertJsonCount(1, 'available_users')
+            ->assertJsonPath('available_users.0.id', $employees[0]->id);
+
         // Assignment revocation affects both subjects and metrics on the next request.
         \Illuminate\Support\Facades\DB::table('rop_branch_groups')->where('rop_id', $rop->id)->delete();
         $this->getJson($url)->assertOk()->assertJsonCount(0, 'data')->assertJsonCount(0, 'available_users')->assertJsonPath('summary.processed_leads_count', 0);
