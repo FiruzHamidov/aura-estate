@@ -406,6 +406,7 @@ class BookingController extends Controller
     {
         $validated = $request->validate([
             'agent_id' => 'nullable|integer',
+            'crm_client_id' => 'nullable|integer|min:1',
             'attribution' => 'nullable|in:agent,author',
             'include_inactive' => 'nullable|boolean',
             'branch_id' => 'nullable',
@@ -450,6 +451,10 @@ class BookingController extends Controller
         }
         if ($request->filled('property_id')) {
             $q->where('property_id', $request->integer('property_id'));
+        }
+
+        if (isset($validated['crm_client_id'])) {
+            $q->where('crm_client_id', $validated['crm_client_id']);
         }
 
         $this->applyBranchAccessForAgents($request, $q, $employeeColumn);
