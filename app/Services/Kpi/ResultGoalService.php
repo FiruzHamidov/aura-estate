@@ -30,6 +30,11 @@ final class ResultGoalService
         ];
     }
 
+    public static function publishedGoalIsLocked(string $month, string $kind): bool
+    {
+        return $kind === 'rental' && $month === CarbonImmutable::now('Asia/Dushanbe')->format('Y-m');
+    }
+
     public function publish(User $actor, array $data): array
     {
         return DB::transaction(function () use ($actor, $data) {
@@ -53,9 +58,11 @@ final class ResultGoalService
             $query = DB::table('kpi_result_goals')->where('scope_key', $key)->where('month', $month->toDateString())->where('kind', $data['kind']);
             $last = (clone $query)->latest('version')->first();
             abort_if((int) ($last?->version ?? 0) !== (int) $data['expected_version'], 409, 'KPI_GOAL_VERSION_CONFLICT');
-            $inherited = ! empty($scope['user_id']) ? $this->resolve($scope['user_id'], $scope['branch_group_id'], $data['month'], $data['kind'], true) : null;
-            if (($last || $inherited) && ! $month->isFuture()) {
-                throw ValidationException::withMessages(['month' => 'Опубликованный план текущего месяца зафиксирован. Создайте версию на следующий месяц.']);
+            if (self::publishedGoalIsLocked($data['month'], $data['kind'])) {
+                $hasGoal = $last || ($scope['user_id'] && $this->resolve($scope['user_id'], $scope['branch_group_id'], $data['month'], $data['kind'], true));
+                if ($hasGoal) {
+                    throw ValidationException::withMessages(['month' => 'Опубликованный план по аренде текущего месяца зафиксирован.']);
+                }
             }
             $mode = $data['mode'];
             $row = $scope + [

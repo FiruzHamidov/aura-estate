@@ -191,10 +191,8 @@ final class PlanningDraftService
             if ((int) ($current?->version ?? 0) !== (int) $data['expected_version']) {
                 $this->conflict('KPI_GOAL_VERSION_CONFLICT', $current);
             }
-            $personalUser = ! empty($data['user_id']) ? $recipients->first() : null;
-            $appliedGoal = $personalUser ? app(ResultGoalService::class)->resolve($personalUser->id, $personalUser->branch_group_id, $data['month'], $data['kind'], $lock) : null;
-            if ($data['month'] < $today->format('Y-m') || (($current || $appliedGoal) && $data['month'] === $today->format('Y-m'))) {
-                throw ValidationException::withMessages(['month' => 'Опубликованный текущий месяц и прошлые периоды зафиксированы. Скопируйте цель на будущий месяц.']);
+            if ($data['month'] < $today->format('Y-m')) {
+                throw ValidationException::withMessages(['month' => 'План нельзя публиковать за прошедший месяц.']);
             }
             $excluded = collect();
             $effective = collect();
@@ -204,6 +202,10 @@ final class PlanningDraftService
                 if (empty($data['user_id']) && ! empty($goal['user_id'])) {
                     $excluded->push($user->id);
                 }
+            }
+            $hasGoal = $current !== null || (! empty($data['user_id']) && ! empty($effective->first()['goal']));
+            if ($hasGoal && ResultGoalService::publishedGoalIsLocked($data['month'], $data['kind'])) {
+                throw ValidationException::withMessages(['month' => 'Опубликованный план по аренде текущего месяца зафиксирован.']);
             }
             $result = ['current' => $current, 'effective' => $effective, 'recipients' => $members->whereNotIn('user_id', $excluded)->values(),
                 'excluded' => $members->whereIn('user_id', $excluded)->values(), 'condition' => $data, 'inherits_for_new_members' => empty($data['user_id'])];
