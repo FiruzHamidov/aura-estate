@@ -408,7 +408,7 @@ class ClientNeedController extends Controller
             $validated = $this->clientAccess->normalizeNeedMutationData($validated, $authUser, $clientNeed->client);
             $validated['created_by'] = $clientNeed->created_by;
             if (! $request->exists('responsible_agent_id')) $validated['responsible_agent_id'] = $clientNeed->responsible_agent_id;
-            $this->clientAccess->validateNeedMutationTargets($authUser, $clientNeed->client, $validated, 'client_needs.update');
+            $this->clientAccess->validateNeedMutationTargets($authUser, $clientNeed->client, $validated, 'client_needs.update', $clientNeed->responsible_agent_id);
             $validated = $this->applyClosedState($validated, $clientNeed);
 
             $propertyTypeIds = null;

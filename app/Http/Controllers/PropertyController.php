@@ -929,7 +929,7 @@ class PropertyController extends Controller
         $summary = null;
         if ($request->user()?->hasPermission('properties.list.closed_only')) {
             $reportProperties = $this->baseQueryMyProperties($request)->withoutEagerLoads();
-            $reportUsers = User::query()->select(['id', 'name', 'status', 'branch_id', 'branch_group_id'])->where(function ($users) use ($reportProperties) {
+            $reportUsers = User::query()->activeForSelection()->select(['id', 'name', 'status', 'branch_id', 'branch_group_id'])->where(function ($users) use ($reportProperties) {
                 $users->whereIn('id', (clone $reportProperties)->select('created_by'))
                     ->orWhereIn('id', (clone $reportProperties)->select('agent_id'));
                 if (Schema::hasColumn('properties', 'sale_user_id')) $users->orWhereIn('id', (clone $reportProperties)->select('sale_user_id'));

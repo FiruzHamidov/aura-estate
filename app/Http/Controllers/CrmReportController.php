@@ -54,7 +54,7 @@ class CrmReportController extends Controller
         [$from, $to] = $this->resolveDateRange($validated);
         $scope = $this->resolveScope($authUser, $validated);
 
-        $usersQuery = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
+        $usersQuery = User::query()->activeForSelection()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->tap(fn ($q) => $this->scopeAssignedGroups($q))
             ->with(['role', 'branch'])
             ->whereHas('role', fn ($query) => $query->withPermission('crm_reports.subject.'.$validated['role_type']))

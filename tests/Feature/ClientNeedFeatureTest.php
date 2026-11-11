@@ -303,6 +303,24 @@ class ClientNeedFeatureTest extends TestCase
             ->assertJsonCount(2, 'needs');
     }
 
+    public function test_dismissed_employee_cannot_receive_a_new_need_from_a_stale_form(): void
+    {
+        [$agent, $client] = $this->seedClientContext();
+        $former = $this->createUser($agent->role, $agent->branch, 'Former employee');
+        $former->update(['status' => 'inactive']);
+        Sanctum::actingAs($agent);
+
+        $this->postJson('/api/clients/'.$client->id.'/needs', [
+            'type_id' => 1, 'responsible_agent_id' => $former->id,
+        ])->assertUnprocessable()->assertJsonStructure(['details' => ['errors' => ['responsible_agent_id']]]);
+        $this->assertSame(0, $client->needs()->count());
+
+        $id = $this->postJson('/api/clients/'.$client->id.'/needs', ['type_id' => 1])->assertCreated()->json('id');
+        ClientNeed::whereKey($id)->update(['responsible_agent_id' => $former->id]);
+        $this->patchJson('/api/client-needs/'.$id, ['comment' => 'Updated without reassignment'])
+            ->assertOk()->assertJsonPath('responsible_agent_id', $former->id);
+    }
+
     public function test_new_need_creates_one_linked_deal_in_main_pipeline_and_edits_do_not_duplicate_it(): void
     {
         [$agent, $client] = $this->seedClientContext();

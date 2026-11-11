@@ -654,6 +654,9 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertDatabaseCount('kpi_adjustment_logs', 1);
         $historicalRole->forceFill(['permissions' => ['kpi.subject.assigned_groups']])->save();
         $this->getJson($url)->assertOk()->assertJsonCount(1, 'data');
+        $employee->update(['status' => User::STATUS_INACTIVE]);
+        $this->getJson($url)->assertOk()->assertJsonCount(0, 'data');
+        $this->assertDatabaseCount('kpi_adjustment_logs', 1);
     }
 
     public function test_adjustment_changes_only_snapshot_group_and_requires_its_period_lock(): void
