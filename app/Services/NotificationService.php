@@ -1036,6 +1036,7 @@ class NotificationService
         $recipients = collect($users)
             ->filter(fn ($user) => $user instanceof User && $user->status === User::STATUS_ACTIVE)
             ->unique('id')
+            ->filter(fn (User $user) => NotificationDeliveryAccess::allowsType($type, $user))
             ->filter(fn (User $user) => app(NotificationGroupAccess::class)->subjectAllowed($user, $subject))
             ->reject(fn (User $user) => $actor && (int) $user->id === (int) $actor->id)
             ->values();
