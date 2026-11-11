@@ -8,8 +8,18 @@ use App\Support\Notifications\NotificationType;
 /** Subscription-only events must recheck the current grant before external delivery. */
 final class NotificationDeliveryAccess
 {
+    public static function allowsType(?string $type, User $recipient): bool
+    {
+        return $type !== NotificationType::DEAL_ACTIVITY_OVERDUE
+            || ! in_array($recipient->role?->slug, ['admin', 'superadmin'], true);
+    }
+
     public function allows(Notification $notification, User $recipient): bool
     {
+        if (! self::allowsType($notification->type, $recipient)) {
+            return false;
+        }
+
         $permission = match ($notification->type) {
             NotificationType::MOTIVATION_MANAGER_MORNING_DIGEST => 'notifications.receive.digest.leads.morning',
             NotificationType::MOTIVATION_MANAGER_EVENING_DIGEST => 'notifications.receive.digest.leads.evening',

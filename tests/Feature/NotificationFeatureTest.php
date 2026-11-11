@@ -434,6 +434,50 @@ class NotificationFeatureTest extends TestCase
         $this->assertSame('Вам ответили в чате', $ios['apns']['payload']['aps']['alert']['body']);
     }
 
+    public function test_overdue_deal_reminders_skip_admin_roles_at_creation_and_push_delivery(): void
+    {
+        Queue::fake();
+        Schema::create('crm_deals', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('created_by');
+            $table->unsignedBigInteger('responsible_agent_id');
+            $table->timestamp('closed_at')->nullable();
+            $table->timestamp('next_activity_at');
+            $table->timestamp('deadline_at');
+            $table->softDeletes();
+        });
+        $branch = Branch::create(['name' => 'Central']);
+        $agent = $this->createUser(Role::create(['name' => 'Agent', 'slug' => 'agent']), $branch, 'Agent');
+        $admin = $this->createUser(Role::create(['name' => 'Admin', 'slug' => 'admin']), $branch, 'Admin');
+        $superadmin = $this->createUser(Role::create(['name' => 'Superadmin', 'slug' => 'superadmin']), $branch, 'Superadmin');
+        foreach ([[$admin, $agent], [$agent, $superadmin]] as [$creator, $assignee]) {
+            DB::table('crm_deals')->insert([
+                'created_by' => $creator->id, 'responsible_agent_id' => $assignee->id,
+                'next_activity_at' => now()->subMinute(), 'deadline_at' => now()->addHour(),
+            ]);
+        }
+
+        $service = app(NotificationService::class);
+        (new \ReflectionMethod($service, 'dispatchDealActivityOverdue'))->invoke($service);
+        $reminders = Notification::where('type', NotificationType::DEAL_ACTIVITY_OVERDUE)->orderBy('id')->get();
+        $this->assertSame([$agent->id, $agent->id], $reminders->pluck('user_id')->all());
+        Queue::assertPushed(SendFirebasePushNotification::class, 2);
+
+        $job = new SendFirebasePushNotification($reminders->first()->id);
+        $firebase = \Mockery::mock(\App\Services\FirebasePushService::class);
+        $firebase->shouldReceive('send')->once();
+        $job->handle($firebase);
+        foreach ([$admin, $superadmin] as $administrator) {
+            $agent->update(['role_id' => $administrator->role_id]);
+            $job->handle($firebase);
+        }
+
+        (new \ReflectionMethod($service, 'dispatchDealDeadlineSoon'))->invoke($service);
+        foreach ([$admin, $superadmin] as $administrator) {
+            $this->assertDatabaseHas('notifications', ['user_id' => $administrator->id, 'type' => NotificationType::DEAL_DEADLINE_SOON]);
+        }
+    }
+
     public function test_overdue_lead_without_a_manager_is_skipped_without_an_info_log(): void
     {
         $branch = Branch::create(['name' => 'Central']);
