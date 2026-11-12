@@ -555,6 +555,34 @@ class BookingAccessTest extends TestCase
         $response->assertJsonPath('data.0.id', $matchingBooking->id);
         $response->assertJsonPath('total', 1);
     }
+
+    public function test_record_showing_requires_both_the_crm_client_and_property_within_agent_scope(): void
+    {
+        Schema::table('bookings', fn (Blueprint $table) => $table->unsignedBigInteger('crm_client_id')->nullable());
+        Schema::create('clients', function (Blueprint $table) {
+            $table->id();
+            $table->softDeletes();
+        });
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = User::create(['name' => 'A', 'phone' => '910000001', 'role_id' => $role->id]);
+        $other = User::create(['name' => 'B', 'phone' => '910000002', 'role_id' => $role->id]);
+        $property = Property::create(['title' => 'A', 'created_by' => $agent->id]);
+        $second = Property::create(['title' => 'B', 'created_by' => $agent->id]);
+        $visits = [];
+        foreach ([
+            [$agent->id, $property->id, 42], [$agent->id, $property->id, 43],
+            [$agent->id, $second->id, 42], [$other->id, $property->id, 42],
+        ] as [$agentId, $propertyId, $clientId]) {
+            $visits[] = Booking::create([
+                'agent_id' => $agentId, 'property_id' => $propertyId, 'crm_client_id' => $clientId,
+                'start_time' => now(), 'end_time' => now()->addHour(),
+            ]);
+        }
+        Sanctum::actingAs($agent);
+        $this->getJson("/api/bookings?property_id={$property->id}&crm_client_id=42&per_page=1")
+            ->assertOk()->assertJsonPath('total', 1)->assertJsonPath('data.0.id', $visits[0]->id);
+    }
+
     public function test_saved_booking_scope_changes_existing_accounts_and_can_revoke_listing(): void
     {
         $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
