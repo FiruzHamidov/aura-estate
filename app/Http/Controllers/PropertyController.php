@@ -16,6 +16,7 @@ use App\Services\PropertyMapLocation;
 use App\Services\PropertyModeration\PropertyModerationAccess;
 use App\Services\PropertyModeration\PropertyModerationService;
 use App\Services\PropertyPublicationVisibility;
+use App\Services\PropertySearchArea;
 use App\Services\PublicPropertyPresenter;
 use App\Services\PropertyQualityService;
 use App\Support\ClientAccess;
@@ -1553,7 +1554,7 @@ class PropertyController extends Controller
             if ($zoom <= 11) {
                 $cell = 0.02; // шаг сетки ~2 км (подберите под город)
                 $effectivePriceSql = $this->effectivePriceSql();
-                $rows = $query
+                $buckets = $query
                     ->selectRaw("
                         FLOOR(latitude  / {$cell}) as gx,
                         FLOOR(longitude / {$cell}) as gy,
@@ -1566,8 +1567,17 @@ class PropertyController extends Controller
                         AVG(longitude) as lng_avg
                     ")
                     ->groupBy('gx', 'gy')
-                    ->limit($limit)
-                    ->get();
+                    ->limit($limit);
+
+                if (PropertySearchArea::isPolygon($request->input('area'))) {
+                    // The mean of points in a concave area can lie outside the contour.
+                    $rows = $query->getConnection()->query()->fromSub($buckets, 'buckets')
+                        ->join('properties as anchor', 'anchor.id', '=', 'buckets.member_id')
+                        ->select('buckets.*', 'anchor.latitude as anchor_lat', 'anchor.longitude as anchor_lng')
+                        ->get();
+                } else {
+                    $rows = $buckets->get();
+                }
 
                 $features = $rows->map(function ($r) {
                     $minPrice = $this->normalizeRawNumber($r->min_price);
@@ -1579,7 +1589,7 @@ class PropertyController extends Controller
                         'geometry' => [
                             'type' => 'Point',
                             // ВНИМАНИЕ: проверь порядок в вашей карте. Для Yandex чаще [lat, lng]
-                            'coordinates' => [(float) $r->lat_avg, (float) $r->lng_avg],
+                            'coordinates' => [(float) ($r->anchor_lat ?? $r->lat_avg), (float) ($r->anchor_lng ?? $r->lng_avg)],
                         ],
                         'properties' => [
                             'cluster' => true,
@@ -1721,6 +1731,10 @@ class PropertyController extends Controller
         if ($this->isGeneralReportRequest($request)) {
             $query->whereIn('properties.id', app(\App\Services\PropertyReportQuery::class)->inventory($request)->select('properties.id'));
             return;
+        }
+
+        if ($request->filled('area')) {
+            PropertySearchArea::apply($query, $request->input('area'));
         }
 
         $toArray = function ($value) {
