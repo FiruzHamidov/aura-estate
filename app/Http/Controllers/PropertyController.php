@@ -359,14 +359,27 @@ class PropertyController extends Controller
         ];
     }
 
-    private function ensureDealAssigneeExists(int $assigneeId): void
+    private function ensureDealAssignee(User $actor, int $id, string $field, Property $property, bool $participant = false): void
     {
-        $assignee = User::query()->find($assigneeId);
-
-        abort_unless($assignee, 422, 'Указанный сотрудник не найден.');
+        $user = User::query()->activeForSelection()
+            ->when(DB::transactionLevel() > 0, fn ($query) => $query->lockForUpdate())->find($id);
+        $active = $user && ! $user->isDeletedAccount();
+        if (! $active) {
+            $alreadyParticipates = $participant && DB::table('property_agent_sales')
+                ->where('property_id', $property->id)->where('agent_id', $id)
+                ->when(DB::transactionLevel() > 0, fn ($query) => $query->lockForUpdate())->first(['agent_id']);
+            if (! $alreadyParticipates) {
+                throw \Illuminate\Validation\ValidationException::withMessages([
+                    $field => 'Сотрудник больше недоступен для назначения. Выберите действующего сотрудника.',
+                ]);
+            }
+        }
+        if ($actor->usesAssignedGroupScope()) {
+            app(\App\Support\RopGroupAccess::class)->ensureEmployee($actor, $id, $property->branch_group_id, $active);
+        }
     }
 
-    private function ensureDealAssignmentUsersInScope(User $actor, array $data, ?Property $property = null): void
+    private function ensureDealAssignmentUsersInScope(User $actor, array $data, Property $property): void
     {
         $fields = [
             'deposit_user_id' => 'Недостаточно прав, чтобы указать сотрудника как принявшего депозит.',
@@ -378,7 +391,7 @@ class PropertyController extends Controller
                 continue;
             }
 
-            if ($property && (int) $property->{$field} === (int) $data[$field]) {
+            if ((int) $property->{$field} === (int) $data[$field]) {
                 continue;
             }
 
@@ -388,8 +401,7 @@ class PropertyController extends Controller
                 $message
             );
 
-            $this->ensureDealAssigneeExists((int) $data[$field]);
-            if ($actor->usesAssignedGroupScope()) app(\App\Support\RopGroupAccess::class)->ensureEmployee($actor, (int) $data[$field], $property?->branch_group_id, true);
+            $this->ensureDealAssignee($actor, (int) $data[$field], $field, $property);
         }
 
         foreach (($data['agents'] ?? []) as $index => $agent) {
@@ -403,8 +415,7 @@ class PropertyController extends Controller
                 'Недостаточно прав, чтобы добавить соисполнителя #'.($index + 1).'.'
             );
 
-            $this->ensureDealAssigneeExists((int) $agent['agent_id']);
-            if ($actor->usesAssignedGroupScope()) app(\App\Support\RopGroupAccess::class)->ensureEmployee($actor, (int) $agent['agent_id'], $property?->branch_group_id, true);
+            $this->ensureDealAssignee($actor, (int) $agent['agent_id'], "agents.$index.agent_id", $property, participant: true);
         }
     }
 

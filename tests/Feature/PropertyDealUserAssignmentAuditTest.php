@@ -655,6 +655,37 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
         $this->assertSame(1, $facts->currentQuery()->count());
     }
 
+    public function test_dismissal_blocks_new_deal_assignments_and_preserves_existing_sale_history(): void
+    {
+        [$actor, $property] = $this->workflowFixture();
+        $employee = $this->makeUser($actor->role, $actor->branch_id, 'former');
+        $otherProperty = $this->makeProperty($actor, $property->type, $property->status);
+        $otherProperty->forceFill(['moderation_version' => 1])->saveQuietly();
+        $url = '/api/properties/'.$property->id.'/deal';
+        $otherUrl = '/api/properties/'.$otherProperty->id.'/deal';
+        $participant = ['agent_id' => $employee->id, 'role' => 'partner', 'commission_amount' => 100];
+        $existingSale = $this->salePayload(['version' => 1, 'sale_user_id' => $employee->id, 'agents' => [$participant]]);
+        $this->postJson($url, $existingSale)->assertOk();
+        $employee->forceFill(['status' => User::STATUS_INACTIVE])->saveQuietly();
+
+        foreach ([
+            'deposit_user_id' => $this->depositPayload(['version' => 1, 'deposit_user_id' => $employee->id]),
+            'sale_user_id' => $existingSale,
+            'agents.0.agent_id' => $this->salePayload(['version' => 1, 'agents' => [$participant]]),
+        ] as $field => $payload) {
+            $errors = $this->postJson($otherUrl, $payload)->assertUnprocessable()->json('details.errors');
+            $this->assertArrayHasKey($field, $errors);
+        }
+        $this->assertEquals(1, $otherProperty->fresh()->moderation_version);
+        $this->assertFalse($otherProperty->saleAgents()->exists());
+
+        $existingSale['version'] = 2;
+        $existingSale['agents'][] = ['agent_id' => $actor->id, 'role' => 'main'];
+        $this->postJson($url, $existingSale)->assertOk();
+        $this->assertEquals($employee->id, $property->fresh()->sale_user_id);
+        $this->assertEquals(100, $property->saleAgents()->findOrFail($employee->id)->pivot->agent_commission_amount);
+    }
+
     public function test_refusal_unpublishes_and_legacy_closed_rows_are_never_public(): void
     {
         [, $property] = $this->workflowFixture();
