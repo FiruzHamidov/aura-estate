@@ -3,6 +3,7 @@
 namespace App\Services\Marketing;
 
 use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Facades\Http;
 
 final class OsonCampaignGateway
@@ -12,16 +13,16 @@ final class OsonCampaignGateway
         return filled(config('osonsmsservice.bulk_token'));
     }
 
-    /** Use the installed gateway's signature and credentials over the provider's HTTPS endpoint. */
+    /** Legacy accounts use a signature. Token accounts use the documented bearer credentials. */
     public function submitIndividual(string $phone, string $message, string $transaction): array
     {
         $login = config('osonsmsservice.login');
         $sender = config('osonsmsservice.sender_name');
-        $response = Http::acceptJson()->withoutRedirecting()->connectTimeout(20)->timeout(20)
-            ->get('https://api.osonsms.com/sendsms_v1.php', [
-                'from' => $sender, 'phone_number' => $phone, 'msg' => $message, 'txn_id' => $transaction, 'login' => $login,
-                'str_hash' => $this->signature([$transaction, $login, $sender, $phone]),
-            ]);
+        $params = ['from' => $sender, 'phone_number' => $phone, 'msg' => $message, 'txn_id' => $transaction, 'login' => $login];
+        if (blank(config('osonsmsservice.api_token'))) {
+            $params['str_hash'] = $this->signature([$transaction, $login, $sender, $phone]);
+        }
+        $response = $this->individualRequest()->get('https://api.osonsms.com/sendsms_v1.php', $params);
 
         if ($response->successful() && is_numeric($response->json('msg_id')) && (int) $response->json('msg_id') > 0) {
             return ['status' => 'accepted', 'provider_id' => (int) $response->json('msg_id')];
@@ -30,17 +31,25 @@ final class OsonCampaignGateway
         return $this->failure($response->status());
     }
 
-    public function receipt(int $providerId): string
+    public function receipt(int $providerId, string $sendTransaction): string
     {
         $login = config('osonsmsservice.login');
-        $transaction = (string) \Illuminate\Support\Str::uuid();
-        $response = Http::acceptJson()->withoutRedirecting()->connectTimeout(20)->timeout(20)
-            ->get('https://api.osonsms.com/query_sms.php', [
-                'login' => $login, 'txn_id' => $transaction, 'msg_id' => $providerId,
-                'str_hash' => $this->signature([$login, $transaction]),
-            ]);
+        $params = ['login' => $login, 'txn_id' => $sendTransaction, 'msg_id' => $providerId];
+        if (blank(config('osonsmsservice.api_token'))) {
+            $params['txn_id'] = (string) \Illuminate\Support\Str::uuid();
+            $params['str_hash'] = $this->signature([$login, $params['txn_id']]);
+        }
+        $response = $this->individualRequest()->get('https://api.osonsms.com/query_sms.php', $params);
 
         return $response->ok() ? strtoupper(trim((string) ($response->json('message_state') ?? $response->json('status')))) : '';
+    }
+
+    private function individualRequest(): PendingRequest
+    {
+        $request = Http::acceptJson()->withoutRedirecting()->connectTimeout(20)->timeout(20);
+        $token = config('osonsmsservice.api_token');
+
+        return filled($token) ? $request->withToken($token) : $request;
     }
 
     private function signature(array $parts): string

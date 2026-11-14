@@ -4,6 +4,7 @@
  * You can register for FREE in https://osonsms.com in order to get access to OsonSMS gateway and send SMS via its gateway.
  */
 return [
+    'api_token' => env('OSONSMS_API_TOKEN'),
     'bulk_token' => env('OSONSMS_BULK_TOKEN'),
     'login' => 'AuraTj',                                    // your login in OsonSMS platform
     'pass_salt_hash' => '4c119321c7580ac4e46f23540467c765',                  // your hash code in OsonSMS platform

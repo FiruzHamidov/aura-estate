@@ -2,7 +2,7 @@
 
 namespace App\Services\Marketing;
 
-use App\Models\Client;
+use App\Services\Crm\ClientListFilters;
 use App\Models\User;
 use App\Support\BranchVisibility;
 use App\Support\ClientAccess;
@@ -10,6 +10,7 @@ use App\Support\InternationalPhone;
 use App\Support\LeadAccess;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 final class SmsAudience
 {
@@ -21,16 +22,17 @@ final class SmsAudience
             'accounts' => $this->accounts($actor),
         };
         BranchVisibility::records($query);
-        foreach (['status', 'branch_id', 'source_id', 'source'] as $key) {
-            if (isset($segment[$key])) {
-                $query->where($key, $segment[$key]);
+        if ($segment['base'] === 'clients') {
+            if (isset($segment['business'])) {
+                $segment['is_business'] = true;
             }
-        }
-        if (isset($segment['contact_kind'])) {
-            $query->whereIn('contact_kind', Client::kindsMatchingFilter($segment['contact_kind']));
-        }
-        if (isset($segment['business'])) {
-            $query->whereHas('type', fn ($q) => $q->where('is_business', true));
+            ClientListFilters::apply($query, $segment);
+        } else {
+            foreach (['status', 'branch_id', 'source'] as $key) {
+                if (isset($segment[$key])) {
+                    $query->where($key, $segment[$key]);
+                }
+            }
         }
         if (isset($segment['from'])) {
             $query->whereDate('created_at', '>=', $segment['from']);
@@ -65,9 +67,17 @@ final class SmsAudience
         $excluded = array_fill_keys(DB::table('sms_campaign_exclusions')->pluck('phone')->all(), true);
         $recipients = [];
         $invalid = $duplicates = $suppressed = 0;
-        foreach ($this->query($actor, $segment)->toBase()->lazyById(1000) as $record) {
+        $test = $segment['base'] === 'test';
+        // Explicit test numbers use their 1-based position as the source ID.
+        $records = $test
+            ? collect($segment['phones'])->map(fn ($phone, $i) => (object) ['id' => $i + 1, 'phone' => $phone])
+            : $this->query($actor, $segment)->toBase()->lazyById(1000);
+        foreach ($records as $record) {
             $phone = InternationalPhone::e164($record->phone);
             if ($phone === null || ! preg_match('/^\+992[0-9]{9}$/D', $phone)) {
+                if ($test) {
+                    throw ValidationException::withMessages(['segment.phones' => "Проверьте номер №{$record->id}. Нужен номер Таджикистана (+992)."]);
+                }
                 $invalid++;
             } elseif (isset($excluded[$phone])) {
                 $suppressed++;
