@@ -9,6 +9,7 @@ use App\Models\SmsCampaign;
 use App\Models\SmsCampaignRecipient;
 use App\Rules\InternationalPhoneNumber;
 use App\Services\Marketing\SmsCampaigns;
+use App\Services\Marketing\SmsAudience;
 use App\Support\InternationalPhone;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Controllers\HasMiddleware;
@@ -36,6 +37,11 @@ final class SmsCampaignController extends Controller implements HasMiddleware
             'branches' => $branches->orderBy('name')->get(['id', 'name']),
             'sources' => ClientSource::orderBy('name')->get(['id', 'name']),
         ]);
+    }
+
+    public function audience(SmsCampaignRequest $request, SmsAudience $audience)
+    {
+        return response()->json($audience->resolve($request->user(), $request->validated('segment'))['summary']);
     }
 
     public function preview(SmsCampaignRequest $request, SmsCampaigns $service)

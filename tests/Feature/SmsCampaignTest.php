@@ -82,7 +82,7 @@ class SmsCampaignTest extends TestCase
             foreach (['', '/options', '/1/recipients', '/exclusions'] as $path) {
                 $this->getJson(self::URL.$path)->assertForbidden();
             }
-            foreach (['', '/preview', '/1/cancel', '/exclusions'] as $path) {
+            foreach (['', '/audience', '/preview', '/1/cancel', '/exclusions'] as $path) {
                 $this->postJson(self::URL.$path)->assertForbidden();
             }
             $this->deleteJson(self::URL.'/exclusions/1')->assertForbidden();
@@ -101,8 +101,11 @@ class SmsCampaignTest extends TestCase
         $this->client('917000004', ['deleted_at' => now()]);
         $this->postJson(self::URL.'/exclusions', ['phone' => '917000003'])->assertNoContent();
         $draft = $this->draft(['base' => 'clients', 'contact_kind' => 'buyer']);
+        $this->postJson(self::URL.'/audience', ['segment' => $draft['segment']])->assertOk()
+            ->assertExactJson(['matched' => 5, 'total' => 1, 'duplicates' => 1, 'invalid' => 2, 'excluded' => 1]);
+        $this->assertDatabaseCount('sms_campaigns', 0);
         $preview = $this->postJson(self::URL.'/preview', $draft)->assertOk()
-            ->assertJson(['total' => 1, 'duplicates' => 1, 'invalid' => 2, 'excluded' => 1]);
+            ->assertJson(['matched' => 5, 'total' => 1, 'duplicates' => 1, 'invalid' => 2, 'excluded' => 1]);
         $payload = $draft + ['preview_token' => $preview->json('preview_token')];
         $this->postJson(self::URL, ['message' => 'Другой текст'] + $payload)->assertConflict();
         DB::table('clients')->where('phone', '917000001')->update(['phone' => '917000003']);

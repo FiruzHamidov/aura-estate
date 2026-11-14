@@ -40,14 +40,18 @@ class SmsCampaignRequest extends FormRequest
             }
         }
 
+        $rules['segment'] = ['required', 'array:'.implode(',', $keys)];
+        $rules['segment.base'] = ['required', Rule::in(['clients', 'leads', 'accounts', 'test'])];
+        if ($this->routeIs('sms-campaigns.audience')) {
+            return $rules;
+        }
+
         return $rules + [
             'request_id' => ['required', 'uuid'],
             'name' => ['required', 'string', 'max:120'],
             'message' => ['required', 'string', 'max:1000'],
             'delivery_report' => ['sometimes', 'boolean'],
             'scheduled_at' => [Rule::prohibitedIf($base === 'test'), 'nullable', 'date_format:Y-m-d\\TH:i:s.v\\Z'],
-            'segment' => ['required', 'array:'.implode(',', $keys)],
-            'segment.base' => ['required', Rule::in(['clients', 'leads', 'accounts', 'test'])],
             'preview_token' => [$this->routeIs('sms-campaigns.store') ? 'required' : 'sometimes', 'string', 'size:64'],
         ];
     }

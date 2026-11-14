@@ -525,6 +525,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::prefix('/crm/sms-campaigns')->controller(SmsCampaignController::class)->group(function () {
         Route::get('/', 'index');
         Route::get('/options', 'options');
+        Route::post('/audience', 'audience')->name('sms-campaigns.audience');
         Route::post('/preview', 'preview');
         Route::post('/', 'store')->name('sms-campaigns.store');
         Route::get('/{id}/recipients', 'recipients')->whereNumber('id');
