@@ -85,6 +85,7 @@ use App\Http\Controllers\SelectionController;
 use App\Http\Controllers\StoryController;
 use App\Http\Controllers\SupportConversationController;
 use App\Http\Controllers\TagController;
+use App\Http\Controllers\SmsCampaignController;
 use App\Http\Controllers\TelegramAuthController;
 use App\Http\Controllers\UserController;
 use Illuminate\Support\Facades\Route;
@@ -520,6 +521,18 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::post('/favorites/merge', [\App\Http\Controllers\TypedFavoriteController::class, 'merge'])->middleware('throttle:30,1');
     Route::post('/favorites', [FavoriteController::class, 'store'])->middleware('rop.branch.scope');
     Route::delete('/favorites/{property_id}', [FavoriteController::class, 'destroy'])->middleware('rop.branch.scope');
+
+    Route::prefix('/crm/sms-campaigns')->controller(SmsCampaignController::class)->group(function () {
+        Route::get('/', 'index');
+        Route::get('/options', 'options');
+        Route::post('/preview', 'preview');
+        Route::post('/', 'store')->name('sms-campaigns.store');
+        Route::get('/{id}/recipients', 'recipients')->whereNumber('id');
+        Route::post('/{id}/cancel', 'cancel')->whereNumber('id');
+        Route::get('/exclusions', 'exclusions');
+        Route::post('/exclusions', 'exclude');
+        Route::delete('/exclusions/{id}', 'include')->whereNumber('id');
+    });
 
     Route::get('/bookings', [BookingController::class, 'index']);
     Route::get('/bookings/{id}', [BookingController::class, 'show'])->whereNumber('id');
