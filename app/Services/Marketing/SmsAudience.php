@@ -90,7 +90,7 @@ final class SmsAudience
 
         return [
             'recipients' => $recipients,
-            'summary' => ['total' => count($recipients), 'invalid' => $invalid, 'duplicates' => $duplicates, 'excluded' => $suppressed],
+            'summary' => ['matched' => count($recipients) + $invalid + $duplicates + $suppressed, 'total' => count($recipients), 'invalid' => $invalid, 'duplicates' => $duplicates, 'excluded' => $suppressed],
         ];
     }
 }
