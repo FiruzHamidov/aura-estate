@@ -24,7 +24,7 @@ class SmsCampaignTest extends TestCase
     protected function setUp(): void
     {
         parent::setUp();
-        config(['audit.api_requests.enabled' => false, 'kpi.daily_report.enforce_submission' => false, 'osonsmsservice.bulk_token' => null]);
+        config(['audit.api_requests.enabled' => false, 'kpi.daily_report.enforce_submission' => false, 'osonsmsservice.bulk_token' => null, 'osonsmsservice.api_token' => null]);
         foreach ([
             '0001_01_01_000000_create_roles_table', '0001_01_01_000003_create_users_table', '0001_01_01_000002_create_jobs_table',
             '2025_06_23_015158_create_personal_access_tokens_table', '2026_02_10_120000_create_branches_table',
@@ -114,6 +114,73 @@ class SmsCampaignTest extends TestCase
         $this->getJson(self::URL)->assertOk()->assertJsonPath('data.0.counts.pending', 1);
         $this->getJson(self::URL."/$id/recipients")->assertOk()->assertJsonPath('data.0.phone', '••• 0001');
         $this->postJson(self::URL.'/preview', $this->draft(['base' => 'accounts', 'contact_kind' => 'buyer']))->assertUnprocessable();
+    }
+
+    public function test_manual_numbers_are_isolated_deduplicated_and_have_individual_receipts(): void
+    {
+        config(['osonsmsservice.bulk_token' => 'fake-bulk', 'osonsmsservice.api_token' => 'fake-individual']);
+        Sanctum::actingAs($this->user('marketing'));
+        $this->client('917009999');
+        $this->postJson(self::URL.'/exclusions', ['phone' => '917000003'])->assertNoContent();
+        $draft = $this->draft(['base' => 'test', 'phones' => ['917000001', '+992 917000001', '917000002', '917000003', '917000004']]);
+        $preview = $this->postJson(self::URL.'/preview', $draft)->assertOk()
+            ->assertJson(['transport' => 'individual', 'total' => 3, 'duplicates' => 1, 'excluded' => 1]);
+        $payload = $draft + ['preview_token' => $preview->json('preview_token')];
+        $id = $this->postJson(self::URL, $payload)->assertCreated()->json('id');
+        $this->postJson(self::URL, $payload)->assertOk();
+        $this->assertDatabaseCount('sms_campaign_recipients', 3);
+        $this->postJson(self::URL.'/exclusions', ['phone' => '917000004'])->assertNoContent();
+        $this->getJson(self::URL)->assertOk()->assertJsonMissingPath('data.0.segment.phones');
+        $ids = [];
+        Http::fake(function (Request $request) use (&$ids) {
+            $this->assertTrue($request->hasHeader('Authorization', 'Bearer fake-individual'));
+            $this->assertArrayNotHasKey('str_hash', $request->data());
+            if (str_contains($request->url(), '/sendsms_v1.php')) {
+                $this->assertContains($request['phone_number'], ['992917000001', '992917000002']);
+                $id = count($ids) + 1;
+                $ids[$id] = $request['txn_id'];
+
+                return Http::response(['msg_id' => $id], 201);
+            }
+            $this->assertSame($ids[$request['msg_id']], $request['txn_id']);
+
+            return Http::response(['status' => $request['msg_id'] == 1 ? 'DELIVERED' : 'UNDELIVERABLE']);
+        });
+        $this->artisan('sms:dispatch-campaigns')->assertSuccessful();
+        for ($i = 0; $i < 3; $i++) {
+            $this->work();
+        }
+        $this->travel(3)->minutes();
+        $this->artisan('sms:dispatch-campaigns')->assertSuccessful();
+        $this->work();
+        $this->work();
+        Http::assertSentCount(4);
+        $this->getJson(self::URL)->assertOk()->assertJsonPath('data.0.counts.delivered', 1)
+            ->assertJsonPath('data.0.counts.failed', 1)->assertJsonPath('data.0.counts.skipped', 1);
+        $this->getJson(self::URL."/$id/recipients?status=delivered")->assertOk()->assertJsonPath('total', 1);
+    }
+
+    public function test_invalid_manual_list_never_falls_back_to_clients(): void
+    {
+        Sanctum::actingAs($this->user('admin'));
+        foreach ([[], ['invalid', '917000001'], ['+14155552671'], array_fill(0, 11, '917000001')] as $phones) {
+            $this->postJson(self::URL.'/preview', $this->draft(['base' => 'test', 'phones' => $phones]))->assertUnprocessable();
+        }
+        $this->postJson(self::URL.'/preview', $this->draft(['base' => 'clients', 'phones' => ['917000001']]))->assertUnprocessable();
+        $this->postJson(self::URL.'/preview', $this->draft(['base' => 'test', 'phones' => ['917000001'], 'status' => 'active']))->assertUnprocessable();
+        $this->assertDatabaseCount('sms_campaigns', 0);
+    }
+
+    public function test_report_mode_is_bound_to_the_review_and_works_with_a_bulk_token(): void
+    {
+        config(['osonsmsservice.bulk_token' => 'fake-bulk']);
+        Sanctum::actingAs($this->user('admin'));
+        $this->client('917000001');
+        $draft = $this->draft() + ['delivery_report' => true];
+        $payload = $this->reviewed($draft);
+        $this->postJson(self::URL, ['delivery_report' => false] + $payload)->assertConflict();
+        $this->postJson(self::URL, $payload)->assertCreated();
+        $this->assertDatabaseHas('sms_campaigns', ['transport' => 'individual']);
     }
 
     public function test_accounts_and_leads_use_distinct_filters_and_exclude_inactive_accounts(): void

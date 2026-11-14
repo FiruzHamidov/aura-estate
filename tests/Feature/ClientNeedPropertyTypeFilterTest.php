@@ -677,6 +677,33 @@ class ClientNeedPropertyTypeFilterTest extends TestCase
         );
     }
 
+    public function test_sms_preview_and_send_follow_the_same_client_list_filters_across_pages(): void
+    {
+        (require database_path('migrations/2026_11_14_120000_create_sms_campaigns.php'))->up();
+        [$agent, $branch] = $this->prepareAgentContext();
+        $admin = $this->createUser(Role::create(['name' => 'Admin', 'slug' => 'admin']), $branch, 'Admin');
+        $matches = [];
+        foreach ([100000, 300000, 325000, 500000] as $amount) {
+            $client = $this->createClient($branch, $agent, "Buyer $amount");
+            $this->catalogNeed($client, $amount);
+            if ($amount >= 300000 && $amount <= 350000) {
+                $matches[] = $client->id;
+            }
+        }
+        $filters = ['contact_kind' => 'buyer', 'full_name' => 'Buyer', 'responsible_agent_id' => $agent->id,
+            'has_cash_on_hand' => '1', 'cash_on_hand_amount_from' => '300000', 'cash_on_hand_amount_to' => '350000'];
+        Sanctum::actingAs($admin);
+        $list = $this->getJson('/api/clients?'.http_build_query($filters + ['per_page' => 1]))->assertOk();
+        $this->assertSame(2, $list->json('total'));
+        $draft = ['request_id' => (string) \Illuminate\Support\Str::uuid(), 'name' => 'Проверка', 'message' => 'Подборка',
+            'segment' => ['base' => 'clients'] + $filters];
+        $url = '/api/crm/sms-campaigns';
+        $token = $this->postJson($url.'/preview', $draft)->assertOk()->assertJsonPath('total', 2)->json('preview_token');
+        $id = $this->postJson($url, $draft + ['preview_token' => $token])->assertCreated()->json('id');
+        $this->assertEqualsCanonicalizing($matches, DB::table('sms_campaign_recipients')->where('campaign_id', $id)->pluck('source_id')->all());
+        $this->getJson($url)->assertOk()->assertJsonMissingPath('data.0.segment.full_name');
+    }
+
     public function test_client_store_accepts_valid_source_id(): void
     {
         [$agent] = $this->prepareAgentContext();

@@ -3,6 +3,7 @@
 namespace App\Services\Marketing;
 
 use App\Models\SmsCampaign;
+use App\Models\SmsCampaignRecipient;
 use App\Models\User;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
@@ -17,7 +18,12 @@ final class SmsCampaigns
         $this->checkSchedule($data);
         $resolved = $this->audience->resolve($actor, $data['segment']);
 
-        return $resolved['summary'] + ['preview_token' => $this->token($actor, $data, $resolved['recipients'])];
+        $summary = $resolved['summary'];
+        if ($data['segment']['base'] === 'test') {
+            $summary['phones'] = array_map([SmsCampaignRecipient::class, 'mask'], array_keys($resolved['recipients']));
+        }
+
+        return $summary + ['transport' => $this->transport($data), 'preview_token' => $this->token($actor, $data, $resolved['recipients'])];
     }
 
     public function create(User $actor, array $data): SmsCampaign
@@ -45,8 +51,8 @@ final class SmsCampaigns
             $campaign = SmsCampaign::create([
                 'created_by' => $actor->id, 'name' => $data['name'], 'message' => $data['message'],
                 'request_id' => $data['request_id'], 'preview_token' => $data['preview_token'],
-                'transport' => OsonCampaignGateway::bulkConfigured() ? 'bulk' : 'individual',
-                'segment' => $data['segment'], 'scheduled_at' => $scheduled,
+                'transport' => $this->transport($data),
+                'segment' => array_diff_key($data['segment'], ['phones' => true]), 'scheduled_at' => $scheduled,
             ]);
             $rows = [];
             foreach ($recipients as $phone => $sourceId) {
@@ -64,6 +70,15 @@ final class SmsCampaigns
         }, 3);
     }
 
+    private function transport(array $data): string
+    {
+        if ($data['segment']['base'] === 'test' || ($data['delivery_report'] ?? false)) {
+            return 'individual';
+        }
+
+        return OsonCampaignGateway::bulkConfigured() ? 'bulk' : 'individual';
+    }
+
     private function token(User $actor, array $data, array $recipients): string
     {
         $segment = $data['segment'];
@@ -71,6 +86,9 @@ final class SmsCampaigns
         $hash = hash_init('sha256', HASH_HMAC, config('app.key'));
         hash_update($hash, json_encode([$actor->id, $data['request_id'], $data['name'], $data['message'],
             $data['scheduled_at'] ?? null, $segment], JSON_THROW_ON_ERROR));
+        if ($data['delivery_report'] ?? false) {
+            hash_update($hash, '|delivery_report');
+        }
         foreach ($recipients as $phone => $id) {
             hash_update($hash, "|$id:$phone");
         }

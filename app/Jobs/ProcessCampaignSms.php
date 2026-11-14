@@ -46,8 +46,8 @@ final class ProcessCampaignSms implements ShouldQueue
         $actor = User::find($campaign->created_by);
         $eligible = SmsCampaign::allowed($actor)
             && ! DB::table('sms_campaign_exclusions')->where('phone', $recipient->phone)->exists()
-            && InternationalPhone::e164($audience->query($actor, $campaign->segment)
-                ->whereKey($recipient->source_id)->value('phone')) === $recipient->phone;
+            && ($campaign->segment['base'] === 'test' || InternationalPhone::e164($audience->query($actor, $campaign->segment)
+                ->whereKey($recipient->source_id)->value('phone')) === $recipient->phone);
 
         // Only one worker may cross the provider boundary, even after queue redelivery.
         $claimed = $this->update('pending', [
@@ -73,7 +73,7 @@ final class ProcessCampaignSms implements ShouldQueue
     private function receipt(OsonCampaignGateway $provider, SmsCampaignRecipient $recipient): void
     {
         try {
-            $state = $provider->receipt($recipient->provider_id);
+            $state = $provider->receipt($recipient->provider_id, "campaign_{$recipient->campaign_id}_{$recipient->id}");
         } catch (Throwable) {
             $state = '';
         }

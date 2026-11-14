@@ -65,7 +65,11 @@ final class SmsCampaignController extends Controller implements HasMiddleware
                 $totals[$row->status] = (int) $row->total;
             }
 
-            return $campaign->toArray() + ['counts' => $totals, 'author' => $names->get($campaign->created_by)];
+            $data = $campaign->toArray();
+            // Search filters may contain the complete phone even though recipient rows are masked.
+            $data['segment'] = array_diff_key($campaign->segment, array_flip(['phones', 'phone', 'search', 'full_name', 'email']));
+
+            return $data + ['counts' => $totals, 'author' => $names->get($campaign->created_by)];
         });
 
         return response()->json($campaigns);
