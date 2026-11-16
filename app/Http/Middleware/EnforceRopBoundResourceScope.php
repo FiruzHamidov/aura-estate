@@ -2,6 +2,7 @@
 
 namespace App\Http\Middleware;
 
+use App\Http\Controllers\PropertyModerationController;
 use App\Models\{Booking, Client, ClientNeed, CrmTask, DailyReport, Deal, Lead, Property, PropertyDuplicateCandidate, PropertyModerationCase, PropertyPromotion};
 use App\Support\RopGroupAccess;
 use Closure;
@@ -29,7 +30,15 @@ final class EnforceRopBoundResourceScope
                 $access->ensureVisible($actor, Property::findOrFail($record->property_id));
             } elseif ($record instanceof PropertyDuplicateCandidate) {
                 $access->ensureVisible($actor, Property::findOrFail($record->moderationCase()->value('property_id')));
-                $access->ensureVisible($actor, Property::findOrFail($record->candidate_property_id));
+                // These actions decide a persisted match on the source listing only.
+                if (! in_array($action, [
+                    PropertyModerationController::class.'@decideDuplicate',
+                    PropertyModerationController::class.'@confirmDuplicateForProperty',
+                    PropertyModerationController::class.'@dismissDuplicateForProperty',
+                    PropertyModerationController::class.'@escalateDuplicate',
+                ], true)) {
+                    $access->ensureVisible($actor, Property::findOrFail($record->candidate_property_id));
+                }
             }
         }
 

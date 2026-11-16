@@ -2523,7 +2523,9 @@ class PropertyController extends Controller
 
     public function duplicateCandidates(Request $request, Property $property)
     {
-        $user = $this->authorizePropertyMutation($property);
+        $user = $this->crmAuthUser();
+        app(\App\Support\RopGroupAccess::class)->ensureVisible($user, $property);
+        abort_unless($this->moderationAccess->canModerate($user, $property) || $this->moderationAccess->canEdit($user, $property), 403, 'Доступ запрещён');
 
         $data = $property->getAttributes();
         $cases = Schema::hasTable('property_moderation_cases')
@@ -2533,6 +2535,11 @@ class PropertyController extends Controller
             $blockedReason = $this->moderationAccess->decisionBlockReason($user, $case);
             $case->setAttribute('can_decide', $blockedReason === null);
             $case->setAttribute('blocked_reason', $blockedReason);
+            if ($blockedReason === null && $user->usesAssignedGroupScope()
+                && $case->status === PropertyModerationCase::STATUS_OPEN && $case->type === PropertyModerationCase::TYPE_DUPLICATE) {
+                $case->setAttribute('restricted_duplicate_candidates', app(\App\Services\GroupAccess\GroupDataProjection::class)
+                    ->restrictedDuplicateCandidates($case->duplicateCandidates, $user));
+            }
         });
 
         return response()->json([

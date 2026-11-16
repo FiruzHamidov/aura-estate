@@ -152,7 +152,8 @@ class EnsureUserIsNotClient
             return match ($method) {
                 'myProperties' => ['properties.list.internal'],
                 'store' => ['properties.create'],
-                'update', 'destroy', 'duplicateCandidates', 'updateModerationAndListingType' => ['properties.edit'],
+                'update', 'destroy', 'updateModerationAndListingType' => ['properties.edit'],
+                'duplicateCandidates' => ['properties.edit', 'properties.moderate'],
                 'updateCoOwner' => ['properties.co_owner.manage'],
                 'refreshListingDate' => ['properties.listing_date.refresh'],
                 'logs' => ['properties.history.view'],
@@ -183,7 +184,7 @@ class EnsureUserIsNotClient
             return match ($method) {
                 'submit', 'withdrawChanges', 'withdrawCase', 'withdrawCaseForProperty', 'withdrawListing', 'appeal', 'appealForProperty' => ['properties.edit'],
                 'queue', 'promotionQueue', 'trustReport', 'approve', 'approveAll', 'reject', 'approveForProperty', 'rejectForProperty',
-                'markDetectedDuplicate', 'decideDuplicate', 'mergeDuplicate', 'rejectDuplicate', 'resolveAppeal',
+                'markDetectedDuplicate', 'decideDuplicate', 'escalateDuplicate', 'mergeDuplicate', 'rejectDuplicate', 'resolveAppeal',
                 'decideDuplicateForProperty', 'confirmDuplicateForProperty', 'dismissDuplicateForProperty', 'mergeDuplicateForProperty', 'rejectDuplicateForProperty', 'reopen' => ['properties.moderate'],
                 'breakGlassApprove' => ['properties.break_glass'],
                 'transfer' => ['properties.transfer'],

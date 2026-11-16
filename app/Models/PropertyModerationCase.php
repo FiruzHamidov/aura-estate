@@ -26,13 +26,14 @@ class PropertyModerationCase extends Model
     protected $fillable = [
         'property_id', 'type', 'status', 'blocking', 'submitted_by', 'submitted_at',
         'decided_by', 'decided_at', 'decision_comment', 'baseline_snapshot',
-        'proposed_snapshot', 'reason_codes', 'parent_case_id', 'version',
+        'proposed_snapshot', 'reason_codes', 'parent_case_id', 'version', 'escalated_at',
     ];
 
     protected $casts = [
         'blocking' => 'boolean',
         'submitted_at' => 'datetime',
         'decided_at' => 'datetime',
+        'escalated_at' => 'datetime',
         'baseline_snapshot' => 'array',
         'proposed_snapshot' => 'array',
         'reason_codes' => 'array',

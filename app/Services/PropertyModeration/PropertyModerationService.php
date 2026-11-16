@@ -9,7 +9,9 @@ use App\Models\PropertyModerationCase;
 use App\Models\PropertyModerationEvent;
 use App\Models\PropertyPromotion;
 use App\Models\User;
+use App\Services\GroupAccess\GroupRecordWriteLock;
 use App\Services\PropertyDuplicateService;
+use App\Support\RopGroupAccess;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
@@ -868,6 +870,41 @@ final class PropertyModerationService
         });
     }
 
+    /** A decision changes the source listing. Merging also requires access to the target. */
+    private function lockPendingDuplicate(PropertyDuplicateCandidate $candidate, User $actor, ?int $version): array
+    {
+        $source = $candidate->moderationCase()->firstOrFail()->property()->firstOrFail();
+        $target = $candidate->candidateProperty()->firstOrFail();
+        [$actor, [$source, $target]] = app(GroupRecordWriteLock::class)->acquireMany($actor, [$source, $target]);
+        app(RopGroupAccess::class)->ensureVisible($actor, $source);
+
+        $case = $source->moderationCases()->lockForUpdate()->findOrFail($candidate->moderation_case_id);
+        $candidate = $case->duplicateCandidates()->where('candidate_property_id', $target->id)->lockForUpdate()->findOrFail($candidate->id);
+        $case->setRelation('property', $source);
+        $blocked = $this->access->decisionBlockReason($actor, $case);
+        if ($blocked !== null) {
+            abort(403, strtoupper($blocked));
+        }
+        abort_unless($case->type === PropertyModerationCase::TYPE_DUPLICATE && $case->status === PropertyModerationCase::STATUS_OPEN, 409, 'MODERATION_CASE_NOT_OPEN');
+        abort_if($version !== null && $case->version !== $version, 409, 'MODERATION_VERSION_CONFLICT');
+        abort_unless($candidate->decision === PropertyDuplicateCandidate::DECISION_PENDING, 409, 'DUPLICATE_REVIEW_UNAVAILABLE');
+
+        return [$actor, $source, $case, $candidate, $target];
+    }
+
+    public function escalateDuplicate(PropertyDuplicateCandidate $candidate, User $actor, int $version): Property
+    {
+        return DB::transaction(function () use ($candidate, $actor, $version): Property {
+            [$actor, $property, $case, , $target] = $this->lockPendingDuplicate($candidate, $actor, $version);
+            abort_unless($actor->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->allows($actor, $target), 403, 'MODERATION_PERMISSION_DENIED');
+            $case->update(['escalated_at' => now(), 'version' => $case->version + 1]);
+            $property->increment('moderation_version');
+            $this->event($property, $case, 'duplicate_review_escalated', $actor, ['candidate_property_id' => $target->id]);
+
+            return $property;
+        });
+    }
+
     public function decideDuplicate(
         PropertyDuplicateCandidate $candidate,
         User $actor,
@@ -878,18 +915,7 @@ final class PropertyModerationService
         abort_unless(in_array($decision, [PropertyDuplicateCandidate::DECISION_NOT_DUPLICATE, PropertyDuplicateCandidate::DECISION_CONFIRMED], true), 422);
 
         return DB::transaction(function () use ($candidate, $actor, $decision, $comment, $expectedVersion): Property {
-            [$actor, $property] = app(\App\Services\GroupAccess\PropertyWriteLock::class)->acquire($actor, (int) $candidate->moderationCase()->value('property_id'), [], [$candidate->candidate_property_id]);
-            $case = PropertyModerationCase::query()->lockForUpdate()->findOrFail($candidate->moderation_case_id);
-            $candidate = PropertyDuplicateCandidate::query()->lockForUpdate()->findOrFail($candidate->id);
-            if ($actor->usesAssignedGroupScope()) {
-                $target = Property::query()->lockForUpdate()->findOrFail($candidate->candidate_property_id);
-                app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $target);
-                app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $property);
-            }
-            $case->setRelation('property', $property);
-            abort_unless($case->status === PropertyModerationCase::STATUS_OPEN, 409, 'MODERATION_CASE_NOT_OPEN');
-            abort_if($expectedVersion !== null && $case->version !== $expectedVersion, 409, 'MODERATION_VERSION_CONFLICT');
-            abort_unless($this->access->canDecideCase($actor, $case), 403, 'SELF_APPROVAL_FORBIDDEN');
+            [$actor, $property, $case, $candidate] = $this->lockPendingDuplicate($candidate, $actor, $expectedVersion);
 
             $candidate->update([
                 'decision' => $decision,
