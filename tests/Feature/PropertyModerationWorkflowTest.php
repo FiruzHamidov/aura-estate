@@ -88,6 +88,7 @@ class PropertyModerationWorkflowTest extends TestCase
         DB::table('branch_groups')->insert(['id' => 1, 'branch_id' => 1, 'name' => 'Assigned']);
         (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
         (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
+        (require database_path('migrations/2026_11_16_100000_add_escalated_at_to_property_moderation_cases.php'))->up();
         (require database_path('migrations/2025_06_23_004510_create_notifications_table.php'))->up();
         (require database_path('migrations/2026_04_04_180000_expand_notifications_table.php'))->up();
     }
@@ -1460,32 +1461,88 @@ class PropertyModerationWorkflowTest extends TestCase
         }
     }
 
-    public function test_rop_cannot_decide_or_merge_a_duplicate_from_an_unassigned_group(): void
+    private function crossGroupDuplicateReview(): array
     {
-        [$agent, $rop] = $this->users();
+        [$source, $target, $rop, $agent] = $this->detectedDuplicateFixture();
         DB::table('branch_groups')->insert(['id' => 2, 'branch_id' => 1, 'name' => 'Other']);
-        $property = Property::create($this->propertyPayload($agent));
-        $foreign = Property::create($this->propertyPayload($agent, ['branch_group_id' => 2]));
-        $case = PropertyModerationCase::create(['property_id' => $property->id,
-            'type' => 'duplicate_review', 'status' => 'open', 'submitted_by' => $agent->id,
-            'submitted_at' => now(), 'version' => 1]);
-        $candidate = PropertyDuplicateCandidate::create(['moderation_case_id' => $case->id,
-            'candidate_property_id' => $foreign->id, 'score' => 90]);
-        $service = $this->moderation();
-        foreach ([
-            fn () => $service->decideDuplicate($candidate, $rop, 'not_duplicate', 'test', 1),
-            fn () => $service->mergeDuplicate($candidate, $rop, 'test', 1),
-            fn () => $service->rejectDuplicate($candidate, $rop, 'test', 1),
-        ] as $operation) {
-            try {
-                $operation();
-                $this->fail('Foreign duplicate must be inaccessible.');
-            } catch (\Symfony\Component\HttpKernel\Exception\HttpException $error) {
-                $this->assertSame(404, $error->getStatusCode());
-            }
-        }
-        $this->assertSame('open', $case->fresh()->status);
+        $target->forceFill(['branch_group_id' => 2, 'owner_phone' => '900999888'])->saveQuietly();
+        $source->forceFill(['moderation_status' => 'pending', 'publication_status' => 'pending'])->saveQuietly();
+        $case = PropertyModerationCase::create(['property_id' => $source->id, 'type' => 'duplicate_review',
+            'status' => 'open', 'blocking' => true, 'submitted_by' => $agent->id, 'submitted_at' => now(), 'version' => 1]);
+        $candidate = $case->duplicateCandidates()->create(['candidate_property_id' => $target->id, 'score' => 90,
+            'candidate_snapshot' => ['owner_phone' => '900999888', 'photos' => ['private-photo.jpg']]]);
+
+        return [$source, $target, $case, $candidate, $rop, $agent];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('caseDuplicateDecisions')]
+    public function test_rop_can_resolve_persisted_cross_group_match_on_own_listing(string $decision, string $publication): void
+    {
+        [$source, $target, $case, $candidate] = $this->crossGroupDuplicateReview();
+        $originalState = $target->fresh()->getAttributes();
+        $card = $this->getJson("/api/properties/{$source->id}/duplicate-candidates")->assertOk()
+            ->assertJsonPath('cases.0.duplicate_candidates', [])->assertJsonPath('cases.0.can_decide', true);
+        $this->assertEquals(['id' => $candidate->id, 'candidate_property_id' => $target->id, 'score' => '90.00', 'decision' => 'pending'],
+            $card->json('cases.0.restricted_duplicate_candidates.0'));
+        $this->assertStringNotContainsString('900999888', $card->getContent());
+        $this->assertStringNotContainsString('private-photo.jpg', $card->getContent());
+        $payload = ['version' => 1, 'comment' => 'Проверено', 'decision' => $decision];
+        $this->postJson("/api/property-duplicate-candidates/{$candidate->id}/merge", $payload)->assertNotFound();
+        $this->postJson("/api/properties/{$source->id}/duplicates/{$candidate->id}/reject", $payload)->assertNotFound();
+        $url = "/api/property-duplicate-candidates/{$candidate->id}/decision";
+        $this->postJson($url, ['version' => 5] + $payload)->assertConflict();
+        $this->postJson($url, $payload)->assertOk();
+        $this->postJson($url, $payload)->assertConflict();
+        $this->assertSame($publication, $source->fresh()->publication_status);
+        $this->assertFalse($case->fresh()->blocking);
+        $this->assertSame($decision, $candidate->fresh()->decision);
+        $this->assertSame($originalState, $target->fresh()->getAttributes());
+    }
+
+    public static function caseDuplicateDecisions(): array
+    {
+        return [['not_duplicate', 'published'], ['confirmed_duplicate', 'archived']];
+    }
+
+    public function test_handoff_keeps_case_open_and_notifies_the_administrator_who_can_finish_it(): void
+    {
+        [$source, $target, $case, $candidate, $rop, $agent] = $this->crossGroupDuplicateReview();
+        $adminRole = Role::create(['slug' => 'admin', 'name' => 'Admin']);
+        $admin = User::forceCreate(['name' => 'Admin', 'phone' => '900000004', 'role_id' => $adminRole->id, 'status' => 'active']);
+        $url = "/api/property-duplicate-candidates/{$candidate->id}";
+        $payload = ['version' => 1, 'decision' => 'not_duplicate', 'comment' => 'Объекты разные'];
+        $this->actingAs($agent)->postJson("$url/escalate", ['version' => 1])->assertForbidden();
+        $this->postJson("$url/decision", $payload)->assertForbidden();
+        $this->actingAs($rop)->postJson("$url/escalate", ['version' => 5])->assertConflict();
+        $this->postJson("$url/escalate", ['version' => 1])->assertOk();
+        $this->assertTrue($case->fresh()->blocking);
         $this->assertSame('pending', $candidate->fresh()->decision);
+        $this->assertSame('pending', $source->fresh()->publication_status);
+        $this->getJson("/api/properties/{$source->id}/duplicate-candidates")->assertOk()
+            ->assertJsonPath('cases.0.blocked_reason', 'duplicate_escalated')->assertJsonMissingPath('cases.0.restricted_duplicate_candidates');
+        $this->postJson("$url/escalate", ['version' => 1])->assertForbidden();
+        $this->postJson("$url/decision", ['version' => 2] + $payload)->assertForbidden();
+        $this->assertDatabaseHas('property_moderation_events', ['event_type' => 'duplicate_review_escalated', 'actor_id' => $rop->id, 'moderation_case_id' => $case->id]);
+        $notified = DB::table('notifications')->where('title', 'Проверка дубля передана администратору')->get();
+        $this->assertEquals([$admin->id], $notified->pluck('user_id')->all());
+        $this->assertSame('/apartment/'.$source->id, $notified->sole()->action_url);
+        $this->actingAs($admin)->getJson('/api/property-moderation-cases')->assertOk()
+            ->assertJsonPath('data.0.id', $case->id)->assertJsonPath('data.0.can_decide', true);
+        $this->getJson("/api/properties/{$source->id}/duplicate-candidates")->assertOk()
+            ->assertJsonPath('cases.0.duplicate_candidates.0.candidate_property.owner_phone', '900999888');
+        $this->postJson("$url/decision", ['version' => 2] + $payload)->assertOk();
+        $this->assertSame('published', $source->fresh()->publication_status);
+    }
+
+    public function test_rop_losing_source_group_cannot_act_on_a_known_candidate(): void
+    {
+        [$source, , $case, $candidate, $rop] = $this->crossGroupDuplicateReview();
+        $rop->supervisedGroups()->detach();
+        $url = "/api/property-duplicate-candidates/{$candidate->id}";
+        $this->postJson("$url/escalate", ['version' => 1])->assertNotFound();
+        $this->postJson("$url/decision", ['version' => 1, 'decision' => 'confirmed_duplicate'])->assertNotFound();
+        $this->assertSame(1, $case->fresh()->version);
+        $this->assertSame('pending', $source->fresh()->publication_status);
     }
 
     public function test_duplicate_search_scans_all_groups_and_branches_beyond_recent_candidates(): void

@@ -175,6 +175,13 @@ final class PropertyModerationController extends Controller
         ))]);
     }
 
+    public function escalateDuplicate(Request $request, PropertyDuplicateCandidate $candidate)
+    {
+        $data = $request->validate(['version' => 'required|integer|min:1']);
+
+        return response()->json(['data' => $this->mutationData($this->moderation->escalateDuplicate($candidate, $request->user(), $data['version']))]);
+    }
+
     public function decideDuplicate(Request $request, PropertyDuplicateCandidate $candidate)
     {
         $data = $request->validate([

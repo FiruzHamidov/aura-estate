@@ -161,6 +161,10 @@ final class PropertyModerationAccess
             return 'outside_moderation_scope';
         }
 
+        if ($case->escalated_at && ($user->usesAssignedGroupScope() || ! $user->hasPermission('properties.manage_all'))) {
+            return 'duplicate_escalated';
+        }
+
         // ROP+ may review their own proposals, within their existing branch scope.
         // Appeals still require someone other than the original decision maker.
         if ($case->type === PropertyModerationCase::TYPE_APPEAL && (
@@ -241,6 +245,7 @@ final class PropertyModerationAccess
             'can_mark_duplicate' => $canModerate
                 && in_array($property->publication_status, ['published', 'pending'], true)
                 && ! $property->needsReopening()
+                && ! $openCases->contains(fn ($case) => $case->escalated_at && ! $decidableCases->contains($case))
                 && ! $openCases->contains('type', PropertyModerationCase::TYPE_APPEAL),
             'can_resolve_duplicate' => $decidableCases->contains('type', PropertyModerationCase::TYPE_DUPLICATE),
             'can_appeal' => $canEdit && Schema::hasTable('property_moderation_cases') && $property->moderationCases()

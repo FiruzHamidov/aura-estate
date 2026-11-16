@@ -19,6 +19,18 @@ final class PropertyModerationNotifier
             return;
         }
 
+        if ($event === 'duplicate_review_escalated' && $case) {
+            $administrators = User::query()->where('status', User::STATUS_ACTIVE)
+                ->whereHas('role', fn (Builder $roles) => $roles->usingAssignedGroups(false)
+                    ->withPermission('properties.manage_all')->withPermission('properties.moderate'))->get();
+            foreach ($administrators as $recipient) {
+                $this->write($recipient, $property, $actor, 'PROPERTY_DUPLICATE_REVIEW_REQUIRED',
+                    'Проверка дубля передана администратору', "РОП передал проверку #{$case->id} по объявлению #{$property->id}.",
+                    $event.':'.$case->id, '/apartment/'.$property->id);
+            }
+            return;
+        }
+
         $opened = in_array($event, [
             'price_review_opened',
             'duplicate_review_opened',

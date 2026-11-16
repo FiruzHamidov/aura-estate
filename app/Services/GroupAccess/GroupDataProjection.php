@@ -144,10 +144,19 @@ final class GroupDataProjection
                 'floor', 'total_floors', 'repair_type_id', 'year_built', 'price', 'currency',
                 'moderation_status',
             ]));
-            $safe['scope_notice'] = 'Совпадение в другой группе или филиале. Для проверки обратитесь к администратору.';
+            $safe['scope_notice'] = 'Совпадение в другой группе или филиале. Доступны только характеристики для сравнения.';
             $safe['details_restricted'] = true;
             return $safe;
         })->values();
+    }
+
+    /** Pending matches for the moderation card, without stored snapshots or contacts. */
+    public function restrictedDuplicateCandidates(Collection $candidates, User $actor): array
+    {
+        return $candidates->filter(fn ($candidate) => $candidate->decision === \App\Models\PropertyDuplicateCandidate::DECISION_PENDING
+            && $candidate->candidateProperty && ! $this->visible($candidate->candidateProperty, $actor))
+            ->map(fn ($candidate) => $candidate->only(['id', 'candidate_property_id', 'score', 'decision']))
+            ->values()->all();
     }
 
     public function relations(Model $record, User $actor): array
