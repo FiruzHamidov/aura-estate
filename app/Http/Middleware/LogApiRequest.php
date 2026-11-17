@@ -48,6 +48,7 @@ class LogApiRequest
             $route = $request->route();
             $technicalOnly = ResidentialDiagnostics::applies($request) || $request->is(
                 'api/login', 'api/register', 'api/sms/*', 'api/password/*', 'api/telegram/*',
+                'api/user/client-recruitment/lookup', 'api/user/*/recruit-agent',
                 'api/reviews/request-code', 'api/agents/*/reviews', 'api/crm/sms-campaigns', 'api/crm/sms-campaigns/*'
             );
 
