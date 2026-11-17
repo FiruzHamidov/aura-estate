@@ -625,6 +625,10 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         Route::apiResource('construction-stages', ConstructionStageController::class)->except(['index', 'show']);
 
         Route::apiResource('roles', RoleController::class);
+        Route::controller(\App\Http\Controllers\ClientRecruitmentController::class)->middleware('throttle:30,1,client-recruitment')->group(function () {
+            Route::post('/user/client-recruitment/lookup', 'lookup');
+            Route::post('/user/{clientId}/recruit-agent', 'store')->whereNumber('clientId');
+        });
         Route::post('/user/{user}/photo', [UserController::class, 'updatePhoto']);
         Route::get('/user/{user}/dismissal-preview', [UserController::class, 'dismissalPreview']);
         Route::get('/user/{user}/restoration-preview', [UserController::class, 'restorationPreview']);

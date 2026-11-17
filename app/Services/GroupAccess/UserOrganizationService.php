@@ -2,9 +2,15 @@
 
 namespace App\Services\GroupAccess;
 
+use App\Models\BranchGroup;
+use App\Models\Role;
 use App\Models\User;
+use App\Support\InternationalPhone;
+use App\Support\RopGroupAccess;
+use App\Support\UserPhoneIdentity;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Validation\ValidationException;
 
 final class UserOrganizationService
 {
@@ -14,16 +20,69 @@ final class UserOrganizationService
 
     public function update(User $actor, User $subject, array $data): User
     {
-        return DB::transaction(function () use ($actor, $subject, $data) {
-            $users = User::query()->whereIn('id', [$actor->id, $subject->id])->orderBy('id')->lockForUpdate()->get()->keyBy('id');
-            $subject = $users->get($subject->id);
+        return $this->applyUpdate($actor, $subject->id, $data);
+    }
+
+    public function findRecruitableClient(User $actor, string $phone): User
+    {
+        $this->authorizeRecruitment($actor);
+        $number = InternationalPhone::e164($phone);
+        if ($number === null || (str_starts_with($number, '+992') && strlen($number) !== 13)) {
+            throw ValidationException::withMessages(['phone' => 'Введите полный номер телефона.']);
+        }
+        $client = UserPhoneIdentity::resolve($number);
+        abort_unless($client && $this->isRecruitableClient($client), 404, 'Клиент для перевода по этому номеру не найден.');
+
+        return $client;
+    }
+
+    private function authorizeRecruitment(User $actor): void
+    {
+        abort_unless($actor->status === User::STATUS_ACTIVE && ! $actor->isDeletedAccount()
+            && $actor->usesAssignedGroupScope() && $actor->hasPermission('users.create')
+            && $actor->hasPermission('users.update') && ($actor->hasPermission('users.assign_role.agent') || $actor->hasPermission('users.assign_any_role')),
+            403, 'Нет права переводить клиентов в агенты.');
+        abort_unless(BranchGroup::whereIn('id', app(RopGroupAccess::class)->groupsQuery($actor))->exists(),
+            403, 'Нет закреплённой группы для назначения.');
+    }
+
+    private function isRecruitableClient(User $user): bool
+    {
+        return $user->role?->slug === 'client' && $user->status === User::STATUS_ACTIVE && ! $user->isDeletedAccount()
+            && $user->branch_id === null && $user->branch_group_id === null;
+    }
+
+    public function recruitAgent(User $actor, int $clientId, string $phone, int $groupId): User
+    {
+        $client = $this->findRecruitableClient($actor, $phone);
+        abort_unless((int) $client->id === $clientId, 404, 'Клиент для перевода по этому номеру не найден.');
+
+        return $this->applyUpdate($actor, $clientId, ['branch_group_id' => $groupId], $phone);
+    }
+
+    private function applyUpdate(User $actor, int $subjectId, array $data, ?string $recruitmentPhone = null): User
+    {
+        return DB::transaction(function () use ($actor, $subjectId, $data, $recruitmentPhone) {
+            $users = User::query()->whereIn('id', [$actor->id, $subjectId])->orderBy('id')->lockForUpdate()->get()->keyBy('id');
+            $subject = $users->get($subjectId);
             $actor = $users->get($actor->id);
             abort_unless($subject && $actor, 404, 'NOT_FOUND');
+            if ($recruitmentPhone !== null) {
+                $this->authorizeRecruitment($actor);
+                abort_unless($this->isRecruitableClient($subject)
+                    && InternationalPhone::e164($subject->phone) === InternationalPhone::e164($recruitmentPhone),
+                    409, 'Данные клиента изменились. Повторите поиск.');
+                app(RopGroupAccess::class)->ensureGroup($actor, $data['branch_group_id']);
+                $agent = Role::where('slug', 'agent')->firstOrFail();
+                abort_unless($agent->hasPermission('users.subject.team'), 403, 'Роль агента недоступна для назначения в группу.');
+                $data['role_id'] = $agent->id;
+                $data['branch_id'] = $actor->branch_id;
+            }
             $before = $subject->only(['role_id', 'branch_id', 'branch_group_id']);
             $previousRole = $subject->role;
             $subject->fill($data);
             $nextRole = $subject->isDirty('role_id')
-                ? \App\Models\Role::find($subject->role_id) : $previousRole;
+                ? Role::find($subject->role_id) : $previousRole;
             // Promotion within the same team preserves existing responsibility.
             // Supervised groups are still assigned explicitly; this does not make
             // the new supervisor eligible to receive other employees' records.
@@ -40,15 +99,15 @@ final class UserOrganizationService
             }
             $changed = $subject->isDirty(['role_id', 'branch_id', 'branch_group_id']);
             if ($changed) {
-                if ($actor->usesAssignedGroupScope()) {
-                    app(\App\Support\RopGroupAccess::class)->ensureVisible($actor, $subject->fresh());
+                if ($recruitmentPhone === null && $actor->usesAssignedGroupScope()) {
+                    app(RopGroupAccess::class)->ensureVisible($actor, $subject->fresh());
                     abort_unless($actor->id !== $subject->id
                         && $previousRole?->hasPermission('users.subject.team')
                         && $nextRole?->hasPermission('users.subject.team')
                         && ! $subject->isDirty(['branch_id', 'branch_group_id', 'status']), 403, 'FORBIDDEN_ACTION');
                 }
                 if ($subject->branch_group_id) {
-                    $group = \App\Models\BranchGroup::query()->lockForUpdate()->find($subject->branch_group_id);
+                    $group = BranchGroup::query()->lockForUpdate()->find($subject->branch_group_id);
                     abort_unless($group, 422, 'INVALID_GROUP');
                     abort_unless($subject->branch_id && (int) $group->branch_id === (int) $subject->branch_id,
                         422, 'GROUP_BRANCH_MISMATCH');

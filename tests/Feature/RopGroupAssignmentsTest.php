@@ -54,6 +54,87 @@ class RopGroupAssignmentsTest extends TestCase
         $this->rop = $this->user('rop', $this->a);
     }
 
+    public function test_rop_recruits_an_unassigned_client_by_full_phone_into_a_supervised_group(): void
+    {
+        $role = Role::create(['name' => 'Клиент', 'slug' => 'client']);
+        $client = User::create(['name' => 'Клиент', 'phone' => '055 123-456', 'role_id' => $role->id]);
+        $this->rop->supervisedGroups()->attach([$this->a->id, $this->b->id]);
+        Sanctum::actingAs($this->rop);
+        $phone = ['phone' => '+992 (055) 123-456'];
+        $lookup = '/api/user/client-recruitment/lookup';
+        $url = "/api/user/{$client->id}/recruit-agent";
+
+        $this->postJson($lookup, ['phone' => '123'])->assertUnprocessable();
+        $this->postJson($lookup, $phone)->assertOk()->assertExactJson(['id' => $client->id, 'name' => $client->name]);
+        $this->getJson('/api/user?role=client')->assertOk()->assertJsonCount(0, 'data');
+        $this->postJson($url, $phone)->assertUnprocessable();
+        $this->postJson($url, $phone + ['branch_group_id' => $this->c->id])->assertForbidden();
+        $this->postJson("/api/user/{$this->admin->id}/recruit-agent", $phone + ['branch_group_id' => $this->b->id])->assertNotFound();
+        $this->assertNull($client->fresh()->branch_group_id);
+
+        $this->postJson($url, $phone + ['branch_group_id' => $this->b->id, 'name' => 'Other', 'role_id' => $this->admin->role_id])
+            ->assertOk()->assertJsonPath('id', $client->id)->assertJsonPath('branch_group_id', $this->b->id);
+        $updated = $client->fresh();
+        $this->assertSame('agent', $updated->role->slug);
+        $this->assertSame($this->branch->id, $updated->branch_id);
+        $this->assertSame($client->name, $updated->name);
+        $this->assertSame($client->phone, $updated->phone);
+        $this->assertGreaterThan($client->access_scope_version ?? 0, $updated->access_scope_version);
+        $this->assertDatabaseHas('group_access_audit_logs', ['event' => 'user_organization_changed', 'actor_id' => $this->rop->id, 'subject_id' => $client->id]);
+        $this->postJson($url, $phone + ['branch_group_id' => $this->a->id])->assertNotFound();
+        $this->assertSame($this->b->id, $client->fresh()->branch_group_id);
+    }
+
+    public function test_recruitment_hides_unavailable_accounts_and_rechecks_permissions_and_group(): void
+    {
+        $role = Role::create(['name' => 'Клиент', 'slug' => 'client']);
+        $client = User::create(['name' => 'Клиент', 'phone' => '900123456', 'role_id' => $role->id]);
+        $lookup = '/api/user/client-recruitment/lookup';
+        $phone = ['phone' => $client->phone];
+        $url = "/api/user/{$client->id}/recruit-agent";
+        Sanctum::actingAs($this->admin);
+        $this->postJson($lookup, $phone)->assertForbidden();
+        Sanctum::actingAs($this->rop);
+        $this->postJson($lookup, $phone)->assertForbidden();
+        $this->rop->supervisedGroups()->attach($this->a->id);
+        $this->postJson($lookup, ['phone' => $this->admin->phone])->assertNotFound();
+        $this->postJson($lookup, $phone)->assertOk();
+        DB::table('users')->where('id', $client->id)->update(['status' => 'inactive']);
+        $this->postJson($url, $phone + ['branch_group_id' => $this->a->id])->assertNotFound();
+        DB::table('users')->where('id', $client->id)->update(['status' => 'active', 'branch_id' => $this->branch->id]);
+        $this->postJson($lookup, $phone)->assertNotFound();
+        DB::table('users')->where('id', $client->id)->update(['branch_id' => null]);
+        DB::table('users')->insert(['name' => 'Other', 'phone' => '+992900123456', 'role_id' => $this->admin->role_id]);
+        $this->postJson($lookup, $phone)->assertConflict();
+        $this->postJson($url, $phone + ['branch_group_id' => $this->a->id])->assertConflict();
+        $this->assertSame('client', $client->fresh()->role->slug);
+    }
+
+    public function test_losing_the_group_or_agent_assignment_grant_after_lookup_blocks_recruitment(): void
+    {
+        $clientRole = Role::create(['name' => 'Клиент', 'slug' => 'client']);
+        $client = User::create(['name' => 'Клиент', 'phone' => '900234567', 'role_id' => $clientRole->id]);
+        $phone = ['phone' => $client->phone];
+        $lookup = '/api/user/client-recruitment/lookup';
+        $url = "/api/user/{$client->id}/recruit-agent";
+        $destination = $phone + ['branch_group_id' => $this->a->id];
+        $this->rop->supervisedGroups()->attach($this->a->id);
+        Sanctum::actingAs($this->rop);
+        $this->postJson($lookup, $phone)->assertOk();
+        $this->rop->supervisedGroups()->detach();
+        $this->postJson($url, $destination)->assertForbidden();
+
+        $this->rop->supervisedGroups()->attach($this->a->id);
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $grants = array_values(array_diff($this->rop->role->permissionKeys(), ['users.assign_role.agent', 'users.assign_any_role']));
+        $this->rop->role->forceFill(['permissions' => $grants])->save();
+        Sanctum::actingAs($this->rop->fresh());
+        $this->postJson($lookup, $phone)->assertForbidden();
+        $this->postJson($url, $destination)->assertForbidden();
+        $this->assertSame('client', $client->fresh()->role->slug);
+        $this->assertDatabaseMissing('group_access_audit_logs', ['subject_id' => $client->id, 'event' => 'user_organization_changed']);
+    }
+
     private function mergeRights(): void
     {
         Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
