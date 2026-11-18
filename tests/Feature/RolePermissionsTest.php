@@ -65,9 +65,9 @@ class RolePermissionsTest extends TestCase
         $security->forceFill(['permissions' => null])->save();
         $migration->up();
         $this->assertNull($security->fresh()->permissions);
-        $this->assertTrue($security->fresh()->hasPermission('properties.history.published'));
+        $this->assertFalse($security->fresh()->hasPermission('properties.history.published'));
         foreach (Role::all() as $role) {
-            $this->assertSame($role->slug === 'security', $role->hasPermission('properties.history.published'), $role->slug);
+            $this->assertFalse($role->hasPermission('properties.history.published'), $role->slug);
         }
         $this->assertDatabaseCount('role_permission_audits', 0);
     }

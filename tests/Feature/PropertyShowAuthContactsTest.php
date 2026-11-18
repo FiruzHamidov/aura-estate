@@ -355,6 +355,9 @@ class PropertyShowAuthContactsTest extends TestCase
         $role = Role::create(['name' => 'Security', 'slug' => 'security']);
         $user = User::create(['name' => 'Security reader', 'phone' => '930000560', 'role_id' => $role->id, 'status' => 'active']);
         (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        (require database_path('migrations/2026_11_18_120000_allow_security_published_property_history.php'))->up();
+        (require database_path('migrations/2026_11_18_130000_add_role_permission_expirations.php'))->up();
+        (require database_path('migrations/2026_11_18_140000_limit_security_history_to_one_month.php'))->up();
         $log = $property->logs()->create(['user_id' => $agent->id, 'action' => 'updated',
             'changes' => ['price' => ['old' => 90000, 'new' => 100000]]]);
         $this->withToken($user->createToken('test')->plainTextToken);
@@ -372,9 +375,15 @@ class PropertyShowAuthContactsTest extends TestCase
         $this->postJson('/api/properties/'.$property->id.'/refresh-listing-date')->assertForbidden();
         $this->assertSame('Public listing', $property->fresh()->title);
 
+        $deadline = \Carbon\Carbon::parse($role->fresh()->permission_expirations['properties.history.published']);
+        $this->travelTo($deadline);
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        $this->getJson('/api/properties/'.$property->id)->assertOk()->assertJsonPath('capabilities.can_view_history', false);
+        $this->travelBack();
+
         foreach (['properties.history.published', 'properties.history.view'] as $revoked) {
             $role->forceFill(['permissions' => array_values(array_diff(
-                app(\App\Services\Rbac\PermissionCatalog::class)->defaults('security'), [$revoked]
+                [...app(\App\Services\Rbac\PermissionCatalog::class)->defaults('security'), 'properties.history.published'], [$revoked]
             ))])->save();
             $this->app['auth']->forgetGuards();
             $this->getJson('/api/properties/'.$property->id)->assertOk()
