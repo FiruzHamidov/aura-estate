@@ -2358,17 +2358,28 @@ class PropertyConstructionFieldsTest extends TestCase
         $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
     }
 
-    public function test_security_history_default_preserves_closed_stage_boundary_and_can_be_revoked(): void
+    public function test_security_can_read_published_and_closed_history_without_editing_and_access_can_be_revoked(): void
     {
         [$owner, $property] = $this->createListingDateRefreshFixture('sold', '930000410');
         $role = Role::create(['name' => 'Security', 'slug' => 'security']);
         $security = User::create(['name' => 'Security', 'phone' => '930000411', 'role_id' => $role->id, 'status' => 'active']);
         (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        (require database_path('migrations/2026_11_18_120000_allow_security_published_property_history.php'))->up();
+        (require database_path('migrations/2026_11_18_130000_add_role_permission_expirations.php'))->up();
+        (require database_path('migrations/2026_11_18_140000_limit_security_history_to_one_month.php'))->up();
         Sanctum::actingAs($security->fresh());
         $this->getJson('/api/properties/'.$property->id.'/logs')->assertOk();
         $this->postJson('/api/properties/'.$property->id.'/refresh-listing-date')->assertForbidden();
         $property->forceFill(['moderation_status' => 'approved'])->save();
-        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        $this->getJson('/api/properties/'.$property->id)->assertOk()
+            ->assertJsonPath('capabilities.can_view_history', true)
+            ->assertJsonPath('capabilities.can_edit', false);
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertOk();
+        $this->postJson('/api/properties/'.$property->id.'/refresh-listing-date')->assertForbidden();
+        foreach (['draft', 'pending', 'denied'] as $status) {
+            $property->forceFill(['moderation_status' => $status])->save();
+            $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        }
         $property->forceFill(['moderation_status' => 'sold'])->save();
         $role->forceFill(['permissions' => []])->save();
         Sanctum::actingAs($security->fresh());

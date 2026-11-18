@@ -349,6 +349,75 @@ class PropertyShowAuthContactsTest extends TestCase
         $this->getJson('/api/properties/'.$property->id)->assertNotFound();
     }
 
+    public function test_security_can_read_published_history_and_author_but_cannot_change_the_property(): void
+    {
+        [, $property, $agent] = $this->publicRopFixture();
+        $role = Role::create(['name' => 'Security', 'slug' => 'security']);
+        $user = User::create(['name' => 'Security reader', 'phone' => '930000560', 'role_id' => $role->id, 'status' => 'active']);
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        (require database_path('migrations/2026_11_18_120000_allow_security_published_property_history.php'))->up();
+        (require database_path('migrations/2026_11_18_130000_add_role_permission_expirations.php'))->up();
+        (require database_path('migrations/2026_11_18_140000_limit_security_history_to_one_month.php'))->up();
+        $log = $property->logs()->create(['user_id' => $agent->id, 'action' => 'updated',
+            'changes' => ['price' => ['old' => 90000, 'new' => 100000]]]);
+        $this->withToken($user->createToken('test')->plainTextToken);
+
+        $this->getJson('/api/properties/'.$property->id)->assertOk()
+            ->assertJsonPath('capabilities.can_view_history', true)
+            ->assertJsonPath('capabilities.can_edit', false)
+            ->assertJsonPath('capabilities.can_moderate', false);
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertOk()
+            ->assertJsonFragment(['id' => $log->id, 'action' => 'updated',
+                'changes' => ['price' => ['old' => 90000, 'new' => 100000]]])
+            ->assertJsonFragment(['name' => $agent->name]);
+        $this->putJson('/api/properties/'.$property->id, ['title' => 'Changed'])->assertForbidden();
+        $this->deleteJson('/api/properties/'.$property->id)->assertForbidden();
+        $this->postJson('/api/properties/'.$property->id.'/refresh-listing-date')->assertForbidden();
+        $this->assertSame('Public listing', $property->fresh()->title);
+
+        $deadline = \Carbon\Carbon::parse($role->fresh()->permission_expirations['properties.history.published']);
+        $this->travelTo($deadline);
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        $this->getJson('/api/properties/'.$property->id)->assertOk()->assertJsonPath('capabilities.can_view_history', false);
+        $this->travelBack();
+
+        foreach (['properties.history.published', 'properties.history.view'] as $revoked) {
+            $role->forceFill(['permissions' => array_values(array_diff(
+                [...app(\App\Services\Rbac\PermissionCatalog::class)->defaults('security'), 'properties.history.published'], [$revoked]
+            ))])->save();
+            $this->app['auth']->forgetGuards();
+            $this->getJson('/api/properties/'.$property->id)->assertOk()
+                ->assertJsonPath('capabilities.can_view_history', false);
+            $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        }
+    }
+
+    public function test_published_history_permission_preserves_publication_and_assigned_group_boundaries(): void
+    {
+        [$rop, $property] = $this->publicRopFixture();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $rop->role->forceFill(['permissions' => [
+            'properties.history.view', 'properties.history.published', 'data.scope.assigned_groups',
+        ]])->save();
+        $this->withToken($rop->createToken('test')->plainTextToken);
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertNotFound();
+        $property->forceFill(['branch_id' => 10, 'branch_group_id' => 100])->saveQuietly();
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertOk();
+
+        foreach (['draft', 'pending', 'unpublished', 'archived'] as $state) {
+            $property->forceFill(['publication_status' => $state])->saveQuietly();
+            $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        }
+        $property->forceFill(['publication_status' => 'published'])->saveQuietly();
+        $case = $property->moderationCases()->create([
+            'type' => 'duplicate_review', 'status' => 'open', 'blocking' => true,
+            'submitted_by' => $rop->id, 'submitted_at' => now(),
+        ]);
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        $case->forceFill(['status' => 'approved'])->save();
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertOk();
+    }
+
     public function test_security_can_read_closed_report_cards_and_history_but_cannot_edit(): void
     {
         $role = Role::create(['name' => 'Security', 'slug' => 'security']);

@@ -12,7 +12,7 @@ class Role extends Model
 
     protected $fillable = ['name', 'description', 'slug'];
 
-    protected $casts = ['permissions' => 'array', 'permissions_version' => 'integer'];
+    protected $casts = ['permissions' => 'array', 'permissions_version' => 'integer', 'permission_expirations' => 'array'];
 
     /** Central policy predicate; used by both loaded users and fresh SQL selections. */
     public function usesAssignedGroupScope(): bool
@@ -39,21 +39,48 @@ class Role extends Model
         }
         $column = $query->qualifyColumn('permissions');
         $slug = $query->qualifyColumn('slug');
-        $condition = fn ($roles) => $roles
-            ->where(fn ($legacy) => $legacy->whereNull($column)->whereIn($slug, $defaults))
-            ->orWhere(fn ($configured) => $configured->whereNotNull($column)->whereJsonContains($column, $permission));
+        $hasExpirations = \Illuminate\Support\Facades\Schema::hasColumn($query->getModel()->getTable(), 'permission_expirations');
+        $condition = function ($roles) use ($column, $slug, $defaults, $permission, $hasExpirations, $query) {
+            $roles->where(fn ($grants) => $grants
+                ->where(fn ($legacy) => $legacy->whereNull($column)->whereIn($slug, $defaults))
+                ->orWhere(fn ($configured) => $configured->whereNotNull($column)->whereJsonContains($column, $permission)));
+            if ($hasExpirations) {
+                $expiry = $query->qualifyColumn('permission_expirations').'->'.$permission;
+                $roles->where(fn ($active) => $active->whereNull($expiry)
+                    ->orWhere($expiry, '>', now()->utc()->format('Y-m-d\TH:i:s\Z')));
+            }
+        };
         $enabled ? $query->where($condition) : $query->whereNot($condition);
     }
 
-    public function permissionKeys(): array
+    public function configuredPermissionKeys(): array
     {
         // An explicit empty array revokes every grant. Null preserves pre-migration behavior.
         return $this->permissions ?? app(\App\Services\Rbac\PermissionCatalog::class)->defaults($this->slug);
     }
 
+    public function permissionKeys(): array
+    {
+        return array_values(array_filter($this->configuredPermissionKeys(), fn (string $key) => $this->permissionIsActive($key)));
+    }
+
+    private function permissionIsActive(string $permission): bool
+    {
+        $expiresAt = $this->permission_expirations[$permission] ?? null;
+        return $expiresAt === null || \Carbon\CarbonImmutable::parse($expiresAt)->isFuture();
+    }
+
+    public function attributesToArray(): array
+    {
+        $attributes = parent::attributesToArray();
+        // User/profile responses must also hide expired grants from older clients.
+        if (array_key_exists('permissions', $attributes)) $attributes['permissions'] = $this->permissionKeys();
+        return $attributes;
+    }
+
     public function hasPermission(string $permission): bool
     {
-        if (!in_array($permission, $this->permissionKeys(), true)) return false;
+        if (!in_array($permission, $this->configuredPermissionKeys(), true) || ! $this->permissionIsActive($permission)) return false;
         if (array_key_exists($permission, config('permissions', []))) return true;
         foreach (['users.assign_role.', 'kpi.reports.dashboard.role.'] as $prefix) {
             if (str_starts_with($permission, $prefix)) return self::query()->where('slug', substr($permission, strlen($prefix)))->exists();
