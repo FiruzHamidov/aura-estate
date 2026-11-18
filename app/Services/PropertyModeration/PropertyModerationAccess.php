@@ -67,7 +67,10 @@ final class PropertyModerationAccess
         if ($user->usesAssignedGroupScope() && ! app(RopGroupAccess::class)->allows($user, $property)) return false;
 
         return $user->hasPermission('properties.history.view')
-            && ($this->canEdit($user, $property) || $this->canViewClosedProperty($user, $property));
+            && ($this->canEdit($user, $property)
+                || $this->canViewClosedProperty($user, $property)
+                || ($user->hasPermission('properties.history.published')
+                    && Property::query()->publicSearchable()->whereKey($property->id)->exists()));
     }
 
     public function canRefreshListingDate(User $user, Property $property): bool

@@ -2358,7 +2358,7 @@ class PropertyConstructionFieldsTest extends TestCase
         $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
     }
 
-    public function test_security_history_default_preserves_closed_stage_boundary_and_can_be_revoked(): void
+    public function test_security_can_read_published_and_closed_history_without_editing_and_access_can_be_revoked(): void
     {
         [$owner, $property] = $this->createListingDateRefreshFixture('sold', '930000410');
         $role = Role::create(['name' => 'Security', 'slug' => 'security']);
@@ -2368,7 +2368,15 @@ class PropertyConstructionFieldsTest extends TestCase
         $this->getJson('/api/properties/'.$property->id.'/logs')->assertOk();
         $this->postJson('/api/properties/'.$property->id.'/refresh-listing-date')->assertForbidden();
         $property->forceFill(['moderation_status' => 'approved'])->save();
-        $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        $this->getJson('/api/properties/'.$property->id)->assertOk()
+            ->assertJsonPath('capabilities.can_view_history', true)
+            ->assertJsonPath('capabilities.can_edit', false);
+        $this->getJson('/api/properties/'.$property->id.'/logs')->assertOk();
+        $this->postJson('/api/properties/'.$property->id.'/refresh-listing-date')->assertForbidden();
+        foreach (['draft', 'pending', 'denied'] as $status) {
+            $property->forceFill(['moderation_status' => $status])->save();
+            $this->getJson('/api/properties/'.$property->id.'/logs')->assertForbidden();
+        }
         $property->forceFill(['moderation_status' => 'sold'])->save();
         $role->forceFill(['permissions' => []])->save();
         Sanctum::actingAs($security->fresh());

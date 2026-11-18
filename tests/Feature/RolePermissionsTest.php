@@ -29,6 +29,49 @@ class RolePermissionsTest extends TestCase
         (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
     }
 
+    public function test_security_history_migration_only_expands_security_and_audits_once(): void
+    {
+        $security = Role::where('slug', 'security')->firstOrFail();
+        $before = array_values(array_diff($security->permissions, ['properties.history.published']));
+        $security->forceFill(['permissions' => $before])->save();
+        $others = Role::whereKeyNot($security->id)->get()->map->getAttributes()->all();
+        $migration = require database_path('migrations/2026_11_18_120000_allow_security_published_property_history.php');
+        $migration->up();
+
+        $after = [...$before, 'properties.history.published'];
+        $this->assertSame($after, $security->fresh()->permissions);
+        $this->assertFalse($security->fresh()->hasPermission('properties.edit'));
+        $this->assertSame($security->permissions_version + 1, $security->fresh()->permissions_version);
+        $audit = DB::table('role_permission_audits')->sole();
+        $this->assertSame($security->id, $audit->role_id);
+        $this->assertNull($audit->actor_id);
+        $this->assertSame($before, json_decode($audit->before, true));
+        $this->assertSame($after, json_decode($audit->after, true));
+        $migration->up();
+        $this->assertDatabaseCount('role_permission_audits', 1);
+        $this->assertSame($others, Role::whereKeyNot($security->id)->get()->map->getAttributes()->all());
+    }
+
+    public function test_security_history_migration_preserves_revoked_history_and_legacy_defaults(): void
+    {
+        $security = Role::where('slug', 'security')->firstOrFail();
+        $migration = require database_path('migrations/2026_11_18_120000_allow_security_published_property_history.php');
+        foreach ([[], ['properties.closed.view']] as $permissions) {
+            $security->forceFill(['permissions' => $permissions])->save();
+            $migration->up();
+            $migration->down();
+            $this->assertSame($permissions, $security->fresh()->permissions);
+        }
+        $security->forceFill(['permissions' => null])->save();
+        $migration->up();
+        $this->assertNull($security->fresh()->permissions);
+        $this->assertTrue($security->fresh()->hasPermission('properties.history.published'));
+        foreach (Role::all() as $role) {
+            $this->assertSame($role->slug === 'security', $role->hasPermission('properties.history.published'), $role->slug);
+        }
+        $this->assertDatabaseCount('role_permission_audits', 0);
+    }
+
     public function test_unattended_catalog_permission_migration_preserves_existing_access_and_audits_once(): void
     {
         Role::query()->update(['permissions' => '[]']);
