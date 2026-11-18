@@ -341,6 +341,128 @@ class ClientIntegrationTest extends TestCase
         $this->assertSame(Client::CONTACT_KIND_BUYER, $client->contact_kind);
     }
 
+    private function coAgentBookingContext(): array
+    {
+        $this->travelTo(Carbon::parse('2026-11-18T00:00:00Z'));
+        [$agent, $client, $property] = $this->seedClientContext();
+        Schema::table('users', fn (Blueprint $table) => $table->timestamp('deleted_at')->nullable());
+        (require database_path('migrations/2026_11_18_120000_add_co_agent_to_bookings.php'))->up();
+        (require database_path('migrations/2026_10_15_180000_add_created_by_to_bookings.php'))->up();
+        $coAgent = User::create(['name' => 'Соучастник', 'phone' => (string) ++$this->phoneCounter,
+            'role_id' => $agent->role_id, 'branch_id' => $agent->branch_id, 'status' => 'active']);
+        Sanctum::actingAs($agent);
+        $payload = ['property_id' => $property->id, 'agent_id' => $agent->id, 'client_id' => $client->id,
+            'start_time' => '2026-11-19T10:00:00+05:00', 'end_time' => '2026-11-19T11:00:00+05:00'];
+
+        return [$agent, $coAgent, $payload];
+    }
+
+    public function test_booking_co_agent_is_optional_and_visible_in_the_participants_calendar(): void
+    {
+        [$agent, $coAgent, $payload] = $this->coAgentBookingContext();
+        $this->postJson('/api/bookings', $payload)->assertCreated()->assertJsonPath('booking.co_agent', null);
+        $this->postJson('/api/bookings', $payload + ['co_agent_id' => null])->assertCreated();
+        $id = $this->postJson('/api/bookings', $payload + ['co_agent_id' => $coAgent->id])->assertCreated()
+            ->assertJsonPath('booking.co_agent.id', $coAgent->id)
+            ->assertJsonPath('booking.created_by', $agent->id)->json('booking.id');
+        $booking = \App\Models\Booking::with('coAgent:id,name')->findOrFail($id);
+        $this->assertEqualsCanonicalizing([$agent->id, $coAgent->id],
+            app(\App\Services\NotificationRecipientResolver::class)->bookingAgent($booking)->pluck('id')->all());
+
+        Sanctum::actingAs($coAgent);
+        $this->getJson('/api/bookings?agent_id='.$coAgent->id)->assertOk()
+            ->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $id)
+            ->assertJsonPath('data.0.co_agent.name', 'Соучастник');
+        $this->getJson('/api/bookings/'.$id)->assertOk()->assertJsonPath('co_agent_id', $coAgent->id);
+        $this->patchJson('/api/bookings/'.$id, ['note' => 'Not the responsible agent'])->assertForbidden();
+        // Participation must not duplicate the creator's report count.
+        $this->getJson('/api/bookings?attribution=author&agent_id='.$coAgent->id)->assertOk()->assertJsonCount(0, 'data');
+    }
+
+    public function test_booking_co_agent_can_be_replaced_cleared_and_preserved_when_omitted(): void
+    {
+        [$agent, $coAgent, $payload] = $this->coAgentBookingContext();
+        $id = $this->postJson('/api/bookings', $payload)->assertCreated()->json('booking.id');
+        $this->patchJson('/api/bookings/'.$id, ['co_agent_id' => $coAgent->id])->assertOk()->assertJsonPath('co_agent_id', $coAgent->id);
+        $this->patchJson('/api/bookings/'.$id, ['note' => 'Keep participant'])->assertOk()->assertJsonPath('co_agent_id', $coAgent->id);
+        $replacement = User::create(['name' => 'Replacement', 'phone' => (string) ++$this->phoneCounter,
+            'role_id' => $agent->role_id, 'branch_id' => $agent->branch_id, 'status' => 'active']);
+        $this->patchJson('/api/bookings/'.$id, ['co_agent_id' => $replacement->id])->assertOk()->assertJsonPath('co_agent_id', $replacement->id);
+        Sanctum::actingAs($coAgent);
+        $this->getJson('/api/bookings/'.$id)->assertForbidden();
+        Sanctum::actingAs($agent);
+        $this->patchJson('/api/bookings/'.$id, ['co_agent_id' => null])->assertOk()->assertJsonPath('co_agent', null);
+        $this->assertDatabaseHas('bookings', ['id' => $id, 'co_agent_id' => null]);
+    }
+
+    public function test_booking_co_agent_rejects_duplicate_inactive_non_employee_and_foreign_branch(): void
+    {
+        [$agent, $coAgent, $payload] = $this->coAgentBookingContext();
+        $id = $this->postJson('/api/bookings', $payload)->assertCreated()->json('booking.id');
+        $reject = function (int $coAgentId) use ($payload, $id) {
+            $this->postJson('/api/bookings', $payload + ['co_agent_id' => $coAgentId])->assertUnprocessable()->assertJsonValidationErrors('co_agent_id', 'details.errors');
+            $this->patchJson('/api/bookings/'.$id, ['co_agent_id' => $coAgentId])->assertUnprocessable()->assertJsonValidationErrors('co_agent_id', 'details.errors');
+        };
+        $reject($agent->id);
+        $reject(999999);
+        $coAgent->update(['status' => 'inactive']);
+        $reject($coAgent->id);
+        $coAgent->update(['status' => 'active', 'role_id' => Role::create(['name' => 'Client', 'slug' => 'client'])->id]);
+        $reject($coAgent->id);
+        $coAgent->update(['role_id' => $agent->role_id, 'branch_id' => Branch::create(['name' => 'Other branch'])->id]);
+        $reject($coAgent->id);
+        $this->assertDatabaseCount('bookings', 1);
+    }
+
+    public function test_booking_co_agent_with_group_scope_can_read_their_shared_booking(): void
+    {
+        [$agent, $coAgent, $payload] = $this->coAgentBookingContext();
+        $group = BranchGroup::create(['name' => 'Agent group', 'branch_id' => $agent->branch_id]);
+        $otherGroup = BranchGroup::create(['name' => 'Co-agent group', 'branch_id' => $agent->branch_id]);
+        $agent->update(['branch_group_id' => $group->id]);
+        $coAgent->update(['role_id' => Role::create(['name' => 'MOP', 'slug' => 'mop'])->id, 'branch_group_id' => $otherGroup->id]);
+        $id = $this->postJson('/api/bookings', $payload + ['co_agent_id' => $coAgent->id])->assertCreated()->json('booking.id');
+        Sanctum::actingAs($coAgent->fresh());
+        $this->getJson('/api/bookings?branch_group_id='.$otherGroup->id.'&branch_id='.$agent->branch_id)->assertOk()
+            ->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $id);
+        $this->getJson('/api/bookings/'.$id)->assertOk();
+    }
+
+    public function test_booking_transfer_to_co_agent_removes_the_duplicate_participant(): void
+    {
+        [$agent, $coAgent, $payload] = $this->coAgentBookingContext();
+        $id = $this->postJson('/api/bookings', $payload + ['co_agent_id' => $coAgent->id])->assertCreated()->json('booking.id');
+        $group = BranchGroup::create(['name' => 'Destination', 'branch_id' => $agent->branch_id]);
+        $coAgent->update(['branch_group_id' => $group->id]);
+        $admin = User::create(['name' => 'Admin', 'phone' => (string) ++$this->phoneCounter,
+            'role_id' => Role::create(['name' => 'Admin', 'slug' => 'admin'])->id, 'status' => 'active']);
+        Sanctum::actingAs($admin);
+        $url = '/api/group-transfers/bookings/'.$id;
+        $revision = $this->getJson($url)->assertOk()->json('revision');
+        $this->postJson($url, ['branch_group_id' => $group->id, 'responsible_user_id' => $coAgent->id,
+            'revision' => $revision, 'reason' => 'Assign showing to participant'])->assertOk();
+        $this->assertDatabaseHas('bookings', ['id' => $id, 'agent_id' => $coAgent->id, 'co_agent_id' => null, 'created_by' => $agent->id]);
+    }
+
+    public function test_booking_co_agent_obeys_the_rop_selected_group(): void
+    {
+        [$agent, $coAgent, $payload] = $this->coAgentBookingContext();
+        $group = BranchGroup::create(['name' => 'Assigned', 'branch_id' => $agent->branch_id]);
+        $otherGroup = BranchGroup::create(['name' => 'Other', 'branch_id' => $agent->branch_id]);
+        $agent->update(['branch_group_id' => $group->id]);
+        $coAgent->update(['branch_group_id' => $otherGroup->id]);
+        $rop = User::create(['name' => 'ROP', 'phone' => (string) ++$this->phoneCounter,
+            'role_id' => Role::create(['name' => 'ROP', 'slug' => 'rop'])->id, 'branch_id' => $agent->branch_id, 'status' => 'active']);
+        DB::table('rop_branch_groups')->insert(['rop_id' => $rop->id, 'branch_group_id' => $group->id]);
+        DB::table('clients')->where('id', $payload['client_id'])->update(['branch_group_id' => $group->id]);
+        DB::table('properties')->where('id', $payload['property_id'])->update(['branch_id' => $agent->branch_id, 'branch_group_id' => $group->id]);
+        Sanctum::actingAs($rop);
+        $payload += ['branch_group_id' => $group->id, 'co_agent_id' => $coAgent->id];
+        $this->postJson('/api/bookings', $payload)->assertUnprocessable()->assertJsonValidationErrors('co_agent_id', 'details.errors');
+        DB::table('users')->where('id', $coAgent->id)->update(['branch_group_id' => $group->id]);
+        $this->postJson('/api/bookings', $payload)->assertCreated()->assertJsonPath('booking.co_agent.id', $coAgent->id);
+    }
+
     public function test_booking_save_uses_server_clock_and_normalizes_timezones(): void
     {
         config(['app.timezone' => 'Asia/Dushanbe']);

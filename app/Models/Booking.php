@@ -16,6 +16,7 @@ class Booking extends Model
         'branch_group_id',
         'property_id',
         'agent_id',
+        'co_agent_id',
         'client_id',
         'crm_client_id',
         'start_time',
@@ -54,6 +55,11 @@ class Booking extends Model
     public function client()
     {
         return $this->belongsTo(Client::class, 'crm_client_id');
+    }
+
+    public function coAgent()
+    {
+        return $this->belongsTo(User::class, 'co_agent_id');
     }
 
     public function legacyClientUser()

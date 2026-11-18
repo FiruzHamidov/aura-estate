@@ -237,7 +237,43 @@ class BookingController extends Controller
         return $data;
     }
 
-    private function applyBranchAccessForAgents(Request $request, $query, string $agentColumn = 'agent_id'): void
+    private function validateCoAgent(User $actor, ?int $coAgentId, int $agentId, ?int $groupId): void
+    {
+        if ($coAgentId === null) return;
+        $coAgent = User::query()->activeForSelection()
+            ->whereHas('role', fn ($roles) => $roles->withPermission('users.subject.public_agent'))
+            ->find($coAgentId);
+        $allowed = $coAgent && $coAgentId !== $agentId;
+        if ($allowed && $actor->usesAssignedGroupScope()) {
+            $groupId = app(\App\Support\RopGroupAccess::class)->creationGroup($actor, $groupId);
+            $allowed = (int) $coAgent->branch_id === (int) $actor->branch_id
+                && (int) $coAgent->branch_group_id === $groupId;
+        } elseif ($allowed && ! $actor->hasPermission('users.scope.all')) {
+            $allowed = $actor->branch_id && (int) $coAgent->branch_id === (int) $actor->branch_id;
+        }
+        if (! $allowed) {
+            throw ValidationException::withMessages([
+                'co_agent_id' => ['Выберите другого действующего сотрудника из доступного списка.'],
+            ]);
+        }
+    }
+
+    private function filterBookingEmployee($query, string $column, int $employeeId, bool $includeCoAgent): void
+    {
+        $this->filterBookingEmployees($query, $column, [$employeeId], $includeCoAgent);
+    }
+
+    private function filterBookingEmployees($query, string $column, $employees, bool $includeCoAgent): void
+    {
+        // Calendar participation does not create an extra author/KPI credit.
+        $withCoAgent = $includeCoAgent && Schema::hasColumn('bookings', 'co_agent_id');
+        $query->where(function ($q) use ($column, $employees, $withCoAgent) {
+            $q->whereIn($column, $employees);
+            if ($withCoAgent) $q->orWhereIn('bookings.co_agent_id', $employees);
+        });
+    }
+
+    private function applyBranchAccessForAgents(Request $request, $query, string $agentColumn = 'agent_id', bool $includeCoAgent = false): void
     {
         $authUser = $this->authUser($request);
         $roleSlug = $this->roleSlug($authUser);
@@ -262,7 +298,7 @@ class BookingController extends Controller
         }
 
         if ($scope === 'agent') {
-            $query->where($agentColumn, $authUser?->id);
+            $this->filterBookingEmployee($query, $agentColumn, (int) $authUser->id, $includeCoAgent);
 
             return;
         }
@@ -276,7 +312,7 @@ class BookingController extends Controller
                     return;
                 }
 
-                $query->whereIn($agentColumn, User::query()->whereIn('branch_group_id', $branchGroupIds)->select('id'));
+                $this->filterBookingEmployees($query, $agentColumn, User::query()->whereIn('branch_group_id', $branchGroupIds)->select('id'), $includeCoAgent);
             }
         }
 
@@ -284,7 +320,7 @@ class BookingController extends Controller
             $branchIds = $this->toArray($request->input('branch_id'));
 
             if (!empty($branchIds)) {
-                $query->whereIn($agentColumn, User::query()->whereIn('branch_id', $branchIds)->select('id'));
+                $this->filterBookingEmployees($query, $agentColumn, User::query()->whereIn('branch_id', $branchIds)->select('id'), $includeCoAgent);
             }
         }
 
@@ -294,7 +330,7 @@ class BookingController extends Controller
                 return;
             }
 
-            $query->whereIn($agentColumn, User::query()->where('branch_id', $authUser->branch_id)->select('id'));
+            $this->filterBookingEmployees($query, $agentColumn, User::query()->where('branch_id', $authUser->branch_id)->select('id'), $includeCoAgent);
         }
 
         if ($scope === 'group') {
@@ -303,7 +339,7 @@ class BookingController extends Controller
                 return;
             }
 
-            $query->whereIn($agentColumn, User::query()->where('branch_group_id', $authUser->branch_group_id)->select('id'));
+            $this->filterBookingEmployees($query, $agentColumn, User::query()->where('branch_group_id', $authUser->branch_group_id)->select('id'), $includeCoAgent);
         }
     }
 
@@ -335,7 +371,7 @@ class BookingController extends Controller
         }
         $visible = Booking::query()
             ->whereKey($booking->id)
-            ->tap(fn ($query) => $this->applyBranchAccessForAgents($request, $query, 'agent_id'))
+            ->tap(fn ($query) => $this->applyBranchAccessForAgents($request, $query, 'agent_id', true))
             ->exists();
 
         abort_unless($visible, 403, 'Forbidden');
@@ -347,6 +383,7 @@ class BookingController extends Controller
             'booking_id' => $booking->id,
             'property_id' => $booking->property_id,
             'agent_id' => $booking->agent_id,
+            'co_agent_id' => $booking->co_agent_id,
             'start_time' => $booking->start_time,
             'end_time' => $booking->end_time,
         ];
@@ -367,6 +404,7 @@ class BookingController extends Controller
                 'booking_id' => $booking->id,
                 'property_id' => $booking->property_id,
                 'agent_id' => $booking->agent_id,
+                'co_agent_id' => $booking->co_agent_id,
                 'start_time' => $booking->start_time,
                 'end_time' => $booking->end_time,
             ],
@@ -385,6 +423,7 @@ class BookingController extends Controller
             'booking_id' => $booking->id,
             'property_id' => $booking->property_id,
             'agent_id' => $booking->agent_id,
+            'co_agent_id' => $booking->co_agent_id,
             'start_time' => $booking->start_time,
             'end_time' => $booking->end_time,
             'crm_client_id' => $booking->crm_client_id,
@@ -422,7 +461,7 @@ class BookingController extends Controller
         $employeeColumn = $request->input('attribution') === 'author'
             ? \App\Support\BookingAttribution::column() : 'agent_id';
         $q = Booking::query()->tap(fn ($query) => \App\Support\BranchVisibility::records($query))
-            ->with(['property', 'agent', 'client.type', 'creator:id,name']);
+            ->with(['property', 'agent', 'coAgent:id,name', 'client.type', 'creator:id,name']);
         // Report filters follow the employee whose activity is being counted.
         // Keep callers without this option compatible (e.g. the booking calendar).
         if ($request->has('include_inactive')) {
@@ -447,7 +486,7 @@ class BookingController extends Controller
         }
 
         if ($request->filled('agent_id')) {
-            $q->where($employeeColumn, $request->integer('agent_id'));
+            $this->filterBookingEmployee($q, $employeeColumn, $request->integer('agent_id'), $request->input('attribution') !== 'author');
         }
         if ($request->filled('property_id')) {
             $q->where('property_id', $request->integer('property_id'));
@@ -457,7 +496,7 @@ class BookingController extends Controller
             $q->where('crm_client_id', $validated['crm_client_id']);
         }
 
-        $this->applyBranchAccessForAgents($request, $q, $employeeColumn);
+        $this->applyBranchAccessForAgents($request, $q, $employeeColumn, $request->input('attribution') !== 'author');
 
         $bookings = $q->orderByDesc('start_time')
             ->orderByDesc('bookings.id')
@@ -493,6 +532,7 @@ class BookingController extends Controller
                 'integer',
                 $this->activeUserExistsRule(),
             ],
+            'co_agent_id' => ['nullable', 'integer', $this->activeUserExistsRule()],
             'client_id' => 'required|integer|exists:clients,id',
             'start_time' => 'required|date',
             'end_time' => 'required|date',
@@ -508,10 +548,11 @@ class BookingController extends Controller
             $client = $this->resolveClient($validated['client_id']);
             $property = \App\Models\Property::findOrFail($validated['property_id']);
             [$authUser, $records] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquireMany(
-                $authUser, [$client, $property], [$validated['agent_id']], [$validated['branch_group_id'] ?? null]
+                $authUser, [$client, $property], [$validated['agent_id'], $validated['co_agent_id'] ?? null], [$validated['branch_group_id'] ?? null]
             );
             $client = $records[0];
             abort_unless($authUser->hasPermission('bookings.create'), 403, 'Нет права создавать показы.');
+            $this->validateCoAgent($authUser, $validated['co_agent_id'] ?? null, (int) $validated['agent_id'], $validated['branch_group_id'] ?? null);
             $this->ensureBookingAgentClientAccess($client, $validated['agent_id'] ?? null, $authUser);
             $validated = $this->syncBookingSnapshot($validated, $client, $authUser);
             unset($validated['client_id']);
@@ -534,7 +575,7 @@ class BookingController extends Controller
             $this->logClientBookingCreated($client, $authUser, $booking);
 
             // Ensure relations are available for subject/description
-            $booking->load(['property', 'agent', 'client.type']);
+            $booking->load(['property', 'agent', 'coAgent:id,name', 'client.type']);
             $this->transformBookingForResponse($booking);
             $this->notifications->handleBookingCreated($booking, $authUser);
 
@@ -546,7 +587,7 @@ class BookingController extends Controller
 
     public function show($id)
     {
-        $booking = Booking::with(['property', 'agent', 'client.type'])->findOrFail($id);
+        $booking = Booking::with(['property', 'agent', 'coAgent:id,name', 'client.type'])->findOrFail($id);
         $this->ensureBookingIsVisible(request(), $booking);
         $this->transformBookingForResponse($booking);
 
@@ -567,6 +608,7 @@ class BookingController extends Controller
                 'integer',
                 $this->activeUserExistsRule(),
             ],
+            'co_agent_id' => ['sometimes', 'nullable', 'integer', $this->activeUserExistsRule()],
             'client_id' => 'sometimes|integer|exists:clients,id',
             'client_name' => 'prohibited',
             'client_phone' => 'prohibited',
@@ -574,9 +616,10 @@ class BookingController extends Controller
 
         return \DB::transaction(function () use ($request, $validated, $booking) {
             $authUser = $request->user();
-            [$authUser, $booking] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquire(
-                $authUser, $booking, $validated['agent_id'] ?? null, null
+            [$authUser, $records] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquireMany(
+                $authUser, [$booking], [$validated['agent_id'] ?? null, $validated['co_agent_id'] ?? null, $booking->co_agent_id]
             );
+            $booking = $records[0];
             app(\App\Support\RopGroupAccess::class)->ensureVisible($authUser, $booking);
             if (!$authUser->hasPermission('bookings.update.all')
                 && !($authUser->hasPermission('bookings.update.own') && (int) $booking->agent_id === (int) $authUser->id)) {
@@ -612,6 +655,7 @@ class BookingController extends Controller
                 'booking_id' => $booking->id,
                 'property_id' => $booking->property_id,
                 'agent_id' => $booking->agent_id,
+                'co_agent_id' => $booking->co_agent_id,
                 'start_time' => $booking->start_time,
                 'end_time' => $booking->end_time,
                 'crm_client_id' => $booking->crm_client_id,
@@ -632,12 +676,18 @@ class BookingController extends Controller
                 $booking->agent_id = $validated['agent_id'];
             }
 
+            if (array_key_exists('co_agent_id', $validated) || $booking->isDirty('agent_id')) {
+                $coAgentId = array_key_exists('co_agent_id', $validated) ? $validated['co_agent_id'] : $booking->co_agent_id;
+                $this->validateCoAgent($authUser, $coAgentId, (int) $booking->agent_id, $booking->branch_group_id);
+                if (array_key_exists('co_agent_id', $validated)) $booking->co_agent_id = $coAgentId;
+            }
+
             if ($scheduleChanged) {
                 $this->ensureBookingStartsInFuture($startCarbon);
             }
             $booking->save();
 
-            $booking->load(['property', 'agent', 'client.type']);
+            $booking->load(['property', 'agent', 'coAgent:id,name', 'client.type']);
             $this->transformBookingForResponse($booking);
             $this->logClientBookingUpdated($currentClient, $authUser, $booking, $auditOldValues);
             $this->notifications->handleBookingUpdated($booking, $authUser, $auditOldValues);
