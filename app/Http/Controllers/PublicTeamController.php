@@ -16,22 +16,72 @@ use Illuminate\Validation\Rule;
 class PublicTeamController extends Controller
 {
 
-    public function index(): JsonResponse
+    public function index(Request $request): JsonResponse
     {
         $agents = $this->publicAgentsQuery()
             ->select(['id', 'name', 'phone', 'photo', 'role_id'])
             ->with('role:id,slug')
             ->get()
             ->sortBy(fn (User $user) => $user->role?->slug === 'mop' ? 0 : 1)
-            ->values()
-            ->map(fn (User $user) => [
-                'id' => $user->id,
-                'name' => $user->name,
-                'phone' => $user->phone,
-                'photo' => $user->photo,
-            ]);
+            ->values();
 
-        return response()->json($agents)->header('Cache-Control', 'no-store');
+        $viewer = $request->user() ?? $request->user('sanctum');
+        $canViewAll = $viewer?->status === User::STATUS_ACTIVE
+            && $viewer->role !== null && $viewer->role->slug !== 'client';
+
+        if (! $canViewAll) {
+            $agents = $this->publicPreview($agents);
+        }
+
+        return response()->json($agents->map(fn (User $user) => [
+            'id' => $user->id,
+            'name' => $user->name,
+            'phone' => $user->phone,
+            'photo' => $user->photo,
+        ]))
+            ->header('Cache-Control', 'no-store')
+            ->header('Vary', 'Authorization');
+    }
+
+    private function publicPreview(Collection $agents): Collection
+    {
+        if ($agents->count() <= 10) {
+            return $agents;
+        }
+
+        [$from, $to] = $this->resolveDateRange([]);
+        // Use the same current-month rankings and tie breakers as the honor board.
+        $rankings = [
+            $this->salesByCountRows($from, $to, null, 10),
+            $this->showsRows($from, $to, null, 10),
+            $this->addedRows($from, $to, null, 10),
+        ];
+        $ids = collect();
+        foreach ($rankings as $rows) {
+            $ids = $ids->merge($rows->take(3)->pluck('agent_id'));
+        }
+        // A person can lead several nominations. Fill their duplicate slots with
+        // the next ranked people, without repeating anyone in the team grid.
+        for ($rank = 3; $rank < 10; $rank++) {
+            foreach ($rankings as $rows) {
+                if ($row = $rows->get($rank)) {
+                    $ids->push($row->agent_id);
+                }
+            }
+        }
+        $byId = $agents->keyBy('id');
+        $featured = $ids->unique()->map(fn ($id) => $byId->get($id))->filter()->take(9)->values();
+        $remaining = $agents->whereNotIn('id', $featured->pluck('id'))->sortBy('id')->values();
+
+        // Rotate the extra person daily; keep the same selection on reload.
+        // At the start of a quiet month, fill any missing nominees the same way.
+        $offset = intdiv(Carbon::today()->getTimestamp(), 86400) % $remaining->count();
+        $slots = 10 - $featured->count();
+        for ($index = 0; $index < $slots; $index++) {
+            $featured->push($remaining->get(($offset + $index) % $remaining->count()));
+        }
+
+        return $featured;
     }
 
     private function resolveSaleAgentColumn(): ?string

@@ -7,6 +7,7 @@ use App\Models\User;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
 class PublicTeamHallOfFameTest extends TestCase
@@ -77,6 +78,131 @@ class PublicTeamHallOfFameTest extends TestCase
             $table->timestamp('agent_paid_at')->nullable();
             $table->timestamps();
         });
+    }
+
+    private function seedPreviewTeam(bool $withActivity = true): array
+    {
+        $this->travelTo(now()->setDate(2026, 11, 18)->startOfDay());
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agents = [];
+        for ($index = 0; $index < 15; $index++) {
+            $agents[] = User::create(['name' => 'Expert '.$index, 'phone' => '902090'.sprintf('%03d', $index),
+                'role_id' => $role->id, 'branch_id' => $index % 2 + 1, 'status' => 'active']);
+        }
+        if ($withActivity) {
+            for ($index = 0; $index < 3; $index++) {
+                for ($count = 0; $count < 3 - $index; $count++) {
+                    DB::table('properties')->insert(['agent_id' => $agents[$index]->id, 'created_by' => $agents[$index]->id,
+                        'moderation_status' => 'sold', 'sold_at' => now(), 'created_at' => now()->subMonth(), 'updated_at' => now()]);
+                    DB::table('bookings')->insert(['agent_id' => $agents[$index + 3]->id, 'created_at' => now(), 'updated_at' => now()]);
+                    DB::table('properties')->insert(['created_by' => $agents[$index + 6]->id,
+                        'moderation_status' => 'approved', 'created_at' => now(), 'updated_at' => now()]);
+                }
+            }
+        }
+
+        return $agents;
+    }
+
+    public function test_guests_and_clients_get_nine_current_nominees_and_one_daily_extra(): void
+    {
+        $agents = $this->seedPreviewTeam();
+        $response = $this->getJson('/api/public/team')->assertOk()->assertJsonCount(10);
+        $ids = array_column($response->json(), 'id');
+        $this->assertSame(array_map(fn ($agent) => $agent->id, array_slice($agents, 0, 9)), array_slice($ids, 0, 9));
+        $this->assertCount(10, array_unique($ids));
+        $this->getJson('/api/public/team?limit=100&status=all&date_from=2000-01-01')->assertExactJson($response->json());
+
+        $role = Role::create(['name' => 'Client', 'slug' => 'client']);
+        $client = User::create(['name' => 'Client', 'phone' => '902091001', 'role_id' => $role->id, 'status' => 'active']);
+        Sanctum::actingAs($client);
+        $this->getJson('/api/public/team')->assertOk()->assertExactJson($response->json());
+        $this->travel(1)->days();
+        $next = array_column($this->getJson('/api/public/team')->assertOk()->assertJsonCount(10)->json(), 'id');
+        $this->assertSame(array_slice($ids, 0, 9), array_slice($next, 0, 9));
+        $this->assertNotSame($ids[9], $next[9]);
+    }
+
+    public function test_every_active_non_client_role_keeps_the_full_team_and_order(): void
+    {
+        $agents = $this->seedPreviewTeam();
+        $mopRole = Role::create(['name' => 'MOP', 'slug' => 'mop']);
+        $mop = User::create(['name' => 'Public MOP', 'phone' => '902091002', 'role_id' => $mopRole->id, 'status' => 'active']);
+        $agents[14]->update(['status' => 'inactive']);
+        foreach (['admin', 'security', 'external_agent', 'custom_internal'] as $index => $slug) {
+            $role = Role::create(['name' => $slug, 'slug' => $slug]);
+            $viewer = User::create(['name' => 'Viewer', 'phone' => '90209200'.$index, 'role_id' => $role->id, 'status' => 'active']);
+            Sanctum::actingAs($viewer);
+            $rows = $this->getJson('/api/public/team')->assertOk()->assertJsonCount(15)
+                ->assertJsonPath('0.id', $mop->id)->assertJsonMissing(['id' => $agents[14]->id])->json();
+            $this->assertSame(array_merge([$mop->id], array_map(fn ($agent) => $agent->id, array_slice($agents, 0, 14))), array_column($rows, 'id'));
+        }
+    }
+
+    private function createTokensTable(): void
+    {
+        Schema::create('personal_access_tokens', function (Blueprint $table) {
+            $table->id(); $table->morphs('tokenable'); $table->string('name');
+            $table->string('token', 64)->unique(); $table->text('abilities')->nullable();
+            $table->timestamp('last_used_at')->nullable(); $table->timestamp('expires_at')->nullable(); $table->timestamps();
+        });
+    }
+
+    public function test_inactive_viewer_and_invalid_bearer_token_only_get_the_public_preview(): void
+    {
+        $agents = $this->seedPreviewTeam();
+        $this->createTokensTable();
+        $this->withToken('999|invalid-token')->getJson('/api/public/team')->assertOk()->assertJsonCount(10);
+        $agents[14]->update(['status' => 'inactive']);
+        Sanctum::actingAs($agents[14]);
+        $this->getJson('/api/public/team')->assertOk()->assertJsonCount(10)->assertJsonMissing(['id' => $agents[14]->id]);
+    }
+
+    public function test_real_bearer_authentication_uses_the_current_role_and_token_expiry(): void
+    {
+        $agents = $this->seedPreviewTeam();
+        $this->createTokensTable();
+        $token = $agents[14]->createToken('team-preview')->plainTextToken;
+        $response = $this->withToken($token)->getJson('/api/public/team')->assertOk()->assertJsonCount(15);
+        $this->assertContains('Authorization', array_map('trim', explode(',', $response->headers->get('Vary'))));
+
+        $clientRole = Role::create(['name' => 'Client', 'slug' => 'client']);
+        $agents[14]->update(['role_id' => $clientRole->id]);
+        $this->app['auth']->forgetGuards();
+        $this->withToken($token)->getJson('/api/public/team')->assertOk()->assertJsonCount(10);
+
+        $agents[14]->update(['role_id' => $agents[0]->role_id]);
+        DB::table('personal_access_tokens')->update(['expires_at' => now()->subMinute()]);
+        $this->app['auth']->forgetGuards();
+        $this->withToken($token)->getJson('/api/public/team')->assertOk()->assertJsonCount(10);
+    }
+
+    public function test_public_preview_deduplicates_nominations_and_uses_next_ranked_people(): void
+    {
+        $agents = $this->seedPreviewTeam(false);
+        for ($index = 0; $index < 12; $index++) {
+            for ($count = 0; $count < 12 - $index; $count++) {
+                DB::table('properties')->insert(['agent_id' => $agents[$index]->id, 'created_by' => $agents[$index]->id,
+                    'moderation_status' => 'sold', 'sold_at' => now(), 'created_at' => now()->subMonth(), 'updated_at' => now()]);
+                DB::table('bookings')->insert(['agent_id' => $agents[$index]->id, 'created_at' => now(), 'updated_at' => now()]);
+                DB::table('properties')->insert(['created_by' => $agents[$index]->id,
+                    'moderation_status' => 'approved', 'created_at' => now(), 'updated_at' => now()]);
+            }
+        }
+        $ids = array_column($this->getJson('/api/public/team')->assertOk()->assertJsonCount(10)->json(), 'id');
+        $this->assertCount(10, array_unique($ids));
+        $this->assertSame(array_map(fn ($agent) => $agent->id, array_slice($agents, 0, 9)), array_slice($ids, 0, 9));
+    }
+
+    public function test_preview_tracks_new_month_and_fills_missing_nominees_without_duplicates(): void
+    {
+        $agents = $this->seedPreviewTeam();
+        $this->travelTo(now()->addMonth()->startOfMonth());
+        $this->getJson('/api/public/team/hall-of-fame')->assertJsonCount(0, 'nominations.best_sales_by_count.leaders');
+        $ids = array_column($this->getJson('/api/public/team')->assertOk()->assertJsonCount(10)->json(), 'id');
+        $this->assertCount(10, array_unique($ids));
+        DB::table('bookings')->insert(['agent_id' => $agents[14]->id, 'created_at' => now(), 'updated_at' => now()]);
+        $this->getJson('/api/public/team')->assertOk()->assertJsonCount(10)->assertJsonPath('0.id', $agents[14]->id);
     }
 
     public function test_custom_public_role_can_enter_and_leave_public_nominations(): void
