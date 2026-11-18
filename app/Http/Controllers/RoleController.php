@@ -87,12 +87,20 @@ class RoleController extends Controller
                 if ($affected->id === $locked->id || array_intersect($dependentKeys, $affected->permissions ?? []) === []) continue;
                 $before = $affected->permissions;
                 $after = array_values(array_diff($before, $dependentKeys));
+                $beforeExpirations = $affected->permission_expirations ?? [];
+                $afterExpirations = array_diff_key($beforeExpirations, array_flip($dependentKeys));
+                $supportsExpirations = \Illuminate\Support\Facades\Schema::hasColumn('roles', 'permission_expirations');
                 $affected->permissions = $after;
+                if ($supportsExpirations) $affected->permission_expirations = (object) $afterExpirations;
                 $affected->permissions_version++;
                 $affected->save();
                 \Illuminate\Support\Facades\DB::table('role_permission_audits')->insert([
                     'role_id' => $affected->id, 'role_name' => $affected->name, 'actor_id' => $request->user()->id,
                     'before' => json_encode($before, JSON_THROW_ON_ERROR), 'after' => json_encode($after, JSON_THROW_ON_ERROR),
+                    ...($supportsExpirations ? [
+                        'before_expirations' => json_encode((object) $beforeExpirations, JSON_THROW_ON_ERROR),
+                        'after_expirations' => json_encode((object) $afterExpirations, JSON_THROW_ON_ERROR),
+                    ] : []),
                     'version' => $affected->permissions_version, 'created_at' => now(),
                 ]);
             }
