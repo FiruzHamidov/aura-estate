@@ -463,6 +463,159 @@ class ClientIntegrationTest extends TestCase
         $this->postJson('/api/bookings', $payload)->assertCreated()->assertJsonPath('booking.co_agent.id', $coAgent->id);
     }
 
+    private function bookingResultContext(): array
+    {
+        [$agent, $coAgent, $payload] = $this->coAgentBookingContext();
+        (require database_path('migrations/2026_05_01_220000_create_crm_task_types_and_tasks_tables.php'))->up();
+        Schema::table('crm_tasks', fn (Blueprint $table) => $table->unsignedBigInteger('branch_group_id')->nullable());
+        (require database_path('migrations/2026_11_18_150000_add_booking_results.php'))->up();
+        $group = BranchGroup::create(['name' => 'Showing team', 'branch_id' => $agent->branch_id]);
+        $agent->update(['branch_group_id' => $group->id]);
+        $coAgent->update(['branch_group_id' => $group->id]);
+        Sanctum::actingAs($agent->fresh());
+        $id = $this->postJson('/api/bookings', $payload + ['co_agent_id' => $coAgent->id])->assertCreated()->json('booking.id');
+        return [$agent, $coAgent, $id];
+    }
+
+    public function test_booking_result_fields_are_optional_and_all_statuses_still_count(): void
+    {
+        [$agent, $coAgent, $id] = $this->bookingResultContext();
+        $url = '/api/bookings/'.$id.'/result';
+        $this->patchJson($url, ['version' => 0])->assertOk()->assertJsonPath('status', 'pending')->assertJsonPath('result_version', 0);
+        $this->patchJson($url, ['version' => 0, 'status' => null, 'outcome' => null, 'result_note' => null])->assertOk()->assertJsonPath('result_version', 0);
+        foreach (['confirmed', 'completed', 'not_held', 'cancelled', 'pending'] as $version => $status) {
+            $this->patchJson($url, ['version' => $version, 'status' => $status])->assertOk()
+                ->assertJsonPath('status', $status)->assertJsonPath('outcome', null)->assertJsonPath('result_version', $version + 1);
+            $this->getJson('/api/bookings/agents-report')->assertOk()->assertJsonPath('0.shows_count', 1);
+            $this->getJson('/api/bookings?attribution=author&agent_id='.$agent->id)->assertOk()->assertJsonCount(1, 'data');
+        }
+        $this->assertDatabaseCount('crm_tasks', 0);
+        $this->assertDatabaseCount('bookings', 1);
+        Sanctum::actingAs($coAgent);
+        $this->getJson('/api/bookings?attribution=author&agent_id='.$coAgent->id)->assertOk()->assertJsonCount(0, 'data');
+    }
+
+    public function test_booking_result_is_shared_audited_and_protected_from_stale_saves(): void
+    {
+        [$agent, $coAgent, $id] = $this->bookingResultContext();
+        Sanctum::actingAs($coAgent);
+        $this->getJson('/api/bookings/'.$id)->assertOk()->assertJsonPath('can_record_result', true);
+        $this->patchJson('/api/bookings/'.$id.'/result', ['version' => 0, 'outcome' => 'thinking', 'result_note' => 'Позвонить после обсуждения'])
+            ->assertOk()->assertJsonPath('status', 'completed')->assertJsonPath('result_recorded_by', $coAgent->id);
+        Sanctum::actingAs($agent);
+        $this->patchJson('/api/bookings/'.$id.'/result', ['version' => 0, 'result_note' => 'stale'])->assertConflict();
+        $this->getJson('/api/bookings/'.$id.'/history')->assertOk()->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.actor.id', $coAgent->id)->assertJsonPath('data.0.new_values.outcome', 'thinking');
+        $this->patchJson('/api/bookings/'.$id.'/result', ['version' => 1, 'status' => 'not_held'])->assertOk()->assertJsonPath('outcome', null);
+        // Removing a participant revokes write and history access immediately.
+        $this->patchJson('/api/bookings/'.$id, ['co_agent_id' => null])->assertOk();
+        Sanctum::actingAs($coAgent);
+        $this->patchJson('/api/bookings/'.$id.'/result', ['version' => 2, 'result_note' => 'forbidden'])->assertForbidden();
+        $this->getJson('/api/bookings/'.$id.'/history')->assertForbidden();
+        $this->patchJson('/api/bookings/'.$id.'/reschedule', ['version' => 2])->assertForbidden();
+    }
+
+    public function test_booking_result_next_contact_is_explicit_optional_and_has_one_active_task(): void
+    {
+        [$agent, $coAgent, $id] = $this->bookingResultContext();
+        Sanctum::actingAs($coAgent);
+        $url = '/api/bookings/'.$id.'/result';
+        $this->getJson('/api/bookings/'.$id)->assertOk()->assertJsonPath('can_schedule_follow_up', true);
+        $first = $this->patchJson($url, ['version' => 0, 'status' => 'completed', 'next_contact_at' => '2026-11-20T10:00:00+05:00'])
+            ->assertOk()->assertJsonPath('follow_up.assignee_id', $agent->id)->json('follow_up.id');
+        $this->assertDatabaseHas('crm_tasks', ['id' => $first, 'due_at' => '2026-11-20 10:00:00', 'related_entity_type' => 'showing', 'related_entity_id' => $id]);
+        $this->patchJson($url, ['version' => 1, 'result_note' => 'Дополнение'])->assertOk();
+        $this->patchJson($url, ['version' => 2, 'next_contact_at' => '2026-11-21T09:00:00+05:00'])->assertOk()->assertJsonPath('follow_up.id', $first);
+        $this->patchJson($url, ['version' => 3, 'next_contact_at' => '2026-11-21T09:00:00+05:00'])->assertOk()->assertJsonPath('result_version', 3);
+        $this->assertDatabaseCount('crm_tasks', 1);
+        $this->patchJson($url, ['version' => 2, 'next_contact_at' => '2026-11-22T09:00:00+05:00'])->assertConflict();
+        $this->patchJson($url, ['version' => 3, 'next_contact_at' => null])->assertOk()->assertJsonPath('follow_up_task_id', null);
+        $this->assertDatabaseHas('crm_tasks', ['id' => $first, 'status' => 'canceled']);
+        $this->patchJson($url, ['version' => 4, 'next_contact_at' => '2026-11-22T09:00:00+05:00'])->assertOk();
+        $this->assertSame(1, DB::table('crm_tasks')->where('status', 'new')->count());
+    }
+
+    public function test_booking_result_invalid_contact_rolls_back_and_can_be_omitted(): void
+    {
+        [$agent, $coAgent, $id] = $this->bookingResultContext();
+        $url = '/api/bookings/'.$id.'/result';
+        $this->patchJson($url, ['version' => 0, 'status' => 'completed', 'next_contact_at' => '2026-11-17T10:00:00+05:00'])
+            ->assertUnprocessable()->assertJsonValidationErrors('next_contact_at', 'details.errors');
+        $this->assertDatabaseHas('bookings', ['id' => $id, 'status' => 'pending', 'result_version' => 0]);
+        $this->assertDatabaseCount('crm_tasks', 0);
+        $this->patchJson($url, ['version' => 0, 'result_note' => 'Только заметка'])->assertOk()->assertJsonPath('status', 'pending');
+        DB::table('bookings')->where('id', $id)->update(['branch_group_id' => null]);
+        $this->getJson('/api/bookings/'.$id)->assertOk()->assertJsonPath('can_schedule_follow_up', false);
+        $this->patchJson($url, ['version' => 1, 'status' => 'completed'])->assertOk();
+    }
+
+    public function test_booking_result_overdue_filter_does_not_change_status_or_report_count(): void
+    {
+        [$agent, $coAgent, $id] = $this->bookingResultContext();
+        $this->getJson('/api/bookings?needs_result=1')->assertOk()->assertJsonCount(0, 'data');
+        $this->travelTo(Carbon::parse('2026-11-19T06:01:00Z'));
+        $this->getJson('/api/bookings?needs_result=1')->assertOk()->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.needs_result', true)->assertJsonPath('data.0.status', 'pending');
+        $this->patchJson('/api/bookings/'.$id.'/result', ['version' => 0, 'status' => 'completed'])->assertOk()->assertJsonPath('needs_result', false);
+        $this->getJson('/api/bookings?needs_result=1')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/bookings/agents-report')->assertOk()->assertJsonPath('0.shows_count', 1);
+    }
+
+    public function test_booking_result_reschedule_keeps_id_count_and_history_and_checks_revision(): void
+    {
+        [$agent, $coAgent, $id] = $this->bookingResultContext();
+        $this->patchJson('/api/bookings/'.$id.'/result', ['version' => 0, 'outcome' => 'not_suitable', 'result_reason' => 'price'])->assertOk();
+        Sanctum::actingAs($coAgent);
+        $url = '/api/bookings/'.$id.'/reschedule';
+        $this->patchJson($url, ['version' => 1])->assertOk()->assertJsonPath('status', 'completed');
+        $this->patchJson($url, ['version' => 1, 'start_time' => '2026-11-17T10:00:00+05:00', 'end_time' => '2026-11-17T11:00:00+05:00'])->assertUnprocessable();
+        $this->patchJson($url, ['version' => 1, 'start_time' => '2026-11-21T10:00:00+05:00', 'end_time' => '2026-11-21T11:00:00+05:00'])
+            ->assertOk()->assertJsonPath('id', $id)->assertJsonPath('status', 'pending')->assertJsonPath('outcome', null)->assertJsonPath('result_reason', null)->assertJsonPath('result_version', 2);
+        $this->patchJson($url, ['version' => 1])->assertConflict();
+        $this->getJson('/api/bookings/'.$id.'/history')->assertOk()->assertJsonCount(2, 'data')
+            ->assertJsonPath('data.0.event', 'booking_rescheduled')->assertJsonPath('data.0.old_values.outcome', 'not_suitable');
+        $this->assertDatabaseCount('bookings', 1);
+        Sanctum::actingAs($agent);
+        $this->getJson('/api/bookings/agents-report')->assertOk()->assertJsonPath('0.shows_count', 1);
+        $this->patchJson('/api/bookings/'.$id.'/result', ['version' => 2, 'status' => 'completed'])->assertOk();
+        $this->patchJson('/api/bookings/'.$id, ['start_time' => '2026-11-22T10:00:00+05:00', 'end_time' => '2026-11-22T11:00:00+05:00'])
+            ->assertOk()->assertJsonPath('status', 'pending')->assertJsonPath('result_version', 4);
+    }
+
+    public function test_booking_result_validates_values_and_preserves_foreign_group_boundaries(): void
+    {
+        [$agent, $coAgent, $id] = $this->bookingResultContext();
+        $this->patchJson('/api/bookings/'.$id.'/result', ['version' => 0, 'status' => 'success', 'outcome' => 'sold', 'result_reason' => 'unknown'])
+            ->assertUnprocessable()->assertJsonValidationErrors(['status', 'outcome', 'result_reason'], 'details.errors');
+        $rop = User::create(['name' => 'ROP', 'phone' => (string) ++$this->phoneCounter,
+            'role_id' => Role::create(['name' => 'ROP', 'slug' => 'rop'])->id, 'branch_id' => $agent->branch_id, 'status' => 'active']);
+        DB::table('rop_branch_groups')->insert(['rop_id' => $rop->id, 'branch_group_id' => $agent->branch_group_id]);
+        Sanctum::actingAs($rop);
+        $this->getJson('/api/bookings/'.$id)->assertOk()->assertJsonPath('can_record_result', false);
+        $this->patchJson('/api/bookings/'.$id.'/result', ['version' => 0, 'status' => 'completed'])->assertForbidden();
+        $other = BranchGroup::create(['name' => 'Other team', 'branch_id' => $agent->branch_id]);
+        DB::table('bookings')->where('id', $id)->update(['branch_group_id' => $other->id]);
+        $this->getJson('/api/bookings/'.$id)->assertNotFound();
+        $this->getJson('/api/bookings/'.$id.'/history')->assertNotFound();
+        $this->patchJson('/api/bookings/'.$id.'/reschedule', ['version' => 0])->assertNotFound();
+        $this->assertDatabaseHas('bookings', ['id' => $id, 'status' => 'pending', 'result_version' => 0]);
+    }
+
+    public function test_booking_result_migration_keeps_legacy_status_and_rolls_back(): void
+    {
+        [$agent, $coAgent, $payload] = $this->coAgentBookingContext();
+        (require database_path('migrations/2026_05_01_220000_create_crm_task_types_and_tasks_tables.php'))->up();
+        $id = $this->postJson('/api/bookings', $payload)->assertCreated()->json('booking.id');
+        DB::table('bookings')->where('id', $id)->update(['status' => 'confirmed', 'end_time' => '2026-11-16 06:00:00']);
+        $migration = require database_path('migrations/2026_11_18_150000_add_booking_results.php');
+        $migration->up();
+        $this->assertDatabaseHas('bookings', ['id' => $id, 'status' => 'confirmed', 'outcome' => null, 'result_version' => 0]);
+        DB::table('bookings')->where('id', $id)->update(['status' => 'completed']);
+        $migration->down();
+        $this->assertFalse(Schema::hasColumn('bookings', 'result_version'));
+        $this->assertDatabaseHas('bookings', ['id' => $id, 'status' => 'confirmed']);
+    }
+
     public function test_booking_save_uses_server_clock_and_normalizes_timezones(): void
     {
         config(['app.timezone' => 'Asia/Dushanbe']);

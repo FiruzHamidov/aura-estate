@@ -11,6 +11,14 @@ class Booking extends Model
 
     use HasFactory;
 
+    public const STATUSES = ['pending', 'confirmed', 'completed', 'not_held', 'cancelled'];
+    public const OUTCOMES = ['interested', 'thinking', 'not_suitable', 'undecided'];
+    public const REASONS = ['price', 'location', 'condition', 'layout', 'client_no_show', 'owner_unavailable', 'property_unavailable', 'other'];
+
+    protected $casts = [
+        'result_recorded_at' => 'datetime',
+        'result_version' => 'integer',
+    ];
 
     protected $fillable = [
         'branch_group_id',
@@ -60,6 +68,11 @@ class Booking extends Model
     public function coAgent()
     {
         return $this->belongsTo(User::class, 'co_agent_id');
+    }
+
+    public function followUpTask()
+    {
+        return $this->belongsTo(CrmTask::class, 'follow_up_task_id');
     }
 
     public function legacyClientUser()

@@ -125,8 +125,37 @@ class BookingController extends Controller
             ->toIso8601String();
     }
 
+    private function bookingResultsAvailable(): bool
+    {
+        $request = request();
+        if (! $request->attributes->has('booking_results_available')) {
+            $request->attributes->set('booking_results_available', Schema::hasColumn('bookings', 'result_version'));
+        }
+        return $request->attributes->get('booking_results_available');
+    }
+
     private function transformBookingForResponse(Booking $booking): Booking
     {
+        $actor = auth()->user();
+        $results = app(\App\Services\BookingResultService::class);
+        $available = $this->bookingResultsAvailable();
+        $staff = $actor && ($actor->hasPermission('bookings.reports.view') || $actor->hasPermission('bookings.update.own') || $actor->hasPermission('bookings.update.all'));
+        $booking->setAttribute('needs_result', in_array($booking->status, ['pending', 'confirmed'], true)
+            && $booking->end_time && Carbon::parse($booking->end_time, 'UTC')->lt(Carbon::now('UTC')));
+        $booking->setAttribute('can_view_result', (bool) $staff);
+        $booking->setAttribute('can_record_result', $available && $actor && $results->canEdit($actor, $booking));
+        $booking->setAttribute('can_schedule_follow_up', $available && $actor && $results->canFollowUp($actor, $booking));
+        if ($available && $staff && $booking->follow_up_task_id) {
+            $booking->loadMissing('followUpTask');
+            $task = $booking->followUpTask;
+            $visible = $task && (! $actor->usesAssignedGroupScope() || app(\App\Support\RopGroupAccess::class)->allowsGroup($actor, $task->branch_group_id));
+            $booking->setAttribute('follow_up', $visible ? [
+                'id' => $task->id, 'due_at' => $task->due_at ? Carbon::parse($task->getRawOriginal('due_at'), config('app.timezone'))->toIso8601String() : null, 'status' => $task->status,
+                'assignee_id' => $task->assignee_id,
+            ] : null);
+        }
+        $booking->unsetRelation('followUpTask');
+        if (! $staff) $booking->makeHidden(['outcome', 'result_reason', 'result_note', 'result_recorded_by', 'result_recorded_at', 'follow_up_task_id']);
         $booking->start_time = $this->formatUtcToApiIso8601($booking->start_time);
         $booking->end_time = $this->formatUtcToApiIso8601($booking->end_time);
 
@@ -447,6 +476,7 @@ class BookingController extends Controller
             'agent_id' => 'nullable|integer',
             'crm_client_id' => 'nullable|integer|min:1',
             'attribution' => 'nullable|in:agent,author',
+            'needs_result' => 'nullable|boolean',
             'include_inactive' => 'nullable|boolean',
             'branch_id' => 'nullable',
             'branch_group_id' => 'nullable',
@@ -462,6 +492,10 @@ class BookingController extends Controller
             ? \App\Support\BookingAttribution::column() : 'agent_id';
         $q = Booking::query()->tap(fn ($query) => \App\Support\BranchVisibility::records($query))
             ->with(['property', 'agent', 'coAgent:id,name', 'client.type', 'creator:id,name']);
+        if ($this->bookingResultsAvailable()) $q->with('followUpTask');
+        if ($request->boolean('needs_result')) {
+            $q->whereIn('bookings.status', ['pending', 'confirmed'])->where('bookings.end_time', '<', Carbon::now('UTC')->toDateTimeString());
+        }
         // Report filters follow the employee whose activity is being counted.
         // Keep callers without this option compatible (e.g. the booking calendar).
         if ($request->has('include_inactive')) {
@@ -626,6 +660,7 @@ class BookingController extends Controller
                 return response()->json(['error' => 'Forbidden'], 403);
             }
 
+            $resultBefore = app(\App\Services\BookingResultService::class)->snapshot($booking);
             $startCarbon = isset($validated['start_time'])
                 ? $this->parseInputDateTimeToUtc($validated['start_time'])
                 : Carbon::parse($booking->start_time, 'UTC');
@@ -684,6 +719,7 @@ class BookingController extends Controller
 
             if ($scheduleChanged) {
                 $this->ensureBookingStartsInFuture($startCarbon);
+                if (Schema::hasColumn('bookings', 'result_version')) app(\App\Services\BookingResultService::class)->recordReschedule($booking, $authUser, $resultBefore);
             }
             $booking->save();
 
@@ -694,6 +730,73 @@ class BookingController extends Controller
 
             return response()->json($booking);
         });
+    }
+
+    public function result(Request $request, int $id)
+    {
+        $booking = Booking::findOrFail($id);
+        $this->ensureBookingIsVisible($request, $booking);
+        $data = $request->validate([
+            'version' => 'required|integer|min:0',
+            'status' => ['sometimes', 'nullable', Rule::in(Booking::STATUSES)],
+            'outcome' => ['sometimes', 'nullable', Rule::in(Booking::OUTCOMES)],
+            'result_reason' => ['sometimes', 'nullable', Rule::in(Booking::REASONS)],
+            'result_note' => 'sometimes|nullable|string|max:5000',
+            'next_contact_at' => 'sometimes|nullable|date',
+        ]);
+        return DB::transaction(function () use ($request, $booking, $data) {
+            [$actor, $records] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquireMany(
+                $request->user(), [$booking], [$booking->co_agent_id]);
+            $booking = $records[0];
+            app(\App\Services\BookingResultService::class)->save($booking, $actor, $data);
+            return response()->json($this->transformBookingForResponse($booking->fresh(['property', 'agent', 'coAgent:id,name', 'client.type'])));
+        });
+    }
+
+    public function reschedule(Request $request, int $id)
+    {
+        $booking = Booking::findOrFail($id);
+        $this->ensureBookingIsVisible($request, $booking);
+        $data = $request->validate([
+            'version' => 'required|integer|min:0',
+            'start_time' => 'nullable|date|required_with:end_time',
+            'end_time' => 'nullable|date|required_with:start_time',
+        ]);
+        return DB::transaction(function () use ($request, $booking, $data) {
+            [$actor, $records] = app(\App\Services\GroupAccess\GroupRecordWriteLock::class)->acquireMany(
+                $request->user(), [$booking], [$booking->co_agent_id]);
+            $booking = $records[0];
+            $results = app(\App\Services\BookingResultService::class);
+            abort_unless($results->canEdit($actor, $booking), 403, 'FORBIDDEN_ACTION');
+            abort_unless((int) $booking->result_version === (int) $data['version'], 409, 'BOOKING_RESULT_CHANGED');
+            if (! empty($data['start_time'])) {
+                $start = $this->parseInputDateTimeToUtc($data['start_time']);
+                $end = $this->parseInputDateTimeToUtc($data['end_time']);
+                if ($end->lessThanOrEqualTo($start)) throw ValidationException::withMessages(['end_time' => ['Окончание должно быть позже начала.']]);
+                if (! $start->equalTo(Carbon::parse($booking->start_time, 'UTC')) || ! $end->equalTo(Carbon::parse($booking->end_time, 'UTC'))) {
+                    $this->ensureBookingStartsInFuture($start);
+                    $before = $results->snapshot($booking);
+                    $booking->start_time = $start->toDateTimeString();
+                    $booking->end_time = $end->toDateTimeString();
+                    $results->recordReschedule($booking, $actor, $before);
+                    $booking->save();
+                    $this->notifications->handleBookingUpdated($booking, $actor, $before);
+                }
+            }
+            return response()->json($this->transformBookingForResponse($booking->fresh(['property', 'agent', 'coAgent:id,name', 'client.type'])));
+        });
+    }
+
+    public function history(Request $request, int $id)
+    {
+        $booking = Booking::findOrFail($id);
+        $this->ensureBookingIsVisible($request, $booking);
+        $actor = $request->user();
+        abort_unless($actor->hasPermission('bookings.reports.view') || $actor->hasPermission('bookings.update.own') || $actor->hasPermission('bookings.update.all'), 403);
+        return response()->json(\App\Models\CrmAuditLog::query()
+            ->where('auditable_type', $booking->getMorphClass())->where('auditable_id', $id)
+            ->whereIn('event', ['booking_result_updated', 'booking_rescheduled'])
+            ->with('actor:id,name')->orderByDesc('id')->paginate(20));
     }
 
     public function agentsReport(Request $request)
