@@ -130,6 +130,9 @@ final class GroupRecordTransfer
 
             $field = GroupOwnedRecordObserver::RESPONSIBLES[$record->getTable()];
             $changes = ['branch_group_id' => $group->id, $field => $target->id, 'updated_at' => now()];
+            if ($record instanceof Booking && (int) $record->co_agent_id === (int) $target->id) {
+                $changes['co_agent_id'] = null;
+            }
             if (array_key_exists('branch_id', $record->getAttributes())) $changes['branch_id'] = $group->branch_id;
             if ($record instanceof Deal) {
                 $stage = DealStage::query()->with('pipeline')->findOrFail($data['stage_id'] ?? $record->stage_id);

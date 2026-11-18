@@ -536,6 +536,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     });
 
     Route::get('/bookings', [BookingController::class, 'index']);
+    Route::get('/bookings/{id}/history', [BookingController::class, 'history'])->whereNumber('id');
     Route::get('/bookings/{id}', [BookingController::class, 'show'])->whereNumber('id');
     Route::middleware('non.client')->group(function () {
         Route::get('/marketing/property-contact-analytics', [\App\Http\Controllers\PropertyContactAnalyticsController::class, 'index']);
@@ -676,6 +677,8 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         // Показы
         Route::post('/bookings', [BookingController::class, 'store']);
         Route::put('/bookings/{id}', [BookingController::class, 'update']);
+        Route::patch('/bookings/{id}/result', [BookingController::class, 'result'])->whereNumber('id');
+        Route::patch('/bookings/{id}/reschedule', [BookingController::class, 'reschedule'])->whereNumber('id');
         Route::patch('/bookings/{id}', [BookingController::class, 'update']);
         Route::get('/bookings/agents-report', [BookingController::class, 'agentsReport']);
 

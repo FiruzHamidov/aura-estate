@@ -98,11 +98,9 @@ class NotificationRecipientResolver
 
     public function bookingAgent(Booking $booking): Collection
     {
-        $booking->loadMissing('agent.role');
-
-        return collect([$booking->agent])
-            ->filter(fn ($user) => $user instanceof User && $user->status === User::STATUS_ACTIVE)
-            ->values();
+        return User::query()->with('role')
+            ->whereIn('id', array_filter([$booking->agent_id, $booking->co_agent_id]))
+            ->where('status', User::STATUS_ACTIVE)->get();
     }
 
     public function propertyAgent(Property $property): Collection
