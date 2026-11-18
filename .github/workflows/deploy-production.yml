@@ -67,7 +67,8 @@ jobs:
             set -euo pipefail
             composer install --no-dev --no-scripts --no-plugins --prefer-dist --no-interaction
             npm ci --ignore-scripts --no-fund
-            npm audit --audit-level=moderate
+            node --test scripts/check-build-audit.test.mjs
+            node scripts/check-build-audit.mjs
             npm run build
             tar --hard-dereference -C public -czf "$RUNNER_TEMP/build.tar.gz" build
       - id: upload
