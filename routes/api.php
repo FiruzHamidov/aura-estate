@@ -683,6 +683,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         Route::get('/bookings/agents-report', [BookingController::class, 'agentsReport']);
 
         // Отчёты
+        Route::get('/reports/properties/status-inventory', [PropertyReportController::class, 'statusInventory']);
         // --- Агентские отчёты (дополнительно) ---
         Route::middleware('rop.branch.scope')->group(function () {
             Route::get('/reports/employees', [PropertyReportController::class, 'employees']);
