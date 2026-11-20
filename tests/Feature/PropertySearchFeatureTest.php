@@ -663,6 +663,32 @@ class PropertySearchFeatureTest extends TestCase
         $this->getJson('/api/properties')->assertOk()->assertJsonPath('data.0.responsible_agent', null);
     }
 
+    public function test_room_selection_counts_and_results_share_agent_city_and_visibility_filters(): void
+    {
+        Schema::table('properties', function (Blueprint $table) {
+            $table->string('apartment_type')->nullable();
+            $table->decimal('latitude', 10, 7)->nullable();
+            $table->decimal('longitude', 10, 7)->nullable();
+        });
+        foreach ([1, 2, 2, 3, 5, 6] as $rooms) {
+            $property = $this->createProperty(['rooms' => $rooms]);
+            $property->forceFill(['latitude' => 38.57, 'longitude' => 68.78])->saveQuietly();
+        }
+        $this->createProperty(['rooms' => 2, 'moderation_status' => 'pending']);
+        $this->createProperty(['rooms' => 2, 'location_id' => null]);
+        foreach (['2' => 2, '2,3' => 3, '5' => 1, '5+' => 2, '2,5+' => 4] as $rooms => $expected) {
+            $query = http_build_query(['rooms' => $rooms, 'responsible_user_id' => $this->agent->id,
+                'include_co_owned' => true, 'location_id' => $this->dushanbe->id]);
+            $this->getJson('/api/properties/count?'.$query)->assertOk()->assertJsonPath('count', $expected);
+            $this->getJson('/api/properties?'.$query)->assertOk()->assertJsonPath('total', $expected)->assertJsonCount($expected, 'data');
+            $this->getJson('/api/feed/properties/stats?'.$query)->assertOk()->assertJsonPath('total', $expected);
+            $this->getJson('/api/properties/map?'.$query.'&bbox=38,68,39,69&zoom=12')->assertOk()->assertJsonCount($expected, 'features');
+        }
+        foreach (['two', '2,', '-1', '5plusplus'] as $invalid) {
+            $this->getJson('/api/properties/count?'.http_build_query(['rooms' => $invalid]))->assertUnprocessable();
+        }
+    }
+
     private function createProperty(array $attributes = []): Property
     {
         $property = Property::create(array_merge([

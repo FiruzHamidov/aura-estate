@@ -6,6 +6,7 @@ use App\Models\Developer;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class DeveloperController extends Controller
 {
@@ -75,6 +76,8 @@ class DeveloperController extends Controller
             'description' => ['nullable', 'string'],
         ]);
 
+        $this->validateProjectCounts($data);
+
         // загрузка файла логотипа, если пришел
         if ($request->hasFile('logo')) {
             $path = $request->file('logo')->store('developers', 'public');
@@ -125,6 +128,8 @@ class DeveloperController extends Controller
             'description' => ['nullable', 'string'],
         ]);
 
+        $this->validateProjectCounts($data, $developer);
+
         // если грузим новый логотип — удалим старый (по желанию)
         if ($request->hasFile('logo')) {
             if ($developer->logo_path && Storage::disk('public')->exists($developer->logo_path)) {
@@ -137,6 +142,21 @@ class DeveloperController extends Controller
         $developer->update($data);
 
         return response()->json($developer->refresh());
+    }
+
+    private function validateProjectCounts(array $data, ?Developer $developer = null): void
+    {
+        $fields = ['total_projects', 'under_construction_count', 'built_count'];
+        if (! array_intersect($fields, array_keys($data))) {
+            return;
+        }
+        $counts = array_replace($developer?->only($fields) ?? [], $data);
+        $total = $counts['total_projects'] ?? 0;
+        if (($counts['under_construction_count'] ?? 0) + ($counts['built_count'] ?? 0) > $total) {
+            throw ValidationException::withMessages([
+                'total_projects' => 'Всего проектов не может быть меньше суммы строящихся и завершённых проектов.',
+            ]);
+        }
     }
 
     /**

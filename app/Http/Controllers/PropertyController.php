@@ -2043,6 +2043,17 @@ class PropertyController extends Controller
         // Алиасы
         $aliases = ['area' => 'total_area'];
 
+        if ($request->filled('rooms')) {
+            $selectedRooms = explode(',', $request->string('rooms')->toString());
+            $query->where(function (Builder $rooms) use ($selectedRooms) {
+                foreach (array_unique($selectedRooms) as $value) {
+                    $value === '5+'
+                        ? $rooms->orWhere('properties.rooms', '>=', 5)
+                        : $rooms->orWhere('properties.rooms', (int) $value);
+                }
+            });
+        }
+
         // Диапазоны
         foreach ([
             'rooms' => 'rooms',
@@ -2230,6 +2241,7 @@ class PropertyController extends Controller
             'priceTo' => ['sometimes', 'nullable', 'numeric', 'min:0'],
             'roomsFrom' => ['sometimes', 'nullable', 'integer', 'min:1'],
             'roomsTo' => ['sometimes', 'nullable', 'integer', 'min:1'],
+            'rooms' => ['sometimes', 'nullable', 'string', 'max:300', 'regex:/\A(?:[0-9]|[1-9][0-9]|5\+)(?:,(?:[0-9]|[1-9][0-9]|5\+))*\z/'],
             'total_areaFrom' => ['sometimes', 'nullable', 'numeric', 'min:0'],
             'total_areaTo' => ['sometimes', 'nullable', 'numeric', 'min:0'],
             'living_areaFrom' => ['sometimes', 'nullable', 'numeric', 'min:0'],

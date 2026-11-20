@@ -144,4 +144,27 @@ final class InventoryQuery
             ->selectRaw('new_building_id, block_id, '.self::ROOMS_SQL.' AS rooms, COUNT(*) AS offers_count, MIN(area) AS area_from, MIN(CASE WHEN total_price > 0 THEN total_price END) AS price_from')
             ->groupBy('new_building_id', 'block_id')->groupByRaw(self::ROOMS_SQL)->orderBy('block_id')->orderBy('rooms')->get()->groupBy('new_building_id');
     }
+
+    /** Room shortcuts replace the room selection, but retain all other conditions. */
+    public function catalogRoomCounts(array $filters): array
+    {
+        unset($filters['rooms'], $filters['rooms_from'], $filters['rooms_to']);
+        $groups = $this->filterUnits(DeveloperUnit::query()->available()
+            ->whereIn('new_building_id', $this->buildingFilters($filters)->select('new_buildings.id')), $filters)
+            ->selectRaw(self::ROOMS_SQL.' AS rooms, COUNT(*) AS offers_count')
+            ->groupByRaw(self::ROOMS_SQL)->get();
+        $counts = ['studio' => 0, '1' => 0, '2' => 0, '3' => 0, '4+' => 0];
+        foreach ($groups as $group) {
+            if ($group->rooms === null) {
+                continue;
+            }
+            $rooms = (int) $group->rooms;
+            $key = $rooms === 0 ? 'studio' : ($rooms >= 4 ? '4+' : (string) $rooms);
+            if (array_key_exists($key, $counts)) {
+                $counts[$key] += (int) $group->offers_count;
+            }
+        }
+
+        return $counts;
+    }
 }

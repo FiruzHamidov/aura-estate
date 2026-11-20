@@ -31,7 +31,8 @@ class NewBuildingController extends Controller
         $count = $this->inventory->filterUnits(\App\Models\DeveloperUnit::query()->available()
             ->whereIn('new_building_id', $this->inventory->buildingFilters($filters)->select('new_buildings.id')), $filters)->count();
 
-        return response()->json($page->toArray() + ['meta' => ['total_complexes' => $page->total(), 'total_available_units' => $count, 'as_of' => now()->toIso8601String()]]);
+        return response()->json($page->toArray() + ['meta' => ['total_complexes' => $page->total(), 'total_available_units' => $count,
+            'room_counts' => $this->inventory->catalogRoomCounts($filters), 'as_of' => now()->toIso8601String()]]);
     }
 
     public function map(Request $request)
