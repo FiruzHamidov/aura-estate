@@ -46,6 +46,31 @@ class ResidentialInventoryTest extends TestCase
         return $building->units()->create(['name' => 'Квартира', 'area' => '60.00', 'rooms' => 2, 'bedrooms' => 2, 'price_per_sqm' => '10000.00', 'total_price' => '600000.00', 'publication_status' => 'published', 'availability_status' => 'available', 'moderation_status' => 'available', 'is_available' => true, ...$attributes]);
     }
 
+    public function test_room_shortcut_counts_cover_all_pages_and_replace_only_the_room_filter(): void
+    {
+        for ($index = 0; $index < 18; $index++) {
+            $building = $this->building(['district' => 'Selected']);
+            $this->unit($building, ['rooms' => 2, 'total_price' => 500000]);
+            $this->unit($building, ['rooms' => 3, 'total_price' => 500000]);
+            $this->unit($building, ['rooms' => 1, 'total_price' => 900000]);
+            $this->unit($building, ['rooms' => 2, 'availability_status' => 'reserved']);
+            $this->unit($building, ['rooms' => 2, 'publication_status' => 'draft']);
+        }
+        $this->unit($this->building(['district' => 'Other']), ['rooms' => 2]);
+        $this->unit($this->building(['district' => 'Selected', 'publication_status' => 'draft']), ['rooms' => 2]);
+        foreach ([0, 4, 5] as $rooms) {
+            $this->unit($building, ['rooms' => $rooms, 'bedrooms' => $rooms, 'total_price' => 500000]);
+        }
+        foreach ([1, 2] as $page) {
+            $this->getJson('/api/new-buildings?'.http_build_query([
+                'district' => 'Selected', 'price_max' => 600000, 'rooms' => ['2'], 'per_page' => 16, 'page' => $page,
+            ]))->assertOk()->assertJsonPath('total', 18)->assertJsonPath('meta.total_available_units', 18)
+                ->assertJsonPath('meta.room_counts', ['studio' => 1, '1' => 0, '2' => 18, '3' => 18, '4+' => 2])
+                ->assertJsonCount($page === 1 ? 16 : 2, 'data');
+        }
+        $this->getJson('/api/new-buildings?district=Selected&price_max=600000')->assertOk()->assertJsonPath('meta.total_available_units', 39);
+    }
+
     public function test_catalog_matches_all_apartment_filters_in_the_same_lot(): void
     {
         $building = $this->building();

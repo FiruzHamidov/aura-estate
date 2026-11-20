@@ -20,6 +20,19 @@ class PropertyReportController extends Controller
     {
     }
 
+    public function statusInventory(Request $request, \App\Services\ListingStatusReport $report)
+    {
+        $filters = $request->validate([
+            'branch_id' => 'nullable|integer|min:1',
+            'branch_group_id' => 'nullable|integer|min:1',
+            'rop_id' => 'nullable|integer|min:1',
+            'include_hidden' => 'nullable|boolean',
+        ]);
+
+        return response()->json($report->build($request->user(), $filters))
+            ->header('Cache-Control', 'private, no-store');
+    }
+
     /** One complete, scoped dataset for the employee table and its export. */
     public function employees(Request $request, \App\Services\KpiModuleService $kpi)
     {

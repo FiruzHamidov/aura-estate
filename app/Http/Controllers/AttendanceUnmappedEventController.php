@@ -32,7 +32,7 @@ final class AttendanceUnmappedEventController extends Controller
             // slip between the deduplication marker and removal of the raw event.
             $device = $this->access->mappingDevicesQuery($actor)->lockForUpdate()->findOrFail($data['device_id']);
             $deleted = 0;
-            AttendanceRawEvent::query()
+            app(\App\Services\Attendance\AttendancePrivacy::class)->terminalRecords(AttendanceRawEvent::query(), $actor)
                 ->where('device_id', $device->id)
                 ->where('device_user_id', $data['device_user_id'])
                 ->where('id', '<=', $data['last_raw_event_id'])

@@ -33,6 +33,8 @@ use Tests\TestCase;
 
 class AttendanceModuleFeatureTest extends TestCase
 {
+    use \Tests\Feature\Concerns\AttendancePrivacyCases;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -50,6 +52,7 @@ class AttendanceModuleFeatureTest extends TestCase
         (require database_path('migrations/2026_09_08_140000_add_attendance_context_groups.php'))->up();
         (require database_path('migrations/2026_10_17_140000_create_attendance_device_user_profiles.php'))->up();
         (require database_path('migrations/2026_10_17_160000_create_attendance_discarded_events.php'))->up();
+        (require database_path('migrations/2026_11_20_130000_add_attendance_privacy_to_users.php'))->up();
         config([
             'attendance.timezone' => 'Asia/Dushanbe',
             'attendance.duplicate_window_seconds' => 10,

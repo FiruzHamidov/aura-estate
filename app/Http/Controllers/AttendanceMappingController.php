@@ -11,6 +11,7 @@ use App\Services\Attendance\AttendanceAccessService;
 use App\Services\Attendance\AttendanceAuditService;
 use App\Services\Attendance\AttendanceIngestionService;
 use App\Services\Attendance\AttendanceParticipantService;
+use App\Services\Attendance\AttendancePrivacy;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
 
@@ -65,6 +66,8 @@ final class AttendanceMappingController extends Controller
             ->addSelect(['processed_events_count' => AttendanceEvent::query()->selectRaw('COUNT(*)')
                 ->whereColumn('attendance_events.device_id', 'attendance_device_users.device_id')
                 ->whereColumn('attendance_events.device_user_id', 'attendance_device_users.device_user_id')]);
+        app(AttendancePrivacy::class)->records($query, $request->user());
+        app(AttendancePrivacy::class)->terminalRecords($query, $request->user());
         if ($this->access->hasRestrictedMappingScope($request->user())) {
             $query->whereIn('user_id', $this->access->mappingUsersQuery($request->user(), ! $request->user()->usesAssignedGroupScope())->select('users.id'))
                 ->whereIn('device_id', $this->access->mappingDevicesQuery($request->user())->select('id'));
@@ -95,8 +98,9 @@ final class AttendanceMappingController extends Controller
             $targets = $restricted
                 ? $this->access->mappingUsersQuery($actor, ! $actor->usesAssignedGroupScope())
                 : User::query();
-            $target = $targets->lockForUpdate()->findOrFail($data['user_id']);
+            $target = app(AttendancePrivacy::class)->users($targets, $actor)->lockForUpdate()->findOrFail($data['user_id']);
             $this->access->mappingDevicesQuery($actor)->lockForUpdate()->findOrFail($data['device_id']);
+            app(AttendancePrivacy::class)->assertCanAccessTerminal($actor, (int) $data['device_id'], $data['device_user_id']);
             $mapping = AttendanceDeviceUser::query()
                 ->where('device_id', $data['device_id'])
                 ->where('device_user_id', $data['device_user_id'])
@@ -180,7 +184,8 @@ final class AttendanceMappingController extends Controller
                 $this->access->mappingUsersQuery($actor, true)->lockForUpdate()->findOrFail($mapping->user_id);
                 $this->access->mappingDevicesQuery($actor)->lockForUpdate()->findOrFail($mapping->device_id);
             }
-            $current = AttendanceDeviceUser::query()->lockForUpdate()->findOrFail($mapping->id);
+            $current = app(AttendancePrivacy::class)->records(AttendanceDeviceUser::query(), $actor)->lockForUpdate()->findOrFail($mapping->id);
+            app(AttendancePrivacy::class)->assertCanAccessTerminal($actor, (int) $current->device_id, $current->device_user_id);
             abort_if($current->user_id !== $mapping->user_id || $current->device_id !== $mapping->device_id, 409, 'Сопоставление изменилось. Обновите страницу.');
             return $this->deleteMapping($request, $current);
         });
