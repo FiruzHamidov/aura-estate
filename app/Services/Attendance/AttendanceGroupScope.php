@@ -13,6 +13,7 @@ final class AttendanceGroupScope
 
     public function apply(Builder $query, User $viewer): Builder
     {
+        app(AttendancePrivacy::class)->records($query, $viewer);
         if (!$viewer->usesAssignedGroupScope() && $viewer->hasPermission('attendance.scope.assigned_branches')) {
             $access = app(AttendanceAccessService::class);
             $table = $query->getModel()->getTable();

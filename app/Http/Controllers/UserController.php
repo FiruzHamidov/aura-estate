@@ -472,6 +472,7 @@ class UserController extends Controller
             app(\App\Services\Users\UserRecordCounts::class)->attach($users->getCollection(), $authUser);
         }
 
+        $users->getCollection()->each(fn (User $target) => app(\App\Services\Attendance\AttendancePrivacy::class)->exposeSetting($target, $authUser));
         $payload = $users->toArray();
         $meta = $this->paginationMeta($payload);
 
@@ -504,6 +505,7 @@ class UserController extends Controller
                 'auth_method' => 'nullable|in:password,sms',
                 'status' => ['nullable', Rule::in(['active', 'inactive'])],
                 'password' => 'nullable|string|min:6',
+                'attendance_hidden_from_others' => 'sometimes|boolean',
                 'security_attendance_branch_ids' => 'sometimes|array|max:100',
                 'security_attendance_branch_ids.*' => 'required|integer|distinct|exists:branches,id',
             ]);
@@ -522,6 +524,7 @@ class UserController extends Controller
             $data = $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'birthday', 'description']);
             $data = $this->normalizeBranchIdForMutation($data, $authUser, $targetRole);
             $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
+            $data += app(\App\Services\Attendance\AttendancePrivacy::class)->settingsForMutation($request, $authUser, $targetRole);
             if ($request->exists('security_attendance_branch_ids')) {
                 abort_unless($authUser->hasPermission('users.security_attendance.assign'), 403, 'Нет права назначать филиалы посещаемости.');
                 abort_unless($targetRole->hasPermission('attendance.scope.assigned_branches'), 422, 'Роли сотрудника нужен доступ к посещаемости назначенных филиалов.');
@@ -538,7 +541,7 @@ class UserController extends Controller
 
             $user = User::create($data);
 
-            return response()->json($user->load(['role', 'branch', 'branchGroup']), 201);
+            return response()->json(app(\App\Services\Attendance\AttendancePrivacy::class)->exposeSetting($user->load(['role', 'branch', 'branchGroup']), $authUser), 201);
         });
     }
 
@@ -551,7 +554,7 @@ class UserController extends Controller
             app(\App\Services\Users\UserRecordCounts::class)->attach(collect([$user]), $authUser);
         }
 
-        return response()->json($user->load(['role', 'branch', 'branchGroup']));
+        return response()->json(app(\App\Services\Attendance\AttendancePrivacy::class)->exposeSetting($user->load(['role', 'branch', 'branchGroup']), $authUser));
     }
 
     public function auditLogs(Request $request, User $user)
@@ -684,6 +687,7 @@ class UserController extends Controller
                 'auth_method' => 'sometimes|nullable|in:password,sms',
                 'status' => ['sometimes', Rule::in(['active', 'inactive'])],
                 'password' => 'nullable|string|min:6',
+                'attendance_hidden_from_others' => 'sometimes|boolean',
                 'security_attendance_branch_ids' => 'sometimes|array|max:100',
                 'security_attendance_branch_ids.*' => 'required|integer|distinct|exists:branches,id',
             ]);
@@ -717,6 +721,7 @@ class UserController extends Controller
             $preservesUngroupedRole = $authUser->usesAssignedGroupScope() && $user->branch_group_id === null
                 && (int) $targetRole?->id === (int) $user->role_id;
             if (!$preservesUngroupedRole) $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
+            $data += app(\App\Services\Attendance\AttendancePrivacy::class)->settingsForMutation($request, $authUser, $targetRole, $user);
             if ($request->exists('security_attendance_branch_ids')) {
                 abort_unless($authUser->hasPermission('users.security_attendance.assign'), 403, 'Нет права назначать филиалы посещаемости.');
                 abort_unless($targetRole->hasPermission('attendance.scope.assigned_branches'), 422, 'Роли сотрудника нужен доступ к посещаемости назначенных филиалов.');
@@ -734,7 +739,7 @@ class UserController extends Controller
 
             $user = app(\App\Services\GroupAccess\UserOrganizationService::class)->update($authUser, $user, $data);
 
-            return response()->json($user->fresh(['role', 'branch', 'branchGroup']));
+            return response()->json(app(\App\Services\Attendance\AttendancePrivacy::class)->exposeSetting($user->fresh(['role', 'branch', 'branchGroup']), $authUser));
         });
     }
 

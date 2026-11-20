@@ -49,7 +49,8 @@ final class AttendanceAccessService
     public function mappingUsersQuery(User $viewer, bool $includeInactive = false): Builder
     {
         $query = ($includeInactive ? User::query() : $this->participants->query())
-            ->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
+            ->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
+            ->tap(fn ($q) => app(AttendancePrivacy::class)->users($q, $viewer));
         if ($viewer->hasPermission('attendance.mappings.scope.branch')) {
             $query->where('users.branch_id', $viewer->branch_id ?? 0);
         }
@@ -147,7 +148,8 @@ final class AttendanceAccessService
         // Apply the same employee scope to the table, totals, reports and day details.
         $query = $this->participants->query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->whereHas('role', fn (Builder $roles) => $roles->withPermission('attendance.subject.exclude_table', false))
-            ->with(['role', 'branch', 'branchGroup']);
+            ->with(['role', 'branch', 'branchGroup'])
+            ->tap(fn ($q) => app(AttendancePrivacy::class)->users($q, $viewer));
 
         if ($viewer->usesAssignedGroupScope()) {
             return app(\App\Support\RopGroupAccess::class)->scope($query, $viewer, 'users.branch_group_id', 'users.branch_id')

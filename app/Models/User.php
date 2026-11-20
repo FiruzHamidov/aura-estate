@@ -22,7 +22,7 @@ class User extends Authenticatable
 
     protected $fillable = [
         'name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'password', 'photo', 'description', 'birthday',
-        'security_attendance_branch_ids',
+        'security_attendance_branch_ids', 'attendance_hidden_from_others',
         'telegram_id', 'telegram_username', 'telegram_photo_url', 'telegram_chat_id', 'telegram_linked_at',
         'deleted_at', 'deletion_requested_at', 'deletion_reason', 'deleted_by_user_id', 'deletion_phone_hash',
     ];
@@ -30,10 +30,12 @@ class User extends Authenticatable
     protected $hidden = [
         'password',
         'remember_token',
+        'attendance_hidden_from_others',
     ];
 
     protected $casts = [
         'security_attendance_branch_ids' => 'array',
+        'attendance_hidden_from_others' => 'boolean',
         'birthday' => 'date',
         'telegram_linked_at' => 'datetime',
         'deleted_at' => 'datetime',

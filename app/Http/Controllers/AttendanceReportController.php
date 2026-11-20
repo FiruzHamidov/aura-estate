@@ -8,6 +8,7 @@ use App\Models\AttendanceRawEvent;
 use App\Models\User;
 use App\Services\Attendance\AttendanceAccessService;
 use App\Services\Attendance\AttendanceGroupScope;
+use App\Services\Attendance\AttendancePrivacy;
 use App\Services\Attendance\AttendanceIngestionService;
 use App\Services\Attendance\AttendanceTimesheetExporter;
 use Carbon\CarbonImmutable;
@@ -56,12 +57,15 @@ final class AttendanceReportController extends Controller
         }
         if (! empty($validated['role'])) $users->whereHas('role', fn ($roles) => $roles->where('slug', $validated['role']));
         if (! empty($validated['search'])) $users->where('users.name', 'like', '%'.trim($validated['search']).'%');
-        $payload = $report->build($users->orderBy('users.name')->get(), $from, $to);
+        $employees = $users->orderBy('users.name')->get();
+        $payload = $report->build($employees, $from, $to);
         if (($validated['format'] ?? 'json') !== 'xlsx') return response()->json($payload);
         $path = $this->timesheetExporter->buildHrReport($payload);
-        return response()->download($path, 'Отчет_о_посещаемости_'.$from->format('Y-m-d').'_'.$to->format('Y-m-d').'.xlsx', [
+        $download = response()->download($path, 'Отчет_о_посещаемости_'.$from->format('Y-m-d').'_'.$to->format('Y-m-d').'.xlsx', [
             'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         ])->deleteFileAfterSend(true);
+        return new \App\Http\Responses\CheckedTemporaryDownload($download,
+            fn () => app(AttendancePrivacy::class)->assertExportable($request->user(), $employees->modelKeys()));
     }
 
     public function daily(Request $request)
@@ -104,7 +108,7 @@ final class AttendanceReportController extends Controller
         $deviceUserName = \App\Models\AttendanceDeviceUserProfile::query()->select('name')
             ->whereColumn('attendance_device_user_profiles.device_id', 'attendance_raw_events.device_id')
             ->whereColumn('attendance_device_user_profiles.device_user_id', 'attendance_raw_events.device_user_id');
-        $query = AttendanceRawEvent::query()->where('processing_status', 'unmapped');
+        $query = app(AttendancePrivacy::class)->terminalRecords(AttendanceRawEvent::query(), $request->user())->where('processing_status', 'unmapped');
         $isMappingScoped = $this->access->hasRestrictedMappingScope($request->user());
         if ($isMappingScoped) {
             // Unknown employee IDs can only be scoped by terminal until explicitly linked.
@@ -157,7 +161,7 @@ final class AttendanceReportController extends Controller
     {
         $this->access->assertCanAdminister($request->user());
         $data = $request->validate(['raw_event_id' => ['required', 'integer', 'exists:attendance_raw_events,id']]);
-        $raw = AttendanceRawEvent::query()->findOrFail($data['raw_event_id']);
+        $raw = app(AttendancePrivacy::class)->terminalRecords(AttendanceRawEvent::query(), $request->user())->findOrFail($data['raw_event_id']);
 
         return response()->json(['data' => ['result' => $this->ingestion->reprocess($raw)]]);
     }
@@ -165,7 +169,7 @@ final class AttendanceReportController extends Controller
     public function export(Request $request)
     {
         $validated = $this->filters($request);
-        $visibleIds = $this->attendanceUsersQuery($request)->pluck('users.id');
+        $visibleIds = $this->attendanceUsersQuery($request)->select('users.id');
         $query = AttendanceDailySummary::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->with('user')->whereIn('user_id', $visibleIds);
         $this->applySummaryFilters($query, $validated);
 
@@ -184,6 +188,7 @@ final class AttendanceReportController extends Controller
             $path = $this->timesheetExporter->build($users, $from, $to, $request->user());
             try {
                 $this->assertExportScope($request->user());
+                app(AttendancePrivacy::class)->assertExportable($request->user(), $users->modelKeys());
             } catch (\Throwable $error) {
                 if (is_file($path)) unlink($path);
                 throw $error;
@@ -194,9 +199,10 @@ final class AttendanceReportController extends Controller
                 'Content-Type' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             ])->deleteFileAfterSend(true);
             $actor = $request->user();
-            return ($actor->usesAssignedGroupScope() || $actor->hasPermission('attendance.scope.assigned_branches'))
-                ? new \App\Http\Responses\CheckedTemporaryDownload($download, fn () => $this->assertExportScope($actor))
-                : $download;
+            return new \App\Http\Responses\CheckedTemporaryDownload($download, function () use ($actor, $users) {
+                $this->assertExportScope($actor);
+                app(AttendancePrivacy::class)->assertExportable($actor, $users->modelKeys());
+            });
         }
 
         $actor = $request->user();
@@ -207,6 +213,7 @@ final class AttendanceReportController extends Controller
             fputcsv($stream, ['date', 'user_id', 'employee', 'first_in_at', 'last_out_at', 'worked_minutes', 'late_minutes', 'status']);
             $query->orderBy('work_date')->orderBy('user_id')->chunk(500, function ($rows) use ($stream, $actor) {
                 $this->assertExportScope($actor);
+                app(AttendancePrivacy::class)->assertExportable($actor, $rows->pluck('user_id')->all());
                 foreach ($rows as $row) {
                     fputcsv($stream, [
                         $row->work_date?->toDateString(), $row->user_id, $this->spreadsheetSafe($row->user?->name),
