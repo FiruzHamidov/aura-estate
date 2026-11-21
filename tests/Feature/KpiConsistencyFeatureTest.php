@@ -305,7 +305,7 @@ class KpiConsistencyFeatureTest extends TestCase
         $this->getJson('/api/reports/employees?date_from=2026-10-31&date_to=2026-10-01')->assertUnprocessable();
     }
 
-    public function test_unified_report_merges_former_employee_contexts_without_repeating_targets(): void
+    public function test_unified_report_moves_all_activity_to_current_group_without_repeating_targets(): void
     {
         [, $agent, $branch, $oldGroup] = $this->fixture();
         $this->employeeReportProperties();
@@ -321,13 +321,86 @@ class KpiConsistencyFeatureTest extends TestCase
         $this->report($agent, '2026-10-12', ['calls_count' => 100]);
         Sanctum::actingAs($rop);
         $result = $this->getJson('/api/reports/employees?date_from=2026-10-01&date_to=2026-10-31&interval=month&agent_id='.$agent->id)
-            ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.calls', 17)->assertJsonPath('totals.calls', 17);
-        $this->assertEquals(31 * config('kpi.v2.targets.calls'), $result->json('data.0.metrics.calls.target_value'));
+            ->assertOk()->assertJsonCount(0, 'data');
         $this->getJson('/api/reports/employees?date_from=2026-10-01&date_to=2026-10-31&interval=month&branch_group_id='.$oldGroup->id)
-            ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.calls', 8);
+            ->assertOk()->assertJsonCount(0, 'data');
         $this->getJson('/api/reports/employees?date_from=2026-10-01&date_to=2026-10-31&branch_group_id='.$newGroup->id)->assertForbidden();
+        $rop->supervisedGroups()->attach($newGroup->id);
+        $result = $this->getJson('/api/reports/employees?date_from=2026-10-01&date_to=2026-10-31&interval=month&agent_id='.$agent->id.'&branch_group_id='.$newGroup->id)
+            ->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.calls', 117)->assertJsonPath('totals.calls', 117);
+        $this->assertEquals(31 * config('kpi.v2.targets.calls'), $result->json('data.0.metrics.calls.target_value'));
         $agent->update(['status' => 'inactive']);
         $this->getJson('/api/reports/employees?date_from=2026-10-01&date_to=2026-10-31')->assertOk()->assertJsonCount(0, 'data');
+    }
+
+    public function test_sales_follow_current_employee_across_groups_and_branches_for_all_history(): void
+    {
+        [$admin, $seller, $oldBranch, $oldGroup] = $this->fixture();
+        $this->employeeReportProperties();
+        $branch = Branch::create(['name' => 'Destination']);
+        $group = BranchGroup::create(['name' => 'Current', 'branch_id' => $branch->id]);
+        $author = User::create(['name' => 'Author', 'phone' => '900990003', 'role_id' => $seller->role_id,
+            'branch_id' => $oldBranch->id, 'branch_group_id' => $oldGroup->id]);
+        foreach (['2026-09-10', '2026-10-10'] as $date) {
+            \DB::table('properties')->insert(['created_by' => $author->id, 'agent_id' => $author->id,
+                'sale_user_id' => $seller->id, 'branch_id' => $oldBranch->id, 'branch_group_id' => $oldGroup->id,
+                'moderation_status' => 'sold', 'created_at' => $date.' 10:00:00', 'sold_at' => $date.' 12:00:00',
+                'company_commission_amount' => 100, 'company_commission_currency' => 'TJS']);
+        }
+        $source = \DB::table('properties')->get()->toJson();
+        $allBefore = $this->getJson('/api/reports/employees')->assertOk()->json('totals');
+        $seller->update(['branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $this->assertSame($allBefore, $this->getJson('/api/reports/employees')->assertOk()->json('totals'));
+        foreach (['' => 2, '&date_from=2026-10-01&date_to=2026-10-31' => 1] as $period => $count) {
+            foreach (['branch_group_id' => [$oldGroup->id, $group->id], 'branch_id' => [$oldBranch->id, $branch->id]] as $filter => [$old, $new]) {
+                $oldRows = $this->getJson('/api/reports/employees?'.$filter.'='.$old.$period)->assertOk()->json('data');
+                $this->assertNotContains($seller->id, array_column($oldRows, 'employee_id'));
+                $this->getJson('/api/reports/employees?'.$filter.'='.$new.$period)->assertOk()
+                    ->assertJsonCount(1, 'data')->assertJsonPath('data.0.employee_id', $seller->id)
+                    ->assertJsonPath('data.0.sales', $count);
+            }
+        }
+        // The calendar-month banner follows the same employee as the inventory.
+        $this->getJson('/api/reports/employees?branch_group_id='.$group->id.'&kpi_month=2026-10')->assertOk()
+            ->assertJsonPath('data.0.result_kpi.sale.count', 1)->assertJsonPath('data.0.result_kpi.sale.amount', 100);
+        foreach (['rop', 'branch_director'] as $roleSlug) {
+            $role = Role::create(['name' => $roleSlug, 'slug' => $roleSlug]);
+            $leader = User::create(['name' => $roleSlug, 'phone' => '90099000'.($roleSlug === 'rop' ? 4 : 5),
+                'role_id' => $role->id, 'branch_id' => $branch->id]);
+            if ($roleSlug === 'rop') $leader->supervisedGroups()->attach($group->id);
+            Sanctum::actingAs($leader);
+            $rows = $this->getJson('/api/reports/employees?kpi_month=2026-10')->assertOk()->json('data');
+            $row = collect($rows)->firstWhere('employee_id', $seller->id);
+            $this->assertSame(2, $row['sales']);
+            $this->assertSame(1, $row['result_kpi']['sale']['count']);
+            $this->assertEquals(100, $row['result_kpi']['sale']['amount']);
+            // ROP aggregate access does not expose foreign CRM cards.
+            if ($roleSlug === 'rop') {
+                $this->getJson('/api/properties/count?report_context=1')->assertOk()->assertJsonPath('count', 0);
+            }
+        }
+        $this->assertSame($source, \DB::table('properties')->get()->toJson());
+    }
+
+    public function test_rop_current_roster_keeps_unattributed_inventory_but_not_ungrouped_former_staff(): void
+    {
+        [, $agent, $branch, $group] = $this->fixture();
+        $this->employeeReportProperties();
+        $other = BranchGroup::create(['name' => 'Other', 'branch_id' => $branch->id]);
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $rop = User::create(['name' => 'Supervisor', 'phone' => '900990003', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $rop->supervisedGroups()->attach($group->id);
+        foreach ([[$agent->id, $group->id], [null, $group->id], [null, $other->id]] as [$owner, $groupId]) {
+            \DB::table('properties')->insert(['created_by' => $owner, 'agent_id' => $owner,
+                'branch_id' => $branch->id, 'branch_group_id' => $groupId,
+                'moderation_status' => 'approved', 'created_at' => '2026-10-10 12:00:00']);
+        }
+        $agent->update(['branch_group_id' => null]);
+        Sanctum::actingAs($rop);
+        foreach (['', '?branch_group_id='.$group->id] as $filter) {
+            $this->getJson('/api/reports/employees'.$filter)->assertOk()->assertJsonCount(1, 'data')
+                ->assertJsonPath('data.0.employee_id', 0)->assertJsonPath('totals.total_properties', 1);
+        }
     }
 
     public function test_unified_report_denies_unauthorized_reader_and_inactive_scope(): void
@@ -431,8 +504,8 @@ class KpiConsistencyFeatureTest extends TestCase
             default => array_keys($records),
         };
         if (! $inactive) $expected = array_values(array_diff($expected, [4, 5]));
-        if ($groupFilter === 'first') $expected = array_values(array_diff($expected, [3]));
-        if ($groupFilter === 'second') $expected = array_values(array_intersect($expected, [3]));
+        // Even a sale recorded in another group belongs to its seller's current team.
+        if ($groupFilter === 'second') $expected = [];
         $query = ['include_inactive' => (int) $inactive];
         if ($period !== 'all') {
             [$query['date_from'], $query['date_to']] = match ($period) {
@@ -497,7 +570,7 @@ class KpiConsistencyFeatureTest extends TestCase
                 'created_at' => '2026-10-20 12:00:00']);
         }
         Sanctum::actingAs($actor->fresh());
-        $this->getJson('/api/reports/employees')->assertOk()->assertJsonPath('summary.total', 2)->assertJsonPath('totals.total_properties', 2)
+        $this->getJson('/api/reports/employees')->assertOk()->assertJsonPath('summary.total', 3)->assertJsonPath('totals.total_properties', 3)
             ->assertJsonPath('totals.kpi_percent', null)->assertJsonPath('totals.calls', null);
         $this->getJson('/api/properties/count?report_context=1')->assertOk()->assertJsonPath('count', 2);
         $this->getJson('/api/properties/count')->assertOk()->assertJsonPath('count', 0);
@@ -663,12 +736,12 @@ class KpiConsistencyFeatureTest extends TestCase
         $this->getJson('/api/bookings/3')->assertNotFound();
         $plan = KpiPlan::firstOrFail();
         $this->getJson('/api/kpi/plans/'.($plan->user_id === null ? 'common/' : '').$plan->id)->assertNotFound();
-        // A former employee remains limited to facts in the supervised historical group.
+        // A former employee disappears from the general report, including old bookings.
         $agent->update(['branch_group_id' => $previous->id]);
         $this->getJson('/api/reports/employees?'.$query)->assertOk()
-            ->assertJsonPath('data.0.shows', 1)->assertJsonPath('data.0.shows_visible', 1)
-            ->assertJsonPath('data.0.metrics.shows.final_value', 1)
-            ->assertJsonPath('data.0.metrics.shows.plan_source', 'system');
+            ->assertJsonCount(0, 'data');
+        // Dedicated KPI history still retains its historical group context.
+        $this->getJson('/api/kpi/monthly?v=2&year=2026&month=10')->assertOk()->assertJsonPath('data.0.metrics.shows.fact_value', 1);
         // Removing supervision must remove the full employee totals immediately.
         $rop->supervisedGroups()->detach();
         $this->getJson('/api/reports/employees?'.$query)->assertForbidden();

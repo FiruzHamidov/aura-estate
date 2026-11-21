@@ -94,6 +94,9 @@ class PropertyReportController extends Controller
                 // Current employees keep their full activity totals after a group
                 // transfer. Booking cards still obey their own historical group.
                 $currentIds = $kpi->currentReportUserIds($actor, $filters);
+                // A former member's old bookings must not recreate their row.
+                $liveShows = $liveShows->only($currentIds);
+                $visibleShows = $visibleShows->only($currentIds);
                 if ($currentIds !== []) {
                     $employeeShows = Booking::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
                         ->whereIn($column, $currentIds);
@@ -133,6 +136,7 @@ class PropertyReportController extends Controller
         $kpiMonth = $filters['kpi_month'] ?? $to->format('Y-m');
         $resultRows = $canReadKpi ? collect(app(\App\Services\Kpi\ResultReportService::class)->report($actor, [
             'month' => $kpiMonth,
+            'current_employee_scope' => true,
             'user_id' => $filters['agent_id'] ?? null,
             'branch_id' => $filters['branch_id'] ?? null,
             'branch_group_id' => $filters['branch_group_id'] ?? null,

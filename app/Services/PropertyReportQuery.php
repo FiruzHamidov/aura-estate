@@ -44,7 +44,7 @@ class PropertyReportQuery
         if ($request->filled('report_employee_id')) $filters['agent_id'] = $request->input('report_employee_id');
         $scoped = new Request($filters);
         $scoped->setUserResolver(fn () => $request->user());
-        [$query] = $this->applyCommonFilters($scoped, Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q)));
+        [$query] = $this->applyCommonFilters($scoped, Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q)), currentEmployeeScope: true);
         $request->validate(['include_inactive' => 'nullable|boolean',
             'date_from' => 'nullable|date_format:Y-m-d', 'date_to' => 'nullable|date_format:Y-m-d|after_or_equal:date_from',
             'sold_at_from' => 'nullable|date_format:Y-m-d', 'sold_at_to' => 'nullable|date_format:Y-m-d|after_or_equal:sold_at_from',
@@ -122,7 +122,7 @@ class PropertyReportQuery
         abort_unless($actor?->hasPermission('property_reports.view'), 403, 'Forbidden');
     }
 
-    public function applyBranchAccessFilter(Request $request, $query, string $creatorColumn = 'created_by', ?string $reportOwnerExpression = null): void
+    public function applyBranchAccessFilter(Request $request, $query, string $creatorColumn = 'created_by', ?string $reportOwnerExpression = null, bool $currentEmployeeScope = false): void
     {
         $this->validateReportScope($request);
 
@@ -136,9 +136,30 @@ class PropertyReportQuery
             $access = app(\App\Support\RopGroupAccess::class);
             $isBooking = $query->getModel() instanceof Booking;
             $groupColumn = $isBooking ? 'bookings.branch_group_id' : 'properties.branch_group_id';
-            $access->scope($query, $authUser, $groupColumn, $isBooking ? null : 'properties.branch_id');
-            if ($request->filled('branch_group_id')) {
-                $query->whereIn($groupColumn, $this->toArray($request->input('branch_group_id')));
+            if ($isBooking || ! $currentEmployeeScope) {
+                $access->scope($query, $authUser, $groupColumn, $isBooking ? null : 'properties.branch_id');
+                if ($request->filled('branch_group_id')) {
+                    $query->whereIn($groupColumn, $this->toArray($request->input('branch_group_id')));
+                }
+            } else {
+                // Reporting follows the credited employee's current team. CRM
+                // card/list access continues to use the record's own group.
+                $employees = $access->scope(User::query(), $authUser, 'users.branch_group_id', 'users.branch_id')
+                    ->tap(fn ($users) => \App\Support\BranchVisibility::records($users));
+                if ($request->filled('branch_group_id')) {
+                    $employees->whereIn('users.branch_group_id', $this->toArray($request->input('branch_group_id')));
+                }
+                $owner = $reportOwnerExpression ?? $this->ownerExpression();
+                $query->where(function ($scope) use ($owner, $employees, $access, $authUser, $request) {
+                    $scope->whereIn(DB::raw($owner), $employees->select('users.id'))
+                        ->orWhere(function ($anonymous) use ($owner, $access, $authUser, $request) {
+                            $anonymous->whereNull(DB::raw($owner));
+                            $access->scope($anonymous, $authUser, 'properties.branch_group_id', 'properties.branch_id');
+                            if ($request->filled('branch_group_id')) {
+                                $anonymous->whereIn('properties.branch_group_id', $this->toArray($request->input('branch_group_id')));
+                            }
+                        });
+                });
             }
             if ($isBooking && $request->hasAny([
                 'type_id', 'status_id', 'location_id', 'repair_type_id', 'currency', 'offer_type',
@@ -167,7 +188,9 @@ class PropertyReportQuery
             ));
 
             if (!empty($branchGroupIds)) {
-                $this->applyPropertyBranchGroupFilter($query, $branchGroupIds);
+                $currentEmployeeScope
+                    ? $this->applyEmployeeBranchGroupFilter($query, $branchGroupIds)
+                    : $this->applyPropertyBranchGroupFilter($query, $branchGroupIds);
             }
         }
 
@@ -189,7 +212,7 @@ class PropertyReportQuery
                 return;
             }
 
-            $query->whereIn($creatorColumn, User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->where('branch_id', $authUser->branch_id)->select('id'));
+            $query->whereIn($currentEmployeeScope ? DB::raw($reportOwnerExpression ?? $creatorColumn) : $creatorColumn, User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->where('branch_id', $authUser->branch_id)->select('id'));
         }
 
         if ($authUser?->hasPermission('property_reports.scope.group')) {
@@ -198,7 +221,9 @@ class PropertyReportQuery
                 return;
             }
 
-            $this->applyPropertyBranchGroupFilter($query, [(int) $authUser->branch_group_id]);
+            $currentEmployeeScope
+                ? $this->applyEmployeeBranchGroupFilter($query, [(int) $authUser->branch_group_id])
+                : $this->applyPropertyBranchGroupFilter($query, [(int) $authUser->branch_group_id]);
         }
     }
 
@@ -318,12 +343,34 @@ class PropertyReportQuery
         });
     }
 
+    private function applyEmployeeBranchGroupFilter($query, array $branchGroupIds): void
+    {
+        $branchGroupIds = array_values(array_filter(array_map('intval', $branchGroupIds)));
+
+        if (empty($branchGroupIds) || !Schema::hasColumn('users', 'branch_group_id')) {
+            $query->whereRaw('1 = 0');
+            return;
+        }
+
+        $owner = $this->ownerExpression();
+        $query->where(function ($scope) use ($branchGroupIds, $owner) {
+            $scope->whereIn(DB::raw($owner), User::query()
+                ->tap(fn ($users) => \App\Support\BranchVisibility::records($users))
+                ->whereIn('branch_group_id', $branchGroupIds)->select('id'));
+            // Unattributed inventory still belongs to its recorded group.
+            if (Schema::hasColumn('properties', 'branch_group_id')) {
+                $scope->orWhere(fn ($anonymous) => $anonymous->whereNull(DB::raw($owner))
+                    ->whereIn('properties.branch_group_id', $branchGroupIds));
+            }
+        });
+    }
+
     public function propertyAuthorExpression(): string
     {
         return 'COALESCE(NULLIF(properties.created_by, 0), NULLIF(properties.agent_id, 0))';
     }
 
-    public function applyCommonFilters(Request $request, $query, string $creatorColumn = 'created_by')
+    public function applyCommonFilters(Request $request, $query, string $creatorColumn = 'created_by', bool $currentEmployeeScope = false)
     {
         $this->ensureReportsAllowed($request);
         $this->validateReportScope($request);
@@ -446,7 +493,7 @@ class PropertyReportQuery
             ? "CASE WHEN properties.moderation_status IN ('sold', 'rented', 'sold_by_owner') THEN "
                 .$this->salesAttributionService->primarySellerExpression().' ELSE '.$this->propertyAuthorExpression().' END'
             : null;
-        $this->applyBranchAccessFilter($request, $query, $scopeColumn, $reportOwnerExpression);
+        $this->applyBranchAccessFilter($request, $query, $scopeColumn, $reportOwnerExpression, $currentEmployeeScope);
 
         $request->validate(['include_inactive' => 'nullable|boolean']);
         $actor = $request->user() ?? auth()->user();
