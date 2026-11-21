@@ -1155,7 +1155,7 @@ class KpiModuleService
         $perPage = (int) ($filters['per_page'] ?? 50);
         $page = max(1, (int) ($filters['page'] ?? 1));
 
-        $allUsers = ($authUser->usesAssignedGroupScope() ? $this->historicalKpiUsersQuery($authUser, $filters, $from, $to) : $this->weeklyUsersScopeQuery($authUser, $filters))
+        $allUsers = ($authUser->usesAssignedGroupScope() && ! ($filters['unified_employees'] ?? false) ? $this->historicalKpiUsersQuery($authUser, $filters, $from, $to) : $this->weeklyUsersScopeQuery($authUser, $filters))
             ->when(isset($filters['user_ids']), fn (Builder $query) => $query->whereIn('users.id', $filters['user_ids']))
             ->when(($filters['unified_employees'] ?? false) && ! ($filters['include_inactive'] ?? false), fn (Builder $query) => $query->where('users.status', '!=', 'inactive'))
             ->orderBy('users.name')
@@ -1168,8 +1168,8 @@ class KpiModuleService
                 $user->branch_group_id = $historicalGroup;
             }
         }
-        // The general report has one row per person, even when a former employee
-        // has several authorized historical group/role contexts in this period.
+        // The general report follows today's roster. Dedicated KPI reports retain
+        // their historical group/role contexts.
         $unifiedEmployees = (bool) ($filters['unified_employees'] ?? false);
         if ($unifiedEmployees) $allUsers = $allUsers->unique('id')->values();
         $userIds = $allUsers->pluck('id')->map(fn ($id) => (int) $id)->values();

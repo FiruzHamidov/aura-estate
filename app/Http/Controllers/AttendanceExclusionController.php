@@ -28,8 +28,14 @@ final class AttendanceExclusionController extends Controller
             'per_page' => ['sometimes', 'integer', 'between:1,100'],
         ]);
         $excluded = ($data['mode'] ?? 'excluded') === 'excluded';
-        $query = User::query()->select(['id', 'name', 'phone', 'role_id', 'branch_id', 'status', AttendancePrivacy::FIELD])
-            ->with(['role:id,name,slug', 'branch:id,name'])->where(AttendancePrivacy::FIELD, $excluded);
+        $query = User::query()->select(['id', 'name', 'phone', 'role_id', 'branch_id', 'status', AttendancePrivacy::FIELD, AttendancePrivacy::HIDDEN_FROM_EVERYONE])
+            ->with(['role:id,name,slug', 'branch:id,name']);
+        if ($excluded) {
+            $query->where(fn ($users) => $users->where(AttendancePrivacy::FIELD, true)
+                ->orWhere(AttendancePrivacy::HIDDEN_FROM_EVERYONE, true));
+        } else {
+            $query->where(AttendancePrivacy::FIELD, false)->where(AttendancePrivacy::HIDDEN_FROM_EVERYONE, false);
+        }
         // Keep existing exceptions removable even after dismissal or a role change.
         if (! $excluded) {
             $query->where(fn ($users) => $users->where('status', User::STATUS_ACTIVE)->orWhereNull('status'))
@@ -50,13 +56,16 @@ final class AttendanceExclusionController extends Controller
     public function update(Request $request, User $user)
     {
         $this->authorizeManager($request);
-        $request->validate([AttendancePrivacy::FIELD => ['required', 'boolean']]);
+        $request->validate([
+            AttendancePrivacy::FIELD => ['required_without:'.AttendancePrivacy::HIDDEN_FROM_EVERYONE, 'boolean'],
+            AttendancePrivacy::HIDDEN_FROM_EVERYONE => ['required_without:'.AttendancePrivacy::FIELD, 'boolean'],
+        ]);
         $values = $this->privacy->settingsForMutation($request, $request->user());
         DB::transaction(function () use ($request, $user, $values) {
             $target = User::query()->lockForUpdate()->findOrFail($user->id);
-            $old = [AttendancePrivacy::FIELD => $target->attendance_hidden_from_others];
+            $old = $target->only(array_keys($values));
             $target->fill($values);
-            if ($target->isDirty(AttendancePrivacy::FIELD)) {
+            if ($target->isDirty(array_keys($values))) {
                 $target->save();
                 app(AttendanceAuditService::class)->record($request->user(), 'attendance.privacy.updated', $target, $old, $values, $request);
             }

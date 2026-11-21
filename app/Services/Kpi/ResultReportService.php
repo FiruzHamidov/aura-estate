@@ -24,7 +24,19 @@ final class ResultReportService
         $visibleBranches = DB::table('branches');
         \App\Support\BranchVisibility::apply($visibleBranches, 'branches.id');
         $branchIds = $visibleBranches->pluck('id')->map(fn ($id) => (int) $id)->all();
-        $matches = function ($row) use ($actor, $filters, $branchIds) {
+        // Internal general-report projection: keep immutable financial facts and
+        // closed periods intact, but attribute their totals to today's employee.
+        $currentScope = (bool) ($filters['current_employee_scope'] ?? false);
+        $currentUsers = $currentScope ? User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
+            ->get(['id', 'branch_id', 'branch_group_id'])->keyBy('id') : collect();
+        $matches = function ($row) use ($actor, $filters, $branchIds, $currentScope, $currentUsers) {
+            if ($currentScope) {
+                $employee = $currentUsers->get($row->user_id);
+                if (! $employee || ($row->branch_id && ! in_array((int) $row->branch_id, $branchIds, true))) {
+                    return false;
+                }
+                $row = (object) array_replace((array) $row, ['branch_id' => $employee->branch_id, 'branch_group_id' => $employee->branch_group_id]);
+            }
             if ($row->branch_id && ! in_array((int) $row->branch_id, $branchIds, true)) {
                 return false;
             }
@@ -41,23 +53,35 @@ final class ResultReportService
         };
         $facts = $this->facts->forPeriod($month->toDateString(), $month->endOfMonth()->toDateString())->filter($matches);
         $periods = DB::table('kpi_result_periods')->where('month', $month->toDateString())->get()->filter($matches)
-            ->filter(fn ($period) => collect(json_decode($period->snapshot, true)['deals'] ?? [])->every(fn ($deal) => $this->access->visible($actor, $deal)))
+            ->filter(fn ($period) => collect(json_decode($period->snapshot, true)['deals'] ?? [])->every(fn ($deal) => $currentScope
+                ? (int) ($deal['user_id'] ?? 0) === (int) $period->user_id && $matches((object) $deal)
+                : $this->access->visible($actor, $deal)))
             ->keyBy('user_id');
         $users = app(KpiModuleService::class)->reportUsersQuery($actor)->get()->filter(function ($user) use ($matches) {
             return $matches((object) ['user_id' => $user->id, 'branch_id' => $user->branch_id, 'branch_group_id' => $user->branch_group_id]);
         })->keyBy('id');
-        // Include staff who moved since closing; visibility comes from their historical fact.
+        // Include staff with results outside the KPI roster. The selected report
+        // policy determines whether their current or historical context is used.
         $historical = User::whereIn('id', $facts->pluck('user_id')->merge($periods->keys())->diff($users->keys())->unique())->get();
         foreach ($historical as $user) {
             $context = $facts->firstWhere('user_id', $user->id) ?? $periods->get($user->id);
-            $user->branch_id = $context->branch_id;
-            $user->branch_group_id = $context->branch_group_id;
+            if (! $currentScope) {
+                $user->branch_id = $context->branch_id;
+                $user->branch_group_id = $context->branch_group_id;
+            }
             $users->put($user->id, $user);
         }
         $groupNames = DB::table('branch_groups')->whereIn('id', $users->pluck('branch_group_id')->filter()->unique())->pluck('name', 'id');
-        $rows = $users->map(function (User $user) use ($facts, $periods, $filters, $actor, $groupNames) {
+        $rows = $users->map(function (User $user) use ($facts, $periods, $filters, $actor, $groupNames, $currentScope) {
             if ($closed = $periods->get($user->id)) {
-                return json_decode($closed->snapshot, true) + ['branch_group_name' => $groupNames->get($closed->branch_group_id), 'closed' => true, 'closed_at' => $closed->created_at, 'period_version' => $closed->version];
+                $snapshot = json_decode($closed->snapshot, true);
+                if ($currentScope) {
+                    $snapshot = array_replace($snapshot, ['branch_id' => $user->branch_id,
+                        'branch_group_id' => $user->branch_group_id,
+                        'branch_group_name' => $groupNames->get($user->branch_group_id)]);
+                }
+
+                return $snapshot + ['branch_group_name' => $groupNames->get($closed->branch_group_id), 'closed' => true, 'closed_at' => $closed->created_at, 'period_version' => $closed->version];
             }
 
             return $this->employee($user, $filters['month'], $facts->where('user_id', $user->id), $actor) + ['closed' => false, 'branch_group_name' => $groupNames->get($user->branch_group_id)];

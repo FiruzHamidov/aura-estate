@@ -406,6 +406,46 @@ class KpiResultsFeatureTest extends TestCase
         $this->postJson('/api/motivation/rules', array_replace($payload, ['date_from' => '2026-12-02']))->assertUnprocessable();
     }
 
+    public function test_current_employee_projection_preserves_facts_and_closed_snapshots_after_transfer(): void
+    {
+        (require database_path('migrations/2026_09_08_120000_create_rop_group_access.php'))->up();
+        $rop = $this->user('rop', 2);
+        $rop->supervisedGroups()->attach(2);
+        $property = $this->property(['company_commission_amount' => 150, 'company_commission_currency' => 'TJS']);
+        app(ResultFactService::class)->record($property, 'before-transfer');
+        $service = app(\App\Services\Kpi\ResultReportService::class);
+        $filters = ['month' => '2026-11', 'user_id' => $this->agent->id, 'current_employee_scope' => true];
+        Carbon::setTestNow(Carbon::parse('2026-12-01 12:00:00', 'Asia/Dushanbe'));
+        $service->close($this->admin, '2026-11', $this->agent->id);
+        $factsBefore = DB::table('kpi_result_facts')->get()->toJson();
+        $periodsBefore = DB::table('kpi_result_periods')->get()->toJson();
+        $this->agent->update(['branch_group_id' => 2]);
+        $row = $service->report($rop, $filters)['rows']->sole();
+        $this->assertSame(2, $row['branch_group_id']);
+        $this->assertSame('Группа 2', $row['branch_group_name']);
+        $this->assertTrue($row['closed']);
+        $this->assertSame(1, $row['sale']['count']);
+        $this->assertEquals(150, $row['sale']['amount']);
+        $this->assertCount(0, $service->report($this->admin, $filters + ['branch_group_id' => 1])['rows']);
+        // Dedicated financial history keeps the original period and access rules.
+        $historical = $service->report($this->admin, ['month' => '2026-11', 'user_id' => $this->agent->id])['rows']->sole();
+        $this->assertSame(1, $historical['branch_group_id']);
+        $this->assertCount(0, $service->report($rop, ['month' => '2026-11', 'user_id' => $this->agent->id])['rows']->filter(fn ($r) => $r['sale']['count'] > 0));
+        $this->assertSame($factsBefore, DB::table('kpi_result_facts')->get()->toJson());
+        $this->assertSame($periodsBefore, DB::table('kpi_result_periods')->get()->toJson());
+        $rop->supervisedGroups()->detach();
+        $this->assertCount(0, $service->report($rop, $filters)['rows']);
+        // Moving out of a hidden source branch must not expose its closed facts.
+        Schema::table('branches', fn (Blueprint $t) => $t->boolean('is_hidden')->default(false));
+        DB::table('branches')->insert(['id' => 2, 'name' => 'Visible', 'is_hidden' => false]);
+        DB::table('branch_groups')->where('id', 2)->update(['branch_id' => 2]);
+        $this->agent->update(['branch_id' => 2]);
+        DB::table('branches')->where('id', 1)->update(['is_hidden' => true]);
+        $row = $service->report($this->admin, $filters)['rows']->sole();
+        $this->assertFalse($row['closed']);
+        $this->assertSame(0, $row['sale']['count']);
+    }
+
     public function test_closed_result_is_immutable_until_reviewed_correction_with_history(): void
     {
         $this->postJson('/api/kpi/results/goals', $this->goal())->assertCreated();
