@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Schema;
 final class AttendancePrivacy
 {
     public const FIELD = 'attendance_hidden_from_others';
+    public const HIDDEN_FROM_EVERYONE = 'attendance_hidden_from_everyone';
 
     public function isSuperadmin(User $viewer): bool
     {
@@ -19,19 +20,19 @@ final class AttendancePrivacy
 
     private function applies(User $viewer): bool
     {
-        // Older installations have no private records until the migration is applied.
-        return ! $this->isSuperadmin($viewer) && Schema::hasColumn('users', self::FIELD);
+        return Schema::hasColumn('users', self::HIDDEN_FROM_EVERYONE)
+            || (! $this->isSuperadmin($viewer) && Schema::hasColumn('users', self::FIELD));
     }
 
     public function users(Builder $query, User $viewer): Builder
     {
-        return $this->applies($viewer) ? $query->where('users.'.self::FIELD, false) : $query;
+        return $this->applies($viewer) ? $query->whereNotIn('users.id', $this->hiddenIds($viewer)) : $query;
     }
 
     public function records(Builder $query, User $viewer): Builder
     {
         return $this->applies($viewer)
-            ? $query->whereNotIn($query->getModel()->qualifyColumn('user_id'), $this->hiddenIds())
+            ? $query->whereNotIn($query->getModel()->qualifyColumn('user_id'), $this->hiddenIds($viewer))
             : $query;
     }
 
@@ -46,7 +47,7 @@ final class AttendancePrivacy
             $query->whereNotExists(fn ($link) => $link->selectRaw('1')->from($links.' as private_link')
                 ->whereColumn('private_link.device_id', $table.'.device_id')
                 ->whereColumn('private_link.device_user_id', $table.'.device_user_id')
-                ->whereIn('private_link.user_id', $this->hiddenIds()));
+                ->whereIn('private_link.user_id', $this->hiddenIds($viewer)));
         }
 
         return $query;
@@ -59,7 +60,7 @@ final class AttendancePrivacy
         }
         foreach ([\App\Models\AttendanceDeviceUser::class, \App\Models\AttendanceEvent::class] as $model) {
             abort_if($model::query()->where('device_id', $deviceId)->where('device_user_id', $terminalUserId)
-                ->whereIn('user_id', $this->hiddenIds())->exists(), 403, 'Нет доступа к посещениям сотрудника.');
+                ->whereIn('user_id', $this->hiddenIds($viewer))->exists(), 403, 'Нет доступа к посещениям сотрудника.');
         }
     }
 
@@ -68,27 +69,39 @@ final class AttendancePrivacy
         $fresh = User::query()->with('role')->find($viewer->id);
         abort_unless($fresh && $fresh->status === User::STATUS_ACTIVE, 409, 'ACCESS_SCOPE_VERSION_CONFLICT');
         if ($this->applies($fresh)) {
-            abort_if($this->hiddenIds()->whereIn('users.id', $userIds)->exists(), 409, 'ACCESS_SCOPE_VERSION_CONFLICT');
+            abort_if($this->hiddenIds($fresh)->whereIn('users.id', $userIds)->exists(), 409, 'ACCESS_SCOPE_VERSION_CONFLICT');
         }
     }
 
     public function settingsForMutation(Request $request, User $viewer): array
     {
-        if (! $request->exists(self::FIELD)) {
+        $fields = array_filter([self::FIELD, self::HIDDEN_FROM_EVERYONE], fn ($field) => $request->exists($field));
+        if ($fields === []) {
             return [];
         }
         abort_unless($this->isSuperadmin($viewer), 403, 'Только суперадминистратор может менять видимость посещаемости.');
 
-        return [self::FIELD => $request->boolean(self::FIELD)];
+        $settings = [];
+        foreach ($fields as $field) $settings[$field] = $request->boolean($field);
+        return $settings;
     }
 
     public function exposeSetting(User $target, User $viewer): User
     {
-        return $this->isSuperadmin($viewer) ? $target->makeVisible(self::FIELD) : $target->makeHidden(self::FIELD);
+        $fields = [self::FIELD, self::HIDDEN_FROM_EVERYONE];
+        return $this->isSuperadmin($viewer) ? $target->makeVisible($fields) : $target->makeHidden($fields);
     }
 
-    private function hiddenIds(): Builder
+    private function hiddenIds(User $viewer): Builder
     {
-        return User::query()->where(self::FIELD, true)->select('users.id');
+        return User::query()->where(function (Builder $users) use ($viewer) {
+            $users->whereRaw('1 = 0');
+            if (Schema::hasColumn('users', self::HIDDEN_FROM_EVERYONE)) {
+                $users->orWhere(self::HIDDEN_FROM_EVERYONE, true);
+            }
+            if (! $this->isSuperadmin($viewer) && Schema::hasColumn('users', self::FIELD)) {
+                $users->orWhere(self::FIELD, true);
+            }
+        })->select('users.id');
     }
 }

@@ -506,6 +506,7 @@ class UserController extends Controller
                 'status' => ['nullable', Rule::in(['active', 'inactive'])],
                 'password' => 'nullable|string|min:6',
                 'attendance_hidden_from_others' => 'sometimes|boolean',
+                'attendance_hidden_from_everyone' => 'sometimes|boolean',
                 'security_attendance_branch_ids' => 'sometimes|array|max:100',
                 'security_attendance_branch_ids.*' => 'required|integer|distinct|exists:branches,id',
             ]);
@@ -688,6 +689,7 @@ class UserController extends Controller
                 'status' => ['sometimes', Rule::in(['active', 'inactive'])],
                 'password' => 'nullable|string|min:6',
                 'attendance_hidden_from_others' => 'sometimes|boolean',
+                'attendance_hidden_from_everyone' => 'sometimes|boolean',
                 'security_attendance_branch_ids' => 'sometimes|array|max:100',
                 'security_attendance_branch_ids.*' => 'required|integer|distinct|exists:branches,id',
             ]);

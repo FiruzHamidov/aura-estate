@@ -53,6 +53,7 @@ class AttendanceModuleFeatureTest extends TestCase
         (require database_path('migrations/2026_10_17_140000_create_attendance_device_user_profiles.php'))->up();
         (require database_path('migrations/2026_10_17_160000_create_attendance_discarded_events.php'))->up();
         (require database_path('migrations/2026_11_20_130000_add_attendance_privacy_to_users.php'))->up();
+        (require database_path('migrations/2026_11_21_150000_add_attendance_full_exclusion_to_users.php'))->up();
         config([
             'attendance.timezone' => 'Asia/Dushanbe',
             'attendance.duplicate_window_seconds' => 10,
