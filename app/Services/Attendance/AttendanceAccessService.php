@@ -120,6 +120,7 @@ final class AttendanceAccessService
         $role = $this->role($user);
 
         return [
+            'can_manage_exclusions' => app(AttendancePrivacy::class)->isSuperadmin($user),
             'can_view_presence' => $user->hasPermission('attendance.presence.view'),
             'can_view_hr_report' => $user->hasPermission('attendance.hr_report.view'),
             'can_view_attendance_table' => $user->hasPermission('attendance.table.view'),

@@ -2,7 +2,6 @@
 
 namespace App\Services\Attendance;
 
-use App\Models\Role;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
@@ -73,15 +72,12 @@ final class AttendancePrivacy
         }
     }
 
-    public function settingsForMutation(Request $request, User $viewer, ?Role $targetRole, ?User $target = null): array
+    public function settingsForMutation(Request $request, User $viewer): array
     {
         if (! $request->exists(self::FIELD)) {
             return [];
         }
         abort_unless($this->isSuperadmin($viewer), 403, 'Только суперадминистратор может менять видимость посещаемости.');
-        // A role change must not implicitly disclose old attendance. A superadmin can clear the retained flag.
-        abort_unless($targetRole?->slug === 'superadmin' || ($target?->attendance_hidden_from_others && ! $request->boolean(self::FIELD)),
-            422, 'Настройка скрытия посещаемости доступна для суперадминистраторов.');
 
         return [self::FIELD => $request->boolean(self::FIELD)];
     }

@@ -524,7 +524,7 @@ class UserController extends Controller
             $data = $request->only(['name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'birthday', 'description']);
             $data = $this->normalizeBranchIdForMutation($data, $authUser, $targetRole);
             $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
-            $data += app(\App\Services\Attendance\AttendancePrivacy::class)->settingsForMutation($request, $authUser, $targetRole);
+            $data += app(\App\Services\Attendance\AttendancePrivacy::class)->settingsForMutation($request, $authUser);
             if ($request->exists('security_attendance_branch_ids')) {
                 abort_unless($authUser->hasPermission('users.security_attendance.assign'), 403, 'Нет права назначать филиалы посещаемости.');
                 abort_unless($targetRole->hasPermission('attendance.scope.assigned_branches'), 422, 'Роли сотрудника нужен доступ к посещаемости назначенных филиалов.');
@@ -721,7 +721,7 @@ class UserController extends Controller
             $preservesUngroupedRole = $authUser->usesAssignedGroupScope() && $user->branch_group_id === null
                 && (int) $targetRole?->id === (int) $user->role_id;
             if (!$preservesUngroupedRole) $data = $this->normalizeBranchGroupIdForMutation($data, $targetRole);
-            $data += app(\App\Services\Attendance\AttendancePrivacy::class)->settingsForMutation($request, $authUser, $targetRole, $user);
+            $data += app(\App\Services\Attendance\AttendancePrivacy::class)->settingsForMutation($request, $authUser);
             if ($request->exists('security_attendance_branch_ids')) {
                 abort_unless($authUser->hasPermission('users.security_attendance.assign'), 403, 'Нет права назначать филиалы посещаемости.');
                 abort_unless($targetRole->hasPermission('attendance.scope.assigned_branches'), 422, 'Роли сотрудника нужен доступ к посещаемости назначенных филиалов.');

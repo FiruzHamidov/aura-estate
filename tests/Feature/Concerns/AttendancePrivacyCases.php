@@ -10,9 +10,71 @@ use App\Models\User;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use Laravel\Sanctum\Sanctum;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 trait AttendancePrivacyCases
 {
+    public function test_attendance_exclusion_list_search_pagination_and_changes_share_the_user_setting(): void
+    {
+        $c = $this->privacyFixture();
+        Sanctum::actingAs($c['public']);
+        $this->getJson('/api/attendance/access')->assertOk()->assertJsonPath('permissions.can_manage_exclusions', true);
+        $this->getJson('/api/attendance/exclusions')->assertOk()->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id', $c['private']->id)->assertJsonPath('data.0.attendance_hidden_from_others', true);
+        $clientRole = Role::create(['name' => 'Client', 'slug' => 'client']);
+        $c['mop']->update(['role_id' => $clientRole->id]);
+        $c['hr']->update(['status' => 'inactive']);
+        $available = $this->getJson('/api/attendance/exclusions?mode=available&per_page=100')->assertOk()->json('data');
+        $ids = array_column($available, 'id');
+        $this->assertContains($c['otherAgent']->id, $ids);
+        $this->assertNotContains($c['mop']->id, $ids);
+        $this->assertNotContains($c['hr']->id, $ids);
+        $this->assertNotContains($c['private']->id, $ids);
+        $this->getJson('/api/attendance/exclusions?mode=available&search=Agent%20B')->assertOk()
+            ->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $c['otherAgent']->id);
+        $first = $this->getJson('/api/attendance/exclusions?mode=available&per_page=1')->assertOk()->json();
+        $second = $this->getJson('/api/attendance/exclusions?mode=available&per_page=1&page=2')->assertOk()->json();
+        $this->assertGreaterThan(1, $first['last_page']);
+        $this->assertNotSame($first['data'][0]['id'], $second['data'][0]['id']);
+        $eventCount = AttendanceEvent::count();
+        $original = $c['otherAgent']->only(['name', 'phone', 'role_id', 'branch_id', 'status']);
+        foreach ([true, false] as $hidden) {
+            $this->patchJson('/api/attendance/exclusions/'.$c['otherAgent']->id,
+                ['attendance_hidden_from_others' => $hidden, 'role_id' => $clientRole->id, 'status' => 'inactive'])
+                ->assertOk()->assertJsonPath('attendance_hidden_from_others', $hidden);
+            $this->getJson('/api/user/'.$c['otherAgent']->id)->assertOk()->assertJsonPath('attendance_hidden_from_others', $hidden);
+            $this->assertSame($original, $c['otherAgent']->fresh()->only(array_keys($original)));
+        }
+        $this->assertSame($eventCount, AttendanceEvent::count());
+        $this->assertSame(2, DB::table('attendance_audit_logs')->where('action', 'attendance.privacy.updated')->count());
+        $this->putJson('/api/user/'.$c['otherAgent']->id, ['attendance_hidden_from_others' => true])->assertOk();
+        $c['otherAgent']->update(['status' => 'inactive']);
+        $this->getJson('/api/attendance/exclusions?search=Agent%20B')->assertOk()->assertJsonPath('data.0.id', $c['otherAgent']->id);
+        $this->patchJson('/api/attendance/exclusions/'.$c['otherAgent']->id, ['attendance_hidden_from_others' => false])->assertOk();
+        $this->patchJson('/api/attendance/exclusions/'.$c['agent']->id, [])->assertUnprocessable();
+        $this->patchJson('/api/attendance/exclusions/'.$c['agent']->id, ['attendance_hidden_from_others' => 'bad'])->assertUnprocessable();
+        $this->getJson('/api/attendance/exclusions?mode=bad')->assertUnprocessable();
+    }
+
+    public function test_attendance_exclusions_are_superadmin_only_even_with_broad_grants(): void
+    {
+        $c = $this->privacyFixture();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $this->getJson('/api/attendance/exclusions')->assertUnauthorized();
+        foreach (['admin', 'hr', 'rop', 'agent'] as $actor) {
+            Sanctum::actingAs($c[$actor]);
+            $this->getJson('/api/attendance/exclusions')->assertForbidden();
+            $this->getJson('/api/attendance/exclusions?mode=available')->assertForbidden();
+            $this->patchJson('/api/attendance/exclusions/'.$c['private']->id, ['attendance_hidden_from_others' => false])->assertForbidden();
+        }
+        $c['admin']->role->forceFill(['permissions' => app(\App\Services\Rbac\PermissionCatalog::class)->defaults('superadmin')])->save();
+        Sanctum::actingAs($c['admin']->fresh('role'));
+        $this->getJson('/api/attendance/access')->assertOk()->assertJsonPath('permissions.can_manage_exclusions', false);
+        $this->getJson('/api/attendance/exclusions')->assertForbidden();
+        $this->patchJson('/api/attendance/exclusions/'.$c['private']->id, ['attendance_hidden_from_others' => false])->assertForbidden();
+        $this->assertTrue($c['private']->fresh()->attendance_hidden_from_others);
+    }
+
     private function privacyFixture(): array
     {
         \Illuminate\Support\Facades\Schema::table('users', fn ($table) => $table->timestamp('deleted_at')->nullable());
@@ -64,7 +126,8 @@ trait AttendancePrivacyCases
                 ->assertOk()->assertJsonPath('attendance_hidden_from_others', $value);
             $this->assertSame($value, $c['private']->fresh()->attendance_hidden_from_others);
         }
-        $this->putJson('/api/user/'.$c['agent']->id, ['attendance_hidden_from_others' => true])->assertUnprocessable();
+        $this->putJson('/api/user/'.$c['agent']->id, ['attendance_hidden_from_others' => true])
+            ->assertOk()->assertJsonPath('attendance_hidden_from_others', true);
         $this->putJson('/api/user/'.$c['private']->id, ['attendance_hidden_from_others' => 'invalid'])->assertUnprocessable();
         foreach (['admin', 'hr', 'rop'] as $key) {
             Sanctum::actingAs($c[$key]);
@@ -75,6 +138,87 @@ trait AttendancePrivacyCases
         $this->getJson('/api/user/'.$c['private']->id)->assertOk()->assertJsonMissingPath('attendance_hidden_from_others');
         $this->assertStringNotContainsString('attendance_hidden_from_others', $this->getJson('/api/user')->assertOk()->getContent());
         $this->assertTrue($c['private']->fresh()->attendance_hidden_from_others);
+    }
+
+    public static function employeeAttendancePrivacyRoles(): array
+    {
+        $roles = ['agent', 'mop', 'rop', 'admin', 'hr', 'branch_director', 'operator', 'remote_employee'];
+
+        return array_combine($roles, array_map(fn ($role) => [$role], $roles));
+    }
+
+    #[DataProvider('employeeAttendancePrivacyRoles')]
+    public function test_superadmin_can_create_and_toggle_privacy_for_any_employee_role(string $slug): void
+    {
+        $c = $this->privacyFixture();
+        $role = Role::firstOrCreate(['slug' => $slug], ['name' => $slug]);
+        Sanctum::actingAs($c['public']);
+        $payload = ['name' => 'Remote employee', 'phone' => '992900777005', 'role_id' => $role->id,
+            'branch_id' => $c['branch']->id, 'branch_group_id' => $c['group']->id, 'auth_method' => 'sms'];
+        $visible = $this->postJson('/api/user', $payload)->assertCreated()->json('id');
+        $this->assertFalse(User::findOrFail($visible)->attendance_hidden_from_others);
+        $id = $this->postJson('/api/user', [...$payload, 'phone' => '992900777006', 'attendance_hidden_from_others' => true])
+            ->assertCreated()->assertJsonPath('attendance_hidden_from_others', true)->json('id');
+        foreach ([false, true] as $hidden) {
+            $this->putJson('/api/user/'.$id, ['attendance_hidden_from_others' => $hidden])
+                ->assertOk()->assertJsonPath('attendance_hidden_from_others', $hidden);
+            $this->assertSame($hidden, User::findOrFail($id)->attendance_hidden_from_others);
+        }
+        $this->putJson('/api/user/'.$id, ['name' => 'Renamed remote employee'])->assertOk();
+        $this->assertTrue(User::findOrFail($id)->attendance_hidden_from_others);
+        $this->putJson('/api/user/'.$id, ['role_id' => $c['admin']->role_id])->assertOk();
+        $this->assertTrue(User::findOrFail($id)->attendance_hidden_from_others);
+        $this->putJson('/api/user/'.$id, ['attendance_hidden_from_others' => false])->assertOk();
+        $this->assertFalse(User::findOrFail($id)->attendance_hidden_from_others);
+    }
+
+    public function test_hidden_employee_is_excluded_from_attendance_and_can_be_restored_without_losing_marks(): void
+    {
+        $c = $this->privacyFixture();
+        $this->travelTo(CarbonImmutable::parse('2026-08-17T12:00:00+05:00'));
+        $this->map($c['device'], $c['agent']);
+        $this->postDevicePayload('/iclock/cdata?SN=PRIVATE&table=ATTLOG', $c['agent']->id."\t2026-08-17 09:07:00\t0\t15\t0")->assertOk();
+        $range = 'date_from=2026-08-17&date_to=2026-08-17';
+        $totals = [];
+        foreach (['admin', 'hr', 'rop'] as $viewer) {
+            Sanctum::actingAs($c[$viewer]);
+            $matrix = $this->getJson('/api/attendance/matrix?'.$range)->assertOk();
+            $this->assertContains($c['agent']->id, collect($matrix->json('data'))->pluck('user.id')->all());
+            $totals[$viewer] = $matrix->json('meta.summary.active_users');
+        }
+        Sanctum::actingAs($c['public']);
+        $this->putJson('/api/user/'.$c['agent']->id, ['attendance_hidden_from_others' => true])->assertOk();
+        foreach (['admin', 'hr', 'rop'] as $viewer) {
+            Sanctum::actingAs($c[$viewer]);
+            $matrix = $this->getJson('/api/attendance/matrix?'.$range)->assertOk();
+            $this->assertNotContains($c['agent']->id, collect($matrix->json('data'))->pluck('user.id')->all());
+            $this->assertSame($totals[$viewer] - 1, $matrix->json('meta.summary.active_users'));
+            $presence = $this->getJson('/api/attendance/presence');
+            if ($viewer === 'hr') {
+                $presence->assertForbidden();
+            } else {
+                $presence->assertOk();
+                $this->assertNotContains($c['agent']->id, collect($presence->json('data'))->pluck('user.id')->all());
+            }
+            $this->getJson('/api/attendance/events?'.$range.'&user_id='.$c['agent']->id)->assertOk()->assertJsonCount(0, 'data');
+            $this->getJson('/api/attendance/users/'.$c['agent']->id.'/days/2026-08-17')->assertStatus($viewer === 'rop' ? 404 : 403);
+            if ($viewer !== 'rop') {
+                $report = $this->getJson('/api/attendance/hr-report?'.$range)->assertOk();
+                $this->assertNotContains($c['agent']->id, collect($report->json('data'))->pluck('user_id')->all());
+                $this->assertStringNotContainsString($c['agent']->name, $this->get('/api/attendance/export?'.$range)->assertOk()->streamedContent());
+            }
+        }
+        Sanctum::actingAs($c['public']);
+        $this->getJson('/api/attendance/users/'.$c['agent']->id.'/days/2026-08-17')->assertOk()->assertJsonCount(1, 'data.events');
+        $this->putJson('/api/user/'.$c['agent']->id, ['attendance_hidden_from_others' => false])->assertOk();
+        Sanctum::actingAs($c['admin']);
+        $matrix = $this->getJson('/api/attendance/matrix?'.$range)->assertOk();
+        $this->assertContains($c['agent']->id, collect($matrix->json('data'))->pluck('user.id')->all());
+        $this->assertSame($totals['admin'], $matrix->json('meta.summary.active_users'));
+        $this->getJson('/api/attendance/users/'.$c['agent']->id.'/days/2026-08-17')->assertOk()->assertJsonCount(1, 'data.events');
+        $this->assertSame(1, AttendanceEvent::where('user_id', $c['agent']->id)->count());
+        $this->assertSame(1, AttendanceDailySummary::where('user_id', $c['agent']->id)->count());
+        $this->travelBack();
     }
 
     public function test_attendance_privacy_create_defaults_and_promotion_do_not_disclose_old_marks(): void
