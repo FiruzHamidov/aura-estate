@@ -26,6 +26,14 @@ The production key can read the public asset URL, request a preflight check, or 
 
 ## Recovery and maintenance
 
+### Public photo downloads from both website origins
+
+Nginx serves `/storage/` files directly, so Laravel's CORS configuration does not control their response headers. Install `deploy/nginx/aura-public-media-cors-map.conf` as `/etc/nginx/conf.d/aura-public-media-cors-map.conf` in the HTTP context and `deploy/nginx/aura-public-media-cors-headers.conf` as `/etc/nginx/snippets/aura-public-media-cors-headers.conf`.
+
+In the existing `location /storage/` block of `backend.aura.tj`, replace its three old `Access-Control-Allow-*` directives with `include /etc/nginx/snippets/aura-public-media-cors-headers.conf;`. Preserve the location's security headers, `try_files`, PHP/HTML denial rules and the separate private request-media restriction. The map allows only `https://aura.tj` and `https://www.aura.tj`; `Vary: Origin` keeps their cached responses separate.
+
+This infrastructure change requires an explicit installation; the application workflow does not modify Nginx configuration. Back up the existing configuration, run `nginx -t`, then reload Nginx. Verify a real public photo with each Origin: HTTP 200 and exactly one matching `Access-Control-Allow-Origin` header. An unrelated Origin and a request without Origin must receive no allow-origin header. Check conditional and range requests, then verify `fetch(..., {mode: 'cors'})`, Blob creation and a browser download from both website origins.
+
 For first-time Reverb provisioning, configure a unique app ID/key/secret in the protected backend environment, `REVERB_HOST=backend.aura.tj`, `REVERB_PORT=443`, `REVERB_SCHEME=https`, `REVERB_SERVER_HOST=127.0.0.1`, `REVERB_SERVER_PORT=8080`, `REVERB_ALLOWED_ORIGINS=aura.tj,www.aura.tj` (Reverb compares hostnames, without schemes), and `REVERB_APP_ACCEPT_CLIENT_EVENTS_FROM=none`. Keep messaging broadcasts disabled until the runtime probe succeeds. Install `deploy/nginx/aura-reverb.conf` as `/etc/nginx/snippets/aura-reverb.conf`, include it inside the existing backend HTTPS server block, and run `nginx -t` before reloading. Rebuild Laravel's configuration cache before starting the supervised Reverb process.
 
 The web client also needs `NEXT_PUBLIC_REVERB_APP_KEY`, `NEXT_PUBLIC_REVERB_HOST`, `NEXT_PUBLIC_REVERB_PORT` and `NEXT_PUBLIC_REVERB_SCHEME` in its server-side build environment. Only the public key is shared with the client; the app secret remains backend-only. Rebuild the existing frontend release after changing these values because Next.js embeds public environment variables at build time. Back up the environment, Nginx, Supervisor and installed deployment entry point before provisioning; restore those copies and rebuild the previous config cache if provisioning fails.
