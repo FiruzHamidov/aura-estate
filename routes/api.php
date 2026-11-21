@@ -201,6 +201,8 @@ Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
     });
 
     Route::prefix('attendance')->group(function () {
+        Route::get('/exclusions', [\App\Http\Controllers\AttendanceExclusionController::class, 'index']);
+        Route::patch('/exclusions/{user}', [\App\Http\Controllers\AttendanceExclusionController::class, 'update'])->whereNumber('user');
         Route::get('/presence', [AttendanceWebController::class, 'presence']);
         Route::get('/matrix', [AttendanceWebController::class, 'matrix']);
         Route::get('/hr-report', [AttendanceReportController::class, 'hrReport']);
