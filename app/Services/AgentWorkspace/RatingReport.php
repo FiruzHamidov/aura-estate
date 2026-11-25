@@ -32,6 +32,7 @@ final class RatingReport
             $revisions = DB::table('agent_rating_revisions')->whereIn('id', $ids)->get();
             $agents = [];
             $details = [];
+            $visibleRevisionIds = [];
             foreach ($revisions as $revision) {
                 $p = json_decode($revision->payload, true);
                 if ($category === 'rental' && $p['kind'] !== 'rental') {
@@ -45,6 +46,7 @@ final class RatingReport
                         continue;
                     }
                     $id = $allocation['agent_id'];
+                    $visibleRevisionIds[$revision->id] = true;
                     $agents[$id] ??= ['agent_id' => $id, 'score_minor' => 0, '_deals' => [], '_branches' => []];
                     $agents[$id]['score_minor'] += $allocation['credit_minor'];
                     if ($allocation['share_bps'] > 0) {
@@ -94,7 +96,9 @@ final class RatingReport
             }
             unset($row);
             $excluded = $period ? 0 : $sources->filter(fn ($s) => ! $s->approved_revision_id && $this->access->matches($actor, $s, $scope) && ($category !== 'rental' || in_array($s->kind, ['rental', 'unknown'], true)))->count();
-            $pending = $period ? 0 : $sources->filter(fn ($s) => $s->approved_revision_id && $s->pending_revision_id && $this->access->matches($actor, $s, $scope) && ($category !== 'rental' || in_array($s->kind, ['rental', 'unknown'], true)))->count();
+            // A shared transaction can affect this scope through a participant in another office.
+            $pending = $period ? 0 : $sources->filter(fn ($s) => $s->approved_revision_id && $s->pending_revision_id &&
+                (isset($visibleRevisionIds[$s->approved_revision_id]) || ($this->access->matches($actor, $s, $scope) && ($category !== 'rental' || in_array($s->kind, ['rental', 'unknown'], true)))))->count();
             $me = collect($rows)->firstWhere('agent_id', $actor->id) ?? ['agent_id' => $actor->id, 'name' => $actor->name, 'photo' => $actor->photo,
                 'offices' => [], 'score_minor' => 0, 'deal_count' => 0, 'rank' => null, 'shared_rank' => false,
                 'previous_rank' => null, 'delta_rank' => null, 'is_new' => false, 'profile_url' => null, 'can_view_details' => $actor->hasPermission('agent_rating.details')];

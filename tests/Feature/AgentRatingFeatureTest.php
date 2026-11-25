@@ -222,6 +222,44 @@ class AgentRatingFeatureTest extends KpiResultsFeatureTest
         $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('pending_count', 1)->assertJsonPath('data_quality', 'partial')->assertJsonPath('rows.0.score_minor', 1000000);
     }
 
+    public function test_pending_shared_commission_is_visible_to_the_other_office_and_personal_dashboard(): void
+    {
+        DB::table('branches')->insert(['id' => 2, 'name' => 'Другой филиал']);
+        $participant = $this->user('agent', 2);
+        $participant->forceFill(['branch_id' => 2, 'branch_group_id' => null])->saveQuietly();
+        $participant->role->forceFill(['permissions' => ['agent_rating.view', 'agent_rating.scope.own', 'agent_rating.scope.branch', 'kpi.reports.view']])->save();
+        $participant->unsetRelation('role');
+        $source = $this->source($this->agent);
+        $participants = [
+            ['agent_id' => $this->agent->id, 'side' => 'closing', 'share_bps' => 6000],
+            ['agent_id' => $participant->id, 'side' => 'listing', 'share_bps' => 4000, 'branch_id' => 2, 'branch_group_id' => null],
+        ];
+        $revision = $this->draft($source, $participants);
+        app(RatingLedger::class)->confirm($this->confirmer, $revision->id);
+        $source = DB::table('agent_rating_sources')->find($source->id);
+        $this->draft($source, $participants, ['commission' => '20000']);
+
+        Sanctum::actingAs($participant);
+        foreach (['own', 'branch:2'] as $scope) {
+            $this->getJson('/api/agent-ratings?month=2026-11&scope='.$scope)->assertOk()
+                ->assertJsonPath('pending_count', 1)->assertJsonPath('data_quality', 'partial')
+                ->assertJsonPath('me.score_minor', 400000);
+        }
+        $this->getJson('/api/agent-ratings?month=2026-11&scope=own&category=rental')->assertOk()
+            ->assertJsonPath('pending_count', 0)->assertJsonPath('data_quality', 'complete');
+        $metrics = collect($this->getJson('/api/agent-dashboard?month=2026-11')->assertOk()->json('metrics'))->keyBy('key');
+        self::assertSame('partial', $metrics['revenue']['status']);
+        self::assertSame('partial', $metrics['deals']['status']);
+        self::assertSame(400000, $metrics['revenue']['value']);
+        self::assertSame(1, $metrics['deals']['value']);
+        $rental = collect($this->getJson('/api/agent-dashboard?month=2026-11&kind=rental')->assertOk()->json('metrics'))->keyBy('key');
+        self::assertSame('complete', $rental['revenue']['status']);
+
+        Sanctum::actingAs($this->user('agent', 2));
+        $this->getJson('/api/agent-ratings?month=2026-11&scope=own')->assertOk()
+            ->assertJsonPath('pending_count', 0)->assertJsonPath('data_quality', 'complete');
+    }
+
     public function test_crm_records_share_one_canonical_cycle_and_ambiguous_links_require_review(): void
     {
         $this->crmFixture();
