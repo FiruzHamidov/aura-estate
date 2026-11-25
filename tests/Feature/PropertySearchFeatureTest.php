@@ -704,6 +704,30 @@ class PropertySearchFeatureTest extends TestCase
         $this->getJson('/api/agent-search?q='.urlencode('Secret'))->assertOk()->assertJsonCount(1, 'properties')->assertJsonMissingPath('properties.0.owner_name');
     }
 
+    public function test_property_search_preserves_literal_wildcards_and_escape_characters(): void
+    {
+        $this->withoutMiddleware(\App\Http\Middleware\EnsureDailyReportSubmitted::class);
+        Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $this->agentRole->forceFill(['slug' => 'custom_search', 'permissions' => ['properties.list.internal', 'properties.list.scope.own']])->save();
+        $cases = [
+            ['Lot 100%', 'Lot 1000', '100%'],
+            ['Block_A', 'BlockXA', 'Block_A'],
+            ['Lot!A', 'LotA', 'Lot!A'],
+            ['Lot\\A', 'LotA', 'Lot\\A'],
+        ];
+        foreach ($cases as [$title, $decoy, $term]) {
+            $match = $this->createProperty(['title' => $title, 'agent_id' => $this->agent->id]);
+            $this->createProperty(['title' => $decoy, 'agent_id' => $this->agent->id]);
+            $this->getJson('/api/properties/search?q='.urlencode($term))->assertOk()
+                ->assertJsonPath('total', 1)->assertJsonPath('data.0.id', $match->id);
+        }
+        \Laravel\Sanctum\Sanctum::actingAs($this->agent->fresh());
+        foreach ($cases as [$title, $decoy, $term]) {
+            $this->getJson('/api/agent-search?q='.urlencode($term))->assertOk()
+                ->assertJsonCount(1, 'properties')->assertJsonPath('properties.0.label', $title);
+        }
+    }
+
     private function createProperty(array $attributes = []): Property
     {
         $property = Property::create(array_merge([
