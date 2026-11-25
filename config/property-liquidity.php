@@ -9,6 +9,8 @@ return [
     'high_confidence_sold_count' => 50,
     'public_badge_minimum_confidence' => 45,
     'liquid_score_threshold' => 65,
+    // Daily recalculation plus time for queued jobs to finish.
+    'chat_max_age_hours' => 48,
     'price_position' => [
         'below_market_max_pct' => -5,
         'at_market_max_pct' => 5,
