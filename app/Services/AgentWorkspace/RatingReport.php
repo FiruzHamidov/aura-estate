@@ -33,6 +33,7 @@ final class RatingReport
             $agents = [];
             $details = [];
             $visibleRevisionIds = [];
+            $visibleTransactions = [];
             foreach ($revisions as $revision) {
                 $p = json_decode($revision->payload, true);
                 if ($category === 'rental' && $p['kind'] !== 'rental') {
@@ -51,6 +52,7 @@ final class RatingReport
                     $agents[$id]['score_minor'] += $allocation['credit_minor'];
                     if ($allocation['share_bps'] > 0) {
                         $agents[$id]['_deals'][$p['transaction_id']] = true;
+                        $visibleTransactions[$p['transaction_id']] = true;
                     }
                     if ($allocation['branch_id']) {
                         $agents[$id]['_branches'][$allocation['branch_id']] = true;
@@ -102,11 +104,41 @@ final class RatingReport
             $me = collect($rows)->firstWhere('agent_id', $actor->id) ?? ['agent_id' => $actor->id, 'name' => $actor->name, 'photo' => $actor->photo,
                 'offices' => [], 'score_minor' => 0, 'deal_count' => 0, 'rank' => null, 'shared_rank' => false,
                 'previous_rank' => null, 'delta_rank' => null, 'is_new' => false, 'profile_url' => null, 'can_view_details' => $actor->hasPermission('agent_rating.details')];
+            $overview = $scope !== 'own' && $actor->hasPermission('agent_rating.scope.all') && ! $actor->usesAssignedGroupScope();
+            $summary = null;
+            if ($overview) {
+                // Recorded source amounts are visible separately; they are not approved
+                // contributions and do not assign an agent a share or a rank.
+                $recorded = 0;
+                $recordedCount = 0;
+                if (! $period && in_array($category, ['all', 'rental'], true)) {
+                    foreach ($sources as $source) {
+                        if ($source->approved_revision_id || $source->state !== 'closed' || $source->canonical_source_id ||
+                            ! $source->closed_at || CarbonImmutable::parse($source->closed_at, 'UTC')->isFuture() || ! in_array($source->kind, ['sale', 'rental'], true) ||
+                            ($category === 'rental' && $source->kind !== 'rental') || ! $this->access->matches($actor, $source, $scope)) {
+                            continue;
+                        }
+                        $financials = json_decode($source->financials ?? '{}', true);
+                        if (! in_array($financials['currency'] ?? null, ['TJS', 'USD'], true) || ! isset($financials['commission'])) {
+                            continue;
+                        }
+                        try {
+                            $recorded += CommissionMath::base((string) $financials['commission'], '0', $financials['currency'], $financials['fx_rate'] ?? null);
+                            $recordedCount++;
+                        } catch (\Illuminate\Validation\ValidationException) {
+                            // Missing/invalid money remains in the review queue, never a zero.
+                        }
+                    }
+                }
+                $summary = ['score_minor' => array_sum(array_column($rows, 'score_minor')), 'deal_count' => count($visibleTransactions),
+                    'agent_count' => count($rows), 'recorded_unranked_minor' => $recorded, 'recorded_unranked_count' => $recordedCount];
+            }
             $payload = ['snapshot_id' => (string) Str::uuid(), 'rules_version' => self::VERSION, 'period' => $month,
                 'timezone' => 'Asia/Dushanbe', 'currency' => 'TJS', 'scope' => $scope, 'scopes' => $this->access->scopes($actor),
                 'category' => $category, 'as_of' => $asOf, 'status' => $period ? ($period->version > 1 ? 'corrected' : 'final') : 'provisional',
                 'period_version' => $period?->version ?? 0, 'data_quality' => ($excluded || $pending) ? 'partial' : 'complete', 'excluded_count' => $excluded, 'pending_count' => $pending,
                 'total_ranked' => $scope === 'own' ? null : count(array_filter($rows, fn ($r) => $r['rank'] !== null)), 'cutoff_rank' => 15,
+                'summary' => $summary, 'show_personal_result' => ! $overview || $me['deal_count'] > 0,
                 'leaders' => $scope === 'own' ? [] : array_values(array_filter($rows, fn ($r) => $r['rank'] === 1)), 'rows' => $rows, 'me' => $me,
                 'capabilities' => ['peers' => $scope !== 'own', 'prepare' => $actor->hasPermission('agent_rating.prepare'),
                     'confirm' => $actor->hasPermission('agent_rating.confirm'), 'close' => $actor->hasPermission('agent_rating.close') && $scope === 'all',
