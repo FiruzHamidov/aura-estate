@@ -47,6 +47,11 @@ class ChatService
                     "- Users may provide filters gradually across multiple messages. You MUST remember and combine previous filters from the conversation.\n".
                     "- When minimal filters are collected (for example rooms + price + city/district), call the tool `search_properties` immediately.\n".
                     "- Do NOT block search for optional fields.\n".
+                    "- For liquid properties, easy resale, or investment selections (e.g. ликвидные квартиры, барои сармоягузорӣ, easy to resell), call search_properties immediately with sort_by=liquidity even without other filters. Preserve this search intent in follow-up refinements until the user changes it.\n".
+                    "- Liquidity search covers ALL eligible published listings, including regular listings. Urgent/VIP are paid promotion labels and are NOT evidence of liquidity. Never substitute listing_type=urgent for a liquidity request.\n".
+                    "- Liquidity results use the platform's daily market calculation (comparable prices, demand, and property characteristics). Preserve the returned ranking; do not invent scores, returns, demand counts, or sale deadlines. This is an estimate, not a guarantee of resale.\n".
+                    "- Liquidity estimates currently cover sales only. If the user explicitly requests rent, keep offer_type=rent and explain that liquidity estimates for rentals are unavailable.\n".
+                    "- If a liquidity search is empty, explain that no listings with a sufficiently recent, reliable estimate match these filters; do not claim there are no properties for sale and do not silently switch to urgent or unrelated listings.\n".
                     "- Currency is optional. If user gives price without currency, assume TJS and continue.\n".
                     "- If offer type (sale/rent) is missing, run search anyway and optionally ask one brief follow-up after showing results.\n".
                     "- Ask at most one clarifying question at a time, and only when truly required.\n".
@@ -58,6 +63,7 @@ class ChatService
                     "- Always represent Aura Estate as the source.\n".
                     "- Use ONLY the exact filter parameter names defined in search_properties.\n".
                     "- For ranges, ALWAYS use From/To suffixes (priceFrom, roomsTo, etc).\n".
+                    "- For an exact room count, set roomsFrom and roomsTo to the same number.\n".
                     "- For districts, ALWAYS pass an array: districts[].\n".
                     "- Do NOT invent fields that are not listed.\n".
                     "- AVAILABLE DISTRICTS (strict values from database):\n".
@@ -86,78 +92,25 @@ class ChatService
         $tools = [[
             'type'        => 'function',
             'name'        => 'search_properties',
-            'description' => 'Search Aura Estate properties using advanced filters',
+            'description' => 'Search published Aura Estate properties, including a daily refreshed liquidity ranking across regular, urgent, and VIP listings',
             'parameters'  => [
                 'type'       => 'object',
                 'properties' => [
-
-                    // мульти-статусы
-                    'moderation_status' => [
-                        'type'  => 'array',
-                        'items' => ['type' => 'string']
+                    'city' => ['type' => 'string', 'description' => 'City name, for example Душанбе'],
+                    'districts' => ['type' => 'array', 'items' => ['type' => 'string']],
+                    'property_type' => ['type' => 'string', 'description' => 'Property type name, slug, or ID'],
+                    'offer_type' => ['type' => 'string', 'enum' => ['sale', 'rent']],
+                    'currency' => ['type' => 'string', 'enum' => ['TJS', 'USD']],
+                    'priceFrom' => ['type' => 'number'],
+                    'priceTo' => ['type' => 'number'],
+                    'roomsFrom' => ['type' => 'integer'],
+                    'roomsTo' => ['type' => 'integer'],
+                    'sort_by' => [
+                        'type' => 'string',
+                        'enum' => ['recommended', 'liquidity'],
+                        'description' => 'Use liquidity for liquid properties, investment, or easy resale. Searches all published sale listings by recent market estimates, independently of urgent/VIP promotions. Keep this choice when refining that search.',
                     ],
-
-                    // districts fuzzy
-                    'districts' => [
-                        'type'  => 'array',
-                        'items' => ['type' => 'string']
-                    ],
-
-                    // текстовые поля
-                    'title'           => ['type' => 'string'],
-                    'description'     => ['type' => 'string'],
-                    'address'         => ['type' => 'string'],
-                    'landmark'        => ['type' => 'string'],
-                    'condition'       => ['type' => 'string'],
-                    'apartment_type'  => ['type' => 'string'],
-                    'owner_phone'     => ['type' => 'string'],
-
-                    // точные поля
-                    'type_id'                => ['type' => 'integer'],
-                    'status_id'              => ['type' => 'integer'],
-                    'location_id'            => ['type' => 'integer'],
-                    'repair_type_id'         => ['type' => 'integer'],
-                    'currency'               => ['type' => 'string'],
-                    'offer_type'             => ['type' => 'string', 'enum' => ['sale','rent']],
-                    'agent_id'               => ['type' => 'integer'],
-                    'listing_type'           => ['type' => 'string'],
-                    'created_by'             => ['type' => 'integer'],
-                    'contract_type_id'       => ['type' => 'integer'],
-                    'developer_id'            => ['type' => 'integer'],
-                    'heating_type_id'        => ['type' => 'integer'],
-                    'parking_type_id'        => ['type' => 'integer'],
-
-                    // boolean
-                    'has_garden'             => ['type' => 'boolean'],
-                    'has_parking'            => ['type' => 'boolean'],
-                    'is_mortgage_available'  => ['type' => 'boolean'],
-                    'is_from_developer'      => ['type' => 'boolean'],
-                    'is_business_owner'      => ['type' => 'boolean'],
-                    'is_full_apartment'      => ['type' => 'boolean'],
-                    'is_for_aura'             => ['type' => 'boolean'],
-
-                    // диапазоны
-                    'priceFrom'        => ['type' => 'number'],
-                    'priceTo'          => ['type' => 'number'],
-                    'roomsFrom'        => ['type' => 'number'],
-                    'roomsTo'          => ['type' => 'number'],
-                    'total_areaFrom'   => ['type' => 'number'],
-                    'total_areaTo'     => ['type' => 'number'],
-                    'living_areaFrom'  => ['type' => 'number'],
-                    'living_areaTo'    => ['type' => 'number'],
-                    'floorFrom'        => ['type' => 'number'],
-                    'floorTo'          => ['type' => 'number'],
-                    'total_floorsFrom' => ['type' => 'number'],
-                    'total_floorsTo'   => ['type' => 'number'],
-                    'year_builtFrom'   => ['type' => 'number'],
-                    'year_builtTo'     => ['type' => 'number'],
-
-                    // даты
-                    'date_from'        => ['type' => 'string'],
-                    'date_to'          => ['type' => 'string'],
-
-                    // служебные
-                    'limit'            => ['type' => 'integer', 'default' => 6],
+                    'limit' => ['type' => 'integer', 'minimum' => 1, 'maximum' => 6, 'default' => 6],
                 ],
             ],
         ], [
@@ -228,13 +181,11 @@ class ChatService
                     $args['price_max'] = is_numeric($args['priceTo']) ? (float)$args['priceTo'] : null;
                 }
                 // rooms range: поддержка "1-2 комнатные"
-                if (array_key_exists('roomsFrom', $args) && array_key_exists('roomsTo', $args)) {
+                if (isset($args['roomsFrom'])) {
                     $args['rooms_min'] = (int)$args['roomsFrom'];
+                }
+                if (isset($args['roomsTo'])) {
                     $args['rooms_max'] = (int)$args['roomsTo'];
-                } elseif (array_key_exists('roomsFrom', $args)) {
-                    $args['rooms'] = (int)$args['roomsFrom'];
-                } elseif (array_key_exists('roomsTo', $args)) {
-                    $args['rooms'] = (int)$args['roomsTo'];
                 }
 
                 // --- Normalize districts to strict DB values (safety net)
@@ -280,7 +231,10 @@ class ChatService
                     'content' =>
                         "Here are the search results in JSON format. ".
                         "Use them to answer the user concisely in the user's language. ".
-                        "If results are empty, politely ask clarifying questions.\n".
+                        "Use only the returned listings and preserve their order. ".
+                        "For sort_by=liquidity, these are candidates from all published sale listings with a recent, sufficiently reliable market estimate, not a promise of resale. ".
+                        "If liquidity results are empty, say no currently assessed candidates match the filters (rental estimates are unavailable); offer to adjust one filter. ".
+                        "For other empty searches, politely ask a clarifying question.\n".
                         json_encode($resultsEnvelope, JSON_UNESCAPED_UNICODE),
                 ];
 

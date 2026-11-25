@@ -510,6 +510,43 @@ class PropertyLiquidityFeatureTest extends TestCase
         $this->assertSame(15, app(PropertyMarketDays::class)->calculate($property->fresh()));
     }
 
+    public function test_daily_recalculation_refreshes_liquid_chat_candidates_without_promotions(): void
+    {
+        Schema::table('properties', fn (Blueprint $table) => $table->string('address')->nullable());
+        Schema::create('property_view_daily_stats', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedBigInteger('property_id');
+            $table->date('date');
+            $table->unsignedInteger('views_count');
+            $table->unsignedInteger('views_delta');
+            $table->unsignedInteger('active_days');
+            $table->timestamps();
+        });
+        $first = $this->createTarget(80_000, 1);
+        $search = fn () => array_column(app(\App\Services\Chat\PropertyRepository::class)->search([
+            'sort_by' => 'liquidity', 'city' => 'Душанбе', 'property_type' => 'apartment',
+        ]), 'id');
+        $this->assertSame([], $search());
+
+        $this->artisan('properties:recalculate-liquidity', ['--sync' => true])->assertSuccessful();
+        $this->assertContains($first->id, $search());
+        $this->assertSame('regular', $first->fresh()->listing_type);
+
+        $this->travel(1)->days();
+        DB::table('properties')->where('id', $first->id)->update(['price' => 170_000]);
+        $second = $this->createTarget(82_000, 1);
+        $this->artisan('properties:recalculate-liquidity', ['--sync' => true])->assertSuccessful();
+        $this->assertNotContains($first->id, $search());
+        $this->assertContains($second->id, $search());
+        $this->assertSame(now()->toDateString(), $second->fresh()->liquidity_calculated_at->toDateString());
+
+        $schedule = collect(app(\Illuminate\Console\Scheduling\Schedule::class)->events())
+            ->first(fn ($event) => str_contains($event->command ?? '', 'properties:recalculate-liquidity'));
+        $this->assertNotNull($schedule);
+        $this->assertSame('30 2 * * *', $schedule->expression);
+        $this->assertTrue($schedule->withoutOverlapping);
+    }
+
     private function createTarget(float $price, int $agentId): Property
     {
         $id = DB::table('properties')->insertGetId($this->propertyRow([

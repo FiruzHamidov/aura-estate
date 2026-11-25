@@ -2,6 +2,7 @@
 
 namespace App\Services\Chat;
 
+use App\Models\Property;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
@@ -11,8 +12,11 @@ class PropertyRepository
     public function search(array $args): array
     {
         // ---------- Нормализация ----------
-        $limit = (int) ($args['limit'] ?? 6);
+        $limit = max(1, min(6, (int) ($args['limit'] ?? 6)));
+        $liquiditySearch = ($args['sort_by'] ?? null) === 'liquidity';
         $rooms = isset($args['rooms']) ? (int) $args['rooms'] : null;
+        $roomsMin = isset($args['rooms_min']) ? (int) $args['rooms_min'] : null;
+        $roomsMax = isset($args['rooms_max']) ? (int) $args['rooms_max'] : null;
         $offerType = ($args['offer_type'] ?? null) === 'rent' ? 'rent' : (($args['offer_type'] ?? null) === 'sale' ? 'sale' : null);
         $currency = in_array(($args['currency'] ?? null), ['TJS', 'USD'], true)
             ? $args['currency']
@@ -21,19 +25,24 @@ class PropertyRepository
         $cityRaw = $args['city'] ?? '';
         $city = $this->normalizeCity($cityRaw);
 
-        [$typeId, $typeMeta] = $this->resolveTypeId($args['property_type'] ?? null);
+        $typeInput = $args['property_type'] ?? $args['type_id'] ?? null;
+        [$typeId] = $this->resolveTypeId($typeInput);
 
-        $propertyIdsWithPhotos = [];
+        // Never replace a requested liquid property type with an unrelated one.
+        if ($liquiditySearch && $typeInput && $typeId === null) {
+            return [];
+        }
+
         $hasDiscountPrice = Schema::hasColumn('properties', 'discount_price');
         $hasEffectivePrice = Schema::hasColumn('properties', 'effective_price');
         $effectivePriceSql = $hasEffectivePrice
             ? 'properties.effective_price'
             : ($hasDiscountPrice
-                ? 'COALESCE(NULLIF(properties.discount_price, 0), properties.price)'
+                ? 'CAST(COALESCE(NULLIF(properties.discount_price, 0), properties.price) AS DECIMAL(18, 2))'
                 : 'properties.price');
 
         // ---------- База запроса ----------
-        $base = DB::table('properties')
+        $base = Property::query()->publicSearchable()->toBase()
             ->select([
                 'properties.id',
                 'properties.title',
@@ -46,31 +55,25 @@ class PropertyRepository
                 'properties.district',
                 'properties.created_at',
             ])
-            ->addSelect(DB::raw("{$effectivePriceSql} as effective_price"))
-            ->when(
-                Schema::hasColumn('properties', 'publication_status'),
-                fn ($query) => $query->where('properties.publication_status', 'published'),
-                fn ($query) => $query->where('properties.moderation_status', 'approved'),
-            );
+            ->addSelect(DB::raw("{$effectivePriceSql} as effective_price"));
 
-        if (Schema::hasTable('property_moderation_cases')) {
-            $base->whereNotExists(function ($query): void {
-                $query->selectRaw('1')
-                    ->from('property_moderation_cases as pmc')
-                    ->whereColumn('pmc.property_id', 'properties.id')
-                    ->where('pmc.status', 'open')
-                    ->where('pmc.blocking', true);
-            });
-        }
-        if (Schema::hasTable('property_duplicate_candidates') && Schema::hasTable('property_moderation_cases')) {
-            $base->whereNotExists(function ($query): void {
-                $query->selectRaw('1')
-                    ->from('property_duplicate_candidates as pdc')
-                    ->join('property_moderation_cases as duplicate_cases', 'duplicate_cases.id', '=', 'pdc.moderation_case_id')
-                    ->whereColumn('duplicate_cases.property_id', 'properties.id')
-                    ->where('pdc.decision', 'confirmed_duplicate')
-                    ->whereNull('pdc.reversed_at');
-            });
+        if ($liquiditySearch) {
+            if (! Schema::hasColumns('properties', [
+                'liquidity_score', 'liquidity_confidence', 'price_position',
+                'liquidity_calculated_at', 'liquidity_model_version',
+            ])) {
+                return [];
+            }
+
+            $base->where('properties.offer_type', 'sale')
+                ->where('properties.liquidity_score', '>=', (int) config('property-liquidity.liquid_score_threshold', 65))
+                ->where('properties.liquidity_confidence', '>=', (int) config('property-liquidity.public_badge_minimum_confidence', 45))
+                ->whereIn('properties.price_position', ['below_market', 'at_market'])
+                ->where('properties.liquidity_model_version', config('property-liquidity.model_version'))
+                ->whereBetween('properties.liquidity_calculated_at', [
+                    now()->subHours(max(1, (int) config('property-liquidity.chat_max_age_hours', 48))), now(),
+                ])
+                ->addSelect('properties.liquidity_calculated_at');
         }
 
         if (Schema::hasTable('property_promotions')) {
@@ -99,19 +102,20 @@ class PropertyRepository
                 ]);
         }
 
-        $hasLocations = Schema::hasTable('locations');
-        if ($hasLocations && Schema::hasColumn('locations', 'name')) {
+        $cityColumn = Schema::hasColumn('locations', 'city') ? 'locations.city'
+            : (Schema::hasColumn('locations', 'name') ? 'locations.name' : null);
+        if ($cityColumn) {
             $base->leftJoin('locations', 'properties.location_id', '=', 'locations.id')
-                ->addSelect(DB::raw('COALESCE(locations.name, NULL) as city'));
+                ->addSelect(DB::raw("{$cityColumn} as city"));
         }
 
         // единый билдер с функцией накатывания фильтров
-        $applyFilters = function ($q, $opts) use ($hasLocations, $offerType, $typeId, $rooms, $city, $currency, $effectivePriceSql) {
+        $applyFilters = function ($q, $opts) use ($cityColumn, $offerType, $typeId, $rooms, $roomsMin, $roomsMax, $city, $currency, $effectivePriceSql, $liquiditySearch) {
             if (! empty($opts['city']) && $city) {
                 // важно обернуть в одну группу, чтобы orWhere не ломал остальные условия
-                $q->where(function ($w) use ($hasLocations, $city) {
-                    if ($hasLocations && Schema::hasColumn('locations', 'name')) {
-                        $w->where('locations.name', 'like', '%'.$city.'%');
+                $q->where(function ($w) use ($cityColumn, $city) {
+                    if ($cityColumn) {
+                        $w->where($cityColumn, 'like', '%'.$city.'%');
                     } else {
                         $w->where(function ($qq) use ($city) {
                             $qq->whereNotNull('properties.district')
@@ -135,6 +139,12 @@ class PropertyRepository
             if (! empty($opts['rooms']) && $rooms !== null) {
                 $q->where('properties.rooms', $rooms);
             }
+            if (! empty($opts['rooms']) && $roomsMin !== null) {
+                $q->where('properties.rooms', '>=', $roomsMin);
+            }
+            if (! empty($opts['rooms']) && $roomsMax !== null) {
+                $q->where('properties.rooms', '<=', $roomsMax);
+            }
 
             if (! empty($opts['districts']) && is_array($opts['districts'])) {
                 $q->whereIn('properties.district', $opts['districts']);
@@ -154,7 +164,10 @@ class PropertyRepository
                 $q->whereRaw("{$effectivePriceSql} <= ?", [$priceMax]);
             }
 
-            if (Schema::hasTable('property_promotions')) {
+            if ($liquiditySearch) {
+                $q->orderByDesc('properties.liquidity_score')
+                    ->orderByDesc('properties.liquidity_confidence');
+            } elseif (Schema::hasTable('property_promotions')) {
                 $q->orderByRaw("CASE
                     WHEN EXISTS (SELECT 1 FROM property_promotions pp WHERE pp.property_id = properties.id AND pp.status = 'active' AND pp.starts_at <= CURRENT_TIMESTAMP AND pp.ends_at > CURRENT_TIMESTAMP AND pp.type = 'urgent') THEN 0
                     WHEN EXISTS (SELECT 1 FROM property_promotions pp WHERE pp.property_id = properties.id AND pp.status = 'active' AND pp.starts_at <= CURRENT_TIMESTAMP AND pp.ends_at > CURRENT_TIMESTAMP AND pp.type = 'vip') THEN 1
@@ -162,7 +175,7 @@ class PropertyRepository
             } else {
                 $q->orderByRaw("CASE WHEN properties.listing_type='urgent' THEN 0 WHEN properties.listing_type='vip' THEN 1 ELSE 2 END");
             }
-            $q->orderByDesc('properties.created_at');
+            $q->orderByDesc('properties.created_at')->orderByDesc('properties.id');
         };
 
         // значения цены
@@ -184,7 +197,7 @@ class PropertyRepository
         $rows = $q1->limit($limit)->get();
 
         // step 2: если пусто, убираем city
-        if ($rows->isEmpty() && $city) {
+        if (! $liquiditySearch && $rows->isEmpty() && $city) {
             $q2 = (clone $base);
             $applyFilters($q2, [
                 'city' => false,
@@ -199,7 +212,7 @@ class PropertyRepository
         }
 
         // step 3: если пусто, убираем ещё и type
-        if ($rows->isEmpty() && $typeId !== null) {
+        if (! $liquiditySearch && $rows->isEmpty() && $typeId !== null) {
             $q3 = (clone $base);
             $applyFilters($q3, [
                 'city' => false,
@@ -214,7 +227,7 @@ class PropertyRepository
         }
 
         // step 4: если пусто, убираем ещё и rooms
-        if ($rows->isEmpty() && $rooms !== null) {
+        if (! $liquiditySearch && $rows->isEmpty() && ($rooms !== null || $roomsMin !== null || $roomsMax !== null)) {
             $q4 = (clone $base);
             $applyFilters($q4, [
                 'city' => false,
@@ -247,7 +260,7 @@ class PropertyRepository
         }
 
         // ---------- Mapping ----------
-        return $rows->map(function ($r) use ($photosByProperty) {
+        return $rows->map(function ($r) use ($photosByProperty, $liquiditySearch) {
             $type = [
                 'id' => $r->type_id,
                 'name' => property_exists($r, 'type_name') ? $r->type_name : null,
@@ -281,6 +294,10 @@ class PropertyRepository
                 'created_at' => $r->created_at,
                 'listing' => $r->listing_type,
                 'address' => $r->address,
+                ...($liquiditySearch ? ['selection' => [
+                    'basis' => 'liquidity',
+                    'calculated_at' => $r->liquidity_calculated_at,
+                ]] : []),
             ];
         })->all();
     }
@@ -299,9 +316,9 @@ class PropertyRepository
 
         $syn = [
             'Душанбе' => 'Душанбе',
-            'душанбе' => 'душанбе',
+            'душанбе' => 'Душанбе',
             'душанбее' => 'Душанбе',
-            'dushanbe' => 'душанбе',
+            'dushanbe' => 'Душанбе',
             'Dushanbe' => 'Душанбе',
         ];
 
