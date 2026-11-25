@@ -1337,31 +1337,31 @@ class PropertyController extends Controller
             }
 
             foreach ($this->propertySearchTextColumns() as $column) {
-                $searchQuery->orWhereRaw("LOWER(properties.{$column}) LIKE ? ESCAPE '\\'", [$like]);
+                $searchQuery->orWhereRaw("LOWER(properties.{$column}) LIKE ? ESCAPE '!'", [$like]);
             }
 
             if ($includeCrmFields) {
                 foreach ($this->propertySearchCrmColumns() as $column) {
-                    $searchQuery->orWhereRaw("LOWER(properties.{$column}) LIKE ? ESCAPE '\\'", [$like]);
+                    $searchQuery->orWhereRaw("LOWER(properties.{$column}) LIKE ? ESCAPE '!'", [$like]);
                 }
             }
 
             $searchQuery
                 ->orWhereHas('developer', fn (Builder $developerQuery) => $developerQuery
-                    ->whereRaw("LOWER(name) LIKE ? ESCAPE '\\'", [$like]))
+                    ->whereRaw("LOWER(name) LIKE ? ESCAPE '!'", [$like]))
                 ->orWhereHas('location', fn (Builder $locationQuery) => $locationQuery
-                    ->whereRaw("LOWER(city) LIKE ? ESCAPE '\\'", [$like]))
+                    ->whereRaw("LOWER(city) LIKE ? ESCAPE '!'", [$like]))
                 ->orWhereHas('type', fn (Builder $typeQuery) => $typeQuery
-                    ->whereRaw("LOWER(name) LIKE ? ESCAPE '\\'", [$like])
-                    ->orWhereRaw("LOWER(slug) LIKE ? ESCAPE '\\'", [$like]))
+                    ->whereRaw("LOWER(name) LIKE ? ESCAPE '!'", [$like])
+                    ->orWhereRaw("LOWER(slug) LIKE ? ESCAPE '!'", [$like]))
                 ->orWhereHas('status', fn (Builder $statusQuery) => $statusQuery
-                    ->whereRaw("LOWER(name) LIKE ? ESCAPE '\\'", [$like])
-                    ->orWhereRaw("LOWER(slug) LIKE ? ESCAPE '\\'", [$like]));
+                    ->whereRaw("LOWER(name) LIKE ? ESCAPE '!'", [$like])
+                    ->orWhereRaw("LOWER(slug) LIKE ? ESCAPE '!'", [$like]));
 
             if ($this->supportsPropertyTags()) {
                 $searchQuery->orWhereHas('tags', fn (Builder $tagQuery) => $tagQuery
-                    ->whereRaw("LOWER(tags.name) LIKE ? ESCAPE '\\'", [$like])
-                    ->orWhereRaw("LOWER(tags.slug) LIKE ? ESCAPE '\\'", [$like]));
+                    ->whereRaw("LOWER(tags.name) LIKE ? ESCAPE '!'", [$like])
+                    ->orWhereRaw("LOWER(tags.slug) LIKE ? ESCAPE '!'", [$like]));
             }
         });
     }
@@ -1396,7 +1396,7 @@ class PropertyController extends Controller
         if (Schema::hasColumn('properties', 'title')) {
             $cases[] = 'WHEN LOWER(properties.title) = ? THEN 800';
             $bindings[] = $lowerTerm;
-            $cases[] = "WHEN LOWER(properties.title) LIKE ? ESCAPE '\\' THEN 700";
+            $cases[] = "WHEN LOWER(properties.title) LIKE ? ESCAPE '!' THEN 700";
             $bindings[] = $like;
         }
 
@@ -1406,14 +1406,14 @@ class PropertyController extends Controller
             'description' => 350,
         ] as $column => $score) {
             if (Schema::hasColumn('properties', $column)) {
-                $cases[] = "WHEN LOWER(properties.{$column}) LIKE ? ESCAPE '\\' THEN {$score}";
+                $cases[] = "WHEN LOWER(properties.{$column}) LIKE ? ESCAPE '!' THEN {$score}";
                 $bindings[] = $like;
             }
         }
 
         if ($includeCrmFields) {
             foreach ($this->propertySearchCrmColumns() as $column) {
-                $cases[] = "WHEN LOWER(properties.{$column}) LIKE ? ESCAPE '\\' THEN 240";
+                $cases[] = "WHEN LOWER(properties.{$column}) LIKE ? ESCAPE '!' THEN 240";
                 $bindings[] = $like;
             }
         }
@@ -1424,7 +1424,7 @@ class PropertyController extends Controller
                 FROM property_tag
                 INNER JOIN tags ON tags.id = property_tag.tag_id
                 WHERE property_tag.property_id = properties.id
-                  AND (LOWER(tags.name) LIKE ? ESCAPE '\\' OR LOWER(tags.slug) LIKE ? ESCAPE '\\')
+                  AND (LOWER(tags.name) LIKE ? ESCAPE '!' OR LOWER(tags.slug) LIKE ? ESCAPE '!')
             ) THEN 500";
             $bindings[] = $like;
             $bindings[] = $like;
@@ -1498,7 +1498,8 @@ class PropertyController extends Controller
 
     private function escapeLikeTerm(string $term): string
     {
-        return str_replace(['\\', '%', '_'], ['\\\\', '\%', '\_'], $term);
+        // An explicit non-backslash escape works in both MySQL SQL modes and SQLite.
+        return str_replace(['!', '%', '_'], ['!!', '!%', '!_'], $term);
     }
 
     private function serializePropertySearchResult(Property $property): array
