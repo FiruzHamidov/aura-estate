@@ -68,7 +68,7 @@ final class AgentRatingController extends Controller
         $scope = $this->access->resolve($actor, $requestedScope);
         $this->sources->sync();
         $start = CarbonImmutable::parse($month.'-01', 'Asia/Dushanbe');
-        $query = DB::table('agent_rating_sources')->where(fn ($q) => $q->whereNull('closed_at')->orWhere(fn ($q) => $q->where('closed_at', '>=', $start->utc())->where('closed_at', '<', $start->addMonth()->utc())));
+        $query = DB::table('agent_rating_sources')->whereIn('state', ['closed', 'needs_link'])->whereNull('canonical_source_id')->where(fn ($q) => $q->whereNull('closed_at')->orWhere(fn ($q) => $q->where('closed_at', '>=', $start->utc())->where('closed_at', '<', $start->addMonth()->utc())));
         if ($scope !== 'all') {
             [$kind, $id] = array_pad(explode(':', $scope), 2, null);
             $query->where(match ($kind) {

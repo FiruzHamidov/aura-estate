@@ -52,7 +52,7 @@ final class RatingAccess
     public function resolve(User $actor, ?string $requested): string
     {
         $keys = array_column($this->scopes($actor), 'key');
-        $scope = $requested ?: (in_array('branch:'.$actor->branch_id, $keys, true) ? 'branch:'.$actor->branch_id : $keys[0]);
+        $scope = $requested ?: $keys[0];
         abort_unless(in_array($scope, $keys, true), 403, 'Область рейтинга недоступна.');
 
         return $scope;

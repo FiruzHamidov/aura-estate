@@ -305,6 +305,119 @@ class AgentRatingFeatureTest extends KpiResultsFeatureTest
         $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('excluded_count', 1)->assertJsonPath('data_quality', 'partial');
     }
 
+    public function test_admin_defaults_to_company_and_overview_counts_contracts_once(): void
+    {
+        $other = $this->user('agent', 2);
+        $source = $this->source($this->agent);
+        $revision = $this->draft($source, [
+            ['agent_id' => $this->agent->id, 'side' => 'listing', 'share_bps' => 4000],
+            ['agent_id' => $other->id, 'side' => 'closing', 'share_bps' => 6000],
+        ]);
+        app(RatingLedger::class)->confirm($this->confirmer, $revision->id);
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('scope', 'all')
+            ->assertJsonPath('summary.score_minor', 1000000)->assertJsonPath('summary.deal_count', 1)
+            ->assertJsonPath('summary.agent_count', 2)->assertJsonPath('show_personal_result', false);
+        $this->getJson('/api/agent-ratings?month=2026-11&scope=branch:1')->assertOk()->assertJsonPath('scope', 'branch:1');
+        $this->getJson('/api/agent-ratings?month=2026-11&scope=own')->assertForbidden();
+        Sanctum::actingAs($this->agent);
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('scope', 'branch:1')
+            ->assertJsonPath('summary', null)->assertJsonPath('show_personal_result', true);
+    }
+
+    public function test_admin_with_actual_contribution_keeps_personal_result(): void
+    {
+        $this->confirm($this->source($this->admin), $this->admin);
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('show_personal_result', true)
+            ->assertJsonPath('me.score_minor', 1000000)->assertJsonPath('summary.score_minor', 1000000);
+    }
+
+    public function test_recorded_commission_is_separate_from_ranking_and_respects_scope_and_kind(): void
+    {
+        DB::table('branches')->insert(['id' => 2, 'name' => 'Другой филиал']);
+        $this->source($this->agent, '12000');
+        $this->source($this->agent, '2000', 'rented');
+        $invalid = $this->source($this->agent);
+        DB::table('agent_rating_sources')->where('id', $invalid->id)->update(['financials' => json_encode(['commission' => '50', 'currency' => 'USD', 'fx_rate' => null])]);
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('summary.score_minor', 0)
+            ->assertJsonPath('summary.recorded_unranked_minor', 1400000)->assertJsonPath('summary.recorded_unranked_count', 2)
+            ->assertJsonPath('excluded_count', 3)->assertJsonCount(0, 'rows');
+        $this->getJson('/api/agent-ratings?month=2026-11&category=rental')->assertOk()
+            ->assertJsonPath('summary.recorded_unranked_minor', 200000)->assertJsonPath('summary.recorded_unranked_count', 1);
+        $this->getJson('/api/agent-ratings?month=2026-11&category=listing')->assertOk()->assertJsonPath('summary.recorded_unranked_count', 0);
+        $this->getJson('/api/agent-ratings?month=2026-11&scope=branch:2')->assertOk()->assertJsonPath('summary.recorded_unranked_count', 0);
+    }
+
+    public function test_recorded_dollar_commission_preserves_fractional_saved_rate(): void
+    {
+        $source = $this->source($this->agent);
+        DB::table('agent_rating_sources')->where('id', $source->id)->update(['financials' => json_encode([
+            'commission' => '10.01', 'currency' => 'USD', 'fx_rate' => 10.123456,
+        ])]);
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()
+            ->assertJsonPath('summary.recorded_unranked_minor', 10134)->assertJsonPath('summary.recorded_unranked_count', 1)
+            ->assertJsonPath('summary.score_minor', 0)->assertJsonCount(0, 'rows');
+    }
+
+    public function test_service_pipeline_sources_are_excluded_without_removing_audit_or_property_results(): void
+    {
+        $this->crmFixture();
+        $property = $this->source($this->agent);
+        $this->confirm($property, $this->agent);
+        $linked = $this->crmDeal(['primary_property_id' => $property->property_id, 'closed_at' => CarbonImmutable::parse($property->closed_at, 'UTC')->setTimezone(config('app.timezone'))->toDateTimeString()]);
+        $independent = $this->crmDeal([]);
+        app(RatingSources::class)->sync(true);
+        $crmSource = DB::table('agent_rating_sources')->where('deal_id', $independent)->first();
+        $revision = $this->draft($crmSource, [['agent_id' => $this->agent->id, 'side' => 'closing', 'share_bps' => 10000]], ['kind' => 'sale']);
+        app(RatingLedger::class)->confirm($this->confirmer, $revision->id);
+        self::assertSame($linked, (int) DB::table('agent_rating_sources')->find($property->id)->deal_id);
+        DB::table('crm_deal_pipelines')->where('id', 1)->update(['code' => 'property_control']);
+        app(RatingSources::class)->sync(true);
+        $excluded = DB::table('agent_rating_sources')->find($crmSource->id);
+        self::assertSame('excluded', $excluded->state);
+        self::assertNull($excluded->approved_revision_id);
+        self::assertTrue(DB::table('agent_rating_revisions')->where('id', $revision->id)->exists());
+        self::assertTrue(DB::table('agent_rating_approvals')->where('revision_id', $revision->id)->exists());
+        self::assertNull(DB::table('agent_rating_sources')->find($property->id)->deal_id);
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('excluded_count', 0)
+            ->assertJsonPath('summary.score_minor', 1000000)->assertJsonPath('summary.deal_count', 1);
+        $this->getJson('/api/agent-ratings/sources?month=2026-11')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $property->id);
+        app(RatingSources::class)->sync(true);
+        self::assertSame((int) $excluded->source_version, (int) DB::table('agent_rating_sources')->find($crmSource->id)->source_version);
+        // Reproduce an old service source referencing the same property: a later KPI
+        // correction must update the property cycle, never reactivate that service source.
+        DB::table('agent_rating_sources')->where('id', $crmSource->id)->update(['property_id' => $property->property_id]);
+        $p = \App\Models\Property::find($property->property_id);
+        $p->company_commission_amount = '15000';
+        app(ResultFactService::class)->record($p, (string) Str::uuid());
+        app(RatingSources::class)->sync(true);
+        self::assertSame('excluded', DB::table('agent_rating_sources')->find($crmSource->id)->state);
+        self::assertSame(15000, json_decode(DB::table('agent_rating_sources')->find($property->id)->financials, true)['commission']);
+    }
+
+    public function test_service_pipelines_are_never_ingested_and_reclassification_requires_new_review(): void
+    {
+        $this->crmFixture();
+        $id = $this->crmDeal(['meta' => json_encode(['transaction_kind' => 'sale'])]);
+        foreach (['property_control', 'hr_recruitment'] as $code) {
+            DB::table('crm_deal_pipelines')->where('id', 1)->update(['code' => $code]);
+            app(RatingSources::class)->sync(true);
+            self::assertSame(0, DB::table('agent_rating_sources')->count());
+        }
+        DB::table('crm_deal_pipelines')->where('id', 1)->update(['code' => null]);
+        app(RatingSources::class)->sync(true);
+        $source = DB::table('agent_rating_sources')->where('deal_id', $id)->first();
+        $this->confirm($source, $this->agent);
+        DB::table('crm_deal_pipelines')->where('id', 1)->update(['code' => 'property_control']);
+        app(RatingSources::class)->sync(true);
+        DB::table('crm_deal_pipelines')->where('id', 1)->update(['code' => null]);
+        app(RatingSources::class)->sync(true);
+        $restored = DB::table('agent_rating_sources')->find($source->id);
+        self::assertSame('closed', $restored->state);
+        self::assertNull($restored->approved_revision_id);
+        self::assertNull($restored->pending_revision_id);
+        self::assertGreaterThan($source->source_version, $restored->source_version);
+    }
+
     private function crmFixture(): void
     {
         \Illuminate\Support\Facades\Schema::create('crm_deal_pipelines', function ($t) {

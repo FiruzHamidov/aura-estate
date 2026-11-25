@@ -22,7 +22,7 @@ final class RatingSources
             if (Schema::hasTable('kpi_result_facts')) {
                 DB::table('kpi_result_facts')->where('id', '>', $cursor->value)->orderBy('id')->chunkById(300, function ($facts) {
                     foreach ($facts as $fact) {
-                        $previous = DB::table('agent_rating_sources')->where('property_id', $fact->property_id)->whereNull('canonical_source_id')->where('state', '!=', 'needs_link')->latest('id')->first();
+                        $previous = DB::table('agent_rating_sources')->where('property_id', $fact->property_id)->whereNull('canonical_source_id')->where('source_key', 'like', 'property:%')->latest('id')->first();
                         if ($fact->state !== 'active') {
                             if ($previous) {
                                 DB::table('agent_rating_sources')->where('id', $previous->id)->update(['state' => 'reversed', 'source_version' => $fact->id, 'updated_at' => now()->utc()]);
@@ -75,10 +75,19 @@ final class RatingSources
                 }
             }
             if (Schema::hasTable('crm_deals')) {
+                // Service pipelines are not sale/rental contracts. Repair previously ingested
+                // sources without removing their revisions or changing the property closing.
+                $serviceDeals = DB::table('crm_deals')->whereIn('pipeline_id', DB::table('crm_deal_pipelines')
+                    ->whereIn('code', ['hr_recruitment', 'property_control'])->select('id'))->select('id');
+                DB::table('agent_rating_sources')->whereIn('deal_id', $serviceDeals)->where('source_key', 'like', 'property:%')
+                    ->update(['deal_id' => null, 'updated_at' => now()->utc()]);
+                DB::table('agent_rating_sources')->whereIn('deal_id', $serviceDeals)->where('source_key', 'like', 'crm:%')->where('state', '!=', 'excluded')
+                    ->update(['state' => 'excluded', 'source_version' => DB::raw('source_version + 1'),
+                        'approved_revision_id' => null, 'pending_revision_id' => null, 'updated_at' => now()->utc()]);
                 Deal::with(['stage', 'pipeline'])->where(function ($q) {
                     $q->whereNotNull('closed_at')->orWhereIn('id', DB::table('agent_rating_sources')->whereNotNull('deal_id')->select('deal_id'))
                         ->orWhereHas('stage', fn ($stage) => $stage->where('is_closed', true)->where('is_lost', false));
-                })->whereHas('pipeline', fn ($q) => $q->where(fn ($q) => $q->whereNull('code')->orWhere('code', '!=', 'hr_recruitment')))
+                })->whereHas('pipeline', fn ($q) => $q->where(fn ($q) => $q->whereNull('code')->orWhereNotIn('code', ['hr_recruitment', 'property_control'])))
                     ->orderBy('id')->chunkById(200, function ($deals) {
                         foreach ($deals as $deal) {
                             $existing = DB::table('agent_rating_sources')->where('deal_id', $deal->id)->first();
@@ -140,7 +149,7 @@ final class RatingSources
         $encoded = json_encode($financials);
         if (! $previous) {
             DB::table('agent_rating_sources')->insert($identity + ['source_key' => $key, 'source_version' => 1, 'state' => 'closed', 'financials' => $encoded, 'created_at' => now()->utc(), 'updated_at' => now()->utc()]);
-        } elseif (json_decode($previous->financials ?? '{}', true) != $financials || $previous->closed_at !== $identity['closed_at'] || $previous->kind !== $identity['kind'] || (int) $previous->user_id !== (int) $identity['user_id']) {
+        } elseif (json_decode($previous->financials ?? '{}', true) != $financials || $previous->closed_at !== $identity['closed_at'] || $previous->kind !== $identity['kind'] || (int) $previous->user_id !== (int) $identity['user_id'] || $previous->state !== ($identity['state'] ?? 'closed')) {
             DB::table('agent_rating_sources')->where('id', $previous->id)->update(['source_version' => $previous->source_version + 1, 'state' => $identity['state'] ?? 'closed', 'financials' => $encoded, 'closed_at' => $identity['closed_at'], 'kind' => $identity['kind'], 'user_id' => $identity['user_id'], 'approved_revision_id' => null, 'pending_revision_id' => null, 'updated_at' => now()->utc()]);
         }
     }
