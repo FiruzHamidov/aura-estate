@@ -347,6 +347,17 @@ class AgentRatingFeatureTest extends KpiResultsFeatureTest
         $this->getJson('/api/agent-ratings?month=2026-11&scope=branch:2')->assertOk()->assertJsonPath('summary.recorded_unranked_count', 0);
     }
 
+    public function test_recorded_dollar_commission_preserves_fractional_saved_rate(): void
+    {
+        $source = $this->source($this->agent);
+        DB::table('agent_rating_sources')->where('id', $source->id)->update(['financials' => json_encode([
+            'commission' => '10.01', 'currency' => 'USD', 'fx_rate' => 10.123456,
+        ])]);
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()
+            ->assertJsonPath('summary.recorded_unranked_minor', 10134)->assertJsonPath('summary.recorded_unranked_count', 1)
+            ->assertJsonPath('summary.score_minor', 0)->assertJsonCount(0, 'rows');
+    }
+
     public function test_service_pipeline_sources_are_excluded_without_removing_audit_or_property_results(): void
     {
         $this->crmFixture();

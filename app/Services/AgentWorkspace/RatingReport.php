@@ -123,7 +123,7 @@ final class RatingReport
                             continue;
                         }
                         try {
-                            $recorded += CommissionMath::base((string) $financials['commission'], '0', $financials['currency'], $financials['fx_rate'] ?? null);
+                            $recorded += CommissionMath::base((string) $financials['commission'], '0', $financials['currency'], isset($financials['fx_rate']) ? (string) $financials['fx_rate'] : null);
                             $recordedCount++;
                         } catch (\Illuminate\Validation\ValidationException) {
                             // Missing/invalid money remains in the review queue, never a zero.
