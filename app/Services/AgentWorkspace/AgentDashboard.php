@@ -50,6 +50,7 @@ final class AgentDashboard
             $period = DB::table('agent_rating_periods')->where('month', $month)->latest('version')->first();
             $sources = DB::table('agent_rating_sources')->where(fn ($q) => $q->whereNull('closed_at')->orWhere(fn ($q) => $q->where('closed_at', '>=', $start->utc())->where('closed_at', '<', $next->utc())))->whereIn('state', ['closed', 'needs_link'])->get();
             $ids = $period ? json_decode($period->revision_ids, true) : $sources->pluck('approved_revision_id')->filter()->all();
+            $ownRevisionIds = [];
             foreach (DB::table('agent_rating_revisions')->whereIn('id', $ids)->get() as $revision) {
                 $p = json_decode($revision->payload, true);
                 if ($kind !== 'all' && $p['kind'] !== $kind) {
@@ -62,13 +63,15 @@ final class AgentDashboard
                 if (! $allocations) {
                     continue;
                 }
+                $ownRevisionIds[$revision->id] = true;
                 $date = CarbonImmutable::parse($p['closed_at'], 'UTC')->setTimezone('Asia/Dushanbe')->format('Y-m-d');
                 $add('revenue', $date, array_sum(array_column($allocations, 'credit_minor')));
                 if (array_sum(array_column($allocations, 'share_bps')) > 0) {
                     $add('deals', $date);
                 }
             }
-            if (! $period && $sources->contains(fn ($s) => ! $s->approved_revision_id && (int) $s->user_id === (int) $actor->id && ($kind === 'all' || ($s->kind === $kind || $s->kind === 'unknown')))) {
+            if (! $period && $sources->contains(fn ($s) => (! $s->approved_revision_id && (int) $s->user_id === (int) $actor->id && ($kind === 'all' || ($s->kind === $kind || $s->kind === 'unknown'))) ||
+                ($s->pending_revision_id && isset($ownRevisionIds[$s->approved_revision_id])))) {
                 $metrics['revenue']['status'] = $metrics['deals']['status'] = 'partial';
             }
         });
