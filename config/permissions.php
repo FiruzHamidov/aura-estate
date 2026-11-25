@@ -1163,4 +1163,16 @@ $permissions['property_reports.inventory.view'] = [
     'roles' => ['admin', 'superadmin', 'branch_director', 'rop'],
 ];
 
+// Agent workspace uses an explicit peer-ranking grant; own KPI never implies peer access.
+$ratingRoles = ['admin', 'superadmin', 'owner', 'branch_director', 'rop', 'mop', 'agent'];
+foreach (['view' => 'Просмотр рейтинга агентов', 'details' => 'Расшифровка собственного вклада'] as $key => $label) {
+    $permissions['agent_rating.'.$key] = ['group' => 'Рейтинг агентов', 'name' => $label, 'description' => 'Подтверждённый комиссионный вклад. Область просмотра проверяется отдельно.', 'roles' => $ratingRoles];
+}
+foreach (['all' => ['admin', 'superadmin', 'owner'], 'branch' => ['branch_director', 'rop', 'mop', 'agent'], 'group' => [], 'own' => []] as $scope => $roles) {
+    $permissions['agent_rating.scope.'.$scope] = ['group' => 'Рейтинг агентов', 'name' => 'Область рейтинга: '.$scope, 'description' => 'Только агрегаты комиссионного вклада, без персональных выплат и контактов.', 'roles' => $roles, 'exclusive_group' => 'agent_rating.scope'];
+}
+foreach (['prepare' => 'Подготовка долей', 'confirm' => 'Подтверждение чужого вклада', 'correct' => 'Коррекция комиссии', 'close' => 'Закрытие месяца', 'reopen' => 'Новая версия закрытого месяца'] as $key => $label) {
+    $permissions['agent_rating.'.$key] = ['group' => 'Рейтинг агентов', 'name' => $label, 'description' => 'Финансовый учёт рейтинга с журналом изменений. Подтверждение собственной сделки запрещено.', 'roles' => ['admin', 'superadmin', 'owner'], 'sensitive' => true];
+}
+
 return $permissions;

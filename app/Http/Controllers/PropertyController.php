@@ -1137,6 +1137,35 @@ class PropertyController extends Controller
         return $query;
     }
 
+    /** Compact internal search: reuse the same record scopes and field permissions as the existing lists. */
+    public function workspaceSearch(Request $request)
+    {
+        $actor = $request->user();
+        abort_unless($actor, 401);
+        $v = $request->validate(['q' => 'required|string|min:2|max:120']);
+        $term = trim($v['q']);
+        $properties = collect();
+        if ($this->canViewInternalPropertyList($actor)) {
+            $query = $this->baseQuery($request, []);
+            $this->applyPropertySearchText($query, $term, $this->canSearchPropertyCrmFields($actor));
+            $properties = $query->latest('properties.id')->limit(6)->get()->map(fn ($p) => [
+                'id' => $p->id, 'label' => $p->title ?: ('Объект №'.$p->id), 'href' => '/apartment/'.$p->id,
+            ]);
+        }
+        $clients = collect();
+        if ($actor->hasPermission('clients.view')) {
+            $query = app(\App\Support\ClientAccess::class)->visibleQuery($actor);
+            $query->where(function ($q) use ($term) {
+                $q->where('full_name', 'like', '%'.$term.'%')->orWhere('phone', 'like', '%'.$term.'%');
+                if (ctype_digit($term)) $q->orWhere('clients.id', (int) $term);
+            });
+            $clients = $query->latest('clients.id')->limit(6)->get()->map(fn ($c) => [
+                'id' => $c->id, 'label' => $c->full_name, 'href' => '/profile/clients/'.$c->id,
+            ]);
+        }
+        return response()->json(['properties' => $properties, 'clients' => $clients])->header('Cache-Control', 'private, no-store');
+    }
+
     public function search(Request $request)
     {
         $validated = $request->validate([

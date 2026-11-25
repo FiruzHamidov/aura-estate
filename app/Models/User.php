@@ -21,7 +21,9 @@ class User extends Authenticatable
     public const STATUS_INACTIVE = 'inactive';
 
     protected $fillable = [
-        'name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'password', 'photo', 'description', 'birthday',
+        'name',
+        'first_name',
+        'last_name', 'phone', 'email', 'role_id', 'branch_id', 'branch_group_id', 'auth_method', 'status', 'password', 'photo', 'description', 'birthday',
         'security_attendance_branch_ids', 'attendance_hidden_from_others', 'attendance_hidden_from_everyone',
         'telegram_id', 'telegram_username', 'telegram_photo_url', 'telegram_chat_id', 'telegram_linked_at',
         'deleted_at', 'deletion_requested_at', 'deletion_reason', 'deleted_by_user_id', 'deletion_phone_hash',

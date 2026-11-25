@@ -174,6 +174,7 @@ return Application::configure(basePath: dirname(__DIR__))
         });
     })
     ->withSchedule(function (Schedule $schedule) {
+        $schedule->command('agent-ratings:sync')->everyMinute()->withoutOverlapping();
         $schedule->command('sms:dispatch-campaigns')->everyMinute()->withoutOverlapping();
         $schedule->command('motivation:refresh')->everyFiveMinutes()->withoutOverlapping();
         $schedule->command('notifications:dispatch-reminders')->everyFiveMinutes();
