@@ -11,3 +11,8 @@ Artisan::command('inspire', function () {
 Artisan::command('properties:expire-promotions', function (PropertyPromotionService $service) {
     $this->info('Expired promotions: '.$service->expireDue());
 })->purpose('Expire VIP and urgent property promotions');
+
+Artisan::command('agent-ratings:sync', function (\App\Services\AgentWorkspace\RatingSources $sources) {
+    $sources->sync();
+    $this->info('Rating sources synchronized. Financial approval is still required.');
+})->purpose('Synchronize agent rating closing cycles without guessing financial shares');

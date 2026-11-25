@@ -73,6 +73,8 @@ class UserAccessTest extends TestCase
         Schema::create('users', function (Blueprint $table) {
             $table->id();
             $table->string('name');
+            $table->string('first_name', 120)->nullable();
+            $table->string('last_name', 120)->nullable();
             $table->string('email')->nullable()->unique();
             $table->string('phone')->unique();
             $table->string('password')->nullable();
@@ -848,6 +850,33 @@ class UserAccessTest extends TestCase
         $role->forceFill(['permissions' => []])->save();
         $this->patchJson('/api/user/profile', ['name' => 'Stale'])->assertForbidden();
         $this->assertSame('Renamed', $user->fresh()->name);
+    }
+
+    public function test_profile_names_are_explicit_and_legacy_compound_names_are_not_split(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create(['name' => 'Мухаммад Али Саид', 'phone' => '939555552', 'role_id' => $role->id, 'status' => 'active']);
+        Sanctum::actingAs($user);
+        $this->assertNull($user->first_name);
+        $this->patchJson('/api/user/profile', ['first_name' => 'Мухаммад Али', 'last_name' => 'Саид'])
+            ->assertOk()->assertJsonPath('name', 'Мухаммад Али Саид')->assertJsonPath('first_name', 'Мухаммад Али');
+        $this->patchJson('/api/user/profile', ['name' => 'Другое составное имя'])
+            ->assertOk()->assertJsonPath('first_name', null)->assertJsonPath('last_name', null);
+        $this->patchJson('/api/user/profile', ['first_name' => 'Только имя'])->assertUnprocessable();
+    }
+
+    public function test_agent_uploads_only_their_own_photo_without_employee_management_permission(): void
+    {
+        \Illuminate\Support\Facades\Storage::fake('public');
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create(['name' => 'Agent', 'phone' => '939555553', 'role_id' => $role->id, 'status' => 'active']);
+        $other = User::create(['name' => 'Other', 'phone' => '939555554', 'role_id' => $role->id, 'status' => 'active']);
+        Sanctum::actingAs($user);
+        $this->postJson('/api/user/photo', ['user_id' => $other->id, 'photo' => \Illuminate\Http\UploadedFile::fake()->image('profile.png')])->assertOk();
+        $this->assertNotNull($user->fresh()->photo);
+        $this->assertNull($other->fresh()->photo);
+        $this->deleteJson('/api/user/photo')->assertOk();
+        $this->assertNull($user->fresh()->photo);
     }
 
     public function test_authenticated_user_can_fetch_own_profile(): void

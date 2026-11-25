@@ -382,6 +382,22 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::post('/kpi/planning/drafts/{draft}/preview', [\App\Http\Controllers\KpiPlanningController::class, 'preview'])->whereNumber('draft');
     Route::post('/kpi/planning/drafts/{draft}/publish', [\App\Http\Controllers\KpiPlanningController::class, 'publish'])->whereNumber('draft');
     Route::post('/kpi/planning/copy-month', [\App\Http\Controllers\KpiPlanningController::class, 'copyMonth']);
+    Route::get('/agent-search', [PropertyController::class, 'workspaceSearch']);
+    Route::get('/agent-dashboard', \App\Http\Controllers\AgentDashboardController::class);
+    Route::prefix('agent-ratings')->controller(\App\Http\Controllers\AgentRatingController::class)->group(function () {
+        Route::get('/', 'index');
+        Route::get('/participants', 'participants');
+        Route::get('/rules', 'rules');
+        Route::get('/sources', 'sources');
+        Route::get('/directory', [\App\Http\Controllers\AgentRatingController::class, 'directory']);
+        Route::get('/period-history', 'history');
+        Route::post('/period-close', 'close');
+        Route::post('/sources/{source}/link', [\App\Http\Controllers\AgentRatingController::class, 'link'])->whereNumber('source');
+        Route::post('/sources/{source}/revisions', 'draft')->whereNumber('source');
+        Route::post('/revisions/{revision}/confirm', 'confirm')->whereNumber('revision');
+        Route::get('/{agent}/breakdown', 'breakdown')->whereNumber('agent');
+    });
+
     Route::get('/kpi/results', [\App\Http\Controllers\KpiResultController::class, 'index']);
     Route::get('/kpi/results/goals', [\App\Http\Controllers\KpiResultController::class, 'goals']);
     Route::post('/kpi/results/goals', [\App\Http\Controllers\KpiResultController::class, 'publish'])->middleware('rop.branch.scope');
@@ -454,6 +470,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
     Route::put('/daily-reports/{dailyReport}', [DailyReportController::class, 'update'])->middleware('rop.branch.scope');
     Route::patch('/daily-reports/{dailyReport}', [DailyReportController::class, 'update'])->middleware('rop.branch.scope');
     Route::post('/telegram/auth/link', [TelegramAuthController::class, 'link']);
+    Route::post('/user/photo', [UserController::class, 'updateMyPhoto']);
     Route::delete('/user/photo', [UserController::class, 'deleteMyPhoto']);
     Route::post('/user/update-password', [UserController::class, 'updatePassword']);
     Route::get('/notifications', [NotificationController::class, 'index']);

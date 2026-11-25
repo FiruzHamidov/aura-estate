@@ -71,6 +71,9 @@ final class ResultFactService
                 'recorded_by' => $actorId, 'reason' => mb_substr((string) $property->status_comment, 0, 500) ?: null,
                 'created_at' => now(), 'updated_at' => now(),
             ] + $financials);
+            if (Schema::hasTable('agent_rating_state')) {
+                DB::table('agent_rating_state')->where('key', 'synced_at')->update(['value' => 0]);
+            }
         });
     }
 

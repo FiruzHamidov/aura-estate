@@ -625,6 +625,7 @@ class UserController extends Controller
 
         return response()->json(array_merge($user->toArray(), [
             'daily_report_status' => app(DailyReportService::class)->reportStatusPayload($user),
+            'public_profile_url' => $user->status === User::STATUS_ACTIVE && $user->hasPermission('public_team.subject.profile') ? rtrim(config('agent_workspace.public_site_url', 'https://aura.tj'), '/').'/about/team/'.$user->id : null,
             'access_scope' => [
                 'scope_type' => $user->usesAssignedGroupScope() ? 'groups' : 'role',
                 'branch_id' => $user->branch_id,
@@ -639,7 +640,7 @@ class UserController extends Controller
         return DB::transaction(function () use ($request) {
             $user = User::query()->lockForUpdate()->findOrFail($this->authUser()->id);
             auth()->setUser($user);
-            if ($request->exists('name')) abort_unless($user->hasPermission('profile.name.edit'), 403, 'Нет права менять имя профиля.');
+            if ($request->hasAny(['name', 'first_name', 'last_name'])) abort_unless($user->hasPermission('profile.name.edit'), 403, 'Нет права менять имя профиля.');
             if ($request->hasAny(['description', 'birthday', 'phone', 'email'])) abort_unless($user->hasPermission('profile.details.edit'), 403, 'Нет права менять контактные данные профиля.');
 
             if (is_string($request->input('phone')) && $request->input('phone') !== $user->phone) {
@@ -647,16 +648,27 @@ class UserController extends Controller
             }
 
             $data = $request->validate([
-                'name' => 'sometimes|string',
+                'name' => 'sometimes|string|max:255',
+                'first_name' => 'required_with:last_name|nullable|string|max:120',
+                'last_name' => 'required_with:first_name|nullable|string|max:120',
                 'description' => 'nullable|string',
                 'birthday' => 'nullable|date',
                 'phone' => ['sometimes', 'string', new \App\Rules\UniqueUserPhone($user->id), new \App\Rules\InternationalPhoneNumber],
-                'email' => 'sometimes|email|unique:users,email,'.$user->id,
+                'email' => 'sometimes|nullable|email|max:255|unique:users,email,'.$user->id,
             ]);
 
+            if ($request->hasAny(['first_name', 'last_name'])) {
+                abort_unless($request->filled('first_name') && $request->filled('last_name'), 422, 'Укажите имя и фамилию.');
+                $data['first_name'] = trim($data['first_name']);
+                $data['last_name'] = trim($data['last_name']);
+                $data['name'] = $data['first_name'].' '.$data['last_name'];
+            } elseif (isset($data['name']) && $data['name'] !== $user->name) {
+                $data['first_name'] = null;
+                $data['last_name'] = null;
+            }
             $user->update($data);
 
-            return response()->json($user->fresh(['role', 'branch', 'branchGroup']));
+            return response()->json(array_merge($user->fresh(['role', 'branch', 'branchGroup'])->toArray(), ['public_profile_url' => $user->status === User::STATUS_ACTIVE && $user->hasPermission('public_team.subject.profile') ? rtrim(config('agent_workspace.public_site_url', 'https://aura.tj'), '/').'/about/team/'.$user->id : null]));
         });
     }
 
@@ -760,9 +772,19 @@ class UserController extends Controller
         return response()->json(['message' => 'Photo updated', 'photo' => $user->photo]);
     }
 
+    public function updateMyPhoto(Request $request)
+    {
+        $user = $this->authUser();
+        abort_unless($user->hasPermission('profile.details.edit'), 403);
+        $request->validate(['photo' => 'required|image|max:5120']);
+        $user->update(['photo' => PublicPhoto::store($request->file('photo'), 'users')]);
+        return response()->json(['message' => 'Фото обновлено', 'photo' => $user->photo]);
+    }
+
     public function deleteMyPhoto()
     {
         $user = Auth::user();
+        abort_unless($user->hasPermission('profile.details.edit'), 403);
 
         if ($user->photo && \Storage::disk('public')->exists($user->photo)) {
             \Storage::disk('public')->delete($user->photo);

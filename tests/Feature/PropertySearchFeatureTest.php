@@ -689,6 +689,21 @@ class PropertySearchFeatureTest extends TestCase
         }
     }
 
+    public function test_workspace_search_respects_scope_and_owner_search_grant(): void
+    {
+        $this->withoutMiddleware(\App\Http\Middleware\EnsureDailyReportSubmitted::class);
+        if (!Schema::hasColumn('roles', 'permissions')) Schema::table('roles', fn (Blueprint $t) => $t->json('permissions')->nullable());
+        $own = $this->createProperty(['agent_id' => $this->agent->id, 'owner_name' => 'Secret Owner', 'title' => 'Search Apartment']);
+        $this->createProperty(['agent_id' => null, 'created_by' => 999, 'owner_name' => 'Secret Owner', 'title' => 'Search Apartment']);
+        $this->agentRole->forceFill(['slug' => 'custom_search', 'permissions' => ['properties.list.internal', 'properties.list.scope.own']])->save();
+        \Laravel\Sanctum\Sanctum::actingAs($this->agent->fresh());
+        $this->getJson('/api/agent-search?q='.urlencode('Secret'))->assertOk()->assertJsonCount(0, 'properties');
+        $this->getJson('/api/agent-search?q='.urlencode('Search Apartment'))->assertOk()->assertJsonCount(1, 'properties')->assertJsonPath('properties.0.id', $own->id)->assertJsonCount(0, 'clients');
+        $this->agentRole->forceFill(['permissions' => ['properties.list.internal', 'properties.list.scope.own', 'properties.search.owner']])->save();
+        \Laravel\Sanctum\Sanctum::actingAs($this->agent->fresh());
+        $this->getJson('/api/agent-search?q='.urlencode('Secret'))->assertOk()->assertJsonCount(1, 'properties')->assertJsonMissingPath('properties.0.owner_name');
+    }
+
     private function createProperty(array $attributes = []): Property
     {
         $property = Property::create(array_merge([
