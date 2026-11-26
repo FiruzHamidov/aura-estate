@@ -116,6 +116,7 @@ class PropertyConstructionFieldsTest extends TestCase
             $table->boolean('has_garden')->default(false);
             $table->boolean('has_parking')->default(false);
             $table->boolean('is_mortgage_available')->default(false);
+            $table->string('mortgage_availability_status')->default('unknown');
             $table->boolean('is_from_developer')->default(false);
             $table->boolean('is_full_apartment')->default(false);
             $table->string('moderation_status')->default('pending');
@@ -511,6 +512,28 @@ class PropertyConstructionFieldsTest extends TestCase
         }
     }
 
+    public function test_mortgage_status_round_trip_and_legacy_compatibility(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create(['name' => 'Agent', 'phone' => '930000099', 'password' => bcrypt('password'), 'role_id' => $role->id, 'status' => 'active']);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        Sanctum::actingAs($user);
+        $payload = ['type_id' => $type->id, 'price' => 150000, 'currency' => 'TJS', 'offer_type' => 'sale'];
+        $id = $this->postJson('/api/properties', $payload)->assertOk()->json('id');
+        $this->assertDatabaseHas('properties', ['id' => $id, 'mortgage_availability_status' => 'unknown']);
+        foreach (['available' => true, 'unavailable' => false, 'unknown' => false] as $status => $legacy) {
+            $this->putJson('/api/properties/'.$id, ['mortgage_availability_status' => $status])
+                ->assertOk()->assertJsonPath('mortgage_availability_status', $status);
+            $this->assertDatabaseHas('properties', ['id' => $id, 'mortgage_availability_status' => $status, 'is_mortgage_available' => $legacy]);
+            $this->putJson('/api/properties/'.$id, ['title' => 'Mortgage '.$status])
+                ->assertOk()->assertJsonPath('mortgage_availability_status', $status);
+        }
+        $this->putJson('/api/properties/'.$id, ['mortgage_availability_status' => 'invalid'])->assertUnprocessable();
+        $this->assertDatabaseHas('properties', ['id' => $id, 'mortgage_availability_status' => 'unknown']);
+        $this->putJson('/api/properties/'.$id, ['is_mortgage_available' => true])->assertOk();
+        $this->assertTrue(\App\Services\PropertyLiquidity\PropertyAmenities::mortgage(\App\Models\Property::findOrFail($id)));
+    }
+
     public function test_property_store_accepts_construction_and_renovation_statuses(): void
     {
         $agentRole = Role::create([
@@ -768,6 +791,8 @@ class PropertyConstructionFieldsTest extends TestCase
             'feature_id' => $parking->id,
         ]);
 
+        Schema::create('property_liquidity_snapshots', fn (Blueprint $table) => $table->id());
+        \Illuminate\Support\Facades\Bus::fake([\App\Jobs\RecalculatePropertyLiquidity::class]);
         $replaced = $this->putJson('/api/properties/'.$propertyId, [
             'type_id' => $type->id,
             'price' => 150000,
@@ -789,6 +814,10 @@ class PropertyConstructionFieldsTest extends TestCase
         ]);
 
         $cleared->assertOk()->assertJsonCount(0, 'features');
+        \Illuminate\Support\Facades\Bus::assertDispatchedTimes(\App\Jobs\RecalculatePropertyLiquidity::class, 2);
+        \Illuminate\Support\Facades\Bus::assertDispatched(\App\Jobs\RecalculatePropertyLiquidity::class, fn ($job) => $job->propertyId === $propertyId && $job->afterCommit);
+        $this->putJson('/api/properties/'.$propertyId, ['features' => null])->assertOk();
+        \Illuminate\Support\Facades\Bus::assertDispatchedTimes(\App\Jobs\RecalculatePropertyLiquidity::class, 2);
         $this->assertDatabaseMissing('feature_property', [
             'property_id' => $propertyId,
         ]);
