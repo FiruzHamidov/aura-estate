@@ -235,6 +235,70 @@ class PropertyShowAuthContactsTest extends TestCase
         }
     }
 
+    public function test_other_agents_cannot_read_or_write_owner_price_even_as_author_or_co_owner(): void
+    {
+        [, $property, $agent] = $this->publicRopFixture();
+        Schema::table('properties', fn (Blueprint $table) => $table->unsignedBigInteger('co_owner_user_id')->nullable());
+        Schema::create('property_agent_sales', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('property_id'); $table->unsignedBigInteger('agent_id');
+            $table->string('role')->nullable(); $table->decimal('agent_commission_amount', 15, 2)->nullable();
+            $table->string('agent_commission_currency')->nullable(); $table->timestamp('agent_paid_at')->nullable(); $table->timestamps();
+        });
+        $other = User::create(['name' => 'Previous agent', 'phone' => '900666666', 'role_id' => $agent->role_id,
+            'branch_id' => 20, 'branch_group_id' => 200, 'status' => 'active']);
+        $property->forceFill(['created_by' => $other->id, 'co_owner_user_id' => $other->id, 'owner_price' => 80000.50])->saveQuietly();
+        $log = \App\Models\PropertyLog::create(['property_id' => $property->id, 'user_id' => $agent->id, 'action' => 'updated',
+            'changes' => ['owner_price' => ['old' => 70000, 'new' => 80000.50], 'title' => ['old' => 'Old', 'new' => 'New']]]);
+        $this->withHeader('Authorization', 'Bearer '.$other->createToken('test')->plainTextToken);
+        $this->getJson('/api/properties/'.$property->id)->assertOk()->assertJsonMissingPath('owner_price')
+            ->assertJsonPath('capabilities.can_view_owner_price', false);
+        foreach (['/api/properties', '/api/properties?compact=1', '/api/my-properties'] as $url) {
+            $this->getJson($url)->assertOk()->assertJsonPath('data.0.id', $property->id)->assertJsonMissingPath('data.0.owner_price');
+        }
+        $history = $this->getJson('/api/properties/'.$property->id.'/logs')->assertOk()->assertJsonMissingPath('data.0.property');
+        $entry = collect($history->json('data'))->firstWhere('id', $log->id);
+        $this->assertNotNull($entry);
+        $this->assertArrayNotHasKey('owner_price', $entry['changes']);
+        $this->assertArrayNotHasKey('owner_price', $log->fresh()->toArray()['changes']);
+        foreach ([90000, null] as $price) {
+            $this->putJson('/api/properties/'.$property->id, ['owner_price' => $price])->assertForbidden();
+        }
+        $this->assertDatabaseHas('properties', ['id' => $property->id, 'owner_price' => 80000.50]);
+
+        $this->app['auth']->forgetGuards();
+        $this->withHeader('Authorization', 'Bearer '.$agent->createToken('test')->plainTextToken);
+        $this->getJson('/api/properties/'.$property->id)->assertOk()->assertJsonPath('owner_price', '80000.50')
+            ->assertJsonPath('capabilities.can_view_owner_price', true);
+        $history = $this->getJson('/api/properties/'.$property->id.'/logs')->assertOk();
+        $entry = collect($history->json('data'))->firstWhere('id', $log->id);
+        $this->assertSame(80000.50, $entry['changes']['owner_price']['new']);
+
+        // Reassignment removes the old agent's access immediately, including historical amounts.
+        $property->forceFill(['agent_id' => $other->id])->saveQuietly();
+        $this->getJson('/api/properties/'.$property->id)->assertOk()->assertJsonMissingPath('owner_price');
+        $this->assertArrayNotHasKey('owner_price', $log->fresh()->toArray()['changes']);
+    }
+
+    public function test_owner_price_allows_scoped_leaders_but_not_other_staff_roles(): void
+    {
+        [$rop, $property, $agent] = $this->publicRopFixture();
+        $property->forceFill(['owner_price' => 80000.50])->saveQuietly();
+        $rop->forceFill(['branch_id' => 20])->saveQuietly();
+        $rop->supervisedGroups()->sync([200]);
+        $this->withHeader('Authorization', 'Bearer '.$rop->createToken('test')->plainTextToken);
+        $this->getJson('/api/properties/'.$property->id)->assertOk()->assertJsonPath('owner_price', '80000.50');
+
+        foreach (['superadmin', 'admin', 'branch_director', 'manager', 'marketing', 'security', 'custom_staff'] as $i => $slug) {
+            $role = Role::create(['name' => $slug, 'slug' => $slug]);
+            $viewer = User::create(['name' => $slug, 'phone' => '95000000'.$i, 'role_id' => $role->id, 'branch_id' => 20]);
+            $this->app['auth']->forgetGuards();
+            $this->withHeader('Authorization', 'Bearer '.$viewer->createToken('test')->plainTextToken);
+            $response = $this->getJson('/api/properties/'.$property->id)->assertOk();
+            if (in_array($slug, ['superadmin', 'admin', 'branch_director'], true)) $response->assertJsonPath('owner_price', '80000.50');
+            else $response->assertJsonMissingPath('owner_price');
+        }
+    }
+
     public function test_client_presentation_forces_public_projection_even_with_employee_token(): void
     {
         [, $property, $agent] = $this->publicRopFixture();

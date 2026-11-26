@@ -113,11 +113,19 @@ class User extends Authenticatable
         return $this->role && $this->role->slug === $slug;
     }
 
-    public function canAccessPropertyOwnerPrice(): bool
+    public function canAccessPropertyOwnerPrice(Property $property): bool
     {
-        return $this->status === self::STATUS_ACTIVE && ! $this->isDeletedAccount()
-            && ! in_array($this->role?->slug, ['client', 'external_agent'], true)
-            && $this->hasPermission('properties.list.internal');
+        if ($this->status !== self::STATUS_ACTIVE || $this->isDeletedAccount()
+            || ! $this->hasPermission('properties.list.internal')
+            || \App\Support\ClientPresentation::enabled()) return false;
+
+        if ($this->usesAssignedGroupScope() && ! app(\App\Support\RopGroupAccess::class)->allows($this, $property)) return false;
+
+        if (in_array($this->role?->slug, ['rop', 'branch_director', 'admin', 'superadmin'], true)) return true;
+
+        // Authorship and co-ownership do not retain access after responsibility is transferred.
+        return in_array($this->role?->slug, ['agent', 'mop'], true)
+            && (int) ($property->agent_id ?: $property->created_by) === (int) $this->id;
     }
 
     public function hasPermission(string $permission): bool

@@ -190,15 +190,15 @@ class PropertyController extends Controller
         return false;
     }
 
-    private function canAccessOwnerPrice(?User $user): bool
+    private function canAccessOwnerPrice(?User $user, Property $property): bool
     {
-        return $user?->canAccessPropertyOwnerPrice() ?? false;
+        return $user?->canAccessPropertyOwnerPrice($property) ?? false;
     }
 
-    private function assertCanWriteOwnerPrice(User $user, array $attributes): void
+    private function assertCanWriteOwnerPrice(User $user, array $attributes, Property $property): void
     {
         if (array_key_exists('owner_price', $attributes)) {
-            abort_unless($this->canAccessOwnerPrice($user), 403, 'Недостаточно прав для изменения цены собственника.');
+            abort_unless($this->canAccessOwnerPrice($user, $property), 403, 'Недостаточно прав для изменения цены собственника.');
         }
     }
 
@@ -299,7 +299,7 @@ class PropertyController extends Controller
                 && $user->hasPermission('properties.contacts.view')
                 && $this->canViewPropertyWithinInternalList($user, $property, request()),
             'can_view_history' => $user && $this->moderationAccess->canViewHistory($user, $property),
-            'can_view_owner_price' => $this->canAccessOwnerPrice($user)
+            'can_view_owner_price' => $this->canAccessOwnerPrice($user, $property)
                 && $this->canViewInternalPropertyDetails($user, $property, request()),
             'can_moderate' => $workflow['can_moderate'],
             'can_manage_co_owner' => $workflow['can_manage_co_owner'],
@@ -474,7 +474,7 @@ class PropertyController extends Controller
         }
 
         $payload = app(PropertyBuildingType::class)->present($property, $property->toArray());
-        if ($this->canAccessOwnerPrice($authUser)) {
+        if ($this->canAccessOwnerPrice($authUser, $property)) {
             $payload['owner_price'] = $property->owner_price;
         }
         $payload['responsible_agent'] = $this->serializeResponsibleAgent($property);
@@ -542,7 +542,7 @@ class PropertyController extends Controller
     private function withModerationWorkflow(Property $property, User $user, ?array $payload = null): array
     {
         $payload ??= $property->toArray();
-        if ($this->canAccessOwnerPrice($user)) {
+        if ($this->canAccessOwnerPrice($user, $property)) {
             $payload['owner_price'] = $property->owner_price;
         }
         if (! array_key_exists('building_type_source', $payload)) $payload = app(PropertyBuildingType::class)->present($property, $payload);
@@ -866,7 +866,7 @@ class PropertyController extends Controller
             $responsible = $property->agent?->only(['id', 'name', 'photo']);
             $property->unsetRelation('agent');
             $payload = $compact ? $this->compactFeedProperty($property) : $property->toArray();
-            if ($this->canAccessOwnerPrice($actor)) {
+            if ($this->canAccessOwnerPrice($actor, $property)) {
                 $payload['owner_price'] = $property->owner_price;
             }
             $payload['agent_id'] = $property->agent_id;
@@ -970,7 +970,7 @@ class PropertyController extends Controller
             $responsible = $property->agent?->only(['id', 'name', 'photo']);
             $property->unsetRelation('agent');
             $payload = $property->toArray();
-            if ($this->canAccessOwnerPrice($request->user())) {
+            if ($this->canAccessOwnerPrice($request->user(), $property)) {
                 $payload['owner_price'] = $property->owner_price;
             }
             return [...$payload, 'responsible_agent' => $responsible,
@@ -2534,13 +2534,15 @@ class PropertyController extends Controller
             [$user] = $this->lockPropertyWrite($user, null, $validated);
             \App\Support\PropertyDocumentTypes::validateWrite($validated);
             PropertyMapLocation::validate($validated);
-            $this->assertCanWriteOwnerPrice($user, $validated);
             $validated = app(PropertyBuildingType::class)->normalizeWrite($validated);
             $this->moderation->assertCanCreate($user);
             if ($requestedType !== 'regular') {
                 abort_unless($user->hasPermission('properties.promotions.request') && $user->hasPermission('properties.edit'), 403, 'PROMOTION_PERMISSION_DENIED');
             }
             $validated = $this->normalizePropertyWriteGroup($user, $validated);
+            $this->assertCanWriteOwnerPrice($user, $validated, new Property([
+                ...$validated, 'created_by' => $user->id, 'agent_id' => $validated['agent_id'] ?? $user->id,
+            ]));
             $this->ensureVisibleClientsForProperty($validated);
             $validated = $this->syncPropertyClientSnapshots($validated);
             $dups = $this->propertyDuplicateService->find($validated);
@@ -2635,7 +2637,7 @@ class PropertyController extends Controller
             [$user, $property] = $this->lockPropertyWrite($user, $property, $validated);
             \App\Support\PropertyDocumentTypes::validateWrite($validated, $property);
             PropertyMapLocation::validate($validated, $property);
-            $this->assertCanWriteOwnerPrice($user, $validated);
+            $this->assertCanWriteOwnerPrice($user, $validated, $property);
             $validated = app(PropertyBuildingType::class)->normalizeWrite($validated, $property);
             $validated = $this->normalizePropertyWriteGroup($user, $validated);
             $this->ensureVisibleClientsForProperty($validated, $property);
@@ -3413,6 +3415,7 @@ class PropertyController extends Controller
         $perPage = (int) $request->input('per_page', 50);
 
         $logs = $property->logs()->with('user')->paginate($perPage);
+        $logs->getCollection()->each(fn (PropertyLog $log) => $log->setRelation('property', $property));
 
         return response()->json($logs);
     }
