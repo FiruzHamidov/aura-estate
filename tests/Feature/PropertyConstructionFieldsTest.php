@@ -12,6 +12,55 @@ use Tests\TestCase;
 
 class PropertyConstructionFieldsTest extends TestCase
 {
+    public function test_owner_details_round_trip_clear_and_public_privacy(): void
+    {
+        (require database_path('migrations/2026_11_26_130000_add_offer_source_and_internal_notes_to_properties.php'))->up();
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create(['name' => 'Agent', 'phone' => '930000096', 'role_id' => $role->id, 'status' => 'active']);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        Sanctum::actingAs($user);
+        $payload = ['type_id' => $type->id, 'price' => 150000, 'currency' => 'TJS', 'offer_type' => 'sale'];
+        $id = $this->postJson('/api/properties', $payload + ['offer_source' => 'owner', 'internal_notes' => 'Показ после 18:00'])
+            ->assertOk()->assertJsonPath('offer_source', 'owner')->assertJsonPath('internal_notes', 'Показ после 18:00')->json('id');
+        $this->getJson('/api/properties/'.$id)->assertOk()->assertJsonPath('internal_notes', 'Показ после 18:00');
+        foreach (['contractor', 'intermediary', 'realtor', 'owner'] as $source) {
+            $this->putJson('/api/properties/'.$id, ['offer_source' => $source])->assertOk()->assertJsonPath('offer_source', $source);
+        }
+        $this->putJson('/api/properties/'.$id, ['title' => 'Новое название'])
+            ->assertOk()->assertJsonPath('internal_notes', 'Показ после 18:00');
+        $this->putJson('/api/properties/'.$id, ['offer_source' => 'invalid'])->assertUnprocessable();
+        $this->putJson('/api/properties/'.$id, ['internal_notes' => str_repeat('x', 5001)])->assertUnprocessable();
+
+        $property = \App\Models\Property::findOrFail($id);
+        $this->assertArrayNotHasKey('internal_notes', $property->toArray());
+        $this->assertArrayNotHasKey('offer_source', $property->toArray());
+        $public = app(\App\Services\PublicPropertyPresenter::class)->present($property);
+        $this->assertArrayNotHasKey('internal_notes', $public);
+        $this->assertArrayNotHasKey('offer_source', $public);
+        $this->getJson('/api/properties/'.$id, ['X-Aura-Client-Presentation' => '1'])
+            ->assertOk()->assertJsonMissingPath('internal_notes')->assertJsonMissingPath('offer_source');
+        $this->putJson('/api/properties/'.$id, ['offer_source' => '', 'internal_notes' => ''])
+            ->assertOk()->assertJsonPath('offer_source', null)->assertJsonPath('internal_notes', null);
+        $this->assertDatabaseHas('properties', ['id' => $id, 'offer_source' => null, 'internal_notes' => null]);
+    }
+
+    public function test_owner_details_require_internal_inventory_permission(): void
+    {
+        (require database_path('migrations/2026_11_26_130000_add_offer_source_and_internal_notes_to_properties.php'))->up();
+        (require database_path('migrations/2026_10_10_000000_add_role_permissions.php'))->up();
+        $role = Role::create(['name' => 'Limited', 'slug' => 'limited']);
+        $role->forceFill(['permissions' => ['properties.create', 'properties.edit', 'properties.list.scope.own']])->save();
+        $user = User::create(['name' => 'Limited', 'phone' => '930000097', 'role_id' => $role->id, 'status' => 'active']);
+        $type = \App\Models\PropertyType::create(['name' => 'Apartment']);
+        Sanctum::actingAs($user);
+        $payload = ['type_id' => $type->id, 'price' => 150000, 'currency' => 'TJS', 'offer_type' => 'sale'];
+        $this->postJson('/api/properties', $payload + ['internal_notes' => 'Private'])->assertForbidden();
+        $this->postJson('/api/properties', $payload + ['offer_source' => 'owner'])->assertForbidden();
+        $id = $this->postJson('/api/properties', $payload)->assertOk()->json('id');
+        $this->putJson('/api/properties/'.$id, ['internal_notes' => 'Private'])->assertForbidden();
+        $this->assertDatabaseHas('properties', ['id' => $id, 'internal_notes' => null]);
+    }
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -1352,7 +1401,7 @@ class PropertyConstructionFieldsTest extends TestCase
             ->assertJsonPath('duplicates.0.photos.0.file_path', 'properties/existing.jpg');
     }
 
-    public function test_property_store_warns_about_suspicious_price_and_phone_but_force_can_continue(): void
+    public function test_property_store_rejects_incomplete_phone_and_warns_about_price_without_force_bypass(): void
     {
         $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
         $agent = User::create([
@@ -1375,6 +1424,10 @@ class PropertyConstructionFieldsTest extends TestCase
             'owner_phone' => '12345',
         ];
 
+        $this->postJson('/api/properties', $payload)->assertUnprocessable()
+            ->assertJsonStructure(['details' => ['errors' => ['owner_phone']]]);
+        $this->assertDatabaseCount('properties', 0);
+        $payload['owner_phone'] = '+992901234567';
         $response = $this->postJson('/api/properties', $payload)
             ->assertOk()
             ->assertJsonPath('moderation_status', 'pending')
@@ -1382,7 +1435,7 @@ class PropertyConstructionFieldsTest extends TestCase
 
         $codes = collect($response->json('quality_warnings'))->pluck('code');
         $this->assertTrue($codes->contains('suspicious_price'));
-        $this->assertTrue($codes->contains('suspicious_owner_phone'));
+        $this->assertFalse($codes->contains('suspicious_owner_phone'));
 
         $this->postJson('/api/properties', [...$payload, 'force' => true])->assertUnprocessable();
         $this->assertDatabaseCount('properties', 1);

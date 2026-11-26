@@ -542,6 +542,12 @@ class PropertyController extends Controller
     private function withModerationWorkflow(Property $property, User $user, ?array $payload = null): array
     {
         $payload ??= $property->toArray();
+        if ($user->hasPermission('properties.list.internal')
+            && ! \App\Support\ClientPresentation::enabled()
+            && ($this->moderationAccess->canEdit($user, $property) || $this->moderationAccess->canModerate($user, $property))) {
+            $payload['offer_source'] = $property->offer_source;
+            $payload['internal_notes'] = $property->internal_notes;
+        }
         if ($this->canAccessOwnerPrice($user, $property)) {
             $payload['owner_price'] = $property->owner_price;
         }
@@ -2540,6 +2546,7 @@ class PropertyController extends Controller
                 abort_unless($user->hasPermission('properties.promotions.request') && $user->hasPermission('properties.edit'), 403, 'PROMOTION_PERMISSION_DENIED');
             }
             $validated = $this->normalizePropertyWriteGroup($user, $validated);
+            $this->assertCanWriteOwnerDetails($user, $validated);
             $this->assertCanWriteOwnerPrice($user, $validated, new Property([
                 ...$validated, 'created_by' => $user->id, 'agent_id' => $validated['agent_id'] ?? $user->id,
             ]));
@@ -2638,6 +2645,7 @@ class PropertyController extends Controller
             \App\Support\PropertyDocumentTypes::validateWrite($validated, $property);
             PropertyMapLocation::validate($validated, $property);
             $this->assertCanWriteOwnerPrice($user, $validated, $property);
+            $this->assertCanWriteOwnerDetails($user, $validated);
             $validated = app(PropertyBuildingType::class)->normalizeWrite($validated, $property);
             $validated = $this->normalizePropertyWriteGroup($user, $validated);
             $this->ensureVisibleClientsForProperty($validated, $property);
@@ -3032,6 +3040,14 @@ class PropertyController extends Controller
         ], 410);
     }
 
+    private function assertCanWriteOwnerDetails(User $user, array $data): void
+    {
+        if (array_key_exists('offer_source', $data) || array_key_exists('internal_notes', $data)) {
+            abort_unless($user->hasPermission('properties.list.internal') && ! \App\Support\ClientPresentation::enabled(),
+                403, 'Нет доступа к внутренним данным владельца.');
+        }
+    }
+
     /**
      * @return array
      */
@@ -3110,6 +3126,8 @@ class PropertyController extends Controller
             'branch_group_id' => 'nullable|integer|exists:branch_groups,id',
             'owner_phone' => ['nullable', 'string', 'max:30', new \App\Rules\InternationalPhoneNumber],
             'owner_name' => 'nullable|string|max:255',
+            'offer_source' => 'sometimes|nullable|string|in:contractor,intermediary,realtor,owner',
+            'internal_notes' => 'sometimes|nullable|string|max:5000',
             'owner_client_id' => 'nullable|exists:clients,id',
             'object_key' => 'nullable|string|max:255',
             'features' => 'sometimes|nullable|array',
