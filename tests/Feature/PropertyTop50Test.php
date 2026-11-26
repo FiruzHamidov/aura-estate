@@ -91,7 +91,6 @@ class PropertyTop50Test extends TestCase
         Schema::table('properties', function (Blueprint $t) {
             $t->unsignedBigInteger('views_count')->default(0);
             $t->timestamp('sold_at')->nullable();
-            $t->timestamp('publication_expires_at')->nullable();
             $t->unsignedBigInteger('co_owner_user_id')->nullable();
         });
         Schema::table('branches', fn (Blueprint $t) => $t->boolean('is_hidden')->default(false));
@@ -191,7 +190,7 @@ class PropertyTop50Test extends TestCase
             ['publication_status' => 'hidden'], ['publication_status' => 'pending'], ['moderation_status' => 'sold'],
             ['moderation_status' => 'rented'], ['moderation_status' => 'deleted'], ['moderation_status' => 'draft'],
             ['moderation_status' => 'deposit'], ['deal_status' => 'deposit'], ['sold_at' => '2026-11-01 10:00:00'],
-            ['publication_expires_at' => '2026-11-26 10:00:00'], ['duplicate_of_property_id' => $valid], ['branch_id' => 2],
+            ['duplicate_of_property_id' => $valid], ['branch_id' => 2],
         ];
         DB::table('branches')->where('id', 2)->update(['is_hidden' => true]);
         $ids = [$valid];
@@ -211,6 +210,27 @@ class PropertyTop50Test extends TestCase
     {
         DB::table('property_promotions')->insert(array_merge(['property_id' => $id, 'type' => 'urgent', 'status' => 'active',
             'requested_by' => $this->actor->id, 'requested_at' => '2026-11-25 12:00:00', 'starts_at' => '2026-11-25 12:00:00', 'ends_at' => '2026-12-01 12:00:00'], $changes));
+    }
+
+    public function test_top50_supports_current_schema_and_enforces_expiry_when_available(): void
+    {
+        // The production migrations do not create publication_expires_at.
+        self::assertFalse(Schema::hasColumn('properties', 'publication_expires_at'));
+        $valid = $this->listing();
+        $expired = $this->listing();
+        foreach ([$valid, $expired] as $id) {
+            $this->showing($id);
+            $this->promotion($id);
+        }
+        foreach (['shown', 'viewed', 'urgent'] as $tab) {
+            $this->getJson('/api/properties/top-50?period=all&tab='.$tab)->assertOk()->assertJsonCount(2, 'data');
+        }
+
+        Schema::table('properties', fn (Blueprint $t) => $t->timestamp('publication_expires_at')->nullable());
+        DB::table('properties')->where('id', $expired)->update(['publication_expires_at' => '2026-11-26 10:00:00']);
+        foreach (['shown', 'viewed', 'urgent'] as $tab) {
+            $this->getJson('/api/properties/top-50?period=all&tab='.$tab)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.property.id', $valid);
+        }
     }
 
     public function test_top50_urgent_requires_active_unexpired_promotion_and_uses_its_start_date(): void
