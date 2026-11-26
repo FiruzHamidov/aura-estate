@@ -8,6 +8,7 @@ use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
@@ -45,8 +46,12 @@ final class PropertyTop50
         BranchVisibility::records($query);
         $query->where(fn ($q) => $q->whereNull('properties.moderation_status')->orWhereNotIn('properties.moderation_status', [...Property::CLOSED_MODERATION_STATUSES, 'pending', 'deposit']))
             ->where('properties.deal_status', 'available')
-            ->where(fn ($q) => $q->whereNull('properties.publication_expires_at')->orWhere('properties.publication_expires_at', '>', $now))
             ->whereNull('properties.duplicate_of_property_id');
+        // Publication availability is status-based in the current schema. Some
+        // installations also supply an explicit expiry; never assume that column exists.
+        if (Schema::hasColumn('properties', 'publication_expires_at')) {
+            $query->where(fn ($q) => $q->whereNull('properties.publication_expires_at')->orWhere('properties.publication_expires_at', '>', $now));
+        }
         if (($v['offer_type'] ?? 'all') !== 'all') {
             $query->where('properties.offer_type', $v['offer_type']);
         }
