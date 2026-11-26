@@ -41,11 +41,11 @@ final class MotivationEligibility
             $items = $items->where('branch_group_id', $rule->branch_group_id);
         }
         $amounts = $items->map(fn ($fact) => app(ResultFactService::class)->amount($fact, $condition['currency'] ?? 'TJS', $condition['rental_basis'] ?? null, ResultAmount::basis($condition)));
-        $progress = ResultProgress::calculate($condition, $items->count(), $amounts->filter(fn ($n) => $n !== null)->sum(), $amounts->filter(fn ($n) => $n === null)->count());
+        $progress = ResultProgress::calculate($condition, $items->sum(fn ($fact) => $fact->sale_credit ?? 1), $amounts->filter(fn ($n) => $n !== null)->sum(), $amounts->filter(fn ($n) => $n === null)->count());
 
         return $progress + [
             'eligible' => $progress['achieved'], 'condition' => $condition,
-            'source_events' => $items->pluck('source_event')->sort()->values()->all(),
+            'source_events' => $items->pluck('source_event')->unique()->sort()->values()->all(),
         ];
     }
 }

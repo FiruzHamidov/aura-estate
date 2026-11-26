@@ -8,6 +8,15 @@ use Tests\TestCase;
 
 class MotivationServiceTest extends TestCase
 {
+    public function test_message_preserves_half_a_sale_instead_of_rounding_to_zero_or_one(): void
+    {
+        $service = new MotivationService();
+        $meta = ['messages' => ['remaining_1' => 'Еще 1 сделка!', 'remaining_default' => 'Осталось {remaining} {unit}.']];
+        $this->assertSame('Осталось 0,5 сделки.', $service->buildMessagePreview($meta, 0.5));
+        $this->assertSame('Осталось 2,5 сделки.', $service->buildMessagePreview($meta, 2.5));
+        $this->assertSame('Еще 1 сделка!', $service->buildMessagePreview($meta, 1));
+    }
+
     public function test_validate_period_accepts_week_month_year(): void
     {
         $service = new MotivationService();
