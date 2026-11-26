@@ -16,7 +16,7 @@ final class ResultAmountUpgrade
             $facts = app(ResultFactService::class);
             $sources = $facts->forPeriod($period->toDateString(), $period->endOfMonth()->toDateString(), true);
             $recorded = 0;
-            foreach ($sources as $source) {
+            foreach ($sources->unique('property_id') as $source) {
                 if (($source->participant_commissions ?? null) !== null && ! ($source->legacy_scope ?? false)) {
                     continue;
                 }

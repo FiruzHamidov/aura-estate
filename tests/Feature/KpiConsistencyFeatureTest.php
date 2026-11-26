@@ -117,6 +117,42 @@ class KpiConsistencyFeatureTest extends TestCase
         });
         (require database_path('migrations/2026_11_05_140000_create_kpi_result_goals_and_facts.php'))->up();
         (require database_path('migrations/2026_11_07_150000_add_kpi_amount_bases.php'))->up();
+        (require database_path('migrations/2026_11_26_120000_add_sale_credits_to_kpi_result_facts.php'))->up();
+    }
+
+    public function test_shared_sale_is_half_in_daily_weekly_monthly_and_employee_result_reports(): void
+    {
+        [, $owner, $branch, $group] = $this->fixture();
+        $otherGroup = BranchGroup::create(['name' => 'Seller group', 'branch_id' => $branch->id]);
+        $seller = User::create(['name' => 'Seller', 'phone' => '900990003', 'role_id' => $owner->role_id,
+            'branch_id' => $branch->id, 'branch_group_id' => $otherGroup->id]);
+        $this->employeeReportProperties();
+        $id = \DB::table('properties')->insertGetId(['created_by' => $owner->id, 'agent_id' => $owner->id,
+            'sale_user_id' => $seller->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id,
+            'moderation_status' => 'sold', 'sold_at' => '2026-11-04 12:00:00', 'created_at' => '2026-11-01 12:00:00']);
+        foreach ([false, true] as $recorded) {
+            if ($recorded) app(\App\Services\Kpi\ResultFactService::class)->record(\App\Models\Property::find($id), 'shared-periods');
+            foreach ([$owner, $seller] as $agent) {
+                foreach (['daily?v=2&date=2026-11-04', 'weekly?v=2&date_from=2026-11-02&date_to=2026-11-08', 'monthly?v=2&year=2026&month=11'] as $route) {
+                    $this->getJson('/api/kpi/'.$route.'&agent_id='.$agent->id)->assertOk()
+                        ->assertJsonPath('data.0.metrics.sales.fact_value', 0.5)->assertJsonPath('meta.totals.sales', 0.5);
+                }
+                $auto = app(\App\Services\DailyReportService::class)->autoMetrics($agent, '2026-11-04');
+                $this->assertSame(0.5, $auto['sales_count']);
+                $this->getJson('/api/reports/employees?date_from=2026-11-01&date_to=2026-11-30&agent_id='.$agent->id)
+                    ->assertOk()->assertJsonPath('data.0.result_kpi.sale.count', 0.5)
+                    ->assertJsonPath('data.0.result_kpi.sale.shared_sales_count', 1);
+            }
+            $this->getJson('/api/kpi/monthly?v=2&year=2026&month=11')->assertOk()->assertJsonPath('meta.totals.sales', 1);
+        }
+        // A supervisor receives only the share belonging to their group.
+        $ropRole = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $rop = User::create(['name' => 'ROP', 'phone' => '900990004', 'role_id' => $ropRole->id, 'branch_id' => $branch->id]);
+        $rop->supervisedGroups()->attach($group->id);
+        Sanctum::actingAs($rop);
+        $rows = $this->getJson('/api/kpi/monthly?v=2&year=2026&month=11')->assertOk()
+            ->assertJsonPath('meta.totals.sales', 0.5)->json('data');
+        $this->assertNotContains($seller->id, array_column($rows, 'employee_id'));
     }
 
     public function test_unified_employee_report_counts_same_complete_rows_and_preserves_canonical_kpi(): void
@@ -147,7 +183,10 @@ class KpiConsistencyFeatureTest extends TestCase
         $canonical = $this->getJson('/api/kpi/monthly?v=2&year=2026&month=10')->assertOk();
         foreach ($result->json('data') as $row) {
             $expected = collect($canonical->json('data'))->firstWhere('employee_id', $row['employee_id']);
-            foreach (['objects', 'shows', 'clients', 'calls', 'ads', 'sales'] as $key) $this->assertEquals($expected[$key], $row[$key]);
+            foreach (['objects', 'shows', 'clients', 'calls', 'ads'] as $key) $this->assertEquals($expected[$key], $row[$key]);
+            // Inventory counts remain whole objects; KPI counts carry each employee's share.
+            $this->assertEquals(0.5, $expected['sales']);
+            $this->assertEquals(0.5, $row['result_kpi']['sale']['count']);
             $this->assertNull($row['kpi_percent']); // Activity plans are not result goals.
             $this->assertSame($row['total_properties'], array_sum($row['by_status']));
             $this->assertSame($row['total_properties'], array_sum($row['contracts']));
@@ -362,7 +401,7 @@ class KpiConsistencyFeatureTest extends TestCase
         }
         // The calendar-month banner follows the same employee as the inventory.
         $this->getJson('/api/reports/employees?branch_group_id='.$group->id.'&kpi_month=2026-10')->assertOk()
-            ->assertJsonPath('data.0.result_kpi.sale.count', 1)->assertJsonPath('data.0.result_kpi.sale.amount', 100);
+            ->assertJsonPath('data.0.result_kpi.sale.count', 0.5)->assertJsonPath('data.0.result_kpi.sale.amount', 100);
         foreach (['rop', 'branch_director'] as $roleSlug) {
             $role = Role::create(['name' => $roleSlug, 'slug' => $roleSlug]);
             $leader = User::create(['name' => $roleSlug, 'phone' => '90099000'.($roleSlug === 'rop' ? 4 : 5),
@@ -372,7 +411,7 @@ class KpiConsistencyFeatureTest extends TestCase
             $rows = $this->getJson('/api/reports/employees?kpi_month=2026-10')->assertOk()->json('data');
             $row = collect($rows)->firstWhere('employee_id', $seller->id);
             $this->assertSame(2, $row['sales']);
-            $this->assertSame(1, $row['result_kpi']['sale']['count']);
+            $this->assertSame(0.5, $row['result_kpi']['sale']['count']);
             $this->assertEquals(100, $row['result_kpi']['sale']['amount']);
             // ROP aggregate access does not expose foreign CRM cards.
             if ($roleSlug === 'rop') {
