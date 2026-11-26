@@ -1137,6 +1137,17 @@ class PropertyController extends Controller
         return $query;
     }
 
+    public function top50(Request $request, \App\Services\PropertyTop50 $feed)
+    {
+        $actor = $request->user();
+        abort_unless($this->canViewInternalPropertyList($actor)
+            && ($actor->hasPermission('properties.site.all') || $actor->hasPermission('properties.site.own'))
+            && ! $actor->hasPermission('properties.list.closed_only'), 403);
+
+        return response()->json($feed->build($request, $this->baseQuery($request, [])))
+            ->header('Cache-Control', 'private, no-store');
+    }
+
     /** Compact internal search: reuse the same record scopes and field permissions as the existing lists. */
     public function workspaceSearch(Request $request)
     {
