@@ -2532,6 +2532,7 @@ class PropertyController extends Controller
         unset($validated['tags']);
         [$property, $dups, $qualityWarnings, $user] = DB::transaction(function () use ($request, $validated, $featureIds, $tagIds, $user, $requiresReview, $requestedType) {
             [$user] = $this->lockPropertyWrite($user, null, $validated);
+            \App\Support\PropertyDocumentTypes::validateWrite($validated);
             PropertyMapLocation::validate($validated);
             $this->assertCanWriteOwnerPrice($user, $validated);
             $validated = app(PropertyBuildingType::class)->normalizeWrite($validated);
@@ -2632,6 +2633,7 @@ class PropertyController extends Controller
             $user
         ): void {
             [$user, $property] = $this->lockPropertyWrite($user, $property, $validated);
+            \App\Support\PropertyDocumentTypes::validateWrite($validated, $property);
             PropertyMapLocation::validate($validated, $property);
             $this->assertCanWriteOwnerPrice($user, $validated);
             $validated = app(PropertyBuildingType::class)->normalizeWrite($validated, $property);

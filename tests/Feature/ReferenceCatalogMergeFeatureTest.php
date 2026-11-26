@@ -76,6 +76,26 @@ class ReferenceCatalogMergeFeatureTest extends TestCase
         $this->assertDatabaseMissing('property_types', ['id' => $created]);
     }
 
+    public function test_merging_property_types_preserves_document_links_without_duplicates(): void
+    {
+        $context = $this->context();
+        Schema::create('document_type_property_type', function (Blueprint $table) {
+            $table->unsignedBigInteger('document_type_id'); $table->unsignedBigInteger('property_type_id');
+            $table->primary(['document_type_id', 'property_type_id']);
+        });
+        \DB::table('document_type_property_type')->insert([
+            ['document_type_id' => 1, 'property_type_id' => $context['source']->id],
+            ['document_type_id' => 1, 'property_type_id' => $context['replacement']->id],
+            ['document_type_id' => 2, 'property_type_id' => $context['source']->id],
+        ]);
+        Sanctum::actingAs($context['admin']);
+        $this->postJson('/api/admin/catalogs/property-types/'.$context['source']->id.'/merge', [
+            'replacement_id' => $context['replacement']->id, 'expected_usage_count' => 6,
+        ])->assertOk();
+        $this->assertDatabaseCount('document_type_property_type', 2);
+        $this->assertDatabaseMissing('document_type_property_type', ['property_type_id' => $context['source']->id]);
+    }
+
     public function test_registry_contains_all_admin_reference_catalogs(): void
     {
         $this->assertSame([
