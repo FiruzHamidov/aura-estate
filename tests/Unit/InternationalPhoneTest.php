@@ -34,7 +34,7 @@ class InternationalPhoneTest extends TestCase
 
     public function test_country_lengths_and_legacy_formats(): void
     {
-        foreach (['+99290123456', '+9929012345678', '+7912345678', '+791234567890', '+99890123456', '+999123456789', 'abc', '+992901234567 ext 1', '+99290+1234567'] as $invalid) {
+        foreach (['123', '+992123', '+99290123456', '+9929012345678', '+7912345678', '+791234567890', '+99890123456', '+999123456789', 'abc', '+992901234567 ext 1', '+99290+1234567'] as $invalid) {
             $this->assertNull(InternationalPhone::e164($invalid), $invalid);
         }
         foreach ([

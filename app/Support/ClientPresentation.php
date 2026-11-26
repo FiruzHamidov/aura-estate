@@ -19,7 +19,7 @@ final class ClientPresentation
         }
 
         foreach (['address', 'landmark', 'contract_type', 'contract_type_id', 'is_co_owned',
-            'views_count', 'publication_expires_at'] as $field) {
+            'views_count', 'publication_expires_at', 'offer_source', 'internal_notes'] as $field) {
             unset($payload[$field]);
         }
         foreach (['latitude', 'longitude'] as $field) {

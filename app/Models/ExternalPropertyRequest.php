@@ -48,6 +48,7 @@ class ExternalPropertyRequest extends Model
         'condition',
         'owner_name',
         'owner_phone',
+        'owner_additional_phone',
         'owner_phone_normalized',
         'external_comment',
         'internal_comment',

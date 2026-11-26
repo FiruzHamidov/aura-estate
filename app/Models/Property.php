@@ -115,6 +115,8 @@ class Property extends Model
     ];
 
     protected $hidden = [
+        'offer_source',
+        'internal_notes',
         'owner_price',
         'non_client_views_count',
         'effective_price',
@@ -144,6 +146,8 @@ class Property extends Model
     ];
 
     protected $fillable = [
+        'offer_source',
+        'internal_notes',
         'owner_price',
         'title',
         'description',

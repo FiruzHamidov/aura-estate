@@ -427,6 +427,7 @@ class ExternalPropertyRequestController extends Controller
             'condition' => ['sometimes', 'nullable', 'string', 'max:255'],
             'owner_name' => ['sometimes', 'nullable', 'string', 'max:255'],
             'owner_phone' => [new \App\Rules\InternationalPhoneNumber, $requiredWhenSubmitted, 'nullable', 'string', 'max:40'],
+            'owner_additional_phone' => ['sometimes', 'nullable', 'string', 'max:40', new \App\Rules\InternationalPhoneNumber],
             'external_comment' => ['sometimes', 'nullable', 'string'],
             'meta' => ['sometimes', 'nullable', 'array'],
         ]);
@@ -581,6 +582,7 @@ class ExternalPropertyRequestController extends Controller
             'condition',
             'owner_name',
             'owner_phone',
+            'owner_additional_phone',
             'external_comment',
             'needs_info_comment',
             'rejection_reason',

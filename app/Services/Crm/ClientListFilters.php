@@ -69,7 +69,7 @@ final class ClientListFilters
             $query->where(function ($builder) use ($term) {
                 $builder
                     ->where('full_name', 'like', '%' . $term . '%')
-                    ->orWhere('phone', 'like', '%' . $term . '%')
+                    ->orWhere(fn (Builder $phones) => self::applyPhoneSearch($phones, $term))
                     ->orWhere('email', 'like', '%' . $term . '%');
             });
         }
@@ -79,7 +79,7 @@ final class ClientListFilters
         }
 
         if (!empty($validated['phone'])) {
-            $query->where('phone', 'like', '%' . trim($validated['phone']) . '%');
+            $query->where(fn (Builder $phones) => self::applyPhoneSearch($phones, trim($validated['phone'])));
         }
 
         if (!empty($validated['email'])) {
@@ -218,6 +218,19 @@ final class ClientListFilters
         }
         if (!empty($validated['status_id']) && Schema::hasColumn('clients', 'status_id')) {
             $query->where('status_id', (int) $validated['status_id']);
+        }
+    }
+
+    private static function applyPhoneSearch(Builder $query, string $term): void
+    {
+        $query->where('phone', 'like', '%'.$term.'%');
+        if (Schema::hasColumn('clients', 'additional_phone')) {
+            $query->orWhere('additional_phone', 'like', '%'.$term.'%');
+            // Also accept copied numbers with spaces, brackets and country codes.
+            $digits = preg_match('/^[+\d\s().-]+$/', $term) ? preg_replace('/\D/', '', $term) : '';
+            if ($digits !== '') {
+                $query->orWhere('additional_phone', 'like', '%'.$digits.'%');
+            }
         }
     }
 }
