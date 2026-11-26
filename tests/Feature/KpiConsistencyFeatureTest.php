@@ -968,6 +968,20 @@ class KpiConsistencyFeatureTest extends TestCase
         $this->assertLessThanOrEqual($baseline + 10, count($queries), 'Global totals must preload sources/plans instead of querying per employee or day.');
     }
 
+    public function test_all_period_includes_an_old_shared_sale_for_the_assigned_listing_agent(): void
+    {
+        [$admin, $agent, $branch, $group] = $this->fixture();
+        $this->employeeReportProperties();
+        \DB::table('properties')->insert(['created_by' => $admin->id, 'agent_id' => $agent->id,
+            'sale_user_id' => $admin->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id,
+            'moderation_status' => 'sold', 'sold_at' => '2024-01-02 12:00:00', 'created_at' => '2024-01-01 12:00:00']);
+
+        $this->getJson('/api/kpi/weekly?v=2&all_period=1&agent_id='.$agent->id)->assertOk()
+            ->assertJsonPath('meta.date_from', '2024-01-02')
+            ->assertJsonPath('data.0.metrics.sales.fact_value', 0.5)
+            ->assertJsonPath('meta.totals.sales', 0.5);
+    }
+
     public function test_all_period_includes_imported_old_facts_and_explicitly_reports_undated_sales(): void
     {
         [$admin, $agent] = $this->fixture();

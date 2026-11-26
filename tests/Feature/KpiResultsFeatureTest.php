@@ -213,6 +213,17 @@ class KpiResultsFeatureTest extends TestCase
         $this->assertCount(1, $result['source_events']);
     }
 
+    public function test_motivation_overview_preserves_fractional_remaining_count(): void
+    {
+        $seller = $this->user('agent', 1);
+        $this->property(['sale_user_id' => $seller->id]);
+        $this->program();
+        $overview = app(\App\Services\MotivationService::class)->buildOverview($this->agent, 'month', '2026-11-01', '2026-11-30');
+        $this->assertSame(0.5, $overview['cards'][0]['remaining']);
+        $this->assertStringContainsString('0,5 сделки', $overview['cards'][0]['message_preview']);
+        $this->assertSame('in_progress', $overview['cards'][0]['status']);
+    }
+
     public function test_closed_month_keeps_shared_sale_snapshot_until_reviewed_adjustment(): void
     {
         $seller = $this->user('agent', 1);

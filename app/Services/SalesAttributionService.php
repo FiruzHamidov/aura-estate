@@ -17,6 +17,16 @@ class SalesAttributionService
             ? (int) $property->agent_id : (int) ($property->created_by ?? 0);
     }
 
+    public function listingAgentExpression(string $table = 'properties'): string
+    {
+        $candidates = array_map(
+            fn (string $column) => "CASE WHEN {$table}.{$column} > 0 THEN {$table}.{$column} END",
+            array_values(array_intersect(['agent_id', 'created_by'], $this->sellerColumns()))
+        );
+
+        return $candidates === [] ? 'NULL' : 'COALESCE('.implode(', ', [...$candidates, 'NULL']).')';
+    }
+
     /** KPI counts are separate from inventory ownership and monetary attribution. */
     public function kpiCreditsByProperty(Collection $properties): array
     {
