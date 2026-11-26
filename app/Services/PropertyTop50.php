@@ -34,7 +34,7 @@ final class PropertyTop50
             default => null,
         };
         $to = $period === 'custom' ? CarbonImmutable::parse($v['date_to'], 'Asia/Dushanbe')->endOfDay()->min($today) : $today;
-        if ($from && $from->diffInDays($to) > 366) {
+        if ($from && $from->diffInDays($to->startOfDay()) >= 366) {
             throw ValidationException::withMessages(['date_from' => 'Выберите период не длиннее 366 дней.']);
         }
         // Timestamps are stored in the application timezone; daily analytics use Dushanbe dates.

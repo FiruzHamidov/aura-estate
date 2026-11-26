@@ -251,6 +251,10 @@ class PropertyTop50Test extends TestCase
         }
         DB::table('property_analytics_coverage')->delete();
         $this->getJson('/api/properties/top-50?tab=viewed')->assertOk()->assertJsonPath('data_quality', 'unknown');
+        // Both dates count toward the 366-day limit, even exactly at midnight.
+        $this->travelTo(Carbon::parse('2026-11-26 00:00:00', 'Asia/Dushanbe'));
+        $this->getJson('/api/properties/top-50?period=custom&date_from=2025-11-26&date_to=2026-11-26')->assertOk();
+        $this->getJson('/api/properties/top-50?period=custom&date_from=2025-11-25&date_to=2026-11-26')->assertUnprocessable();
     }
 
     public function test_top50_assigned_groups_and_blocking_moderation_are_enforced_before_limiting(): void
