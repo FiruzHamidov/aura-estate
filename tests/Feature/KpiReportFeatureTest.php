@@ -124,6 +124,20 @@ class KpiReportFeatureTest extends TestCase
         $this->assertCount(3, $response->json('data'));
     }
 
+    public function test_legacy_report_preserves_fractional_sales_under_the_compatible_metric_key(): void
+    {
+        [$users] = $this->seedContext();
+        Schema::table('daily_reports', fn (Blueprint $table) => $table->decimal('sales_count', 8, 4)->nullable());
+        $agent = User::where('name', 'Agent A')->firstOrFail();
+        DailyReport::where('user_id', $agent->id)->update(['deals_count' => 0, 'sales_count' => 0.5]);
+        Sanctum::actingAs($users['admin']);
+        $url = '/api/kpi-reports?period_type=day&date_from=2026-05-01&date_to=2026-05-01&user_id='.$agent->id;
+        $this->getJson($url)->assertOk()->assertJsonPath('data.0.metrics.deals_count.fact_value', 0.5)
+            ->assertJsonPath('data.0.metrics.deals_count.progress_pct', 50);
+        DailyReport::where('user_id', $agent->id)->update(['deals_count' => 2, 'sales_count' => null]);
+        $this->getJson($url)->assertOk()->assertJsonPath('data.0.metrics.deals_count.fact_value', 2);
+    }
+
     public function test_hidden_branch_is_excluded_from_reports_and_returns_when_restored(): void
     {
         [$users] = $this->seedContext();

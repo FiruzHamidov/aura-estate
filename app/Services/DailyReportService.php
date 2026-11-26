@@ -153,7 +153,7 @@ class DailyReportService
             'new_properties_count' => $this->countNewProperties($user, $startUtc, $endUtc),
             // Keep integer legacy deals_count for backward compatibility.
             'deals_count' => (int) floor($salesCount),
-            // One sale is credited to its primary seller.
+            // Shared sales contribute half to the listing agent and half to the seller.
             'sales_count' => $salesCount,
         ];
     }
@@ -396,34 +396,25 @@ class DailyReportService
             return ['sales_count' => 0.0, 'property_ids' => []];
         }
 
-        $select = ['id', 'moderation_status', 'agent_id', 'sale_user_id', 'created_by'];
-        if (Schema::hasColumn('properties', 'sale_agent_id')) {
-            $select[] = 'sale_agent_id';
-        }
-
-        $soldProperties = DB::table('properties')->tap(fn ($query) => $this->scopeMetricQuery($query, 'properties', $user))
-            ->select($select)
-            ->where('moderation_status', 'sold')
-            ->whereBetween('sold_at', $this->localStorageBounds($startUtc, $endUtc))
-            ->get();
-
-        if ($soldProperties->isEmpty()) {
-            return ['sales_count' => 0.0, 'property_ids' => []];
-        }
-
-        $creditsByProperty = $this->salesAttributionService->creditsByProperty($soldProperties, ['sold']);
-
+        $facts = app(\App\Services\Kpi\ResultFactService::class)->forPeriod(
+            $startUtc->copy()->setTimezone($this->timezone())->toDateString(),
+            $endUtc->copy()->setTimezone($this->timezone())->toDateString(),
+        )->where('kind', 'sale')->where('user_id', $user->id);
+        $visibleBranches = DB::table('branches')->tap(fn ($q) => \App\Support\BranchVisibility::apply($q, 'branches.id'))->pluck('id')->all();
+        $actor = auth()->user();
+        $access = app(\App\Support\RopGroupAccess::class);
+        $historical = $access->applies($actor);
+        $groups = $historical ? $access->groupIds($actor) : [];
         $credit = 0.0;
         $propertyIds = [];
-        foreach ($soldProperties as $property) {
-            $propertyId = (int) ($property->id ?? 0);
-            $propertyCredit = (float) ($creditsByProperty[$propertyId][$user->id] ?? 0.0);
-            if ($propertyCredit <= 0) {
+        foreach ($facts as $fact) {
+            if (($fact->branch_id && ! in_array((int) $fact->branch_id, $visibleBranches))
+                || ($historical && (! in_array((int) $fact->branch_group_id, $groups)
+                    || (int) $fact->branch_group_id !== (int) $user->branch_group_id))) {
                 continue;
             }
-
-            $propertyIds[] = $propertyId;
-            $credit += $propertyCredit;
+            $propertyIds[] = (int) $fact->property_id;
+            $credit += $fact->sale_credit ?? 1;
         }
 
         sort($propertyIds);

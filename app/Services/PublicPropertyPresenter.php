@@ -120,7 +120,7 @@ final class PublicPropertyPresenter
                 ->all();
         }
 
-        return $this->buildingType->present($property, $payload);
+        return \App\Support\ClientPresentation::property($this->buildingType->present($property, $payload));
     }
 
     private function publicAgent(?User $user, bool $includeContact): ?array

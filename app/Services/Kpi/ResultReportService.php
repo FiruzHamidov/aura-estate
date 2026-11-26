@@ -113,13 +113,17 @@ final class ResultReportService
             $currency = $goal['currency'] ?? 'TJS';
             $amountBasis = $goal ? ResultAmount::basis($goal) : 'company_income';
             $amounts = $items->map(fn ($fact) => $this->facts->amount($fact, $currency, $basis, $amountBasis));
-            $row[$kind] = ResultProgress::calculate($goal, $items->count(), $amounts->filter(fn ($n) => $n !== null)->sum(), $amounts->filter(fn ($n) => $n === null)->count())
-                + ['goal' => $goal, 'currency' => $currency, 'rental_basis' => $basis, 'amount_basis' => $amountBasis];
+            $row[$kind] = ResultProgress::calculate($goal, $items->sum(fn ($fact) => $fact->sale_credit ?? 1), $amounts->filter(fn ($n) => $n !== null)->sum(), $amounts->filter(fn ($n) => $n === null)->count())
+                + ['goal' => $goal, 'currency' => $currency, 'rental_basis' => $basis, 'amount_basis' => $amountBasis,
+                    'shared_sales_count' => $items->filter(fn ($fact) => ($fact->sale_credit ?? 1) < 1)->count()];
         }
         $row['deals'] = $facts->map(fn ($fact) => [
             'user_id' => $fact->user_id, 'branch_id' => $fact->branch_id, 'branch_group_id' => $fact->branch_group_id,
             'source_event' => $fact->source_event, 'property_id' => $fact->property_id,
             'kind' => $fact->kind, 'closed_at' => $fact->closed_at, 'amount' => $fact->amount,
+            'sale_credit' => $fact->sale_credit ?? 1,
+            'credit_role' => $fact->credit_role ?? 'seller',
+            'credit_note' => ($fact->sale_credit ?? 1) < 1 ? \App\Services\SalesAttributionService::SHARED_SALE_NOTE : null,
             'kpi_amount' => $this->facts->amount($fact, $row[$fact->kind]['currency'], $row[$fact->kind]['rental_basis'], $row[$fact->kind]['amount_basis']),
             'amount_basis' => $row[$fact->kind]['amount_basis'],
             'kpi_currency' => $row[$fact->kind]['currency'], 'rental_basis' => $row[$fact->kind]['rental_basis'],

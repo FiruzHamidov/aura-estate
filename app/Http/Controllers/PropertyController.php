@@ -164,6 +164,9 @@ class PropertyController extends Controller
 
     private function propertyShowAuthUser(Request $request): ?User
     {
+        if (\App\Support\ClientPresentation::enabled($request)) {
+            return null;
+        }
         $user = $request->user() ?? $request->user('sanctum');
         $user?->loadMissing('role');
 
@@ -843,7 +846,7 @@ class PropertyController extends Controller
                 $payload['agent_id'] = $property->agent_id;
                 $payload['responsible_agent'] = $property->agent?->only(['id', 'name', 'photo']);
 
-                return $payload;
+                return \App\Support\ClientPresentation::property($payload);
             }
 
             if ($actor->hasPermission('properties.contacts.view')) {
@@ -1135,6 +1138,17 @@ class PropertyController extends Controller
         }
 
         return $query;
+    }
+
+    public function top50(Request $request, \App\Services\PropertyTop50 $feed)
+    {
+        $actor = $request->user();
+        abort_unless($this->canViewInternalPropertyList($actor)
+            && ($actor->hasPermission('properties.site.all') || $actor->hasPermission('properties.site.own'))
+            && ! $actor->hasPermission('properties.list.closed_only'), 403);
+
+        return response()->json($feed->build($request, $this->baseQuery($request, [])))
+            ->header('Cache-Control', 'private, no-store');
     }
 
     /** Compact internal search: reuse the same record scopes and field permissions as the existing lists. */
@@ -1504,7 +1518,7 @@ class PropertyController extends Controller
 
     private function serializePropertySearchResult(Property $property): array
     {
-        return [
+        return \App\Support\ClientPresentation::property([
             'id' => (int) $property->id,
             'title' => $property->title,
             'price' => $this->normalizeRawNumber($property->price),
@@ -1541,7 +1555,7 @@ class PropertyController extends Controller
             'created_at' => $property->created_at?->toJSON(),
             'listing_updated_at' => $property->listing_updated_at?->toJSON(),
             'public_price_badge' => $property->publicPriceBadge(),
-        ];
+        ]);
     }
 
     // ==== Карта: bbox + zoom + кластеризация/точки ====
@@ -1630,7 +1644,7 @@ class PropertyController extends Controller
                         'geometry' => [
                             'type' => 'Point',
                             // ВНИМАНИЕ: проверь порядок в вашей карте. Для Yandex чаще [lat, lng]
-                            'coordinates' => [(float) ($r->anchor_lat ?? $r->lat_avg), (float) ($r->anchor_lng ?? $r->lng_avg)],
+                            'coordinates' => [\App\Support\ClientPresentation::coordinate($r->anchor_lat ?? $r->lat_avg), \App\Support\ClientPresentation::coordinate($r->anchor_lng ?? $r->lng_avg)],
                         ],
                         'properties' => [
                             'cluster' => true,
@@ -1663,7 +1677,7 @@ class PropertyController extends Controller
                     'type' => 'Feature',
                     'geometry' => [
                         'type' => 'Point',
-                        'coordinates' => [(float) $p->latitude, (float) $p->longitude],
+                        'coordinates' => [\App\Support\ClientPresentation::coordinate($p->latitude), \App\Support\ClientPresentation::coordinate($p->longitude)],
                     ],
                     'properties' => [
                         'id' => (int) $p->id,

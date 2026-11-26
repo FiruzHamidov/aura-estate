@@ -349,10 +349,11 @@ class KpiDailyMyReportStrictApiTest extends TestCase
             ->assertJsonPath('report_date', '2026-07-06')
             ->assertJsonPath('metrics.objects.fact', 2)
             ->assertJsonPath('metrics.shows.fact', 1)
-            ->assertJsonPath('metrics.sales.fact', 1)
+            ->assertJsonPath('metrics.sales.fact', 0.5)
             ->assertJsonPath('auto.new_properties_count', 2)
             ->assertJsonPath('auto.shows_count', 1)
-            ->assertJsonPath('auto.deals_count', 1)
+            ->assertJsonPath('auto.deals_count', 0)
+            ->assertJsonPath('auto.sales_count', 0.5)
             ->assertJsonPath('meta.debug.auto_metrics.employee_id', $agent->id)
             ->assertJsonPath('meta.debug.auto_metrics.date', '2026-07-06')
             ->assertJsonPath('meta.debug.auto_metrics.timezone', 'Asia/Dushanbe')
@@ -361,7 +362,7 @@ class KpiDailyMyReportStrictApiTest extends TestCase
             ->assertJsonPath('meta.debug.auto_metrics.sales_property_ids', [$soldId])
             ->assertJsonPath('meta.debug.auto_metrics.metrics.objects.fact', 2)
             ->assertJsonPath('meta.debug.auto_metrics.metrics.shows.fact', 1)
-            ->assertJsonPath('meta.debug.auto_metrics.metrics.sales.fact', 1);
+            ->assertJsonPath('meta.debug.auto_metrics.metrics.sales.fact', 0.5);
     }
 
     public function test_old_reports_follow_live_facts_until_explicitly_frozen(): void

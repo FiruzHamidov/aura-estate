@@ -5,7 +5,7 @@ namespace App\Services\Kpi;
 /** Shared by reports, the sticky banner and motivation eligibility. */
 final class ResultProgress
 {
-    public static function calculate(?array $goal, int $count, float $amount, int $missingAmounts): array
+    public static function calculate(?array $goal, int|float $count, float $amount, int $missingAmounts): array
     {
         $amount = round($amount, 2);
         $countTarget = $goal['count_target'] ?? null;

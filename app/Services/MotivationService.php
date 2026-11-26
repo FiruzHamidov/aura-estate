@@ -117,7 +117,7 @@ class MotivationService
         ]);
     }
 
-    public function buildMessagePreview(array $uiMeta, int $remaining): string
+    public function buildMessagePreview(array $uiMeta, int|float $remaining): string
     {
         $key = 'remaining_'.$remaining;
         $messages = is_array($uiMeta['messages'] ?? null) ? $uiMeta['messages'] : [];
@@ -125,7 +125,7 @@ class MotivationService
         $unit = $this->pluralizeRu($remaining, $this->unitLabels($uiMeta));
 
         return strtr($template, [
-            '{remaining}' => (string) $remaining,
+            '{remaining}' => $this->formatCount($remaining),
             '{unit}' => $unit,
         ]);
     }
@@ -186,7 +186,7 @@ class MotivationService
         $amountMode = ($condition['mode'] ?? 'count') === 'amount';
         $fact = $amountMode ? $progress['amount'] : $progress['count'];
         $threshold = (float) ($amountMode ? ($condition['amount_target'] ?? 0) : ($condition['count_target'] ?? $rule->threshold_value));
-        $remaining = max(0, (int) ceil($threshold - $fact));
+        $remaining = max(0, round($threshold - $fact, 4));
         $status = $progress['eligible'] ? 'achieved' : 'in_progress';
         if ($achievement?->status === 'issued') {
             $status = 'issued';
@@ -197,7 +197,7 @@ class MotivationService
             $message = 'До цели осталось '.number_format(max(0, $threshold - $fact), 2, '.', ' ').' '.($condition['currency'] ?? 'TJS').'.';
         }
         if (($condition['mode'] ?? '') === 'count_or_amount' && ! $progress['eligible'] && $progress['status'] !== 'no_plan') {
-            $message = 'До цели: ещё '.$progress['remaining_count'].' '.$this->pluralizeRu((int) $progress['remaining_count'], $this->unitLabels($uiMeta)).' или '.number_format($progress['remaining_amount'], 2, '.', ' ').' '.($condition['currency'] ?? 'TJS').'.';
+            $message = 'До цели: ещё '.$this->formatCount($progress['remaining_count']).' '.$this->pluralizeRu($progress['remaining_count'], $this->unitLabels($uiMeta)).' или '.number_format($progress['remaining_amount'], 2, '.', ' ').' '.($condition['currency'] ?? 'TJS').'.';
         }
         if ($progress['status'] === 'no_plan') {
             $message = 'Руководитель ещё не назначил цель KPI на этот период.';
@@ -244,9 +244,17 @@ class MotivationService
             ->keyBy('rule_id');
     }
 
-    private function pluralizeRu(int $value, array $labels): string
+    private function formatCount(int|float $value): string
     {
-        $n = abs($value) % 100;
+        return rtrim(rtrim(number_format($value, 4, ',', ''), '0'), ',');
+    }
+
+    private function pluralizeRu(int|float $value, array $labels): string
+    {
+        if (floor($value) != $value) {
+            return $labels['few'];
+        }
+        $n = abs((int) $value) % 100;
         $n1 = $n % 10;
         if ($n > 10 && $n < 20) {
             return $labels['many'];

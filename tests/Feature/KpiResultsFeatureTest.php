@@ -82,6 +82,7 @@ class KpiResultsFeatureTest extends TestCase
             '2026_11_05_150000_extend_motivation_programs',
             '2026_11_06_100000_create_kpi_planning_drafts',
             '2026_11_07_150000_add_kpi_amount_bases',
+            '2026_11_26_120000_add_sale_credits_to_kpi_result_facts',
         ] as $migration) {
             (require database_path('migrations/'.$migration.'.php'))->up();
         }
@@ -132,6 +133,128 @@ class KpiResultsFeatureTest extends TestCase
             'name' => 'Ташкент', 'period_type' => 'month', 'date_from' => '2026-11-01', 'date_to' => '2026-11-30', 'is_active' => true,
             'condition' => ['kind' => 'sale', 'mode' => 'count', 'count_target' => 1, 'currency' => 'TJS'],
         ]);
+    }
+
+    public function test_shared_sale_credits_both_agents_and_preserves_money_for_legacy_and_recorded_facts(): void
+    {
+        $seller = $this->user('agent', 2);
+        $property = $this->property(['sale_user_id' => $seller->id, 'actual_sale_currency' => 'TJS']);
+        foreach ([$this->agent, $seller] as $user) {
+            $this->postJson('/api/kpi/results/goals', $this->goal(['user_id' => $user->id, 'mode' => 'count', 'count_target' => 1]))->assertCreated();
+        }
+        $service = app(ResultFactService::class);
+        foreach (['legacy', 'recorded', 'old-ledger'] as $stage) {
+            if ($stage === 'recorded') $service->record($property, 'shared-sale');
+            if ($stage === 'old-ledger') DB::table('kpi_result_facts')->update(['sale_credits' => null]);
+            $report = $this->getJson('/api/kpi/results?month=2026-11')->assertOk();
+            $rows = collect($report->json('rows'))->keyBy('user_id');
+            foreach ([$this->agent, $seller] as $user) {
+                $row = $rows[$user->id];
+                $this->assertEquals(0.5, $row['sale']['count'], $stage);
+                $this->assertEquals(50, $row['sale']['progress_percent']);
+                $this->assertEquals(0.5, $row['sale']['remaining_count']);
+                $this->assertSame(1, $row['sale']['shared_sales_count']);
+                $this->assertSame(0.5, $row['deals'][0]['sale_credit']);
+                $this->assertStringContainsString('по 0,5', $row['deals'][0]['credit_note']);
+            }
+            $this->assertEquals(1, $report->json('totals.sales_count'));
+            $this->assertEquals(0, $rows[$this->agent->id]['sale']['amount']);
+            $this->assertEquals(1000, $rows[$seller->id]['sale']['amount']);
+        }
+        // Each agent may see only their own share, including cross-group sales.
+        foreach ([$this->agent, $seller] as $user) {
+            Sanctum::actingAs($user);
+            $this->getJson('/api/kpi/results?month=2026-11')->assertOk()->assertJsonCount(1, 'rows')
+                ->assertJsonPath('rows.0.user_id', $user->id)->assertJsonPath('rows.0.sale.count', 0.5);
+        }
+    }
+
+    public function test_shared_sale_snapshot_preserves_scope_and_revisions_reallocate_or_reverse_both_shares(): void
+    {
+        $seller = $this->user('agent', 2);
+        $property = $this->property(['sale_user_id' => $seller->id]);
+        $service = app(ResultFactService::class);
+        $service->record($property, 'joint-1');
+        $service->record($property, 'joint-1');
+        $this->assertDatabaseCount('kpi_result_facts', 1);
+        $this->agent->forceFill(['branch_group_id' => 2])->save();
+        $property->actual_sale_price = 2000;
+        $service->record($property, 'joint-2');
+        $facts = $service->forPeriod('2026-11-01', '2026-11-30')->keyBy('user_id');
+        $this->assertSame(1, $facts[$this->agent->id]->branch_group_id);
+        $this->assertSame(2, $facts[$seller->id]->branch_group_id);
+        $this->assertEquals(1, $facts->sum('sale_credit'));
+        $property->agent_id = $seller->id;
+        $service->record($property, 'joint-3');
+        $fact = $service->forPeriod('2026-11-01', '2026-11-30')->sole();
+        $this->assertSame($seller->id, $fact->user_id);
+        $this->assertEquals(1, $fact->sale_credit);
+        $property->moderation_status = 'approved';
+        $service->record($property, 'joint-4');
+        $this->assertCount(0, $service->forPeriod('2026-11-01', '2026-11-30'));
+    }
+
+    public function test_joint_sale_does_not_earn_a_whole_sale_reward_or_double_company_totals(): void
+    {
+        $seller = $this->user('agent', 1);
+        $this->property(['sale_user_id' => $seller->id, 'actual_sale_currency' => 'TJS']);
+        $facts = app(ResultFactService::class)->forPeriod('2026-11-01', '2026-11-30');
+        $rule = $this->program();
+        $eligibility = app(\App\Services\Kpi\MotivationEligibility::class);
+        foreach ([$this->agent, $seller] as $user) {
+            $result = $eligibility->evaluate($rule, $facts, $user);
+            $this->assertSame(0.5, $result['count']);
+            $this->assertFalse($result['eligible']);
+        }
+        $rule->scope = 'company';
+        $result = $eligibility->evaluate($rule, $facts);
+        $this->assertEquals(1, $result['count']);
+        $this->assertEquals(1000, $result['amount']);
+        $this->assertCount(1, $result['source_events']);
+    }
+
+    public function test_motivation_overview_preserves_fractional_remaining_count(): void
+    {
+        $seller = $this->user('agent', 1);
+        $this->property(['sale_user_id' => $seller->id]);
+        $this->program();
+        $overview = app(\App\Services\MotivationService::class)->buildOverview($this->agent, 'month', '2026-11-01', '2026-11-30');
+        $this->assertSame(0.5, $overview['cards'][0]['remaining']);
+        $this->assertStringContainsString('0,5 сделки', $overview['cards'][0]['message_preview']);
+        $this->assertSame('in_progress', $overview['cards'][0]['status']);
+    }
+
+    public function test_closed_month_keeps_shared_sale_snapshot_until_reviewed_adjustment(): void
+    {
+        $seller = $this->user('agent', 1);
+        $property = $this->property(['sale_user_id' => $seller->id]);
+        $service = app(ResultFactService::class);
+        $service->record($property, 'shared-before-close');
+        Carbon::setTestNow(Carbon::parse('2026-12-01 12:00:00', 'Asia/Dushanbe'));
+        $this->postJson('/api/kpi/results/close', ['month' => '2026-11', 'user_id' => $this->agent->id])
+            ->assertOk()->assertJsonPath('data.sale.count', 0.5);
+        $property->moderation_status = 'approved';
+        $service->record($property, 'shared-reopened');
+        $this->getJson('/api/kpi/results?month=2026-11&user_id='.$this->agent->id)->assertOk()
+            ->assertJsonPath('rows.0.sale.count', 0.5)->assertJsonPath('rows.0.sale.shared_sales_count', 1)
+            ->assertJsonPath('rows.0.closed', true);
+        $this->postJson('/api/kpi/results/adjust', ['month' => '2026-11', 'user_id' => $this->agent->id, 'preview' => true])
+            ->assertOk()->assertJsonPath('data.before.sale.count', 0.5)->assertJsonPath('data.after.sale.count', 0);
+    }
+
+    public function test_sale_credit_migration_can_roll_back_and_old_ledger_keeps_both_shares(): void
+    {
+        $seller = $this->user('agent', 1);
+        $property = $this->property(['sale_user_id' => $seller->id]);
+        $service = app(ResultFactService::class);
+        $service->record($property, 'before-rollback');
+        $migration = require database_path('migrations/2026_11_26_120000_add_sale_credits_to_kpi_result_facts.php');
+        $migration->down();
+        $this->assertFalse(Schema::hasColumn('kpi_result_facts', 'sale_credits'));
+        $migration->up();
+        $facts = $service->forPeriod('2026-11-01', '2026-11-30');
+        $this->assertEquals([0.5, 0.5], $facts->pluck('sale_credit')->all());
+        $this->assertDatabaseCount('kpi_result_facts', 1);
     }
 
     public function test_month_boundaries_match_for_legacy_and_ledger_in_each_storage_timezone(): void

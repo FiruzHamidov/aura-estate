@@ -1036,7 +1036,7 @@ class KpiModuleApiFeatureTest extends TestCase
         $admin = User::create(['name' => 'Admin', 'phone' => '900000101', 'role_id' => $adminRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
         $agent = User::create(['name' => 'Agent', 'phone' => '900000102', 'role_id' => $agentRole->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
 
-        // Two real sales; other dates, agents and non-sale statuses do not count.
+        // Two own sales plus half of the listing sold by another employee.
         foreach ([
             [],
             ['sold_at' => '2026-05-05 13:00:00'],
@@ -1104,17 +1104,17 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->assertSame(1, (int) $metrics['ads']['final_value']);
         $this->assertSame(2, (int) $metrics['calls']['final_value']);
         $this->assertSame('system', $metrics['sales']['source']);
-        $this->assertSame(2, (int) $metrics['sales']['fact_value']);
+        $this->assertSame(2.5, $metrics['sales']['fact_value']);
         $this->assertSame(0, (int) $metrics['sales']['manual_value']);
-        $this->assertSame(2, (int) $metrics['sales']['final_value']);
+        $this->assertSame(2.5, $metrics['sales']['final_value']);
 
         $response->assertJsonPath('data.0.objects_raw', 0)
             ->assertJsonPath('data.0.shows_raw', 0)
             ->assertJsonPath('data.0.ads_raw', 1)
             ->assertJsonPath('data.0.calls_raw', 2)
-            ->assertJsonPath('data.0.sales_raw', 2)
+            ->assertJsonPath('data.0.sales_raw', 2.5)
             ->assertJsonPath('data.0.objects_display', '0.00')
-            ->assertJsonPath('data.0.sales_display', '2.00');
+            ->assertJsonPath('data.0.sales_display', '2.50');
 
         $payload['rows'][0]['call'] = 9;
         $payload['rows'][0]['deal'] = 99;
@@ -1124,7 +1124,7 @@ class KpiModuleApiFeatureTest extends TestCase
         $this->getJson('/api/kpi/daily?date=2026-05-05&v=2&agent_id='.$agent->id)
             ->assertOk()
             ->assertJsonPath('data.0.metrics.calls.final_value', 9)
-            ->assertJsonPath('data.0.metrics.sales.final_value', 2)
+            ->assertJsonPath('data.0.metrics.sales.final_value', 2.5)
             ->assertJsonPath('data.0.metrics.sales.manual_value', 0);
     }
 

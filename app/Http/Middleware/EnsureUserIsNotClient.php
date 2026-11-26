@@ -150,7 +150,7 @@ class EnsureUserIsNotClient
         [$controller, $method] = array_pad(explode('@', $action ?? '', 2), 2, '');
         if ($controller === \App\Http\Controllers\PropertyController::class) {
             return match ($method) {
-                'myProperties' => ['properties.list.internal'],
+                'myProperties', 'top50' => ['properties.list.internal'],
                 'store' => ['properties.create'],
                 'update', 'destroy', 'updateModerationAndListingType' => ['properties.edit'],
                 'duplicateCandidates' => ['properties.edit', 'properties.moderate'],

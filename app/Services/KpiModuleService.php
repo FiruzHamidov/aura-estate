@@ -1097,7 +1097,9 @@ class KpiModuleService
                 }
                 if (Schema::hasColumn('properties', 'sold_at')) {
                     $seller = $this->salesAttributionService->primarySellerExpression();
-                    $add((clone $properties)->whereIn(DB::raw($seller), $ids)->where('moderation_status', 'sold')->min('sold_at'), $appTimezone);
+                    $listingAgent = $this->salesAttributionService->listingAgentExpression();
+                    $add((clone $properties)->where(fn ($query) => $query->whereIn(DB::raw($seller), $ids)
+                        ->orWhereIn(DB::raw($listingAgent), $ids))->where('moderation_status', 'sold')->min('sold_at'), $appTimezone);
                 }
             }
             if (Schema::hasTable('clients')) {
@@ -1480,61 +1482,20 @@ class KpiModuleService
             return [];
         }
 
-        $select = ['id', 'sold_at', 'moderation_status', 'sale_user_id', 'agent_id', 'created_by'];
-        if (Schema::hasColumn('properties', 'sale_agent_id')) {
-            $select[] = 'sale_agent_id';
-        }
-
-        if ($historical) $select[] = 'branch_group_id';
-        $soldProperties = DB::table('properties')->tap(fn ($q) => \App\Support\BranchVisibility::records($q))->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'properties.branch_group_id'))
-            ->when(Schema::hasTable('kpi_result_facts'), fn ($q) => $q->whereNotIn('properties.id', DB::table('kpi_result_facts')->select('property_id')))
-            ->select($select)
-            ->where('moderation_status', 'sold')
-            ->where(function ($query) use ($from, $to, $includeUndated) {
-                $query->whereBetween('sold_at', [
-                    $from->copy()->startOfDay()->setTimezone((string) config('app.timezone', self::TZ))->toDateTimeString(),
-                    $to->copy()->endOfDay()->setTimezone((string) config('app.timezone', self::TZ))->toDateTimeString(),
-                ]);
-                if ($includeUndated) $query->orWhereNull('sold_at');
-            })
-            ->get();
-
-        if (Schema::hasTable('kpi_result_facts')) {
-            $ledger = app(\App\Services\Kpi\ResultFactService::class)->currentQuery()
-                ->where('state', 'active')->where('kind', 'sale')->whereIn('user_id', $userIds)
-                ->tap(fn ($q) => \App\Support\BranchVisibility::apply($q, 'facts.branch_id'))
-                ->when($historical, fn ($q) => app(\App\Support\RopGroupAccess::class)->scope($q, $authUser, 'facts.branch_group_id'))
-                ->where(function ($q) use ($from, $to, $includeUndated) {
-                    $q->whereBetween('closed_at', [$from->copy()->startOfDay()->utc(), $to->copy()->endOfDay()->utc()]);
-                    if ($includeUndated) $q->orWhereNull('closed_at');
-                })->get()->map(fn ($fact) => (object) [
-                    'id' => $fact->property_id, 'moderation_status' => 'sold', 'sale_user_id' => $fact->user_id,
-                    'agent_id' => null, 'created_by' => null, 'branch_group_id' => $fact->branch_group_id,
-                    'sold_at' => $fact->closed_at ? Carbon::parse($fact->closed_at, 'UTC')->setTimezone((string) config('app.timezone', self::TZ))->toDateTimeString() : null,
-                ]);
-            $soldProperties = $soldProperties->concat($ledger);
-        }
-        if ($soldProperties->isEmpty()) {
-            return [];
-        }
-
-        $targetUsers = array_fill_keys($userIds, true);
+        $facts = app(\App\Services\Kpi\ResultFactService::class)
+            ->forPeriod($from->toDateString(), $to->toDateString(), includeUndated: $includeUndated)
+            ->where('kind', 'sale')->whereIn('user_id', $userIds);
+        $visibleBranches = DB::table('branches')->tap(fn ($q) => \App\Support\BranchVisibility::apply($q, 'branches.id'))->pluck('id')->all();
+        $groups = $historical ? app(\App\Support\RopGroupAccess::class)->groupIds($authUser) : [];
         $result = [];
-        $creditsByProperty = $this->salesAttributionService->creditsByProperty($soldProperties, ['sold']);
-
-        foreach ($soldProperties as $property) {
-            $soldAt = $property->sold_at ? Carbon::parse((string) $property->sold_at, (string) config('app.timezone', self::TZ))->setTimezone(self::TZ) : null;
-            if (! $soldAt && ! $includeUndated) continue;
-            $dayKey = $soldAt?->toDateString() ?? '__undated__';
-            $propertyId = (int) ($property->id ?? 0);
-            $credits = $creditsByProperty[$propertyId] ?? [];
-            foreach ($credits as $agentId => $credit) {
-                if (! isset($targetUsers[(int) $agentId])) {
-                    continue;
-                }
-                $key = $historical ? $agentId.'|'.$property->branch_group_id : (int) $agentId;
-                $result[$key][$dayKey] = round((float) ($result[$key][$dayKey] ?? 0.0) + (float) $credit, 4);
+        foreach ($facts as $fact) {
+            if (($fact->branch_id && ! in_array((int) $fact->branch_id, $visibleBranches))
+                || ($historical && ! in_array((int) $fact->branch_group_id, $groups))) {
+                continue;
             }
+            $dayKey = $fact->closed_at ? Carbon::parse($fact->closed_at, 'UTC')->setTimezone(self::TZ)->toDateString() : '__undated__';
+            $key = $historical ? $fact->user_id.'|'.$fact->branch_group_id : (int) $fact->user_id;
+            $result[$key][$dayKey] = round((float) ($result[$key][$dayKey] ?? 0) + ($fact->sale_credit ?? 1), 4);
         }
 
         return $result;

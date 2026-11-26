@@ -8,6 +8,40 @@ use Illuminate\Support\Facades\Schema;
 
 class SalesAttributionService
 {
+    public const SHARED_SALE_NOTE = 'Совместная продажа: агенту объекта и продавшему агенту засчитано по 0,5 в KPI.';
+
+    /** The assigned listing agent, with the creator as a legacy fallback. */
+    public function listingAgentId(object $property): int
+    {
+        return (int) ($property->agent_id ?? 0) > 0
+            ? (int) $property->agent_id : (int) ($property->created_by ?? 0);
+    }
+
+    public function listingAgentExpression(string $table = 'properties'): string
+    {
+        $candidates = array_map(
+            fn (string $column) => "CASE WHEN {$table}.{$column} > 0 THEN {$table}.{$column} END",
+            array_values(array_intersect(['agent_id', 'created_by'], $this->sellerColumns()))
+        );
+
+        return $candidates === [] ? 'NULL' : 'COALESCE('.implode(', ', [...$candidates, 'NULL']).')';
+    }
+
+    /** KPI counts are separate from inventory ownership and monetary attribution. */
+    public function kpiCreditsByProperty(Collection $properties): array
+    {
+        $credits = $this->creditsByProperty($properties);
+        foreach ($properties as $property) {
+            $seller = $this->primarySellerId($property);
+            $owner = $this->listingAgentId($property);
+            if (($property->moderation_status ?? null) === 'sold' && $seller > 0 && $owner > 0 && $owner !== $seller) {
+                $credits[(int) $property->id] = [$seller => 0.5, $owner => 0.5];
+            }
+        }
+
+        return $credits;
+    }
+
     /** Columns required to resolve the same seller in SQL and in PHP. */
     public function sellerColumns(): array
     {
