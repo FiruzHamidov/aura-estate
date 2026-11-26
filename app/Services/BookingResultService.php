@@ -28,6 +28,11 @@ final class BookingResultService
             && (int) $agent->branch_group_id === (int) $booking->branch_group_id;
     }
 
+    public function hasStarted(Booking $booking): bool
+    {
+        return $booking->start_time && Carbon::parse($booking->start_time, 'UTC')->lte(Carbon::now('UTC'));
+    }
+
     public function snapshot(Booking $booking): array
     {
         return $booking->only(['status', 'outcome', 'result_reason', 'result_note', 'start_time', 'end_time', 'follow_up_task_id']);
@@ -48,6 +53,9 @@ final class BookingResultService
         }
         // A reaction is about a viewing that took place. No reaction is required.
         if ($booking->outcome && ! array_key_exists('status', $data)) $booking->status = 'completed';
+        if ($booking->status === 'completed' && ! $this->hasStarted($booking)) {
+            throw ValidationException::withMessages(['status' => ['Нельзя отметить будущий показ как проведённый. Дождитесь начала встречи.']]);
+        }
         if ($booking->status !== 'completed') $booking->outcome = null;
         if ($booking->isDirty('status') && ! array_key_exists('result_reason', $data)) $booking->result_reason = null;
 

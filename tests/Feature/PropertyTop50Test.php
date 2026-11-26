@@ -151,7 +151,7 @@ class PropertyTop50Test extends TestCase
             $this->showing($first, $status);
         }
         $this->showing($second);
-        $this->showing($second, 'completed', '2026-10-31 23:59:59');
+        $this->showing($second, 'completed', '2026-10-31 18:59:59');
         $this->showing($zero, 'completed', '2026-11-27 12:00:00');
         $this->showing($zero, 'completed', '2026-11-26 18:00:00');
         $r = $this->getJson('/api/properties/top-50')->assertOk()->assertJsonCount(2, 'data')
@@ -162,6 +162,21 @@ class PropertyTop50Test extends TestCase
         $this->getJson('/api/properties/top-50?period=today')->assertOk()->assertJsonCount(0, 'data');
         $this->getJson('/api/properties/top-50?period=custom&date_from=2026-11-26&date_to=2026-11-26')->assertOk()->assertJsonCount(0, 'data');
         $this->getJson('/api/properties/top-50?period=custom&date_from=2026-10-31&date_to=2026-10-31')->assertOk()->assertJsonPath('data.0.property.id', $second);
+    }
+
+    public function test_completed_showings_use_utc_storage_with_dushanbe_period_boundaries(): void
+    {
+        $this->travelTo(Carbon::parse('2026-11-26T00:30:00+05:00'));
+        $id = $this->listing();
+        foreach (['2026-10-31 18:59:59', '2026-10-31 19:00:00', '2026-11-25 18:59:59',
+            '2026-11-25 19:00:00', '2026-11-25 19:30:00', '2026-11-25 19:30:01'] as $at) {
+            $this->showing($id, 'completed', $at);
+        }
+        $this->getJson('/api/properties/top-50?period=today')->assertOk()->assertJsonPath('data.0.metric_count', 2);
+        $this->getJson('/api/properties/top-50?period=week')->assertOk()->assertJsonPath('data.0.metric_count', 3);
+        $this->getJson('/api/properties/top-50?period=month')->assertOk()->assertJsonPath('data.0.metric_count', 4);
+        $this->getJson('/api/properties/top-50?period=all')->assertOk()->assertJsonPath('data.0.metric_count', 5);
+        $this->getJson('/api/properties/top-50?period=custom&date_from=2026-10-31&date_to=2026-10-31')->assertOk()->assertJsonPath('data.0.metric_count', 1);
     }
 
     public function test_top50_views_use_daily_values_for_period_and_lifetime_for_all_and_cap_at_50(): void
@@ -296,8 +311,8 @@ class PropertyTop50Test extends TestCase
     {
         $this->travelTo(Carbon::parse('2026-11-25 20:00:00', 'UTC'));
         $p = $this->listing();
-        $this->showing($p, 'completed', '2026-11-25 23:59:59');
-        $this->showing($p, 'completed', '2026-11-26 00:00:00');
+        $this->showing($p, 'completed', '2026-11-25 18:59:59');
+        $this->showing($p, 'completed', '2026-11-25 19:00:00');
         $this->getJson('/api/properties/top-50?period=today')->assertOk()->assertJsonPath('filters.date_from', '2026-11-26')->assertJsonPath('data.0.metric_count', 1);
     }
 }

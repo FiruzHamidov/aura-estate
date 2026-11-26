@@ -463,7 +463,7 @@ class ClientIntegrationTest extends TestCase
         $this->postJson('/api/bookings', $payload)->assertCreated()->assertJsonPath('booking.co_agent.id', $coAgent->id);
     }
 
-    private function bookingResultContext(): array
+    private function bookingResultContext(bool $elapsed = true): array
     {
         [$agent, $coAgent, $payload] = $this->coAgentBookingContext();
         (require database_path('migrations/2026_05_01_220000_create_crm_task_types_and_tasks_tables.php'))->up();
@@ -474,6 +474,7 @@ class ClientIntegrationTest extends TestCase
         $coAgent->update(['branch_group_id' => $group->id]);
         Sanctum::actingAs($agent->fresh());
         $id = $this->postJson('/api/bookings', $payload + ['co_agent_id' => $coAgent->id])->assertCreated()->json('booking.id');
+        if ($elapsed) $this->travelTo(Carbon::parse('2026-11-19T06:01:00Z'));
         return [$agent, $coAgent, $id];
     }
 
@@ -549,9 +550,56 @@ class ClientIntegrationTest extends TestCase
         $this->patchJson($url, ['version' => 1, 'status' => 'completed'])->assertOk();
     }
 
-    public function test_booking_result_overdue_filter_does_not_change_status_or_report_count(): void
+    public function test_recorded_result_enters_top50_once_and_correction_or_reschedule_removes_it(): void
     {
         [$agent, $coAgent, $id] = $this->bookingResultContext();
+        (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
+        (require database_path('migrations/2026_10_10_090000_create_property_analytics_daily.php'))->up();
+        $propertyId = DB::table('bookings')->where('id', $id)->value('property_id');
+        DB::table('properties')->where('id', $propertyId)->update(['publication_status' => 'published', 'deal_status' => 'available', 'moderation_status' => 'approved',
+            'branch_id' => $agent->branch_id, 'branch_group_id' => $agent->branch_group_id]);
+        $top = '/api/properties/top-50?tab=shown&period=month';
+        $result = '/api/bookings/'.$id.'/result';
+        $this->getJson($top)->assertOk()->assertJsonCount(0, 'data');
+        Sanctum::actingAs($coAgent);
+        $this->patchJson($result, ['version' => 0, 'status' => 'completed'])->assertOk();
+        // A co-agent's result counts once; the property catalog keeps its own visibility scope.
+        Sanctum::actingAs($agent);
+        $this->getJson($top)->assertOk()->assertJsonPath('data.0.property.id', $propertyId)->assertJsonPath('data.0.metric_count', 1);
+        $this->patchJson($result, ['version' => 1, 'status' => 'completed'])->assertOk()->assertJsonPath('result_version', 1);
+        $this->getJson($top)->assertOk()->assertJsonPath('data.0.metric_count', 1);
+        $this->patchJson($result, ['version' => 1, 'status' => 'not_held'])->assertOk();
+        $this->getJson($top)->assertOk()->assertJsonCount(0, 'data');
+        $this->patchJson($result, ['version' => 2, 'status' => 'completed'])->assertOk();
+        $this->patchJson('/api/bookings/'.$id.'/reschedule', ['version' => 3,
+            'start_time' => '2026-11-21T10:00:00+05:00', 'end_time' => '2026-11-21T11:00:00+05:00'])->assertOk();
+        $this->getJson($top)->assertOk()->assertJsonCount(0, 'data');
+        $this->assertDatabaseCount('bookings', 1);
+    }
+
+    public function test_booking_completion_requires_the_meeting_to_have_started_and_keeps_notes_pending(): void
+    {
+        [$agent, $coAgent, $id] = $this->bookingResultContext(false);
+        $url = '/api/bookings/'.$id.'/result';
+        $this->getJson('/api/bookings/'.$id)->assertOk()->assertJsonPath('can_complete_result', false);
+        foreach ([['status' => 'completed'], ['outcome' => 'interested']] as $result) {
+            $this->patchJson($url, ['version' => 0] + $result)->assertUnprocessable()->assertJsonValidationErrors('status', 'details.errors');
+        }
+        $this->assertDatabaseHas('bookings', ['id' => $id, 'status' => 'pending', 'result_version' => 0]);
+        $this->assertDatabaseCount('crm_tasks', 0);
+        $this->patchJson($url, ['version' => 0, 'result_note' => 'Предварительная заметка'])->assertOk()->assertJsonPath('status', 'pending');
+        $this->travelTo(Carbon::parse('2026-11-19T06:01:00Z'));
+        $this->getJson('/api/bookings/'.$id)->assertOk()->assertJsonPath('can_complete_result', true);
+        $this->patchJson($url, ['version' => 1, 'status' => 'completed'])->assertOk()
+            ->assertJsonPath('status', 'completed')->assertJsonPath('result_recorded_by', $agent->id)->assertJsonPath('result_version', 2);
+        $this->patchJson($url, ['version' => 2, 'status' => 'completed'])->assertOk()->assertJsonPath('result_version', 2);
+        $this->getJson('/api/bookings/'.$id.'/history')->assertOk()->assertJsonCount(2, 'data');
+        $this->assertDatabaseCount('bookings', 1);
+    }
+
+    public function test_booking_result_overdue_filter_does_not_change_status_or_report_count(): void
+    {
+        [$agent, $coAgent, $id] = $this->bookingResultContext(false);
         $this->getJson('/api/bookings?needs_result=1')->assertOk()->assertJsonCount(0, 'data');
         $this->travelTo(Carbon::parse('2026-11-19T06:01:00Z'));
         $this->getJson('/api/bookings?needs_result=1')->assertOk()->assertJsonCount(1, 'data')
@@ -577,6 +625,7 @@ class ClientIntegrationTest extends TestCase
         $this->assertDatabaseCount('bookings', 1);
         Sanctum::actingAs($agent);
         $this->getJson('/api/bookings/agents-report')->assertOk()->assertJsonPath('0.shows_count', 1);
+        $this->travelTo(Carbon::parse('2026-11-21T06:01:00Z'));
         $this->patchJson('/api/bookings/'.$id.'/result', ['version' => 2, 'status' => 'completed'])->assertOk();
         $this->patchJson('/api/bookings/'.$id, ['start_time' => '2026-11-22T10:00:00+05:00', 'end_time' => '2026-11-22T11:00:00+05:00'])
             ->assertOk()->assertJsonPath('status', 'pending')->assertJsonPath('result_version', 4);

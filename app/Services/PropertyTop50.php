@@ -38,7 +38,7 @@ final class PropertyTop50
         if ($from && $from->diffInDays($to->startOfDay()) >= 366) {
             throw ValidationException::withMessages(['date_from' => 'Выберите период не длиннее 366 дней.']);
         }
-        // Timestamps are stored in the application timezone; daily analytics use Dushanbe dates.
+        // Property/promotion timestamps use the app timezone; bookings use UTC.
         $dbFrom = $from?->timezone(config('app.timezone'))->toDateTimeString();
         $dbTo = $to->timezone(config('app.timezone'))->toDateTimeString();
         $now = $today->timezone(config('app.timezone'))->toDateTimeString();
@@ -59,9 +59,11 @@ final class PropertyTop50
         $coverage = DB::table('property_analytics_coverage')->where('id', 1)->value('started_at');
         $quality = 'complete';
         if ($tab === 'shown') {
+            $bookingFrom = $from?->utc()->toDateTimeString();
+            $bookingTo = $to->utc()->toDateTimeString();
             $counts = DB::table('bookings')->select('property_id')->selectRaw('COUNT(*) as metric_count')
-                ->where('status', 'completed')->where('start_time', '<=', $dbTo)
-                ->when($dbFrom, fn ($q) => $q->where('start_time', '>=', $dbFrom))->groupBy('property_id');
+                ->where('status', 'completed')->where('start_time', '<=', $bookingTo)
+                ->when($bookingFrom, fn ($q) => $q->where('start_time', '>=', $bookingFrom))->groupBy('property_id');
             $query->joinSub($counts, 'rank_metric', 'rank_metric.property_id', '=', 'properties.id')
                 ->addSelect('rank_metric.metric_count')->orderByDesc('rank_metric.metric_count');
         } elseif ($tab === 'viewed') {
