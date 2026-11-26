@@ -221,6 +221,33 @@ class PropertyLiquidityFeatureTest extends TestCase
             ->assertJsonStructure(['data' => ['score', 'components', 'market', 'factors']]);
     }
 
+    public function test_exact_score_filter_runs_before_pagination_and_preserves_visibility(): void
+    {
+        $eligible = [];
+        foreach ([[100, 1, false], [100, 1, false], [99, 1, false], [100, 2, false], [100, 1, true]] as [$score, $agent, $sold]) {
+            $property = $this->createTarget(90_000, $agent);
+            $snapshot = app(PropertyLiquidityCalculator::class)->calculate($property);
+            $snapshot->update(['score' => $score]);
+            $property->updateQuietly(['liquidity_score' => $score, 'promotion_eligibility' => 'eligible',
+                'liquidity_business_priority' => $score === 99, 'sold_at' => $sold ? now() : null]);
+            if ($score === 100 && $agent === 1 && ! $sold) $eligible[] = $property->id;
+        }
+
+        Sanctum::actingAs(User::findOrFail(1));
+        $url = '/api/properties/liquidity-feed?purpose=portfolio&score=100&per_page=1';
+        $this->getJson($url)->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('total', 2)
+            ->assertJsonPath('last_page', 2)->assertJsonPath('data.0.id', $eligible[1])->assertJsonPath('data.0.score', 100);
+        $this->getJson($url.'&page=2')->assertOk()->assertJsonPath('data.0.id', $eligible[0])->assertJsonPath('data.0.score', 100);
+        $this->getJson($url.'&page=3')->assertOk()->assertJsonCount(0, 'data')->assertJsonPath('total', 2);
+        foreach (['101', '-1', '99.5', 'invalid'] as $score) {
+            $this->getJson('/api/properties/liquidity-feed?score='.$score)->assertUnprocessable()->assertJsonValidationErrors('score', 'details.errors');
+        }
+
+        Sanctum::actingAs(User::findOrFail(4));
+        $social = $this->getJson('/api/properties/liquidity-feed?purpose=social&score=100')->assertOk()->assertJsonPath('total', 3);
+        $this->assertSame([100], collect($social->json('data'))->pluck('score')->unique()->values()->all());
+    }
+
     public function test_agent_feed_is_limited_to_own_properties_and_marketing_can_update_promotion(): void
     {
         $own = $this->createTarget(90_000, 1);
@@ -414,6 +441,11 @@ class PropertyLiquidityFeatureTest extends TestCase
         $this->assertSame($expected->category, $response->json('data.0.category'));
         $this->assertGreaterThan(0, $response->json('total'));
         $this->getJson('/api/properties/liquidity-feed?price_position=below_market')->assertOk()->assertJsonFragment(['id' => $property->id]);
+        $filtered = $this->getJson('/api/properties/liquidity-feed?score='.$expected->score)->assertOk()->assertJsonFragment(['id' => $property->id]);
+        $this->assertSame([$expected->score], collect($filtered->json('data'))->pluck('score')->unique()->values()->all());
+        $this->assertLessThan(100, $expected->score);
+        $perfect = $this->getJson('/api/properties/liquidity-feed?score=100')->assertOk();
+        $this->assertNotContains($property->id, collect($perfect->json('data'))->pluck('id')->all());
         $report = $this->getJson('/api/reports/properties/liquidity')->assertOk();
         $this->assertGreaterThan(0, $report->json('data.summary.below_market'));
         $this->assertSame(6, $report->json('data.summary.total'));

@@ -58,6 +58,7 @@ class PropertyLiquidityController extends Controller
 
         $validated = $request->validate([
             'purpose' => ['sometimes', Rule::in(['portfolio', 'social'])],
+            'score' => ['sometimes', 'integer', 'between:0,100'],
             'category' => ['sometimes', Rule::in(['very_high', 'high', 'medium', 'low', 'very_low'])],
             'price_position' => ['sometimes', Rule::in(['below_market', 'at_market', 'above_market'])],
             'district_id' => ['sometimes', 'integer'],
@@ -84,7 +85,7 @@ class PropertyLiquidityController extends Controller
             $query->orderByDesc('properties.liquidity_business_priority')->orderByDesc($this->liquidityColumn($user, 'liquidity_score'));
         }
 
-        foreach (['liquidity_category' => 'category', 'price_position' => 'price_position', 'district_id' => 'district_id', 'agent_id' => 'agent_id', 'promotion_eligibility' => 'promotion_eligibility'] as $column => $key) {
+        foreach (['liquidity_score' => 'score', 'liquidity_category' => 'category', 'price_position' => 'price_position', 'district_id' => 'district_id', 'agent_id' => 'agent_id', 'promotion_eligibility' => 'promotion_eligibility'] as $column => $key) {
             if (array_key_exists($key, $validated)) {
                 $query->where($this->liquidityColumn($user, $column), $validated[$key]);
             }
