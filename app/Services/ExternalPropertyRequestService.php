@@ -101,6 +101,9 @@ class ExternalPropertyRequestService
         $data['status'] = $draft ? ExternalPropertyRequest::STATUS_DRAFT : ExternalPropertyRequest::STATUS_SUBMITTED;
         $data['submitted_at'] = $draft ? null : now();
         $data['owner_phone_normalized'] = ClientPhone::normalize($data['owner_phone'] ?? null);
+        if (array_key_exists('owner_additional_phone', $data)) {
+            $data['owner_additional_phone'] = \App\Support\InternationalPhone::e164($data['owner_additional_phone']);
+        }
 
         $data['branch_id'] = $externalAgent->branch_id;
         $data['branch_group_id'] = $externalAgent->branch_group_id;
@@ -117,6 +120,9 @@ class ExternalPropertyRequestService
         );
 
         $data['owner_phone_normalized'] = ClientPhone::normalize($data['owner_phone'] ?? $request->owner_phone);
+        if (array_key_exists('owner_additional_phone', $data)) {
+            $data['owner_additional_phone'] = \App\Support\InternationalPhone::e164($data['owner_additional_phone']);
+        }
         $oldStatus = $request->status;
 
         if ($request->status === ExternalPropertyRequest::STATUS_NEEDS_INFO) {
@@ -535,6 +541,7 @@ class ExternalPropertyRequestService
                 'full_name' => $name ?: 'Владелец объекта',
                 'phone' => $phone,
                 'phone_normalized' => $normalizedPhone,
+                ...($request->owner_additional_phone ? ['additional_phone' => $request->owner_additional_phone] : []),
                 'branch_id' => $propertyPayload['branch_id'] ?? $actor->branch_id,
                 'branch_group_id' => $propertyPayload['branch_group_id'] ?? $actor->branch_group_id,
                 'created_by' => $actor->id,
@@ -543,6 +550,9 @@ class ExternalPropertyRequestService
                 'status' => 'active',
             ]);
         } else {
+            if (! $client->additional_phone && $request->owner_additional_phone) {
+                $client->update(['additional_phone' => $request->owner_additional_phone]);
+            }
             $mergedKind = $client->mergedContactKindFor(Client::CONTACT_KIND_SELLER);
             if ($client->contact_kind !== $mergedKind) {
                 $client->update(['contact_kind' => $mergedKind]);

@@ -58,6 +58,11 @@ final class InternationalPhone
         try {
             $util = PhoneNumberUtil::getInstance();
             $phone = $util->parse($input, 'TJ');
+            // libphonenumber also treats short local TJ service numbers as possible.
+            // Contact fields require a complete nine-digit national number.
+            if ($phone->getCountryCode() === 992 && strlen($util->getNationalSignificantNumber($phone)) !== 9) {
+                return null;
+            }
 
             return $util->isPossibleNumber($phone)
                 ? $util->format($phone, PhoneNumberFormat::E164)

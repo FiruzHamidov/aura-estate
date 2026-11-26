@@ -228,6 +228,70 @@ class ClientWorkflowFeatureTest extends TestCase
         ]);
     }
 
+    public function test_additional_phone_is_optional_and_can_be_updated_cleared_and_preserved_for_all_contact_roles(): void
+    {
+        (require database_path('migrations/2026_11_26_120000_add_additional_contact_phones.php'))->up();
+        $branch = Branch::create(['name' => 'Contact phones']);
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        Setting::create(['key' => ClientAccess::AGENT_CAN_VIEW_SELLERS_SETTING_KEY, 'value' => '1']);
+        Sanctum::actingAs($this->createUser($role, $branch, 'Agent', $this->createBranchGroup($branch, 'Group')));
+
+        foreach (['buyer', 'seller', 'both'] as $index => $kind) {
+            $phone = '+99290011111'.$index;
+            $response = $this->postJson('/api/clients', [
+                'full_name' => 'Contact '.$kind, 'contact_kind' => $kind, 'phone' => $phone,
+                'additional_phone' => "\u{202a}+7 (912) 345-67-89\u{202c}",
+            ])->assertCreated()->assertJsonPath('additional_phone', '+79123456789');
+            $id = $response->json('id');
+            $this->getJson('/api/clients/'.$id)->assertOk()->assertJsonPath('additional_phone', '+79123456789');
+            $this->patchJson('/api/clients/'.$id, ['full_name' => 'Updated'])->assertOk()
+                ->assertJsonPath('additional_phone', '+79123456789');
+            $this->patchJson('/api/clients/'.$id, ['additional_phone' => '+99290'])->assertUnprocessable()
+                ->assertJsonStructure(['details' => ['errors' => ['additional_phone']]]);
+            $this->assertDatabaseHas('clients', ['id' => $id, 'phone' => $phone, 'additional_phone' => '+79123456789']);
+            $this->patchJson('/api/clients/'.$id, ['additional_phone' => '00 123 45 67'])->assertOk()
+                ->assertJsonPath('additional_phone', '+992001234567');
+            $this->patchJson('/api/clients/'.$id, ['additional_phone' => null])->assertOk()
+                ->assertJsonPath('additional_phone', null)->assertJsonPath('phone', $phone);
+        }
+        $this->postJson('/api/clients', ['full_name' => 'No second phone'])->assertCreated()->assertJsonPath('additional_phone', null);
+        $this->postJson('/api/clients', ['full_name' => 'Invalid phone', 'additional_phone' => '123'])->assertUnprocessable();
+    }
+
+    public function test_additional_phone_search_keeps_contact_visibility_scope(): void
+    {
+        (require database_path('migrations/2026_11_26_120000_add_additional_contact_phones.php'))->up();
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $branch = Branch::create(['name' => 'Visible']);
+        $otherBranch = Branch::create(['name' => 'Foreign']);
+        $agent = $this->createUser($role, $branch, 'Agent');
+        $foreignAgent = $this->createUser($role, $otherBranch, 'Foreign');
+        $own = Client::create(['full_name' => 'Own', 'additional_phone' => '+79123456789',
+            'branch_id' => $branch->id, 'created_by' => $agent->id, 'responsible_agent_id' => $agent->id]);
+        $foreign = Client::create(['full_name' => 'Foreign', 'additional_phone' => '+79123456789',
+            'branch_id' => $otherBranch->id, 'created_by' => $foreignAgent->id, 'responsible_agent_id' => $foreignAgent->id]);
+        Sanctum::actingAs($agent);
+        foreach (['search', 'phone'] as $filter) {
+            $this->getJson('/api/clients?'.http_build_query([$filter => '+7 (912) 345-67-89']))->assertOk()
+                ->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $own->id);
+        }
+        $this->patchJson('/api/clients/'.$foreign->id, ['additional_phone' => '+992901234567'])->assertForbidden();
+        $this->assertSame('+79123456789', $foreign->fresh()->additional_phone);
+    }
+
+    public function test_additional_phone_migration_preserves_existing_contacts_and_can_roll_back(): void
+    {
+        $client = Client::create(['full_name' => 'Legacy', 'phone' => '+992901234567']);
+        $migration = require database_path('migrations/2026_11_26_120000_add_additional_contact_phones.php');
+        $migration->up();
+        $migration->up();
+        $this->assertNull($client->fresh()->additional_phone);
+        $this->assertSame('+992901234567', $client->fresh()->phone);
+        $migration->down();
+        $this->assertFalse(Schema::hasColumn('clients', 'additional_phone'));
+        $this->assertSame('+992901234567', $client->fresh()->phone);
+    }
+
     public function test_client_phone_length_is_checked_on_create_and_update(): void
     {
         $branch = Branch::create(['name' => 'Phone validation']);

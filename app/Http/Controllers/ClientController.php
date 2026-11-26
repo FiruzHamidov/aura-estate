@@ -86,6 +86,10 @@ class ClientController extends Controller
             $data['phone_normalized'] = ClientPhone::normalize($data['phone']);
         }
 
+        if (array_key_exists('additional_phone', $data)) {
+            $data['additional_phone'] = \App\Support\InternationalPhone::e164($data['additional_phone']);
+        }
+
         if (array_key_exists('email', $data) && $data['email']) {
             $data['email'] = mb_strtolower(trim((string) $data['email']));
             $data['email_normalized'] = $data['email'];
@@ -299,6 +303,7 @@ class ClientController extends Controller
             [
                 'full_name' => $client->full_name,
                 'phone' => $client->phone,
+                'additional_phone' => $client->additional_phone,
                 'email' => $client->email,
                 'responsible_agent_id' => $client->responsible_agent_id,
                 'contact_kind' => $client->contact_kind,
@@ -481,6 +486,7 @@ class ClientController extends Controller
             $request->validate([
                 'full_name' => 'required|string|max:255',
                 'phone' => ['nullable', 'string', 'max:50', new \App\Rules\InternationalPhoneNumber],
+                'additional_phone' => ['nullable', 'string', 'max:50', new \App\Rules\InternationalPhoneNumber],
                 'email' => 'nullable|email|max:255',
                 'note' => 'nullable|string',
                 'branch_id' => 'nullable|integer|exists:branches,id',
@@ -505,6 +511,7 @@ class ClientController extends Controller
             $data = $request->only([
                 'full_name',
                 'phone',
+                'additional_phone',
                 'email',
                 'email_normalized',
                 'note',
@@ -642,6 +649,7 @@ class ClientController extends Controller
             $request->validate([
                 'full_name' => 'sometimes|string|max:255',
                 'phone' => ['sometimes', 'nullable', 'string', 'max:50', new \App\Rules\InternationalPhoneNumber],
+                'additional_phone' => ['sometimes', 'nullable', 'string', 'max:50', new \App\Rules\InternationalPhoneNumber],
                 'email' => 'sometimes|nullable|email|max:255',
                 'note' => 'nullable|string',
                 'branch_id' => 'sometimes|nullable|integer|exists:branches,id',
@@ -664,6 +672,7 @@ class ClientController extends Controller
             $data = $request->only([
                 'full_name',
                 'phone',
+                'additional_phone',
                 'email',
                 'email_normalized',
                 'note',

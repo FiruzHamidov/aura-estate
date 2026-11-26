@@ -559,6 +559,44 @@ class ExternalPropertyRequestFeatureTest extends TestCase
         }
     }
 
+    public function test_owner_additional_phone_survives_request_edits_and_conversion(): void
+    {
+        (require database_path('migrations/2026_11_26_120000_add_additional_contact_phones.php'))->up();
+        $external = $this->user($this->externalRole, '930555011', branchId: 1, branchGroupId: 1);
+        $internal = $this->user($this->agentRole, '930555012', branchId: 1, branchGroupId: 1);
+        $type = PropertyType::create(['name' => 'Квартира', 'slug' => 'apartment']);
+        $status = PropertyStatus::create(['name' => 'Вторичка', 'slug' => 'secondary']);
+        Sanctum::actingAs($external);
+        $this->postJson('/api/external/property-requests?draft=1', ['owner_additional_phone' => '+7912'])
+            ->assertUnprocessable()->assertJsonStructure(['details' => ['errors' => ['owner_additional_phone']]]);
+        $response = $this->postJson('/api/external/property-requests', [
+            'offer_type' => 'sale', 'type_id' => $type->id, 'price' => 85000, 'currency' => 'USD',
+            'owner_phone' => '900555013', 'owner_additional_phone' => '+7 (912) 345-67-89',
+        ])->assertCreated()->assertJsonPath('owner_additional_phone', '+79123456789');
+        $id = $response->json('id');
+        $this->patchJson('/api/external/property-requests/'.$id, ['owner_additional_phone' => null])->assertOk()
+            ->assertJsonPath('owner_additional_phone', null);
+        $this->patchJson('/api/external/property-requests/'.$id, ['owner_additional_phone' => '+77011234567'])->assertOk();
+        $this->patchJson('/api/external/property-requests/'.$id, ['owner_name' => 'Owner'])->assertOk()
+            ->assertJsonPath('owner_additional_phone', '+77011234567');
+        Sanctum::actingAs($internal);
+        $converted = $this->postJson('/api/external-agent-requests/'.$id.'/convert', ['status_id' => $status->id])->assertCreated();
+        $property = Property::findOrFail($converted->json('data.id'));
+        $this->assertSame('+77011234567', $property->ownerClient->additional_phone);
+        $this->assertSame('900555013', $property->ownerClient->phone);
+
+        // A repeated request must not overwrite the existing owner's second number.
+        Sanctum::actingAs($external);
+        $next = $this->postJson('/api/external/property-requests', [
+            'offer_type' => 'sale', 'type_id' => $type->id, 'price' => 95000, 'currency' => 'USD',
+            'owner_phone' => '900555013', 'owner_additional_phone' => '+79123456789',
+        ])->assertCreated();
+        Sanctum::actingAs($internal);
+        $nextProperty = $this->postJson('/api/external-agent-requests/'.$next->json('id').'/convert', ['status_id' => $status->id])->assertCreated();
+        $this->assertSame($property->owner_client_id, Property::findOrFail($nextProperty->json('data.id'))->owner_client_id);
+        $this->assertSame('+77011234567', $property->ownerClient->fresh()->additional_phone);
+    }
+
     public function test_external_request_rejects_incomplete_owner_phone_even_in_draft(): void
     {
         Sanctum::actingAs($this->user($this->externalRole, '930555001'));

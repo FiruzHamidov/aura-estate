@@ -769,6 +769,26 @@ class ClientIntegrationTest extends TestCase
         ]);
     }
 
+    public function test_owner_additional_phone_is_current_in_authorized_property_details_and_hidden_publicly(): void
+    {
+        (require database_path('migrations/2026_11_26_120000_add_additional_contact_phones.php'))->up();
+        Schema::create('building_types', function (Blueprint $table) { $table->id(); $table->string('name')->nullable(); });
+        foreach (['2026_04_28_120000_create_client_sources_table.php', '2026_04_28_120100_add_source_to_clients_table.php'] as $migration) {
+            (require database_path('migrations/'.$migration))->up();
+        }
+        [$agent, $client, $property] = $this->seedClientContext();
+        $client->update(['additional_phone' => '+79123456789']);
+        $property->update(['owner_client_id' => $client->id, 'owner_phone' => $client->phone]);
+        $this->getJson('/api/properties/'.$property->id)->assertOk()
+            ->assertJsonMissing(['additional_phone' => '+79123456789'])->assertJsonMissingPath('owner_client');
+        Sanctum::actingAs($agent);
+        $this->getJson('/api/properties/'.$property->id)->assertOk()
+            ->assertJsonPath('owner_client.additional_phone', '+79123456789');
+        $this->patchJson('/api/clients/'.$client->id, ['additional_phone' => '+77011234567'])->assertOk();
+        $this->getJson('/api/properties/'.$property->id)->assertOk()
+            ->assertJsonPath('owner_client.additional_phone', '+77011234567');
+    }
+
     public function test_save_deal_links_buyer_client_and_snapshots(): void
     {
         [$agent, $client, $property] = $this->seedClientContext();
