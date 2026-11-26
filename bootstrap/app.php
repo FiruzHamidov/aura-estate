@@ -38,6 +38,7 @@ return Application::configure(basePath: dirname(__DIR__))
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->group('api', [
             HandleCors::class,
+            \App\Http\Middleware\ClientPresentationResponse::class,
             EnsureTraceId::class,
             LogApiRequest::class,
             DetectClientLocale::class,

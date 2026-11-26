@@ -235,6 +235,70 @@ class PropertyShowAuthContactsTest extends TestCase
         }
     }
 
+    public function test_client_presentation_forces_public_projection_even_with_employee_token(): void
+    {
+        [, $property, $agent] = $this->publicRopFixture();
+        Schema::create('contract_types', function (Blueprint $table) { $table->id(); $table->string('name'); });
+        \Illuminate\Support\Facades\DB::table('contract_types')->insert(['id' => 1, 'name' => 'Private contract']);
+        $property->forceFill(['owner_price' => 80000, 'address' => 'Private street 18, apartment 42',
+            'landmark' => 'Private entrance', 'latitude' => 38.568765, 'longitude' => 68.776543,
+            'object_key' => 'Internal keys', 'contract_type_id' => 1])->saveQuietly();
+        $this->withHeader('Authorization', 'Bearer '.$agent->createToken('presentation')->plainTextToken);
+        $this->getJson('/api/properties/'.$property->id)->assertOk()->assertJsonPath('owner_price', '80000.00');
+
+        $this->withHeader('X-Aura-Client-Presentation', '1');
+        $detail = $this->getJson('/api/properties/'.$property->id)->assertOk()
+            ->assertJsonPath('public_view_only', true)
+            ->assertJsonPath('price', 100000)
+            ->assertJsonPath('latitude', 38.57)
+            ->assertJsonPath('longitude', 68.78)
+            ->assertJsonPath('responsible_agent.phone', $agent->phone);
+        $this->assertStringContainsString('no-store', $detail->headers->get('Cache-Control'));
+        foreach (['owner_price', 'owner_phone', 'owner_name', 'buyer_phone', 'buyer_full_name',
+            'status_comment', 'company_commission_amount', 'object_key', 'address', 'landmark',
+            'contract_type_id', 'contract_type', 'co_owner'] as $field) {
+            $detail->assertJsonMissingPath($field);
+        }
+        foreach (['', '?compact=1'] as $query) {
+            $this->getJson('/api/properties'.$query)->assertOk()
+                ->assertJsonPath('data.0.public_view_only', true)
+                ->assertJsonMissingPath('data.0.owner_price')
+                ->assertJsonMissingPath('data.0.address')
+                ->assertJsonMissingPath('data.0.owner_phone');
+        }
+        foreach ([10, 14] as $zoom) {
+            $this->getJson('/api/properties/map?bbox=38,68,39,69&zoom='.$zoom)->assertOk()
+                ->assertJsonPath('features.0.geometry.coordinates', [38.57, 68.78]);
+        }
+
+        // The preference does not alter the employee session or permissions.
+        $this->withHeader('X-Aura-Client-Presentation', '0');
+        $this->getJson('/api/properties/'.$property->id)->assertOk()
+            ->assertJsonPath('owner_price', '80000.00')
+            ->assertJsonPath('address', 'Private street 18, apartment 42');
+    }
+
+    public function test_client_presentation_hides_unpublished_properties_and_projects_favorites(): void
+    {
+        [, $property, $agent] = $this->publicRopFixture();
+        Schema::create('favorites', function (Blueprint $table) {
+            $table->id(); $table->unsignedBigInteger('user_id'); $table->unsignedBigInteger('property_id');
+            $table->string('entity_type')->default('property'); $table->unsignedBigInteger('entity_id')->nullable(); $table->timestamps();
+        });
+        \Illuminate\Support\Facades\DB::table('favorites')->insert([
+            'user_id' => $agent->id, 'property_id' => $property->id, 'entity_type' => 'property', 'entity_id' => $property->id,
+        ]);
+        $this->withHeaders(['Authorization' => 'Bearer '.$agent->createToken('presentation')->plainTextToken,
+            'X-Aura-Client-Presentation' => '1']);
+        $this->getJson('/api/favorites')->assertOk()->assertJsonPath('0.property.public_view_only', true)
+            ->assertJsonMissingPath('0.property.address')->assertJsonMissingPath('0.property.owner_phone');
+
+        $property->forceFill(['publication_status' => 'unpublished'])->saveQuietly();
+        $this->getJson('/api/properties/'.$property->id)->assertNotFound();
+        $this->getJson('/api/properties')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/favorites')->assertOk()->assertJsonCount(0);
+    }
+
     private function publicRopFixture(): array
     {
         Schema::create('branches', function (Blueprint $table) { $table->id(); $table->string('name'); $table->timestamps(); });
