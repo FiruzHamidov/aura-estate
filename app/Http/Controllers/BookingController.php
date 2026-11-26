@@ -144,6 +144,7 @@ class BookingController extends Controller
             && $booking->end_time && Carbon::parse($booking->end_time, 'UTC')->lt(Carbon::now('UTC')));
         $booking->setAttribute('can_view_result', (bool) $staff);
         $booking->setAttribute('can_record_result', $available && $actor && $results->canEdit($actor, $booking));
+        $booking->setAttribute('can_complete_result', $booking->can_record_result && $results->hasStarted($booking));
         $booking->setAttribute('can_schedule_follow_up', $available && $actor && $results->canFollowUp($actor, $booking));
         if ($available && $staff && $booking->follow_up_task_id) {
             $booking->loadMissing('followUpTask');
