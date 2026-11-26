@@ -16,7 +16,7 @@ class PropertyObserver
     private const LIQUIDITY_FIELDS = [
         'price', 'discount_price', 'currency', 'offer_type', 'type_id', 'location_id',
         'district', 'district_id', 'rooms', 'total_area', 'floor', 'total_floors',
-        'condition', 'repair_type_id', 'has_parking', 'is_mortgage_available',
+        'condition', 'repair_type_id', 'has_parking', 'parking_type_id', 'is_mortgage_available', 'mortgage_availability_status',
         'is_from_developer', 'moderation_status', 'sold_at', 'listed_at',
     ];
 

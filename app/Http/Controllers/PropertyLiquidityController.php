@@ -59,6 +59,7 @@ class PropertyLiquidityController extends Controller
         $validated = $request->validate([
             'purpose' => ['sometimes', Rule::in(['portfolio', 'social'])],
             'score' => ['sometimes', 'integer', 'between:0,100'],
+            'min_score' => ['sometimes', 'integer', 'between:0,100'],
             'category' => ['sometimes', Rule::in(['very_high', 'high', 'medium', 'low', 'very_low'])],
             'price_position' => ['sometimes', Rule::in(['below_market', 'at_market', 'above_market'])],
             'district_id' => ['sometimes', 'integer'],
@@ -89,6 +90,10 @@ class PropertyLiquidityController extends Controller
             if (array_key_exists($key, $validated)) {
                 $query->where($this->liquidityColumn($user, $column), $validated[$key]);
             }
+        }
+
+        if (array_key_exists('min_score', $validated)) {
+            $query->where($this->liquidityColumn($user, 'liquidity_score'), '>=', $validated['min_score']);
         }
 
         $page = $query->orderByDesc('properties.id')->paginate($validated['per_page'] ?? 20);

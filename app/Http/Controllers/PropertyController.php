@@ -1053,7 +1053,7 @@ class PropertyController extends Controller
             'price', 'discount_price', 'currency', 'offer_type', 'rooms', 'total_area', 'land_size',
             'living_area', 'floor', 'total_floors', 'year_built', 'condition', 'construction_status',
             'bathroom_type',
-            'apartment_type', 'has_garden', 'has_parking', 'is_mortgage_available', 'is_from_developer',
+            'apartment_type', 'has_garden', 'has_parking', 'is_mortgage_available', 'mortgage_availability_status', 'is_from_developer',
             'landmark', 'latitude', 'longitude', 'district', 'address', 'listing_type', 'views_count',
             'moderation_status', 'publication_expires_at', 'listed_at', 'created_at', 'updated_at',
         ]);
@@ -2657,6 +2657,9 @@ class PropertyController extends Controller
                 $featuresChanged = $this->relationSyncChanged($syncChanges);
                 $relationsChanged = $relationsChanged || $featuresChanged;
                 $listingContentChanged = $listingContentChanged || $featuresChanged;
+                if ($featuresChanged && Schema::hasTable('property_liquidity_snapshots')) {
+                    \App\Jobs\RecalculatePropertyLiquidity::dispatch($property->id)->afterCommit();
+                }
             }
 
             if ($shouldSyncTags && $this->supportsPropertyTags()) {
@@ -3099,6 +3102,7 @@ class PropertyController extends Controller
             'has_garden' => 'sometimes|boolean',
             'has_parking' => 'sometimes|boolean',
             'is_mortgage_available' => 'sometimes|boolean',
+            'mortgage_availability_status' => 'sometimes|in:unknown,available,unavailable',
             'is_from_developer' => 'sometimes|boolean',
             'landmark' => 'nullable|string',
             'latitude' => 'nullable|numeric|between:-90,90',
@@ -3134,6 +3138,10 @@ class PropertyController extends Controller
             'is_full_apartment' => 'sometimes|boolean',
             'is_for_aura' => 'sometimes|boolean',
         ]);
+
+        if (array_key_exists('mortgage_availability_status', $validated)) {
+            $validated['is_mortgage_available'] = $validated['mortgage_availability_status'] === 'available';
+        }
 
         $effectivePrice = array_key_exists('price', $validated)
             ? (float) $validated['price']

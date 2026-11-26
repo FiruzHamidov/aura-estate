@@ -2,7 +2,6 @@
 
 namespace App\Services\PropertyLiquidity;
 
-use App\Models\ClientNeed;
 use App\Models\User;
 use App\Support\RopGroupAccess;
 use App\Models\Property;
@@ -22,7 +21,10 @@ class PropertyLiquidityCalculator
         'house', 'houses', 'cottage',
     ];
 
-    public function __construct(private readonly PropertyMarketDays $marketDays) {}
+    public function __construct(
+        private readonly PropertyMarketDays $marketDays,
+        private readonly PropertyDemandBenchmark $demandBenchmark,
+    ) {}
 
     public function calculate(Property $property): ?PropertyLiquiditySnapshot
     {
@@ -81,24 +83,24 @@ class PropertyLiquidityCalculator
         $pricePosition = $this->pricePosition($priceDelta);
         $priceScore = $this->priceScore($priceDelta);
         $districtMarket = $this->districtMarketScore($property, $strictActive, $strictSold, $actor);
-        [$demandScore, $matchingNeeds] = $this->demandScore($property, max(1, $strictActive->count()), $actor);
+        [$demandScore, $matchingNeeds, $demandAvailable] = $this->demandBenchmark->score($property, $this->usesRooms($property), $actor);
         $propertyFit = $this->propertyFitScore($property);
         $interest = $this->interest($property, $strictActive);
 
-        $weights = config('property-liquidity.weights');
-        $score = (int) round(
-            $districtMarket['score'] * (float) $weights['district_market']
-            + $priceScore * (float) $weights['price']
-            + $demandScore * (float) $weights['demand']
-            + $propertyFit * (float) $weights['apartment_fit']
-        );
-        $score = $this->clamp($score);
+        $components = [
+            'district_market' => $districtMarket['available'] ? $districtMarket['score'] : null,
+            'price' => $priceScore,
+            'demand' => $demandAvailable ? $demandScore : null,
+            'apartment_fit' => $propertyFit,
+        ];
+        $score = LiquidityMath::weightedScore($components, config('property-liquidity.weights'));
 
         [$confidenceScore, $confidenceLevel] = $this->confidence(
             $property,
             $strictSold->count(),
             $strictActive->count(),
-            $usedCityFallback
+            $usedCityFallback,
+            count(array_filter($components, fn ($value) => $value === null))
         );
         $medianDom = $this->medianDom($sold);
         [$predictedFrom, $predictedTo] = $this->predictedDays(
@@ -110,6 +112,12 @@ class PropertyLiquidityCalculator
         );
         [$promotionPriority, $promotionEligibility] = $this->promotion($property, $score, $confidenceScore, $pricePosition, $interest);
         [$factors, $recommendations] = $this->explanation($priceDelta, $matchingNeeds, $propertyFit, $interest);
+        if (in_array(null, $components, true)) {
+            $factors[] = ['impact' => 'neutral', 'code' => 'incomplete_market_data', 'text' => 'Недостаточно данных рынка или спроса: оценка рассчитана по доступным компонентам.'];
+        }
+        if (PropertyAmenities::parking($property) === null || ($this->isResidentialType($property) && PropertyAmenities::mortgage($property) === null)) {
+            $recommendations[] = ['code' => 'clarify_amenities', 'text' => 'Уточните парковку и возможность ипотеки для повышения достоверности оценки.'];
+        }
         $now = now();
         $modelVersion = (string) config('property-liquidity.model_version');
 
@@ -151,6 +159,9 @@ class PropertyLiquidityCalculator
                 'strict_active_count' => $strictActive->count(),
                 'sell_through_rate' => $districtMarket['sell_through_rate'],
                 'currency' => $property->currency,
+                'component_availability' => array_map(fn ($value) => $value !== null, $components),
+                'parking_available' => PropertyAmenities::parking($property),
+                'mortgage_available' => $this->isResidentialType($property) ? PropertyAmenities::mortgage($property) : null,
             ],
             'interest' => $interest,
             'model_version' => $modelVersion,
@@ -228,8 +239,7 @@ class PropertyLiquidityCalculator
             ->where('type_id', $property->type_id)
             ->where('location_id', $property->location_id)
             ->where('currency', $property->currency)
-            ->whereBetween('total_area', [$area * (1 - $areaTolerance), $area * (1 + $areaTolerance)])
-            ->where('created_at', '>=', now()->subMonths((int) config('property-liquidity.lookback_months', 12)));
+            ->whereBetween('total_area', [$area * (1 - $areaTolerance), $area * (1 + $areaTolerance)]);
 
         if ($actor) app(RopGroupAccess::class)->scope($query, $actor, 'properties.branch_group_id', 'properties.branch_id');
 
@@ -251,9 +261,9 @@ class PropertyLiquidityCalculator
         }
 
         if ($sold) {
-            $query->with('statusHistory')->where('moderation_status', 'sold')->whereNotNull('sold_at');
+            $query->with('statusHistory')->where('moderation_status', 'sold')->where('sold_at', '>=', now()->subMonths((int) config('property-liquidity.lookback_months', 12)));
         } else {
-            $query->where('moderation_status', Property::PUBLIC_MODERATION_STATUS)->whereNull('sold_at');
+            $query->publicSearchable()->whereNull('sold_at');
         }
 
         return $query;
@@ -307,20 +317,35 @@ class PropertyLiquidityCalculator
 
     private function districtMarketScore(Property $property, Collection $active, Collection $sold, ?User $actor = null): array
     {
-        $districtDom = $this->medianDom($sold);
-        $citySold = $this->comparableQuery($property, false, true, 0.30, $actor)->get();
-        $cityActive = $this->comparableQuery($property, false, false, 0.30, $actor)->get();
+        $citySold = $this->comparableQuery($property, false, true, 0.20, $actor)->get();
+        $cityActive = $this->comparableQuery($property, false, false, 0.20, $actor)->get()->push($property);
         $cityDom = $this->medianDom($citySold);
-
-        $domScore = $districtDom && $cityDom ? $this->clamp((int) round(50 * $cityDom / $districtDom)) : 50;
-        $sellThrough = $sold->count() / max(1, $sold->count() + $active->count());
         $citySellThrough = $citySold->count() / max(1, $citySold->count() + $cityActive->count());
-        $sellScore = $citySellThrough > 0 ? $this->clamp((int) round(50 * $sellThrough / $citySellThrough)) : 50;
-        $raw = (int) round($domScore * 0.60 + $sellScore * 0.40);
-        $n = $sold->count();
-        $smoothed = (int) round(($n / ($n + 30)) * $raw + (30 / ($n + 30)) * 50);
+        $key = static fn (Property $item) => $item->district_id !== null
+            ? 'id:'.$item->district_id : 'name:'.mb_strtolower(trim((string) $item->district));
+        $soldGroups = $citySold->groupBy($key);
+        $activeGroups = $cityActive->groupBy($key);
+        $metrics = [];
+        foreach ($soldGroups as $district => $sales) {
+            $n = $sales->count();
+            $dom = $this->medianDom($sales);
+            if ($n < (int) config('property-liquidity.district_minimum_sales', 5) || $dom === null || $cityDom === null) continue;
+            $rate = $n / max(1, $n + ($activeGroups[$district] ?? collect())->count());
+            // Smooth the observations, not the resulting percentile (which creates a score ceiling).
+            $metrics[$district] = [
+                'dom' => ($n * $dom + 30 * $cityDom) / ($n + 30),
+                'rate' => ($n * $rate + 30 * $citySellThrough) / ($n + 30),
+            ];
+        }
+        $current = $metrics[$key($property)] ?? null;
+        $available = $current !== null && count($metrics) >= (int) config('property-liquidity.district_minimum_peers', 3);
+        $score = $available ? (int) round(
+            .60 * LiquidityMath::percentile(-$current['dom'], array_map(fn ($metric) => -$metric['dom'], $metrics))
+            + .40 * LiquidityMath::percentile($current['rate'], array_column($metrics, 'rate'))
+        ) : 50;
 
-        return ['score' => $this->clamp($smoothed), 'sell_through_rate' => round($sellThrough, 4)];
+        return ['score' => $score, 'available' => $available,
+            'sell_through_rate' => round($sold->count() / max(1, $sold->count() + $active->count() + 1), 4)];
     }
 
     private function medianDom(Collection $properties): ?int
@@ -330,64 +355,6 @@ class PropertyLiquidityCalculator
         })->filter(fn (?int $value) => $value !== null)->values();
 
         return $days->isEmpty() ? null : (int) round((float) $days->median());
-    }
-
-    private function demandScore(Property $property, int $activeSupply, ?User $actor = null): array
-    {
-        if (! class_exists(ClientNeed::class)) {
-            return [50, 0];
-        }
-
-        $price = $this->effectivePrice($property) ?? 0;
-        $cutoff = now()->subDays((int) config('property-liquidity.demand_freshness_days', 90));
-        $needs = ClientNeed::query()
-            ->when($actor, fn (Builder $needs) => $needs->whereHas('client', fn (Builder $clients) => app(RopGroupAccess::class)->scope($clients, $actor, 'clients.branch_group_id', 'clients.branch_id')))
-            ->where('updated_at', '>=', $cutoff)
-            ->whereNull('closed_at')
-            ->where('currency', $property->currency)
-            ->where('location_id', $property->location_id)
-            ->whereHas('type', fn (Builder $query) => $query->whereIn('slug', ['buy', 'invest']))
-            ->whereHas('status', fn (Builder $query) => $query->where('is_closed', false))
-            ->where(function (Builder $query) use ($property) {
-                if ($property->district_id !== null) {
-                    $query->where('district_id', $property->district_id);
-                } else {
-                    $query->whereRaw('LOWER(TRIM(district)) = ?', [mb_strtolower(trim((string) $property->district))]);
-                }
-            })
-            ->where(function (Builder $query) use ($property) {
-                $query->whereNull('property_type_id')->orWhere('property_type_id', $property->type_id);
-            })
-            ->where(function (Builder $query) use ($price) {
-                $query->whereNull('budget_from')->orWhere('budget_from', '<=', $price * 1.10);
-            })
-            ->where(function (Builder $query) use ($price) {
-                $query->whereNull('budget_to')->orWhere('budget_to', '>=', $price * 0.90);
-            })
-            ->where(function (Builder $query) use ($property) {
-                $query->whereNull('area_from')->orWhere('area_from', '<=', $property->total_area);
-            })
-            ->where(function (Builder $query) use ($property) {
-                $query->whereNull('area_to')->orWhere('area_to', '>=', $property->total_area);
-            })
-            ->when($this->usesRooms($property), function (Builder $query) use ($property) {
-                $query->where(function (Builder $rooms) use ($property) {
-                    $rooms->whereNull('rooms_from')->orWhere('rooms_from', '<=', $property->rooms);
-                })->where(function (Builder $rooms) use ($property) {
-                    $rooms->whereNull('rooms_to')->orWhere('rooms_to', '>=', $property->rooms);
-                });
-            })
-            ->get(['client_id', 'updated_at'])
-            ->unique('client_id');
-
-        $weighted = $needs->sum(function (ClientNeed $need) {
-            $age = $need->updated_at->diffInDays(now());
-
-            return $age <= 30 ? 1.0 : ($age <= 60 ? 0.7 : 0.4);
-        });
-        $ratio = $weighted / max(1, $activeSupply);
-
-        return [$this->clamp((int) round(20 + $ratio * 40)), $needs->count()];
     }
 
     private function propertyFitScore(Property $property): int
@@ -411,10 +378,10 @@ class PropertyLiquidityCalculator
         if (! $property->condition && ! $property->repair_type_id) {
             $score -= 8;
         }
-        if (! $property->has_parking) {
+        if (PropertyAmenities::parking($property) === false) {
             $score -= 5;
         }
-        if ($this->isResidentialType($property) && ! $property->is_mortgage_available) {
+        if ($this->isResidentialType($property) && PropertyAmenities::mortgage($property) === false) {
             $score -= 5;
         }
 
@@ -447,7 +414,7 @@ class PropertyLiquidityCalculator
         return $listedAt ? max(1, $listedAt->diffInDays(now())) : 1;
     }
 
-    private function confidence(Property $property, int $soldCount, int $activeCount, bool $fallback): array
+    private function confidence(Property $property, int $soldCount, int $activeCount, bool $fallback, int $unavailableComponents = 0): array
     {
         $required = ['location_id', 'district', 'price', 'currency', 'total_area'];
         if ($this->usesRooms($property)) {
@@ -462,7 +429,9 @@ class PropertyLiquidityCalculator
         $sample = min(100, ($soldCount / 50 * 70) + ($activeCount / 30 * 30));
         $district = $property->district_id ? 100 : 65;
         $score = (int) round($completeness * 0.40 + $sample * 0.45 + $district * 0.15 - ($fallback ? 15 : 0));
-        $score = $this->clamp($score);
+        $unknownAmenities = (PropertyAmenities::parking($property) === null ? 1 : 0)
+            + ($this->isResidentialType($property) && PropertyAmenities::mortgage($property) === null ? 1 : 0);
+        $score = $this->clamp($score - 10 * $unavailableComponents - 5 * $unknownAmenities);
         $level = $soldCount >= (int) config('property-liquidity.high_confidence_sold_count', 50) && $score >= 75
             ? 'high'
             : ($soldCount >= (int) config('property-liquidity.medium_confidence_sold_count', 15) && $score >= 45 ? 'medium' : 'low');

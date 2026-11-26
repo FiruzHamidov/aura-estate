@@ -221,6 +221,96 @@ class PropertyLiquidityFeatureTest extends TestCase
             ->assertJsonStructure(['data' => ['score', 'components', 'market', 'factors']]);
     }
 
+    public function test_minimum_score_filter_is_inclusive_before_pagination_and_keeps_scope(): void
+    {
+        $ids = [];
+        foreach ([[79, 1], [80, 1], [81, 1], [100, 1], [100, 2]] as [$score, $agent]) {
+            $property = $this->createTarget(90_000, $agent);
+            $snapshot = app(PropertyLiquidityCalculator::class)->calculate($property);
+            $snapshot->update(['score' => $score]);
+            $property->updateQuietly(['liquidity_score' => $score]);
+            if ($agent === 1 && $score >= 80) $ids[] = $property->id;
+        }
+        Sanctum::actingAs(User::findOrFail(1));
+        $this->getJson('/api/properties/liquidity-feed?min_score=80&per_page=2')->assertOk()
+            ->assertJsonPath('total', 3)->assertJsonPath('last_page', 2)->assertJsonCount(2, 'data')
+            ->assertJsonPath('data.0.score', 100)->assertJsonPath('data.1.score', 81);
+        $this->getJson('/api/properties/liquidity-feed?min_score=80&per_page=2&page=2')->assertOk()
+            ->assertJsonPath('data.0.id', $ids[0])->assertJsonPath('data.0.score', 80);
+        foreach (['101', '-1', '80.5', 'invalid'] as $score) {
+            $this->getJson('/api/properties/liquidity-feed?min_score='.$score)->assertUnprocessable();
+        }
+    }
+
+    public function test_unknown_amenities_do_not_mean_no_and_features_and_explicit_status_are_used(): void
+    {
+        $property = $this->createTarget(90_000, 1);
+        $property->forceFill(['has_parking' => false, 'is_mortgage_available' => false])->saveQuietly();
+        $unknown = app(PropertyLiquidityCalculator::class)->calculate($property);
+        $this->assertSame(100, $unknown->apartment_fit_score);
+        $this->assertNull($unknown->market['parking_available']);
+        $this->assertNull($unknown->market['mortgage_available']);
+        foreach (['underground-parking', 'surface-parking', 'svobodnay parkovka'] as $slug) {
+            $featureId = DB::table('features')->insertGetId(['name' => $slug, 'slug' => $slug]);
+            $property->features()->sync([$featureId]);
+            $known = app(PropertyLiquidityCalculator::class)->calculate($property->fresh());
+            $this->assertTrue($known->market['parking_available']);
+            $this->assertSame(100, $known->apartment_fit_score);
+            $this->assertSame($unknown->confidence_score + 5, $known->confidence_score);
+        }
+        $noParking = DB::table('parking_types')->insertGetId(['name' => 'Отсутствует']);
+        $property->forceFill(['parking_type_id' => $noParking, 'mortgage_availability_status' => 'unavailable'])->saveQuietly();
+        $explicitNo = app(PropertyLiquidityCalculator::class)->calculate($property->fresh());
+        $this->assertFalse($explicitNo->market['parking_available']);
+        $this->assertFalse($explicitNo->market['mortgage_available']);
+        $this->assertSame(90, $explicitNo->apartment_fit_score);
+        $yesParking = DB::table('parking_types')->insertGetId(['name' => 'Подземная']);
+        $property->forceFill(['parking_type_id' => $yesParking, 'mortgage_availability_status' => 'available'])->saveQuietly();
+        $explicitYes = app(PropertyLiquidityCalculator::class)->calculate($property->fresh());
+        $this->assertSame(100, $explicitYes->apartment_fit_score);
+        $this->assertTrue($explicitYes->market['mortgage_available']);
+    }
+
+    public function test_demand_uses_multiple_types_total_budget_and_distinct_clients(): void
+    {
+        $property = $this->createTarget(90_000, 1);
+        $typeId = DB::table('client_need_types')->insertGetId(['slug' => 'buy']);
+        $statusId = DB::table('client_need_statuses')->insertGetId(['slug' => 'active', 'is_closed' => false]);
+        $otherType = DB::table('property_types')->insertGetId(['name' => 'House', 'slug' => 'houses']);
+        foreach ([[1, 100_000, 1], [1, 100_000, 40], [2, 60_000, 1], [3, 100_000, 100]] as [$client, $budget, $age]) {
+            $need = DB::table('client_needs')->insertGetId(['client_id' => $client, 'type_id' => $typeId, 'status_id' => $statusId,
+                'currency' => 'USD', 'location_id' => 1, 'district_id' => 1, 'property_type_id' => $otherType,
+                'budget_total' => $budget, 'created_at' => now(), 'updated_at' => now()->subDays($age)]);
+            DB::table('client_need_property_type')->insert(['client_need_id' => $need, 'property_type_id' => 1]);
+        }
+        $snapshot = app(PropertyLiquidityCalculator::class)->calculate($property);
+        $this->assertSame(1, $snapshot->market['matching_active_needs_count']);
+        $this->assertTrue($snapshot->market['component_availability']['demand']);
+    }
+
+    public function test_district_percentiles_can_reach_100_and_missing_data_reweights_the_score(): void
+    {
+        $property = $this->createTarget(90_000, 1);
+        $sparse = app(PropertyLiquidityCalculator::class)->calculate($property);
+        $this->assertFalse($sparse->market['component_availability']['district_market']);
+        $this->assertFalse($sparse->market['component_availability']['demand']);
+        $this->assertSame(100, $sparse->score);
+        foreach ([2 => 120, 3 => 180] as $district => $dom) {
+            for ($i = 0; $i < 5; $i++) DB::table('properties')->insert($this->propertyRow([
+                'district_id' => $district, 'district' => 'District '.$district,
+                'moderation_status' => 'sold', 'sold_at' => now()->subDays(5),
+                'listed_at' => now()->subDays($dom + 5), 'created_at' => now()->subDays(500),
+            ]));
+            for ($i = 0; $i < 10; $i++) DB::table('properties')->insert($this->propertyRow([
+                'district_id' => $district, 'district' => 'District '.$district,
+            ]));
+        }
+        $snapshot = app(PropertyLiquidityCalculator::class)->calculate($property);
+        $this->assertTrue($snapshot->market['component_availability']['district_market']);
+        $this->assertSame(100, $snapshot->district_market_score);
+        $this->assertSame(100, $snapshot->score);
+    }
+
     public function test_exact_score_filter_runs_before_pagination_and_preserves_visibility(): void
     {
         $eligible = [];
@@ -430,7 +520,7 @@ class PropertyLiquidityFeatureTest extends TestCase
 
     public function test_rop_feed_filters_and_report_use_scoped_results_instead_of_global_columns(): void
     {
-        $property = $this->createTarget(90_000, 1);
+        $property = $this->createTarget(94_000, 1);
         $expected = app(PropertyLiquidityCalculator::class)->previewForRop($property, User::findOrFail(5));
         $this->assertNotNull($expected);
         DB::table('properties')->update(['liquidity_score' => 0, 'liquidity_category' => 'very_low', 'price_position' => 'above_market']);
@@ -442,6 +532,7 @@ class PropertyLiquidityFeatureTest extends TestCase
         $this->assertGreaterThan(0, $response->json('total'));
         $this->getJson('/api/properties/liquidity-feed?price_position=below_market')->assertOk()->assertJsonFragment(['id' => $property->id]);
         $filtered = $this->getJson('/api/properties/liquidity-feed?score='.$expected->score)->assertOk()->assertJsonFragment(['id' => $property->id]);
+        $this->getJson('/api/properties/liquidity-feed?min_score=80')->assertOk()->assertJsonFragment(['id' => $property->id]);
         $this->assertSame([$expected->score], collect($filtered->json('data'))->pluck('score')->unique()->values()->all());
         $this->assertLessThan(100, $expected->score);
         $perfect = $this->getJson('/api/properties/liquidity-feed?score=100')->assertOk();
@@ -685,6 +776,10 @@ class PropertyLiquidityFeatureTest extends TestCase
             $table->string('status')->default('active');
             $table->timestamps();
         });
+        Schema::create('features', function (Blueprint $table) { $table->id(); $table->string('name'); $table->string('slug'); $table->timestamps(); });
+        Schema::create('feature_property', function (Blueprint $table) { $table->unsignedBigInteger('feature_id'); $table->unsignedBigInteger('property_id'); $table->timestamps(); });
+        Schema::create('parking_types', function (Blueprint $table) { $table->id(); $table->string('name'); $table->timestamps(); });
+        Schema::create('client_need_property_type', function (Blueprint $table) { $table->unsignedBigInteger('client_need_id'); $table->unsignedBigInteger('property_type_id'); $table->timestamps(); });
         Schema::create('property_types', function (Blueprint $table) {
             $table->id();
             $table->string('name');
@@ -730,6 +825,8 @@ class PropertyLiquidityFeatureTest extends TestCase
             $table->string('condition')->nullable();
             $table->boolean('has_parking')->default(false);
             $table->boolean('is_mortgage_available')->default(false);
+            $table->string('mortgage_availability_status')->default('unknown');
+            $table->unsignedBigInteger('parking_type_id')->nullable();
             $table->boolean('is_from_developer')->default(false);
             $table->string('moderation_status');
             $table->string('district')->nullable();
@@ -787,6 +884,7 @@ class PropertyLiquidityFeatureTest extends TestCase
             $table->unsignedBigInteger('status_id');
             $table->decimal('budget_from', 15, 2)->nullable();
             $table->decimal('budget_to', 15, 2)->nullable();
+            $table->decimal('budget_total', 15, 2)->nullable();
             $table->string('currency', 3);
             $table->unsignedBigInteger('location_id')->nullable();
             $table->string('district')->nullable();

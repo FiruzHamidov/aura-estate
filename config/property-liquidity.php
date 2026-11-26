@@ -1,8 +1,10 @@
 <?php
 
 return [
-    'model_version' => 'liquidity-rules-v2',
+    'model_version' => 'liquidity-rules-v3',
     'lookback_months' => 12,
+    'district_minimum_sales' => 5,
+    'district_minimum_peers' => 3,
     'demand_freshness_days' => 90,
     'minimum_sold_for_prediction' => 15,
     'medium_confidence_sold_count' => 15,
