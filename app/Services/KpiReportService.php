@@ -46,7 +46,7 @@ class KpiReportService
         $reports = $query->get();
 
         $metricsConfig = (array) config('kpi.metrics', []);
-        $availableColumns = $this->availableMetricColumns(array_keys($metricsConfig));
+        $availableColumns = $this->availableMetricColumns([...array_keys($metricsConfig), 'sales_count']);
         $grouped = $this->groupReports($reports, $periodType, $historical);
 
         $locks = collect();
@@ -75,6 +75,10 @@ class KpiReportService
                 $factValue = in_array($column, $availableColumns, true)
                     ? (float) $bucketReports->sum($column)
                     : 0.0;
+                if ($column === 'deals_count' && in_array('sales_count', $availableColumns, true)) {
+                    // Keep the legacy API key, but preserve the fractional KPI value.
+                    $factValue = (float) $bucketReports->sum(fn ($report) => $report->sales_count ?? $report->deals_count);
+                }
 
                 $targetValue = $this->targetForPeriod(
                     (float) ($cfg['target'] ?? 0),

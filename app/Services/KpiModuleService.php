@@ -1097,7 +1097,9 @@ class KpiModuleService
                 }
                 if (Schema::hasColumn('properties', 'sold_at')) {
                     $seller = $this->salesAttributionService->primarySellerExpression();
-                    $add((clone $properties)->whereIn(DB::raw($seller), $ids)->where('moderation_status', 'sold')->min('sold_at'), $appTimezone);
+                    $listingAgent = $this->salesAttributionService->listingAgentExpression();
+                    $add((clone $properties)->where(fn ($query) => $query->whereIn(DB::raw($seller), $ids)
+                        ->orWhereIn(DB::raw($listingAgent), $ids))->where('moderation_status', 'sold')->min('sold_at'), $appTimezone);
                 }
             }
             if (Schema::hasTable('clients')) {

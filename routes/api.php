@@ -561,6 +561,7 @@ Route::middleware(['auth:sanctum', 'active.user', 'daily.report'])->group(functi
         Route::get('/marketing/property-contact-analytics', [\App\Http\Controllers\PropertyContactAnalyticsController::class, 'index']);
         Route::get('/my-properties', [PropertyController::class, 'myProperties']);
         Route::get('/properties/liquidity-feed', [PropertyLiquidityController::class, 'feed']);
+        Route::get('/properties/top-50', [PropertyController::class, 'top50']);
         Route::get('/reports/properties/liquidity', [PropertyLiquidityController::class, 'report']);
         Route::get('/properties/{property}/liquidity/history', [PropertyLiquidityController::class, 'history'])->whereNumber('property');
         Route::post('/admin/properties/{property}/liquidity/recalculate', [PropertyLiquidityController::class, 'recalculate'])->whereNumber('property');
