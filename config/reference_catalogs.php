@@ -5,6 +5,7 @@ return [
         'table' => 'property_types',
         'label_columns' => ['name'],
         'references' => [
+            ['key' => 'document_types', 'label' => 'Типы документов', 'table' => 'document_type_property_type', 'column' => 'property_type_id', 'entity_column' => 'document_type_id', 'pivot' => true],
             ['key' => 'properties', 'label' => 'Объекты недвижимости', 'table' => 'properties', 'column' => 'type_id'],
             ['key' => 'external_property_requests', 'label' => 'Заявки внешних агентов', 'table' => 'external_property_requests', 'column' => 'type_id'],
             ['key' => 'client_needs', 'label' => 'Потребности клиентов', 'table' => 'client_needs', 'column' => 'property_type_id'],
@@ -58,6 +59,7 @@ return [
         'table' => 'document_types',
         'label_columns' => ['name'],
         'references' => [
+            ['key' => 'property_types', 'label' => 'Виды недвижимости', 'table' => 'document_type_property_type', 'column' => 'document_type_id', 'entity_column' => 'property_type_id', 'pivot' => true],
             ['key' => 'properties', 'label' => 'Объекты недвижимости', 'table' => 'properties', 'column' => 'document_type_id'],
         ],
     ],

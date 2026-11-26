@@ -636,6 +636,34 @@ class PropertyConstructionFieldsTest extends TestCase
         );
     }
 
+    public function test_document_type_availability_is_enforced_on_create_and_when_changing_property_kind(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $agent = User::create(['name' => 'Agent', 'phone' => '930000010', 'role_id' => $role->id]);
+        $apartment = \App\Models\PropertyType::create(['name' => 'Квартира', 'slug' => 'apartment']);
+        $house = \App\Models\PropertyType::create(['name' => 'Дом', 'slug' => 'house']);
+        (require database_path('migrations/2026_11_26_180000_link_document_types_to_property_types.php'))->up();
+        $passport = \App\Models\DocumentType::where('slug', 'technical_passport')->firstOrFail();
+        $certificate = \App\Models\DocumentType::where('slug', 'certificate_other')->firstOrFail();
+        Sanctum::actingAs($agent);
+        $payload = ['type_id' => $apartment->id, 'document_type_id' => $passport->id, 'price' => 150000, 'currency' => 'TJS', 'offer_type' => 'sale'];
+        $this->postJson('/api/properties', array_replace($payload, ['document_type_id' => $certificate->id]))
+            ->assertUnprocessable()->assertJsonStructure(['details' => ['errors' => ['document_type_id']]]);
+        $id = $this->postJson('/api/properties', $payload)->assertOk()->json('id');
+        $this->putJson('/api/properties/'.$id, ['type_id' => $house->id])->assertUnprocessable()->assertJsonStructure(['details' => ['errors' => ['document_type_id']]]);
+        $this->assertDatabaseHas('properties', ['id' => $id, 'type_id' => $apartment->id, 'document_type_id' => $passport->id]);
+        $this->putJson('/api/properties/'.$id, ['type_id' => $house->id, 'document_type_id' => $certificate->id])->assertOk();
+
+        $certificate->propertyTypes()->sync([]);
+        $this->putJson('/api/properties/'.$id, ['description' => 'Обновлено', 'document_type_id' => $certificate->id])->assertOk();
+        $this->assertDatabaseHas('properties', ['id' => $id, 'document_type_id' => $certificate->id]);
+        $this->postJson('/api/properties', array_replace($payload, ['type_id' => $house->id, 'document_type_id' => $certificate->id]))->assertUnprocessable();
+        $this->putJson('/api/properties/'.$id, ['document_type_id' => null])->assertOk();
+        $this->assertDatabaseHas('properties', ['id' => $id, 'document_type_id' => null]);
+        $certificate->propertyTypes()->sync([$apartment->id]);
+        $this->putJson('/api/properties/'.$id, ['type_id' => $apartment->id, 'document_type_id' => $certificate->id])->assertOk();
+    }
+
     public function test_property_keeps_contract_type_and_document_type_separate(): void
     {
         $agentRole = Role::create(['name' => 'Agent', 'slug' => 'agent']);
