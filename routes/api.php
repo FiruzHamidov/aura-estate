@@ -150,6 +150,7 @@ Route::get('/agents/{agent}/reviews', [ReviewController::class, 'index'])->where
 Route::post('/agents/{agent}/reviews', [ReviewController::class, 'store'])->middleware('throttle:auth-verify')->whereNumber('agent');
 
 Route::middleware(['auth:sanctum', 'active.user'])->group(function () {
+    Route::post('/telegram/auth/dismiss-link-prompt', [TelegramAuthController::class, 'dismissLinkPrompt']);
     Route::get('/rbac', [\App\Http\Controllers\RolePermissionController::class, 'index']);
     Route::put('/rbac/roles/{role}', [\App\Http\Controllers\RolePermissionController::class, 'update']);
     Route::get('/rbac/roles/{role}/history', [\App\Http\Controllers\RolePermissionController::class, 'history']);

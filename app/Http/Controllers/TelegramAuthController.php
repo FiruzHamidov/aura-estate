@@ -103,6 +103,22 @@ class TelegramAuthController extends Controller
         ]);
     }
 
+    public function dismissLinkPrompt(Request $request)
+    {
+        /** @var User $user */
+        $user = $request->user();
+
+        // Only the signed-in user's preference may change. Repeated requests
+        // preserve the first dismissal and never alter the Telegram connection.
+        User::query()->whereKey($user->id)
+            ->whereNull('telegram_link_prompt_dismissed_at')
+            ->update(['telegram_link_prompt_dismissed_at' => now()]);
+
+        return response()->json([
+            'telegram_link_prompt_dismissed_at' => $user->fresh()->telegram_link_prompt_dismissed_at,
+        ]);
+    }
+
     public function webhook(Request $request, TelegramAuthService $telegramAuthService, TelegramBotService $telegramBotService)
     {
         $this->ensureWebhookAuthorized($request);
@@ -114,7 +130,7 @@ class TelegramAuthController extends Controller
         $telegramUsername = data_get($message, 'from.username');
         $photoUrl = null;
 
-        if (data_get($message, 'chat.type') !== 'private' || !$telegramUserId || (string) $chatId !== (string) $telegramUserId || $text === '') {
+        if (data_get($message, 'chat.type') !== 'private' || ! $telegramUserId || (string) $chatId !== (string) $telegramUserId || $text === '') {
             return response()->json(['ok' => true]);
         }
 
