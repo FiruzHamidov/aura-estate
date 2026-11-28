@@ -37,14 +37,22 @@ class PropertyReportQuery
             : ((int) $property->created_by > 0 ? (int) $property->created_by : (int) $property->agent_id);
     }
 
-    public function inventory(Request $request): Builder
+    public function inventory(Request $request, bool $participantIncome = false): Builder
     {
         $filters = $request->except(['date_from', 'date_to', 'from', 'to', 'sold_at_from', 'sold_at_to',
             'deposit_received_at_from', 'deposit_received_at_to', 'date_field']);
         if ($request->filled('report_employee_id')) $filters['agent_id'] = $request->input('report_employee_id');
         $scoped = new Request($filters);
         $scoped->setUserResolver(fn () => $request->user());
-        [$query] = $this->applyCommonFilters($scoped, Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q)), currentEmployeeScope: true);
+        $query = Property::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q));
+        $incomeOwner = null;
+        if ($participantIncome) {
+            $query->leftJoin('property_agent_sales as income_participant', 'income_participant.property_id', '=', 'properties.id');
+            $incomeOwner = 'COALESCE(income_participant.agent_id, '.$this->salesAttributionService->primarySellerExpression().')';
+            $query->where(fn ($q) => $q->whereNull('income_participant.agent_id')->orWhereIn('income_participant.agent_id',
+                User::query()->tap(fn ($users) => \App\Support\BranchVisibility::records($users))->select('id')));
+        }
+        [$query] = $this->applyCommonFilters($scoped, $query, currentEmployeeScope: true, ownerOverride: $incomeOwner);
         $request->validate(['include_inactive' => 'nullable|boolean',
             'date_from' => 'nullable|date_format:Y-m-d', 'date_to' => 'nullable|date_format:Y-m-d|after_or_equal:date_from',
             'sold_at_from' => 'nullable|date_format:Y-m-d', 'sold_at_to' => 'nullable|date_format:Y-m-d|after_or_equal:sold_at_from',
@@ -76,12 +84,13 @@ class PropertyReportQuery
         return $query;
     }
 
-    public function records(Request $request): Collection
+    public function records(Request $request, bool $includeIncome = false): Collection
     {
         // Reports need no descriptions, contacts or other large property fields.
         $columns = array_values(array_intersect([
             'id', 'moderation_status', 'contract_type_id', 'offer_type', 'rooms', 'price', 'total_area',
             'created_by', 'agent_id', 'sale_user_id', 'sale_agent_id', 'created_at', 'sold_at', 'deposit_received_at',
+            ...($includeIncome ? ['company_commission_amount', 'company_commission_currency', 'deal_fx_rate'] : []),
         ], Schema::getColumnListing('properties')));
         return $this->inventory($request)->get($columns);
     }
@@ -189,7 +198,7 @@ class PropertyReportQuery
 
             if (!empty($branchGroupIds)) {
                 $currentEmployeeScope
-                    ? $this->applyEmployeeBranchGroupFilter($query, $branchGroupIds)
+                    ? $this->applyEmployeeBranchGroupFilter($query, $branchGroupIds, $reportOwnerExpression)
                     : $this->applyPropertyBranchGroupFilter($query, $branchGroupIds);
             }
         }
@@ -222,7 +231,7 @@ class PropertyReportQuery
             }
 
             $currentEmployeeScope
-                ? $this->applyEmployeeBranchGroupFilter($query, [(int) $authUser->branch_group_id])
+                ? $this->applyEmployeeBranchGroupFilter($query, [(int) $authUser->branch_group_id], $reportOwnerExpression)
                 : $this->applyPropertyBranchGroupFilter($query, [(int) $authUser->branch_group_id]);
         }
     }
@@ -343,7 +352,7 @@ class PropertyReportQuery
         });
     }
 
-    private function applyEmployeeBranchGroupFilter($query, array $branchGroupIds): void
+    private function applyEmployeeBranchGroupFilter($query, array $branchGroupIds, ?string $ownerOverride = null): void
     {
         $branchGroupIds = array_values(array_filter(array_map('intval', $branchGroupIds)));
 
@@ -352,7 +361,7 @@ class PropertyReportQuery
             return;
         }
 
-        $owner = $this->ownerExpression();
+        $owner = $ownerOverride ?? $this->ownerExpression();
         $query->where(function ($scope) use ($branchGroupIds, $owner) {
             $scope->whereIn(DB::raw($owner), User::query()
                 ->tap(fn ($users) => \App\Support\BranchVisibility::records($users))
@@ -370,7 +379,7 @@ class PropertyReportQuery
         return 'COALESCE(NULLIF(properties.created_by, 0), NULLIF(properties.agent_id, 0))';
     }
 
-    public function applyCommonFilters(Request $request, $query, string $creatorColumn = 'created_by', bool $currentEmployeeScope = false)
+    public function applyCommonFilters(Request $request, $query, string $creatorColumn = 'created_by', bool $currentEmployeeScope = false, ?string $ownerOverride = null)
     {
         $this->ensureReportsAllowed($request);
         $this->validateReportScope($request);
@@ -463,7 +472,9 @@ class PropertyReportQuery
                 $containsClosed = $statusVals === [] || array_intersect($statusVals, $closedStatuses) !== [];
                 $containsOpen = $statusVals === [] || array_diff($statusVals, $closedStatuses) !== [];
 
-                if (str_starts_with($creatorColumn, 'bookings.')) {
+                if ($ownerOverride !== null) {
+                    $query->whereIn(DB::raw($ownerOverride), $agentIds);
+                } elseif (str_starts_with($creatorColumn, 'bookings.')) {
                     $query->whereIn($creatorColumn, $agentIds);
                 } elseif ($isSalesColumn || ($containsClosed && !$containsOpen)) {
                     $query->where($applySalesFilter);
@@ -489,10 +500,10 @@ class PropertyReportQuery
             ? 'created_by'
             : $creatorColumn;
 
-        $reportOwnerExpression = $query->getModel() instanceof Property
+        $reportOwnerExpression = $ownerOverride ?? ($query->getModel() instanceof Property
             ? "CASE WHEN properties.moderation_status IN ('sold', 'rented', 'sold_by_owner') THEN "
                 .$this->salesAttributionService->primarySellerExpression().' ELSE '.$this->propertyAuthorExpression().' END'
-            : null;
+            : null);
         $this->applyBranchAccessFilter($request, $query, $scopeColumn, $reportOwnerExpression, $currentEmployeeScope);
 
         $request->validate(['include_inactive' => 'nullable|boolean']);

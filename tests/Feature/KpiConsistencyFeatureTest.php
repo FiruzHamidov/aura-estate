@@ -120,6 +120,109 @@ class KpiConsistencyFeatureTest extends TestCase
         (require database_path('migrations/2026_11_26_120000_add_sale_credits_to_kpi_result_facts.php'))->up();
     }
 
+    private function employeeIncomeProperties(): void
+    {
+        $this->employeeReportProperties();
+        Schema::create('property_agent_sales', function (Blueprint $t) {
+            $t->id(); $t->unsignedBigInteger('property_id'); $t->unsignedBigInteger('agent_id');
+            $t->string('role')->default('main');
+            $t->decimal('agent_commission_amount', 16, 2)->nullable();
+            $t->string('agent_commission_currency')->nullable();
+        });
+    }
+
+    public function test_employee_income_totals_use_actual_closed_deals_and_personal_commissions(): void
+    {
+        [, $seller, $branch, $group] = $this->fixture();
+        $helper = User::create(['name' => 'Helper', 'phone' => '900990003', 'role_id' => $seller->role_id,
+            'branch_id' => $branch->id, 'branch_group_id' => $group->id]);
+        $this->employeeIncomeProperties();
+        foreach ([['sold', '2026-10-10', 1200.25, 'USD', 10], ['rented', '2026-10-12', 500.5, 'TJS', null],
+            ['sold_by_owner', '2026-10-15', 9000, 'TJS', null], ['deposit', '2026-10-16', 9000, 'TJS', null],
+            ['sold', '2026-09-30', 9000, 'TJS', null], ['sold', null, 100, 'TJS', null]] as [$status, $date, $amount, $currency, $rate]) {
+            $id = \DB::table('properties')->insertGetId(['created_by' => $helper->id, 'agent_id' => $helper->id,
+                'sale_user_id' => $seller->id, 'branch_id' => $branch->id, 'branch_group_id' => $group->id,
+                'moderation_status' => $status, 'offer_type' => $status === 'rented' ? 'rent' : 'sale',
+                'created_at' => '2026-10-01', 'sold_at' => $date, 'deposit_received_at' => $date,
+                'company_commission_amount' => $amount, 'company_commission_currency' => $currency, 'deal_fx_rate' => $rate]);
+            foreach ([[$seller, 100.25], [$helper, 50.5]] as [$person, $commission]) {
+                \DB::table('property_agent_sales')->insert(['property_id' => $id, 'agent_id' => $person->id,
+                    'agent_commission_amount' => $commission, 'agent_commission_currency' => $currency]);
+            }
+        }
+        $url = '/api/reports/employees?date_from=2026-10-01&date_to=2026-10-31';
+        $response = $this->getJson($url)->assertOk()->assertJsonPath('meta.income_currency', 'TJS')
+            ->assertJsonPath('totals.company_income', 12503)->assertJsonPath('totals.agent_income', 1658.25)
+            ->assertJsonPath('totals.income_missing.company_income', 0)->assertJsonPath('totals.income_missing.agent_income', 0);
+        $rows = collect($response->json('data'))->keyBy('employee_id');
+        $this->assertEquals(12503, $rows[$seller->id]['company_income']);
+        $this->assertEquals(1102.75, $rows[$seller->id]['agent_income']);
+        $this->assertEquals(0, $rows[$helper->id]['company_income']);
+        $this->assertEquals(555.5, $rows[$helper->id]['agent_income']);
+        $this->getJson($url.'&agent_id='.$helper->id)->assertOk()
+            ->assertJsonPath('totals.company_income', 0)->assertJsonPath('totals.agent_income', 555.5);
+        $this->getJson($url.'&moderation_status=rented')->assertOk()
+            ->assertJsonPath('totals.company_income', 500.5)->assertJsonPath('totals.agent_income', 150.75);
+        $this->getJson($url.'&sold_at_from=2026-10-11&sold_at_to=2026-10-31')->assertOk()
+            ->assertJsonPath('totals.company_income', 500.5)->assertJsonPath('totals.agent_income', 150.75);
+        $this->getJson('/api/reports/employees')->assertOk()
+            ->assertJsonPath('totals.company_income', 21603)->assertJsonPath('totals.agent_income', 1959.75);
+    }
+
+    public function test_employee_income_distinguishes_missing_values_and_exchange_rates_from_explicit_zero(): void
+    {
+        [, $agent, $branch, $group] = $this->fixture();
+        $this->employeeIncomeProperties();
+        foreach ([[100, 'TJS', null, 25, 'TJS'], [0, 'USD', null, 0, 'USD'],
+            [50, 'USD', null, 10, 'USD'], [null, 'TJS', null, null, 'TJS']] as [$company, $currency, $rate, $commission, $agentCurrency]) {
+            $id = \DB::table('properties')->insertGetId(['agent_id' => $agent->id, 'branch_id' => $branch->id,
+                'branch_group_id' => $group->id, 'moderation_status' => 'sold', 'sold_at' => '2026-10-10',
+                'company_commission_amount' => $company, 'company_commission_currency' => $currency, 'deal_fx_rate' => $rate]);
+            \DB::table('property_agent_sales')->insert(['property_id' => $id, 'agent_id' => $agent->id,
+                'agent_commission_amount' => $commission, 'agent_commission_currency' => $agentCurrency]);
+        }
+        $this->getJson('/api/reports/employees?date_from=2026-10-01&date_to=2026-10-31&agent_id='.$agent->id)->assertOk()
+            ->assertJsonPath('data.0.company_income', 100)->assertJsonPath('data.0.agent_income', 25)
+            ->assertJsonPath('data.0.income_missing.company_income', 2)->assertJsonPath('data.0.income_missing.agent_income', 2)
+            ->assertJsonPath('totals.income_missing.company_income', 2)->assertJsonPath('totals.income_missing.agent_income', 2);
+    }
+
+    public function test_employee_income_scopes_participants_by_current_group_and_inactive_filter(): void
+    {
+        [$admin, $seller, $branch, $group] = $this->fixture();
+        $helperGroup = BranchGroup::create(['name' => 'Helpers', 'branch_id' => $branch->id]);
+        $helper = User::create(['name' => 'Helper', 'phone' => '900990003', 'role_id' => $seller->role_id,
+            'branch_id' => $branch->id, 'branch_group_id' => $helperGroup->id]);
+        $this->employeeIncomeProperties();
+        $id = \DB::table('properties')->insertGetId(['agent_id' => $seller->id, 'branch_id' => $branch->id,
+            'branch_group_id' => $group->id, 'moderation_status' => 'sold', 'sold_at' => '2026-10-10',
+            'company_commission_amount' => 200, 'company_commission_currency' => 'TJS']);
+        foreach ([[$seller, 70], [$helper, 30]] as [$person, $amount]) {
+            \DB::table('property_agent_sales')->insert(['property_id' => $id, 'agent_id' => $person->id,
+                'agent_commission_amount' => $amount, 'agent_commission_currency' => 'TJS']);
+        }
+        $url = '/api/reports/employees?date_from=2026-10-01&date_to=2026-10-31';
+        $this->getJson($url.'&branch_group_id='.$helperGroup->id)->assertOk()
+            ->assertJsonPath('totals.company_income', 0)->assertJsonPath('totals.agent_income', 30);
+        $role = Role::create(['name' => 'ROP', 'slug' => 'rop']);
+        $rop = User::create(['name' => 'Supervisor', 'phone' => '900990004', 'role_id' => $role->id, 'branch_id' => $branch->id]);
+        $rop->supervisedGroups()->attach($helperGroup->id);
+        Sanctum::actingAs($rop);
+        $report = $this->getJson($url)->assertOk()->assertJsonPath('totals.company_income', 0)
+            ->assertJsonPath('totals.agent_income', 30);
+        $this->assertNotContains($seller->id, array_column($report->json('data'), 'employee_id'));
+        $this->getJson($url.'&branch_group_id='.$group->id)->assertForbidden();
+        $helper->update(['status' => 'inactive']);
+        $this->getJson($url)->assertOk()->assertJsonPath('totals.agent_income', 0);
+        Sanctum::actingAs($admin);
+        $this->getJson($url.'&include_inactive=1')->assertOk()->assertJsonPath('totals.agent_income', 100);
+        Schema::table('branches', fn (Blueprint $t) => $t->boolean('is_hidden')->default(false));
+        $hiddenBranch = Branch::create(['name' => 'Hidden']);
+        \DB::table('branches')->where('id', $hiddenBranch->id)->update(['is_hidden' => true]);
+        $helper->update(['status' => 'active', 'branch_id' => $hiddenBranch->id]);
+        $this->getJson($url)->assertOk()->assertJsonPath('totals.agent_income', 70);
+    }
+
     public function test_shared_sale_is_half_in_daily_weekly_monthly_and_employee_result_reports(): void
     {
         [, $owner, $branch, $group] = $this->fixture();

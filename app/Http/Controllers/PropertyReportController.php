@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Booking;
 use App\Models\Property;
 use App\Models\User;
+use App\Services\EmployeeReportIncome;
 use App\Services\SalesAttributionService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -64,9 +65,10 @@ class PropertyReportController extends Controller
             $this->reportQuery->applyBranchAccessByUserColumn($request, $employees, 'users.id');
             $filters['user_ids'] = $employees->pluck('users.id')->all();
         }
-        $properties = $this->reportQuery->records($request);
+        $properties = $this->reportQuery->records($request, includeIncome: true);
+        $income = app(EmployeeReportIncome::class)->build($request, $properties, $this->reportQuery);
         $byEmployee = $properties->groupBy(fn ($property) => $this->reportQuery->ownerId($property));
-        $filters['inventory_owner_ids'] = $byEmployee->keys()->all();
+        $filters['inventory_owner_ids'] = $byEmployee->keys()->merge($income->keys())->unique()->all();
         $filters['unified_employees'] = true;
         $allPeriod = empty($filters['date_from']);
         $canReadKpi = $actor->hasPermission('kpi.reports.view');
@@ -118,7 +120,7 @@ class PropertyReportController extends Controller
 
         // The inventory may belong to an office account or a former group member
         // outside the KPI roster. Keep those objects visible in their own row.
-        $ownerIds = $byEmployee->keys()->merge($liveShows?->keys() ?? [])->unique();
+        $ownerIds = $byEmployee->keys()->merge($liveShows?->keys() ?? [])->merge($income->keys())->unique();
         $missingIds = $ownerIds->diff($rows->pluck('employee_id'));
         $owners = User::query()->tap(fn ($q) => \App\Support\BranchVisibility::records($q))
             ->with(['branch:id,name', 'role'])->whereIn('id', $ownerIds)->get()->keyBy('id');
@@ -143,7 +145,7 @@ class PropertyReportController extends Controller
         ])['rows'])->keyBy('user_id') : collect();
         $statuses = ['draft', 'pending', 'approved', 'deposit', 'sold', 'rented', 'sold_by_owner', 'denied', 'rejected', 'deleted', 'unknown'];
         $contracts = ['alternative', 'exclusive', 'none', 'unspecified'];
-        $rows = $rows->map(function (array $row) use ($byEmployee, $statuses, $contracts, $owners, $liveShows, $visibleShows, $resultRows, $kpiMonth) {
+        $rows = $rows->map(function (array $row) use ($byEmployee, $statuses, $contracts, $owners, $liveShows, $visibleShows, $resultRows, $kpiMonth, $income) {
             $items = $byEmployee->get($row['employee_id'], collect());
             $byStatus = array_fill_keys($statuses, 0);
             $byContract = array_fill_keys($contracts, 0);
@@ -156,6 +158,7 @@ class PropertyReportController extends Controller
                 };
                 $byContract[$contract] = ($byContract[$contract] ?? 0) + 1;
             }
+            $row = array_merge($row, $income->get($row['employee_id'], EmployeeReportIncome::empty()));
             $row['total_properties'] = $items->count();
             $row['approved'] = $byStatus['approved'];
             $row['sales'] = $byStatus['sold'];
@@ -197,7 +200,11 @@ class PropertyReportController extends Controller
             $row['status'] = $result['sale']['status'] ?? 'unavailable';
             return $row;
         })->values();
-        $totals = [];
+        $totals = EmployeeReportIncome::empty();
+        foreach (EmployeeReportIncome::KEYS as $key) {
+            $totals[$key] = round($rows->sum($key), 2);
+            $totals['income_missing'][$key] = $rows->sum(fn ($row) => $row['income_missing'][$key]);
+        }
         foreach (['total_properties', 'objects', 'approved', 'shows', 'clients', 'calls', 'ads', 'sales', 'rented', 'sold_by_owner'] as $key) {
             $totals[$key] = $rows->contains(fn ($row) => $row[$key] === null) ? null : $rows->sum($key);
         }
@@ -217,7 +224,7 @@ class PropertyReportController extends Controller
             'timezone' => 'Asia/Dushanbe', 'generated_at' => Carbon::now('Asia/Dushanbe')->toIso8601String(),
             'employees_count' => $rows->count(), 'scored_employees_count' => $scored->count(),
             'scored_rental_employees_count' => $rentalScored->count(),
-            'kpi_month' => $kpiMonth, 'kpi_basis' => 'monthly_results',
+            'kpi_month' => $kpiMonth, 'kpi_basis' => 'monthly_results', 'income_currency' => 'TJS',
             'quality' => $payload['meta']['quality'], 'sales_attribution' => 'primary_seller',
             'property_filters' => $request->only(['offer_type', 'moderation_status', 'type_id', 'location_id', 'sold_at_from', 'sold_at_to']),
         ]]);
