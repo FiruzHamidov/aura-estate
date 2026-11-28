@@ -3,64 +3,53 @@
 namespace App\Services\AgentWorkspace;
 
 use App\Models\User;
-use App\Support\DealAccess;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 final class RatingReport
 {
-    public const VERSION = 'aura-commission-v1';
+    public const VERSION = 'aura-listing-participants-v2';
 
-    public function __construct(private RatingAccess $access, private RatingSources $sources) {}
+    public function __construct(private RatingAccess $access, private ListingPerformance $listings) {}
 
     public function build(User $actor, string $month, string $category, ?string $requestedScope): array
     {
         $scope = $this->access->resolve($actor, $requestedScope);
-        $this->sources->sync();
 
         return DB::transaction(function () use ($actor, $month, $category, $scope) {
-            // Same lock as approval/source ingestion: rows, leader and own result share one revision set.
-            DB::table('agent_rating_state')->where('key', 'facts')->lockForUpdate()->first();
             $start = CarbonImmutable::parse($month.'-01', 'Asia/Dushanbe');
-            $end = $start->addMonth();
             $now = CarbonImmutable::now('Asia/Dushanbe');
             $asOf = $now->utc()->toIso8601String();
-            $period = DB::table('agent_rating_periods')->where('month', $month)->latest('version')->first();
-            $sources = DB::table('agent_rating_sources')->where(fn ($q) => $q->whereNull('closed_at')->orWhere(fn ($q) => $q->where('closed_at', '>=', $start->utc())->where('closed_at', '<', $end->utc())))->whereIn('state', ['closed', 'needs_link'])->get();
-            $ids = $period ? json_decode($period->revision_ids, true) : $sources->pluck('approved_revision_id')->filter()->all();
-            $revisions = DB::table('agent_rating_revisions')->whereIn('id', $ids)->get();
             $agents = [];
             $details = [];
-            $visibleRevisionIds = [];
             $visibleTransactions = [];
-            foreach ($revisions as $revision) {
-                $p = json_decode($revision->payload, true);
-                if ($category === 'rental' && $p['kind'] !== 'rental') {
-                    continue;
-                }
-                foreach ($p['participants'] as $allocation) {
-                    if (! $allocation['agent_id'] || ! $this->access->matches($actor, $allocation, $scope)) {
+            $incomplete = [];
+            foreach ($this->listings->forMonth($month) as $closing) {
+                foreach ($closing['participants'] as $participant) {
+                    if (! $participant['agent_id'] || ! $this->access->matches($actor, $participant, $scope)
+                        || ! $this->listings->matchesCategory($closing, $participant, $category)) {
                         continue;
                     }
-                    if (in_array($category, ['listing', 'closing'], true) && $allocation['side'] !== $category) {
+                    if (! $closing['closed_at'] || $participant['credit_minor'] === null) {
+                        $incomplete[$closing['property_id']] = true;
+                    }
+                    if (! $closing['closed_at']) {
                         continue;
                     }
-                    $id = $allocation['agent_id'];
-                    $visibleRevisionIds[$revision->id] = true;
+                    $id = $participant['agent_id'];
                     $agents[$id] ??= ['agent_id' => $id, 'score_minor' => 0, '_deals' => [], '_branches' => []];
-                    $agents[$id]['score_minor'] += $allocation['credit_minor'];
-                    if ($allocation['share_bps'] > 0) {
-                        $agents[$id]['_deals'][$p['transaction_id']] = true;
-                        $visibleTransactions[$p['transaction_id']] = true;
+                    $agents[$id]['score_minor'] += $participant['credit_minor'] ?? 0;
+                    $agents[$id]['_deals'][$closing['property_id']] = true;
+                    $visibleTransactions[$closing['property_id']] = true;
+                    if ($participant['branch_id']) {
+                        $agents[$id]['_branches'][$participant['branch_id']] = true;
                     }
-                    if ($allocation['branch_id']) {
-                        $agents[$id]['_branches'][$allocation['branch_id']] = true;
-                    }
-                    $details[$id][] = ['transaction_id' => $p['transaction_id'], 'property_id' => $p['property_id'], 'deal_id' => $p['deal_id'],
-                        'kind' => $p['kind'], 'closed_at' => $p['closed_at'], 'commission' => $p['commission'], 'refund' => $p['refund'],
-                        'currency' => $p['currency'], 'fx_rate' => $p['fx_rate'], 'base_minor' => $p['base_minor'],
-                        'side' => $allocation['side'], 'share_bps' => $allocation['share_bps'], 'credit_minor' => $allocation['credit_minor'], 'revision_id' => $revision->id];
+                    $details[$id][] = ['transaction_id' => $closing['property_id'], 'property_id' => $closing['property_id'],
+                        'deal_id' => null, 'kind' => $closing['kind'], 'closed_at' => $closing['closed_at'],
+                        'commission' => $participant['commission'], 'currency' => $participant['currency'],
+                        'fx_rate' => $closing['fx_rate'], 'role' => $participant['role'],
+                        'credit_minor' => $participant['credit_minor'], 'source' => 'listing_participant'];
                 }
             }
             $users = DB::table('users')->whereIn('id', array_keys($agents))->get()->keyBy('id');
@@ -97,52 +86,25 @@ final class RatingReport
                 }
             }
             unset($row);
-            $excluded = $period ? 0 : $sources->filter(fn ($s) => ! $s->approved_revision_id && $this->access->matches($actor, $s, $scope) && ($category !== 'rental' || in_array($s->kind, ['rental', 'unknown'], true)))->count();
-            // A shared transaction can affect this scope through a participant in another office.
-            $pending = $period ? 0 : $sources->filter(fn ($s) => $s->approved_revision_id && $s->pending_revision_id &&
-                (isset($visibleRevisionIds[$s->approved_revision_id]) || ($this->access->matches($actor, $s, $scope) && ($category !== 'rental' || in_array($s->kind, ['rental', 'unknown'], true)))))->count();
+            $excluded = count($incomplete);
             $me = collect($rows)->firstWhere('agent_id', $actor->id) ?? ['agent_id' => $actor->id, 'name' => $actor->name, 'photo' => $actor->photo,
                 'offices' => [], 'score_minor' => 0, 'deal_count' => 0, 'rank' => null, 'shared_rank' => false,
                 'previous_rank' => null, 'delta_rank' => null, 'is_new' => false, 'profile_url' => null, 'can_view_details' => $actor->hasPermission('agent_rating.details')];
             $overview = $scope !== 'own' && $actor->hasPermission('agent_rating.scope.all') && ! $actor->usesAssignedGroupScope();
             $summary = null;
             if ($overview) {
-                // Recorded source amounts are visible separately; they are not approved
-                // contributions and do not assign an agent a share or a rank.
-                $recorded = 0;
-                $recordedCount = 0;
-                if (! $period && in_array($category, ['all', 'rental'], true)) {
-                    foreach ($sources as $source) {
-                        if ($source->approved_revision_id || $source->state !== 'closed' || $source->canonical_source_id ||
-                            ! $source->closed_at || CarbonImmutable::parse($source->closed_at, 'UTC')->isFuture() || ! in_array($source->kind, ['sale', 'rental'], true) ||
-                            ($category === 'rental' && $source->kind !== 'rental') || ! $this->access->matches($actor, $source, $scope)) {
-                            continue;
-                        }
-                        $financials = json_decode($source->financials ?? '{}', true);
-                        if (! in_array($financials['currency'] ?? null, ['TJS', 'USD'], true) || ! isset($financials['commission'])) {
-                            continue;
-                        }
-                        try {
-                            $recorded += CommissionMath::base((string) $financials['commission'], '0', $financials['currency'], isset($financials['fx_rate']) ? (string) $financials['fx_rate'] : null);
-                            $recordedCount++;
-                        } catch (\Illuminate\Validation\ValidationException) {
-                            // Missing/invalid money remains in the review queue, never a zero.
-                        }
-                    }
-                }
                 $summary = ['score_minor' => array_sum(array_column($rows, 'score_minor')), 'deal_count' => count($visibleTransactions),
-                    'agent_count' => count($rows), 'recorded_unranked_minor' => $recorded, 'recorded_unranked_count' => $recordedCount];
+                    'agent_count' => count($rows), 'recorded_unranked_minor' => 0, 'recorded_unranked_count' => 0];
             }
             $payload = ['snapshot_id' => (string) Str::uuid(), 'rules_version' => self::VERSION, 'period' => $month,
                 'timezone' => 'Asia/Dushanbe', 'currency' => 'TJS', 'scope' => $scope, 'scopes' => $this->access->scopes($actor),
-                'category' => $category, 'as_of' => $asOf, 'status' => $period ? ($period->version > 1 ? 'corrected' : 'final') : 'provisional',
-                'period_version' => $period?->version ?? 0, 'data_quality' => ($excluded || $pending) ? 'partial' : 'complete', 'excluded_count' => $excluded, 'pending_count' => $pending,
+                'category' => $category, 'as_of' => $asOf, 'status' => 'provisional', 'data_source' => 'listing_participants',
+                'period_version' => 0, 'data_quality' => $excluded ? 'partial' : 'complete', 'excluded_count' => $excluded, 'pending_count' => 0,
                 'total_ranked' => $scope === 'own' ? null : count(array_filter($rows, fn ($r) => $r['rank'] !== null)), 'cutoff_rank' => 15,
                 'summary' => $summary, 'show_personal_result' => ! $overview || $me['deal_count'] > 0,
                 'leaders' => $scope === 'own' ? [] : array_values(array_filter($rows, fn ($r) => $r['rank'] === 1)), 'rows' => $rows, 'me' => $me,
-                'capabilities' => ['peers' => $scope !== 'own', 'prepare' => $actor->hasPermission('agent_rating.prepare'),
-                    'confirm' => $actor->hasPermission('agent_rating.confirm'), 'close' => $actor->hasPermission('agent_rating.close') && $scope === 'all',
-                    'reopen' => $actor->hasPermission('agent_rating.reopen') && $scope === 'all'], '_details' => $details];
+                'capabilities' => ['peers' => $scope !== 'own', 'prepare' => false,
+                    'confirm' => false, 'close' => false, 'reopen' => false], '_details' => $details];
             $content = $payload;
             unset($content['snapshot_id'], $content['as_of']);
             $encoded = json_encode($content, JSON_THROW_ON_ERROR);
@@ -196,9 +158,6 @@ final class RatingReport
         $hidden = 0;
         foreach ($rows as $row) {
             $canRead = $agentId === (int) $actor->id;
-            if (! $canRead && $row['deal_id']) {
-                $canRead = $actor->hasPermission('deals.view') && app(DealAccess::class)->visibleQuery($actor)->whereKey($row['deal_id'])->exists();
-            }
             if (! $canRead && $row['property_id']) {
                 // Aggregate rating permission never implies access to property financial details.
                 $canRead = $actor->hasPermission('agent_rating.confirm') && $actor->hasPermission('agent_rating.scope.all') && ! $actor->usesAssignedGroupScope();
@@ -206,7 +165,7 @@ final class RatingReport
             if ($canRead) {
                 $visible[] = $row;
             } else {
-                $hidden += $row['credit_minor'];
+                $hidden += $row['credit_minor'] ?? 0;
             }
         }
         abort_unless($rows || $agentId === (int) $actor->id, 404);

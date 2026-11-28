@@ -4,7 +4,6 @@ namespace Tests\Feature;
 
 use App\Models\User;
 use App\Services\AgentWorkspace\RatingLedger;
-use App\Services\AgentWorkspace\RatingReport;
 use App\Services\AgentWorkspace\RatingSources;
 use App\Services\Kpi\ResultFactService;
 use Carbon\Carbon;
@@ -13,7 +12,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Laravel\Sanctum\Sanctum;
 
-/** Reuses the production-shaped KPI fixture to exercise the new financial boundary. */
+/** Listing-based reporting plus regression coverage for the separate review ledger. */
 class AgentRatingFeatureTest extends KpiResultsFeatureTest
 {
     private User $confirmer;
@@ -61,53 +60,6 @@ class AgentRatingFeatureTest extends KpiResultsFeatureTest
         app(RatingLedger::class)->confirm($this->confirmer, $revision->id);
     }
 
-    public function test_more_money_with_two_sales_is_above_three_sales_and_pagination_uses_same_snapshot(): void
-    {
-        $other = $this->user('agent', 2);
-        for ($i = 0; $i < 2; $i++) {
-            $this->confirm($this->source($this->agent, '20000'), $this->agent);
-        }
-        for ($i = 0; $i < 3; $i++) {
-            $this->confirm($this->source($other, '10000'), $other);
-        }
-        Sanctum::actingAs($this->agent);
-        $response = $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()
-            ->assertJsonPath('rows.0.agent_id', $this->agent->id)->assertJsonPath('rows.0.deal_count', 2)
-            ->assertJsonPath('rows.0.score_minor', 4000000)->assertJsonPath('rows.1.deal_count', 3);
-        $this->getJson('/api/agent-ratings/participants?snapshot_id='.$response->json('snapshot_id'))->assertOk()->assertJsonPath('rows.0.rank', 1);
-        $this->getJson('/api/agent-ratings/'.$this->agent->id.'/breakdown?snapshot_id='.$response->json('snapshot_id'))
-            ->assertOk()->assertJsonPath('total_minor', 4000000)->assertJsonCount(2, 'rows');
-    }
-
-    public function test_roles_shares_refunds_and_zero_fee_unique_count(): void
-    {
-        $source = $this->source($this->agent);
-        $participants = [['agent_id' => $this->agent->id, 'side' => 'listing', 'share_bps' => 4000], ['agent_id' => $this->agent->id, 'side' => 'closing', 'share_bps' => 6000]];
-        $revision = $this->draft($source, $participants, ['refund' => '2000', 'correction_reference' => 'Возврат комиссии №1']);
-        app(RatingLedger::class)->confirm($this->confirmer, $revision->id);
-        $r = app(RatingReport::class);
-        $all = $r->build($this->agent, '2026-11', 'all', null);
-        self::assertSame(800000, $all['me']['score_minor']);
-        self::assertSame(1, $all['me']['deal_count']);
-        self::assertSame(320000, $r->build($this->agent, '2026-11', 'listing', null)['me']['score_minor']);
-        self::assertSame(480000, $r->build($this->agent, '2026-11', 'closing', null)['me']['score_minor']);
-        self::assertSame(0, $r->build($this->agent, '2026-11', 'rental', null)['me']['score_minor']);
-        $this->confirm($this->source($this->agent, '0'), $this->agent);
-        self::assertSame(2, $r->build($this->agent, '2026-11', 'all', null)['me']['deal_count']);
-    }
-
-    public function test_unconfirmed_sources_are_partial_and_self_confirmation_is_forbidden(): void
-    {
-        $source = $this->source($this->agent);
-        $revision = $this->draft($source, [['agent_id' => $this->agent->id, 'side' => 'listing', 'share_bps' => 10000]]);
-        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('data_quality', 'partial')->assertJsonCount(0, 'rows');
-        $this->postJson('/api/agent-ratings/revisions/'.$revision->id.'/confirm')->assertForbidden();
-        Sanctum::actingAs($this->confirmer);
-        $this->postJson('/api/agent-ratings/revisions/'.$revision->id.'/confirm')->assertOk();
-        $this->postJson('/api/agent-ratings/revisions/'.$revision->id.'/confirm')->assertOk();
-        self::assertSame(1, DB::table('agent_rating_approvals')->count());
-    }
-
     public function test_invalid_shares_and_excess_refunds_are_rejected(): void
     {
         $s = $this->source($this->agent);
@@ -137,129 +89,6 @@ class AgentRatingFeatureTest extends KpiResultsFeatureTest
         self::assertSame('reversed', DB::table('agent_rating_sources')->find($source->id)->state);
     }
 
-    public function test_scope_tampering_and_old_snapshot_after_permission_revocation_are_denied(): void
-    {
-        $this->confirm($this->source($this->agent), $this->agent);
-        Sanctum::actingAs($this->agent);
-        $this->getJson('/api/agent-ratings?scope=all')->assertForbidden();
-        $this->getJson('/api/agent-ratings?scope=branch:999')->assertForbidden();
-        $id = $this->getJson('/api/agent-ratings')->assertOk()->json('snapshot_id');
-        $role = $this->agent->role;
-        $role->forceFill(['permissions' => ['agent_rating.view', 'agent_rating.scope.own']])->save();
-        $this->agent->unsetRelation('role');
-        $this->getJson('/api/agent-ratings/participants?snapshot_id='.$id)->assertForbidden();
-        $this->getJson('/api/agent-ratings')->assertOk()->assertJsonPath('total_ranked', null)->assertJsonCount(0, 'rows')->assertJsonPath('me.rank', null);
-    }
-
-    public function test_closed_month_keeps_its_original_snapshot_until_explicit_new_version(): void
-    {
-        $source = $this->source($this->agent);
-        $this->confirm($source, $this->agent);
-        Carbon::setTestNow('2026-12-02 10:00:00');
-        CarbonImmutable::setTestNow('2026-12-02 10:00:00');
-        $ledger = app(RatingLedger::class);
-        $ledger->close($this->confirmer, '2026-11', 'Месяц проверен', 0);
-        $source = DB::table('agent_rating_sources')->find($source->id);
-        $rev = $this->draft($source, [['agent_id' => $this->agent->id, 'side' => 'closing', 'share_bps' => 10000]], ['refund' => '2000', 'correction_reference' => 'Акт возврата']);
-        $ledger->confirm($this->confirmer, $rev->id);
-        $report = app(RatingReport::class);
-        self::assertSame(1000000, $report->build($this->agent, '2026-11', 'all', null)['me']['score_minor']);
-        $ledger->close($this->confirmer, '2026-11', 'Коррекция по акту возврата', 1);
-        $new = $report->build($this->agent, '2026-11', 'all', null);
-        self::assertSame(800000, $new['me']['score_minor']);
-        self::assertSame('corrected', $new['status']);
-        self::assertSame(2, DB::table('agent_rating_periods')->count());
-    }
-
-    public function test_dashboard_card_totals_match_daily_series_and_unknown_sources_are_not_zero(): void
-    {
-        $this->confirm($this->source($this->agent, '1234.56'), $this->agent);
-        Sanctum::actingAs($this->agent);
-        $result = $this->getJson('/api/agent-dashboard?month=2026-11')->assertOk()->json();
-        $metrics = collect($result['metrics'])->keyBy('key');
-        self::assertSame(123456, $metrics['revenue']['value']);
-        self::assertSame(123456, array_sum(array_column($metrics['revenue']['series'], 'value')));
-        self::assertSame(1, $metrics['deals']['value']);
-        self::assertSame('unavailable', $metrics['contracts']['status']);
-        self::assertNull($metrics['contracts']['value']);
-        self::assertNull($result['goals'][0]['target']);
-    }
-
-    public function test_top_fifteen_places_include_all_tied_agents_and_zero_has_no_rank(): void
-    {
-        for ($i = 0; $i < 17; $i++) {
-            $agent = $this->user('agent', 1);
-            $this->confirm($this->source($agent, $i < 14 ? (string) (20000 - $i * 100) : '1000'), $agent);
-        }
-        $zero = $this->user('agent', 1);
-        $this->confirm($this->source($zero, '0'), $zero);
-        $result = $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->json();
-        self::assertCount(17, $result['rows']);
-        self::assertSame([15, 15, 15], array_column(array_slice($result['rows'], 14), 'rank'));
-        self::assertSame(17, $result['total_ranked']);
-    }
-
-    public function test_financial_correction_preserves_closing_office_after_transfer(): void
-    {
-        $s = $this->source($this->agent);
-        $this->confirm($s, $this->agent);
-        DB::table('branches')->insert(['id' => 2, 'name' => 'Новый филиал']);
-        $this->agent->forceFill(['branch_id' => 2, 'branch_group_id' => null])->saveQuietly();
-        $source = DB::table('agent_rating_sources')->find($s->id);
-        $revision = $this->draft($source, [['agent_id' => $this->agent->id, 'side' => 'closing', 'share_bps' => 10000]], ['refund' => '1000', 'correction_reference' => 'Акт']);
-        app(RatingLedger::class)->confirm($this->confirmer, $revision->id);
-        $report = app(RatingReport::class);
-        self::assertSame(900000, $report->build($this->admin, '2026-11', 'all', 'branch:1')['rows'][0]['score_minor']);
-        self::assertCount(0, $report->build($this->admin, '2026-11', 'all', 'branch:2')['rows']);
-    }
-
-    public function test_pending_correction_keeps_confirmed_amount_and_marks_quality(): void
-    {
-        $s = $this->source($this->agent);
-        $this->confirm($s, $this->agent);
-        $s = DB::table('agent_rating_sources')->find($s->id);
-        $this->draft($s, [['agent_id' => $this->agent->id, 'side' => 'closing', 'share_bps' => 10000]], ['commission' => '20000']);
-        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('pending_count', 1)->assertJsonPath('data_quality', 'partial')->assertJsonPath('rows.0.score_minor', 1000000);
-    }
-
-    public function test_pending_shared_commission_is_visible_to_the_other_office_and_personal_dashboard(): void
-    {
-        DB::table('branches')->insert(['id' => 2, 'name' => 'Другой филиал']);
-        $participant = $this->user('agent', 2);
-        $participant->forceFill(['branch_id' => 2, 'branch_group_id' => null])->saveQuietly();
-        $participant->role->forceFill(['permissions' => ['agent_rating.view', 'agent_rating.scope.own', 'agent_rating.scope.branch', 'kpi.reports.view']])->save();
-        $participant->unsetRelation('role');
-        $source = $this->source($this->agent);
-        $participants = [
-            ['agent_id' => $this->agent->id, 'side' => 'closing', 'share_bps' => 6000],
-            ['agent_id' => $participant->id, 'side' => 'listing', 'share_bps' => 4000, 'branch_id' => 2, 'branch_group_id' => null],
-        ];
-        $revision = $this->draft($source, $participants);
-        app(RatingLedger::class)->confirm($this->confirmer, $revision->id);
-        $source = DB::table('agent_rating_sources')->find($source->id);
-        $this->draft($source, $participants, ['commission' => '20000']);
-
-        Sanctum::actingAs($participant);
-        foreach (['own', 'branch:2'] as $scope) {
-            $this->getJson('/api/agent-ratings?month=2026-11&scope='.$scope)->assertOk()
-                ->assertJsonPath('pending_count', 1)->assertJsonPath('data_quality', 'partial')
-                ->assertJsonPath('me.score_minor', 400000);
-        }
-        $this->getJson('/api/agent-ratings?month=2026-11&scope=own&category=rental')->assertOk()
-            ->assertJsonPath('pending_count', 0)->assertJsonPath('data_quality', 'complete');
-        $metrics = collect($this->getJson('/api/agent-dashboard?month=2026-11')->assertOk()->json('metrics'))->keyBy('key');
-        self::assertSame('partial', $metrics['revenue']['status']);
-        self::assertSame('partial', $metrics['deals']['status']);
-        self::assertSame(400000, $metrics['revenue']['value']);
-        self::assertSame(1, $metrics['deals']['value']);
-        $rental = collect($this->getJson('/api/agent-dashboard?month=2026-11&kind=rental')->assertOk()->json('metrics'))->keyBy('key');
-        self::assertSame('complete', $rental['revenue']['status']);
-
-        Sanctum::actingAs($this->user('agent', 2));
-        $this->getJson('/api/agent-ratings?month=2026-11&scope=own')->assertOk()
-            ->assertJsonPath('pending_count', 0)->assertJsonPath('data_quality', 'complete');
-    }
-
     public function test_crm_records_share_one_canonical_cycle_and_ambiguous_links_require_review(): void
     {
         $this->crmFixture();
@@ -276,7 +105,7 @@ class AgentRatingFeatureTest extends KpiResultsFeatureTest
         app(RatingSources::class)->sync(true);
         self::assertSame('duplicate', DB::table('agent_rating_sources')->find($duplicate->id)->state);
         $this->confirm($source, $this->agent);
-        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('rows.0.deal_count', 1)->assertJsonPath('excluded_count', 0);
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('summary.deal_count', 1)->assertJsonPath('excluded_count', 1);
     }
 
     public function test_crm_reopen_creates_new_cycle_deletion_removes_it_and_unknown_date_stays_partial(): void
@@ -302,60 +131,7 @@ class AgentRatingFeatureTest extends KpiResultsFeatureTest
         $this->crmDeal(['closed_at' => null]);
         app(RatingSources::class)->sync(true);
         self::assertSame('reversed', DB::table('agent_rating_sources')->where('deal_id', $id)->first()->state);
-        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('excluded_count', 1)->assertJsonPath('data_quality', 'partial');
-    }
-
-    public function test_admin_defaults_to_company_and_overview_counts_contracts_once(): void
-    {
-        $other = $this->user('agent', 2);
-        $source = $this->source($this->agent);
-        $revision = $this->draft($source, [
-            ['agent_id' => $this->agent->id, 'side' => 'listing', 'share_bps' => 4000],
-            ['agent_id' => $other->id, 'side' => 'closing', 'share_bps' => 6000],
-        ]);
-        app(RatingLedger::class)->confirm($this->confirmer, $revision->id);
-        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('scope', 'all')
-            ->assertJsonPath('summary.score_minor', 1000000)->assertJsonPath('summary.deal_count', 1)
-            ->assertJsonPath('summary.agent_count', 2)->assertJsonPath('show_personal_result', false);
-        $this->getJson('/api/agent-ratings?month=2026-11&scope=branch:1')->assertOk()->assertJsonPath('scope', 'branch:1');
-        $this->getJson('/api/agent-ratings?month=2026-11&scope=own')->assertForbidden();
-        Sanctum::actingAs($this->agent);
-        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('scope', 'branch:1')
-            ->assertJsonPath('summary', null)->assertJsonPath('show_personal_result', true);
-    }
-
-    public function test_admin_with_actual_contribution_keeps_personal_result(): void
-    {
-        $this->confirm($this->source($this->admin), $this->admin);
-        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('show_personal_result', true)
-            ->assertJsonPath('me.score_minor', 1000000)->assertJsonPath('summary.score_minor', 1000000);
-    }
-
-    public function test_recorded_commission_is_separate_from_ranking_and_respects_scope_and_kind(): void
-    {
-        DB::table('branches')->insert(['id' => 2, 'name' => 'Другой филиал']);
-        $this->source($this->agent, '12000');
-        $this->source($this->agent, '2000', 'rented');
-        $invalid = $this->source($this->agent);
-        DB::table('agent_rating_sources')->where('id', $invalid->id)->update(['financials' => json_encode(['commission' => '50', 'currency' => 'USD', 'fx_rate' => null])]);
-        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('summary.score_minor', 0)
-            ->assertJsonPath('summary.recorded_unranked_minor', 1400000)->assertJsonPath('summary.recorded_unranked_count', 2)
-            ->assertJsonPath('excluded_count', 3)->assertJsonCount(0, 'rows');
-        $this->getJson('/api/agent-ratings?month=2026-11&category=rental')->assertOk()
-            ->assertJsonPath('summary.recorded_unranked_minor', 200000)->assertJsonPath('summary.recorded_unranked_count', 1);
-        $this->getJson('/api/agent-ratings?month=2026-11&category=listing')->assertOk()->assertJsonPath('summary.recorded_unranked_count', 0);
-        $this->getJson('/api/agent-ratings?month=2026-11&scope=branch:2')->assertOk()->assertJsonPath('summary.recorded_unranked_count', 0);
-    }
-
-    public function test_recorded_dollar_commission_preserves_fractional_saved_rate(): void
-    {
-        $source = $this->source($this->agent);
-        DB::table('agent_rating_sources')->where('id', $source->id)->update(['financials' => json_encode([
-            'commission' => '10.01', 'currency' => 'USD', 'fx_rate' => 10.123456,
-        ])]);
-        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()
-            ->assertJsonPath('summary.recorded_unranked_minor', 10134)->assertJsonPath('summary.recorded_unranked_count', 1)
-            ->assertJsonPath('summary.score_minor', 0)->assertJsonCount(0, 'rows');
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('excluded_count', 0)->assertJsonPath('data_quality', 'complete');
     }
 
     public function test_service_pipeline_sources_are_excluded_without_removing_audit_or_property_results(): void
@@ -378,8 +154,8 @@ class AgentRatingFeatureTest extends KpiResultsFeatureTest
         self::assertTrue(DB::table('agent_rating_revisions')->where('id', $revision->id)->exists());
         self::assertTrue(DB::table('agent_rating_approvals')->where('revision_id', $revision->id)->exists());
         self::assertNull(DB::table('agent_rating_sources')->find($property->id)->deal_id);
-        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('excluded_count', 0)
-            ->assertJsonPath('summary.score_minor', 1000000)->assertJsonPath('summary.deal_count', 1);
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('excluded_count', 1)
+            ->assertJsonPath('summary.score_minor', 0)->assertJsonPath('summary.deal_count', 1);
         $this->getJson('/api/agent-ratings/sources?month=2026-11')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.id', $property->id);
         app(RatingSources::class)->sync(true);
         self::assertSame((int) $excluded->source_version, (int) DB::table('agent_rating_sources')->find($crmSource->id)->source_version);
@@ -416,6 +192,196 @@ class AgentRatingFeatureTest extends KpiResultsFeatureTest
         self::assertNull($restored->approved_revision_id);
         self::assertNull($restored->pending_revision_id);
         self::assertGreaterThan($source->source_version, $restored->source_version);
+    }
+
+    private function participant(object $property, User $agent, ?string $amount, string $role = 'main', string $currency = 'TJS'): void
+    {
+        if (! \Illuminate\Support\Facades\Schema::hasTable('property_agent_sales')) {
+            (require database_path('migrations/2025_12_31_115529_create_property_agent_sales_table.php'))->up();
+        }
+        DB::table('property_agent_sales')->insert(['property_id' => $property->id, 'agent_id' => $agent->id,
+            'role' => $role, 'agent_commission_amount' => $amount, 'agent_commission_currency' => $currency]);
+    }
+
+    public function test_rating_uses_moderation_participants_without_crm_or_financial_approval(): void
+    {
+        $helper = $this->user('agent', 2);
+        $p = $this->property(['company_commission_amount' => 99000, 'company_commission_currency' => 'TJS']);
+        $this->participant($p, $this->agent, '2000');
+        $this->participant($p, $helper, '800', 'assistant');
+        $response = $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()
+            ->assertJsonPath('data_source', 'listing_participants')->assertJsonPath('data_quality', 'complete')
+            ->assertJsonPath('summary.score_minor', 280000)->assertJsonPath('summary.deal_count', 1)
+            ->assertJsonPath('summary.agent_count', 2)->assertJsonPath('rows.0.agent_id', $this->agent->id)
+            ->assertJsonPath('rows.1.agent_id', $helper->id)->assertJsonPath('rows.1.score_minor', 80000)
+            ->assertJsonPath('show_personal_result', false);
+        $this->getJson('/api/agent-ratings/'.$helper->id.'/breakdown?snapshot_id='.$response->json('snapshot_id'))
+            ->assertOk()->assertJsonPath('rows.0.property_id', $p->id)->assertJsonPath('rows.0.role', 'assistant')
+            ->assertJsonPath('total_minor', 80000);
+        self::assertSame(0, DB::table('agent_rating_sources')->count());
+        self::assertSame(0, DB::table('agent_rating_approvals')->count());
+    }
+
+    public function test_participant_list_takes_precedence_over_seller_and_listing_owner(): void
+    {
+        $participant = $this->user('agent', 2);
+        $p = $this->property();
+        $this->participant($p, $participant, '1234.56', 'partner');
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonCount(1, 'rows')
+            ->assertJsonPath('rows.0.agent_id', $participant->id)->assertJsonPath('rows.0.score_minor', 123456);
+        Sanctum::actingAs($this->agent);
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('me.deal_count', 0);
+        Sanctum::actingAs($participant);
+        $metrics = collect($this->getJson('/api/agent-dashboard?month=2026-11')->assertOk()->json('metrics'))->keyBy('key');
+        self::assertSame(123456, $metrics['revenue']['value']);
+        self::assertSame(1, $metrics['deals']['value']);
+        self::assertSame(123456, array_sum(array_column($metrics['revenue']['series'], 'value')));
+    }
+
+    public function test_roles_rental_and_scope_filters_use_the_participant_data(): void
+    {
+        $helper = $this->user('agent', 2);
+        $p = $this->property();
+        $this->participant($p, $this->agent, '1000', 'main');
+        $this->participant($p, $helper, '200', 'partner');
+        $rent = $this->property(['moderation_status' => 'rented']);
+        $this->participant($rent, $helper, '50', 'assistant');
+        foreach (['main' => 100000, 'partner' => 20000, 'assistant' => 5000, 'rental' => 5000] as $category => $score) {
+            $this->getJson('/api/agent-ratings?month=2026-11&category='.$category)->assertOk()
+                ->assertJsonPath('summary.score_minor', $score)->assertJsonPath('summary.deal_count', 1);
+        }
+        Sanctum::actingAs($helper);
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()
+            ->assertJsonPath('me.score_minor', 25000)->assertJsonPath('me.deal_count', 2)->assertJsonPath('me.rank', 2);
+        $this->getJson('/api/agent-ratings?month=2026-11&scope=all')->assertForbidden();
+        $this->getJson('/api/agent-ratings?month=2026-11&scope=branch:999')->assertForbidden();
+    }
+
+    public function test_missing_commissions_or_fx_do_not_hide_closed_listing_counts(): void
+    {
+        $p = $this->property();
+        $this->participant($p, $this->agent, null);
+        $usd = $this->property();
+        $this->participant($usd, $this->agent, '100', 'main', 'USD');
+        $zero = $this->property();
+        $this->participant($zero, $this->agent, '0', 'main', 'USD');
+        $this->property(); // legacy closing without participants
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()
+            ->assertJsonPath('summary.deal_count', 4)->assertJsonPath('summary.score_minor', 0)
+            ->assertJsonPath('excluded_count', 3)->assertJsonPath('data_quality', 'partial')->assertJsonCount(0, 'rows');
+        Sanctum::actingAs($this->agent);
+        $metrics = collect($this->getJson('/api/agent-dashboard?month=2026-11')->assertOk()->json('metrics'))->keyBy('key');
+        self::assertSame(4, $metrics['deals']['value']);
+        self::assertSame('complete', $metrics['deals']['status']);
+        self::assertSame('partial', $metrics['revenue']['status']);
+        $result = $this->getJson('/api/agent-ratings?month=2026-11')->assertOk();
+        $this->getJson('/api/agent-ratings/'.$this->agent->id.'/breakdown?snapshot_id='.$result->json('snapshot_id'))
+            ->assertOk()->assertJsonPath('rows.0.credit_minor', null)->assertJsonPath('rows.2.credit_minor', 0);
+    }
+
+    public function test_dollar_commissions_use_saved_fractional_rate_and_ignore_company_income(): void
+    {
+        $p = $this->property(['deal_fx_rate' => '10.12345678', 'company_commission_amount' => '99999']);
+        $this->participant($p, $this->agent, '10.01', 'main', 'USD');
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('summary.score_minor', 10134);
+    }
+
+    public function test_participant_edits_reopening_and_deletion_update_new_snapshots_only(): void
+    {
+        $p = $this->property();
+        $this->participant($p, $this->agent, '100');
+        $snapshot = $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->json('snapshot_id');
+        DB::table('property_agent_sales')->where('property_id', $p->id)->update(['agent_commission_amount' => 200]);
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('summary.score_minor', 20000);
+        $this->getJson('/api/agent-ratings/participants?snapshot_id='.$snapshot)->assertOk()->assertJsonPath('summary.score_minor', 10000);
+        DB::table('properties')->where('id', $p->id)->update(['moderation_status' => 'approved']);
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('summary.deal_count', 0);
+        DB::table('properties')->where('id', $p->id)->update(['moderation_status' => 'sold', 'sold_at' => '2026-11-05 09:00:00']);
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('summary.deal_count', 1);
+        DB::table('properties')->where('id', $p->id)->update(['deleted_at' => now()]);
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('summary.deal_count', 0);
+    }
+
+    public function test_company_dashboard_and_agent_dashboard_use_consistent_listing_counts(): void
+    {
+        $helper = $this->user('agent', 2);
+        $p = $this->property();
+        DB::table('properties')->where('id', $p->id)->update(['created_at' => '2026-11-04 12:00:00']);
+        $this->participant($p, $this->agent, '100');
+        $this->participant($p, $helper, '50', 'assistant');
+        $response = $this->getJson('/api/agent-dashboard?month=2026-11')->assertOk()
+            ->assertJsonPath('scope', 'all')->assertJsonPath('scope_label', 'Вся компания')->assertJsonCount(0, 'goals');
+        $metrics = collect($response->json('metrics'))->keyBy('key');
+        self::assertSame(15000, $metrics['revenue']['value']);
+        self::assertSame(1, $metrics['deals']['value']);
+        self::assertSame(1, $metrics['objects']['value']);
+        foreach ($metrics as $metric) {
+            if ($metric['status'] !== 'unavailable') {
+                self::assertSame($metric['value'], array_sum(array_column($metric['series'], 'value')));
+            }
+        }
+        Sanctum::actingAs($helper);
+        $personal = $this->getJson('/api/agent-dashboard?month=2026-11')->assertOk()->assertJsonPath('scope', 'own');
+        self::assertSame(5000, collect($personal->json('metrics'))->firstWhere('key', 'revenue')['value']);
+    }
+
+    public function test_month_boundaries_future_and_undated_closings_are_handled_in_dushanbe_time(): void
+    {
+        config(['app.timezone' => 'UTC']);
+        foreach (['2026-10-31 18:59:59', '2026-10-31 19:00:00', '2026-11-30 19:00:00', '2026-11-10 00:00:00', null] as $date) {
+            $p = $this->property(['sold_at' => $date]);
+            $this->participant($p, $this->agent, '100');
+        }
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('summary.deal_count', 1)
+            ->assertJsonPath('summary.score_minor', 10000)->assertJsonPath('excluded_count', 1);
+        Sanctum::actingAs($this->agent);
+        $metrics = collect($this->getJson('/api/agent-dashboard?month=2026-11')->assertOk()->json('metrics'))->keyBy('key');
+        self::assertSame(1, $metrics['deals']['value']);
+        self::assertSame('2026-11-01', $metrics['revenue']['series'][0]['date']);
+        self::assertSame(10000, $metrics['revenue']['series'][0]['value']);
+    }
+
+    public function test_ties_top_fifteen_and_zero_amount_have_stable_ranks(): void
+    {
+        for ($i = 0; $i < 18; $i++) {
+            $agent = $this->user('agent', 1);
+            $p = $this->property();
+            $this->participant($p, $agent, $i < 14 ? (string) (20000 - $i * 100) : ($i === 17 ? '0' : '1000'));
+        }
+        $result = $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->json();
+        self::assertCount(17, $result['rows']);
+        self::assertSame([15, 15, 15], array_column(array_slice($result['rows'], 14), 'rank'));
+        self::assertSame(17, $result['total_ranked']);
+        $this->getJson('/api/agent-ratings/participants?snapshot_id='.$result['snapshot_id'])->assertOk()->assertJsonCount(18, 'rows');
+    }
+
+    public function test_snapshot_access_revocation_and_peer_financial_details_remain_protected(): void
+    {
+        $p = $this->property();
+        $other = $this->user('agent', 2);
+        $this->participant($p, $other, '100');
+        Sanctum::actingAs($this->agent);
+        $id = $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->json('snapshot_id');
+        $this->getJson('/api/agent-ratings/'.$other->id.'/breakdown?snapshot_id='.$id)->assertOk()
+            ->assertJsonCount(0, 'rows')->assertJsonPath('restricted_credit_minor', 10000);
+        $this->agent->role->forceFill(['permissions' => ['agent_rating.view', 'agent_rating.scope.own']])->save();
+        $this->agent->unsetRelation('role');
+        $this->getJson('/api/agent-ratings/participants?snapshot_id='.$id)->assertForbidden();
+    }
+
+    public function test_hidden_branches_are_excluded_and_crm_only_commissions_do_not_enter_rating(): void
+    {
+        $this->crmFixture();
+        $this->crmDeal(['meta' => json_encode(['transaction_kind' => 'sale'])]);
+        app(RatingSources::class)->sync(true);
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('summary.score_minor', 0)->assertJsonPath('data_quality', 'complete');
+        (require database_path('migrations/2026_10_16_010000_add_branch_visibility.php'))->up();
+        $p = $this->property();
+        $this->participant($p, $this->agent, '100');
+        DB::table('branches')->where('id', 1)->update(['is_hidden' => true]);
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('summary.deal_count', 0);
+        $metrics = collect($this->getJson('/api/agent-dashboard?month=2026-11')->assertOk()->json('metrics'))->keyBy('key');
+        self::assertSame(0, $metrics['deals']['value']);
     }
 
     private function crmFixture(): void
