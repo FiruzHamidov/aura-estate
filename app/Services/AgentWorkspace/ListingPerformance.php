@@ -4,6 +4,7 @@ namespace App\Services\AgentWorkspace;
 
 use App\Services\SalesAttributionService;
 use App\Support\BranchVisibility;
+use App\Support\DealExchangeRate;
 use Brick\Math\BigDecimal;
 use Brick\Math\Exception\MathException;
 use Brick\Math\RoundingMode;
@@ -51,12 +52,14 @@ final class ListingPerformance
                 $amount = $member->agent_commission_amount ?? null;
                 $currency = $member->agent_commission_currency ?? null;
                 $minor = $this->commissionMinor($amount, $currency, $property->deal_fx_rate ?? null);
+                $invalidFx = $currency === 'USD' && is_numeric($amount) && (float) $amount > 0
+                    && isset($property->deal_fx_rate) && ! DealExchangeRate::isValid($property->deal_fx_rate);
                 $user = $users->get($member->agent_id);
 
                 return ['agent_id' => (int) $member->agent_id, 'role' => $member->role ?? 'assistant',
                     'branch_id' => $user?->branch_id, 'branch_group_id' => $user?->branch_group_id,
                     'commission' => $amount === null ? null : (string) $amount, 'currency' => $currency,
-                    'credit_minor' => $minor];
+                    'credit_minor' => $minor, 'commission_issue' => $invalidFx ? 'invalid_fx_rate' : null];
             })->all();
 
             return ['transaction_id' => (int) $property->id, 'property_id' => (int) $property->id,
@@ -78,13 +81,10 @@ final class ListingPerformance
             }
             // A recorded zero is complete even without an exchange rate.
             if ($currency === 'USD' && ! $value->isZero()) {
-                if ($rate === null) {
+                if (! DealExchangeRate::isValid($rate)) {
                     return null;
                 }
                 $fx = BigDecimal::of((string) $rate);
-                if (! $fx->isPositive()) {
-                    return null;
-                }
                 $value = $value->multipliedBy($fx);
             }
 

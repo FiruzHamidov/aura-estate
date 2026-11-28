@@ -9,7 +9,7 @@ use Illuminate\Support\Str;
 
 final class RatingReport
 {
-    public const VERSION = 'aura-listing-participants-v2';
+    public const VERSION = 'aura-listing-participants-v3';
 
     public function __construct(private RatingAccess $access, private ListingPerformance $listings) {}
 
@@ -25,6 +25,7 @@ final class RatingReport
             $details = [];
             $visibleTransactions = [];
             $incomplete = [];
+            $invalidFx = [];
             foreach ($this->listings->forMonth($month) as $closing) {
                 foreach ($closing['participants'] as $participant) {
                     if (! $participant['agent_id'] || ! $this->access->matches($actor, $participant, $scope)
@@ -36,6 +37,9 @@ final class RatingReport
                     }
                     if (! $closing['closed_at']) {
                         continue;
+                    }
+                    if ($participant['commission_issue'] === 'invalid_fx_rate') {
+                        $invalidFx[$closing['property_id']] = true;
                     }
                     $id = $participant['agent_id'];
                     $agents[$id] ??= ['agent_id' => $id, 'score_minor' => 0, '_deals' => [], '_branches' => []];
@@ -49,7 +53,8 @@ final class RatingReport
                         'deal_id' => null, 'kind' => $closing['kind'], 'closed_at' => $closing['closed_at'],
                         'commission' => $participant['commission'], 'currency' => $participant['currency'],
                         'fx_rate' => $closing['fx_rate'], 'role' => $participant['role'],
-                        'credit_minor' => $participant['credit_minor'], 'source' => 'listing_participant'];
+                        'credit_minor' => $participant['credit_minor'], 'commission_issue' => $participant['commission_issue'],
+                        'source' => 'listing_participant'];
                 }
             }
             $users = DB::table('users')->whereIn('id', array_keys($agents))->get()->keyBy('id');
@@ -100,6 +105,7 @@ final class RatingReport
                 'timezone' => 'Asia/Dushanbe', 'currency' => 'TJS', 'scope' => $scope, 'scopes' => $this->access->scopes($actor),
                 'category' => $category, 'as_of' => $asOf, 'status' => 'provisional', 'data_source' => 'listing_participants',
                 'period_version' => 0, 'data_quality' => $excluded ? 'partial' : 'complete', 'excluded_count' => $excluded, 'pending_count' => 0,
+                'invalid_fx_count' => count($invalidFx),
                 'total_ranked' => $scope === 'own' ? null : count(array_filter($rows, fn ($r) => $r['rank'] !== null)), 'cutoff_rank' => 15,
                 'summary' => $summary, 'show_personal_result' => ! $overview || $me['deal_count'] > 0,
                 'leaders' => $scope === 'own' ? [] : array_values(array_filter($rows, fn ($r) => $r['rank'] === 1)), 'rows' => $rows, 'me' => $me,

@@ -2,6 +2,8 @@
 
 namespace App\Services\Kpi;
 
+use App\Support\DealExchangeRate;
+
 /** One monetary definition for goals, reports, deal drill-down and rewards. */
 final class ResultAmount
 {
@@ -24,7 +26,7 @@ final class ResultAmount
         if ($from === $to || (float) $amount === 0.0) {
             return round((float) $amount, 2);
         }
-        if (! is_numeric($rate) || ! is_finite((float) $rate) || (float) $rate <= 0) {
+        if (! DealExchangeRate::isValid($rate)) {
             return null;
         }
 
