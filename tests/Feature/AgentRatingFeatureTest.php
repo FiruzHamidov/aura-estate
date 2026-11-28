@@ -218,6 +218,8 @@ class AgentRatingFeatureTest extends KpiResultsFeatureTest
         $this->getJson('/api/agent-ratings/'.$helper->id.'/breakdown?snapshot_id='.$response->json('snapshot_id'))
             ->assertOk()->assertJsonPath('rows.0.property_id', $p->id)->assertJsonPath('rows.0.role', 'assistant')
             ->assertJsonPath('total_minor', 80000);
+        $this->getJson('/api/agent-ratings/rules?version='.$response->json('rules_version'))
+            ->assertOk()->assertJsonPath('version', 'aura-listing-participants-v2');
         self::assertSame(0, DB::table('agent_rating_sources')->count());
         self::assertSame(0, DB::table('agent_rating_approvals')->count());
     }
