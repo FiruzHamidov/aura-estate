@@ -69,6 +69,14 @@ final class KpiResultAmountTest extends TestCase
     public static function invalidValues(): array
     {
         return [[null, 'TJS', 10], [-1, 'TJS', 10], ['oops', 'TJS', 10], [INF, 'TJS', 10],
-            [100, 'EUR', 10], [100, null, 10], [100, 'USD', null], [100, 'USD', 0], [100, 'USD', -1]];
+            [100, 'EUR', 10], [100, null, 10], [100, 'USD', null], [100, 'USD', 0], [100, 'USD', -1],
+            [18500, 'USD', 2000], [7185, 'USD', 928], [100, 'USD', 0.0928], [100, 'USD', INF]];
+    }
+
+    public function test_invalid_fx_is_ignored_when_conversion_is_not_needed(): void
+    {
+        $this->assertSame(500.0, ResultAmount::convert(500, 'TJS', 'TJS', 2000));
+        $this->assertSame(0.0, ResultAmount::convert(0, 'USD', 'TJS', 928));
+        $this->assertNull(ResultAmount::convert(500, 'TJS', 'USD', 928));
     }
 }

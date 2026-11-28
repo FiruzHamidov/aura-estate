@@ -635,6 +635,23 @@ class PropertyDealUserAssignmentAuditTest extends TestCase
         $this->assertSame((int) $fact->id, (int) $facts->currentQuery()->sole()->supersedes_id);
     }
 
+    public function test_deal_rejects_suspicious_exchange_rates_before_writing_financial_data(): void
+    {
+        [, $property] = $this->workflowFixture();
+        (require database_path('migrations/2026_11_05_140000_create_kpi_result_goals_and_facts.php'))->up();
+        foreach ([2000, 928, 0.0928, 0, -10] as $rate) {
+            $this->postJson('/api/properties/'.$property->id.'/deal', $this->salePayload([
+                'version' => 1, 'deal_fx_rate' => $rate,
+            ]))->assertUnprocessable()->assertJsonValidationErrors('deal_fx_rate', 'details.errors');
+            $this->assertSame(1, (int) $property->fresh()->moderation_version);
+            $this->assertNull($property->fresh()->deal_fx_rate);
+        }
+        $this->postJson('/api/properties/'.$property->id.'/deal', $this->salePayload([
+            'version' => 1, 'deal_fx_rate' => 9.28,
+        ]))->assertOk();
+        $this->assertSame(9.28, (float) $property->fresh()->deal_fx_rate);
+    }
+
     public function test_participant_payout_only_edit_records_complete_financial_snapshot(): void
     {
         [$actor, $property] = $this->workflowFixture();

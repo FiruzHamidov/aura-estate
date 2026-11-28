@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests;
 
+use App\Support\DealExchangeRate;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -45,15 +46,15 @@ class SavePropertyDealRequest extends FormRequest
             // The deal transaction verifies the selected buyer while acquiring its write lock.
             'buyer_client_id' => ['nullable', 'integer', 'min:1'],
 
-            'deposit_amount'       => 'required_if:deal_status,deposit|numeric|min:0.01',
-            'deposit_currency'     => 'required_if:deal_status,deposit|in:TJS,USD',
-            'deposit_received_at'  => 'required_if:deal_status,deposit|date',
-            'deposit_taken_at'     => 'nullable|date',
-            'deposit_user_id'      => 'nullable|exists:users,id',
+            'deposit_amount' => 'required_if:deal_status,deposit|numeric|min:0.01',
+            'deposit_currency' => 'required_if:deal_status,deposit|in:TJS,USD',
+            'deposit_received_at' => 'required_if:deal_status,deposit|date',
+            'deposit_taken_at' => 'nullable|date',
+            'deposit_user_id' => 'nullable|exists:users,id',
 
             'money_holder' => 'required_if:deal_status,deposit|in:company,agent,owner,developer,client',
 
-            'company_expected_income'          => 'required_if:deal_status,deposit|numeric|min:0',
+            'company_expected_income' => 'required_if:deal_status,deposit|numeric|min:0',
             'company_expected_income_currency' => 'required_if:deal_status,deposit|in:TJS,USD',
 
             'planned_contract_signed_at' => 'required_if:deal_status,deposit|date',
@@ -63,18 +64,18 @@ class SavePropertyDealRequest extends FormRequest
              * 🟢 ЭТАП: ФИНАЛ СДЕЛКИ
              * =========================
              */
-            'actual_sale_price'    => 'required_if:deal_status,sold,rented|numeric|min:0.01',
+            'actual_sale_price' => 'required_if:deal_status,sold,rented|numeric|min:0.01',
             'actual_sale_currency' => 'required_if:deal_status,sold,rented|in:TJS,USD',
             'rental_monthly_amount' => 'nullable|numeric|min:0.01|max:999999999999.99|decimal:0,2',
             'rental_contract_amount' => 'nullable|numeric|min:0.01|max:999999999999.99|decimal:0,2',
-            'deal_fx_rate' => 'nullable|numeric|min:0.00000001|max:99999999',
+            'deal_fx_rate' => 'nullable|numeric|between:'.DealExchangeRate::MIN.','.DealExchangeRate::MAX,
 
-            'company_commission_amount'   => 'required_if:deal_status,sold,rented|numeric|min:0',
+            'company_commission_amount' => 'required_if:deal_status,sold,rented|numeric|min:0',
             'company_commission_currency' => 'required_if:deal_status,sold,rented|in:TJS,USD',
 
-            'money_received_at'  => 'nullable|date',
+            'money_received_at' => 'nullable|date',
             'contract_signed_at' => 'nullable|date',
-            'sale_user_id'       => 'nullable|exists:users,id',
+            'sale_user_id' => 'nullable|exists:users,id',
 
             /**
              * =========================
@@ -88,5 +89,10 @@ class SavePropertyDealRequest extends FormRequest
             'agents.*.commission_currency' => 'nullable|in:TJS,USD',
             'agents.*.paid_at' => 'nullable|date',
         ];
+    }
+
+    public function messages(): array
+    {
+        return ['deal_fx_rate.between' => 'Проверьте курс: укажите количество сомони за 1 USD от '.DealExchangeRate::MIN.' до '.DealExchangeRate::MAX.'. Не указывайте сумму сделки или курс за 100 USD.'];
     }
 }

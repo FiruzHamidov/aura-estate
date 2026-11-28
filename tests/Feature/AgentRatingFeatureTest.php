@@ -219,7 +219,7 @@ class AgentRatingFeatureTest extends KpiResultsFeatureTest
             ->assertOk()->assertJsonPath('rows.0.property_id', $p->id)->assertJsonPath('rows.0.role', 'assistant')
             ->assertJsonPath('total_minor', 80000);
         $this->getJson('/api/agent-ratings/rules?version='.$response->json('rules_version'))
-            ->assertOk()->assertJsonPath('version', 'aura-listing-participants-v2');
+            ->assertOk()->assertJsonPath('version', 'aura-listing-participants-v3');
         self::assertSame(0, DB::table('agent_rating_sources')->count());
         self::assertSame(0, DB::table('agent_rating_approvals')->count());
     }
@@ -286,6 +286,47 @@ class AgentRatingFeatureTest extends KpiResultsFeatureTest
         $p = $this->property(['deal_fx_rate' => '10.12345678', 'company_commission_amount' => '99999']);
         $this->participant($p, $this->agent, '10.01', 'main', 'USD');
         $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()->assertJsonPath('summary.score_minor', 10134);
+    }
+
+    public function test_invalid_rates_do_not_inflate_rating_or_dashboard_and_do_not_hide_closings(): void
+    {
+        foreach ([['2000', '18500'], ['928', '7185']] as [$rate, $amount]) {
+            $property = $this->property(['deal_fx_rate' => $rate]);
+            $this->participant($property, $this->agent, $amount, 'main', 'USD');
+        }
+        $valid = $this->property(['deal_fx_rate' => '10.12345678']);
+        $this->participant($valid, $this->agent, '10.01', 'main', 'USD');
+        // TJS and explicit zero commissions need no currency conversion.
+        $local = $this->property(['deal_fx_rate' => '2000']);
+        $this->participant($local, $this->agent, '500', 'main', 'TJS');
+        $zero = $this->property(['deal_fx_rate' => '2000']);
+        $this->participant($zero, $this->agent, '0', 'main', 'USD');
+        $result = $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()
+            ->assertJsonPath('summary.score_minor', 60134)->assertJsonPath('summary.deal_count', 5)
+            ->assertJsonPath('invalid_fx_count', 2)->assertJsonPath('excluded_count', 2)
+            ->assertJsonPath('data_quality', 'partial');
+        $this->getJson('/api/agent-ratings/'.$this->agent->id.'/breakdown?snapshot_id='.$result->json('snapshot_id'))
+            ->assertOk()->assertJsonPath('total_minor', 60134)
+            ->assertJsonPath('rows.0.credit_minor', null)->assertJsonPath('rows.0.commission_issue', 'invalid_fx_rate')
+            ->assertJsonPath('rows.0.commission', '18500')->assertJsonPath('rows.0.fx_rate', '2000');
+        $metrics = collect($this->getJson('/api/agent-dashboard?month=2026-11')->assertOk()->json('metrics'))->keyBy('key');
+        self::assertSame(60134, $metrics['revenue']['value']);
+        self::assertSame('partial', $metrics['revenue']['status']);
+        self::assertSame(5, $metrics['deals']['value']);
+        self::assertSame('complete', $metrics['deals']['status']);
+        self::assertSame(60134, array_sum(array_column($metrics['revenue']['series'], 'value')));
+        // Correcting the source rate is enough; previously saved snapshots stay unchanged.
+        DB::table('properties')->where('id', $property->id)->update(['deal_fx_rate' => '9.28']);
+        $this->getJson('/api/agent-ratings?month=2026-11')->assertOk()
+            ->assertJsonPath('summary.score_minor', 6727814)->assertJsonPath('invalid_fx_count', 1);
+        $this->getJson('/api/agent-ratings/participants?snapshot_id='.$result->json('snapshot_id'))
+            ->assertOk()->assertJsonPath('summary.score_minor', 60134);
+        // Invalid-rate diagnostics obey the same visibility restrictions as the totals.
+        $other = $this->user('agent', 2);
+        $other->role->forceFill(['permissions' => ['agent_rating.view', 'agent_rating.scope.own']])->save();
+        Sanctum::actingAs($other);
+        $this->getJson('/api/agent-ratings?month=2026-11&scope=own')->assertOk()
+            ->assertJsonPath('invalid_fx_count', 0)->assertJsonPath('excluded_count', 0);
     }
 
     public function test_participant_edits_reopening_and_deletion_update_new_snapshots_only(): void
