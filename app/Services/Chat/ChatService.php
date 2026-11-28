@@ -104,7 +104,7 @@ class ChatService
                 'properties' => [
                     'city' => ['type' => 'string', 'description' => 'City name, for example Душанбе'],
                     'districts' => ['type' => 'array', 'items' => ['type' => 'string']],
-                    'property_type' => ['type' => 'string', 'description' => 'Property type name, slug, or ID'],
+                    'property_type' => ['type' => 'string', 'description' => 'Property type name, slug, or ID. Use apartment for квартира / квартир / kvartir, including new-building and resale apartments; never omit it when apartments were requested.'],
                     'offer_type' => ['type' => 'string', 'enum' => ['sale', 'rent']],
                     'currency' => ['type' => 'string', 'enum' => ['TJS', 'USD']],
                     'priceFrom' => ['type' => 'number'],
@@ -198,10 +198,12 @@ class ChatService
                     ->where('role', 'tool')->where('tool_name', 'search_properties')
                     ->latest('id')->first();
                 $args = app(PropertySearchFilters::class)->forMessage($args, $userMessage, $previousSearch?->tool_args ?? []);
-                $args = app(RepairSearchIntent::class)->apply($args, [
+                $userMessages = [
                     ...$history->where('role', 'user')->pluck('content')->filter()->all(),
                     $userMessage,
-                ]);
+                ];
+                $args = app(ApartmentSearchIntent::class)->apply($args, $userMessages);
+                $args = app(RepairSearchIntent::class)->apply($args, $userMessages);
 
                 // === NORMALIZE FILTERS FOR PropertyRepository ===
                 // price range
