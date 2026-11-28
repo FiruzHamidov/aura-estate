@@ -11,6 +11,7 @@ class PropertyRepository
 {
     public function search(array $args): array
     {
+        $args = (new PropertySearchFilters)->normalize($args);
         // ---------- Нормализация ----------
         $limit = max(1, min(10, (int) ($args['limit'] ?? 6)));
         $liquiditySearch = ($args['sort_by'] ?? null) === 'liquidity';
