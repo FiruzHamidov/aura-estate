@@ -18,11 +18,12 @@ final class PropertyTop50
     public function build(Request $request, Builder $query): array
     {
         $today = CarbonImmutable::now('Asia/Dushanbe');
+        $pastDateRules = $request->input('tab', 'shown') === 'shown' ? [] : ['before_or_equal:'.$today->toDateString()];
         $v = $request->validate([
             'tab' => ['sometimes', Rule::in(['shown', 'viewed', 'urgent'])],
             'period' => ['sometimes', Rule::in(['today', 'week', 'month', 'all', 'custom'])],
-            'date_from' => ['required_if:period,custom', 'nullable', 'date_format:Y-m-d', 'before_or_equal:'.$today->toDateString()],
-            'date_to' => ['required_if:period,custom', 'nullable', 'date_format:Y-m-d', 'after_or_equal:date_from', 'before_or_equal:'.$today->toDateString()],
+            'date_from' => ['required_if:period,custom', 'nullable', 'date_format:Y-m-d', ...$pastDateRules],
+            'date_to' => ['required_if:period,custom', 'nullable', 'date_format:Y-m-d', 'after_or_equal:date_from', ...$pastDateRules],
             'offer_type' => ['sometimes', Rule::in(['all', 'sale', 'rent'])],
         ]);
         $tab = $v['tab'] ?? 'shown';
@@ -35,6 +36,16 @@ final class PropertyTop50
             default => null,
         };
         $to = $period === 'custom' ? CarbonImmutable::parse($v['date_to'], 'Asia/Dushanbe')->endOfDay()->min($today) : $today;
+        if ($tab === 'shown') {
+            // Count every booking in the full calendar period, including future meetings.
+            $to = match ($period) {
+                'today' => $today->endOfDay(),
+                'week' => $today->endOfWeek(\Carbon\Carbon::SUNDAY),
+                'month' => $today->endOfMonth(),
+                'custom' => CarbonImmutable::parse($v['date_to'], 'Asia/Dushanbe')->endOfDay(),
+                default => $today,
+            };
+        }
         if ($from && $from->diffInDays($to->startOfDay()) >= 366) {
             throw ValidationException::withMessages(['date_from' => 'Выберите период не длиннее 366 дней.']);
         }
@@ -62,8 +73,7 @@ final class PropertyTop50
             $bookingFrom = $from?->utc()->toDateTimeString();
             $bookingTo = $to->utc()->toDateTimeString();
             $counts = DB::table('bookings')->select('property_id')->selectRaw('COUNT(*) as metric_count')
-                ->where('status', 'completed')->where('start_time', '<=', $bookingTo)
-                ->when($bookingFrom, fn ($q) => $q->where('start_time', '>=', $bookingFrom))->groupBy('property_id');
+                ->when($bookingFrom, fn ($q) => $q->whereBetween('start_time', [$bookingFrom, $bookingTo]))->groupBy('property_id');
             $query->joinSub($counts, 'rank_metric', 'rank_metric.property_id', '=', 'properties.id')
                 ->addSelect('rank_metric.metric_count')->orderByDesc('rank_metric.metric_count');
         } elseif ($tab === 'viewed') {
@@ -101,7 +111,7 @@ final class PropertyTop50
                 'offer_type' => $v['offer_type'] ?? 'all', 'timezone' => 'Asia/Dushanbe'],
             'data_quality' => $quality, 'views_tracking_started_at' => $coverage,
             'rules' => [
-                'shown' => 'Только проведённые показы по дате встречи. Один показ считается один раз, независимо от соагентов. При равенстве — по ID объекта.',
+                'shown' => 'Все записи показов по дате встречи в выбранном периоде, включая будущие, отменённые и несостоявшиеся. За всё время — без ограничения по дате. Один показ считается один раз, независимо от статуса и соагентов. При равенстве — по ID объекта.',
                 'viewed' => 'Просмотры объявлений, включая сотрудников. Повтор с одного IP и браузера учитывается один раз в сутки. За всё время — накопленный счётчик; за период — ежедневная статистика. При равенстве — по ID объекта.',
                 'urgent' => 'Только действующие срочные продвижения. Период относится к дате их начала; сначала более новые. Срочность не означает высокую ликвидность.',
             ],
