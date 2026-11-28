@@ -43,7 +43,12 @@ class ChatService
                     "- Your ONLY domain is real estate listings published on Aura Estate: apartments, houses, cottages, rooms, commercial properties, land plots, new-buildings.\n".
                     "- Never discuss or recommend unrelated topics such as cars, transport, electronics, services, jobs, etc.\n".
                     "- Detect the user's language (Russian, Tajik, or English) and always respond in that language.\n".
-                    "- If the user is searching for real estate, extract relevant filters (city, district, offer type, property type, rooms, price range).\n".
+                    "- If the user is searching for real estate, extract relevant filters (city, district, offer type, property type, rooms, price, area, repair condition, and renovation permission).\n".
+                    "- Understand Russian typed in Latin letters too: korobka/korobki/korobok and bez remonta mean repair_condition=shell (unfinished, without renovation), NEVER renovated. Коробка is a repair condition, not a property type.\n".
+                    "- С разрешением на ремонт / s razrisheniyami na remonta means renovation_permission_status=allowed, NOT that the apartment already has a renovation. Combine it with repair_condition=shell when the user asks for коробки. Unknown permission does not satisfy this requirement.\n".
+                    "- Preserve repair condition and renovation permission across short follow-ups such as prodaju, davay, давай, покажи ещё. Only change or clear them when the user changes these requirements; use any to explicitly clear a condition.\n".
+                    "- For explicit repair or renovation-permission searches, call search_properties immediately; city and offer type are optional. Never replace empty results with renovated or otherwise nonmatching listings.\n".
+                    "- Самые маленькие / samix malenkix means sort_by=area_asc (smallest known total area first), not the fewest rooms. Never invent a room count. Use areaFrom/areaTo only for explicitly requested area bounds.\n".
                     "- Users may provide filters gradually across multiple messages. You MUST remember and combine previous filters from the conversation.\n".
                     "- When minimal filters are collected (for example rooms + price + city/district), call the tool `search_properties` immediately.\n".
                     "- Do NOT block search for optional fields.\n".
@@ -55,7 +60,7 @@ class ChatService
                     "- Currency is optional. If user gives price without currency, assume TJS and continue.\n".
                     "- If offer type (sale/rent) is missing, run search anyway and optionally ask one brief follow-up after showing results.\n".
                     "- Ask at most one clarifying question at a time, and only when truly required.\n".
-                    "- When showing results, present 3–6 best matches with: title, price, currency, city/district, and a CTA link to aura.tj.\n".
+                    "- Return the requested number of matches up to 10 (default 6), or all available matches if fewer. Do not ask permission to return fewer. Show title, price, currency, area, repair condition, renovation permission when relevant, city/district, and a CTA link to aura.tj.\n".
                     "- If no properties are found, ask clarifying questions.\n".
                     "- If user wants to leave an application/request after finding a suitable option, collect name and phone, then call tool `create_lead_request`.\n".
                     "- Before calling `create_lead_request`, make sure you have: name, phone. Email/comment/property_id are optional.\n".
@@ -105,12 +110,16 @@ class ChatService
                     'priceTo' => ['type' => 'number'],
                     'roomsFrom' => ['type' => 'integer'],
                     'roomsTo' => ['type' => 'integer'],
+                    'repair_condition' => ['type' => 'string', 'enum' => ['shell', 'renovated', 'any'], 'description' => 'shell = коробка / без ремонта / korobok. renovated = с ремонтом. any clears this requirement. Independent of renovation permission.'],
+                    'renovation_permission_status' => ['type' => 'string', 'enum' => ['allowed', 'not_allowed', 'any'], 'description' => 'Permission to start renovation: allowed = с разрешением на ремонт, not_allowed = без разрешения. any clears this requirement. Never infer permission from a photo or existing renovation.'],
+                    'areaFrom' => ['type' => 'number', 'minimum' => 0, 'description' => 'Minimum total area in square metres'],
+                    'areaTo' => ['type' => 'number', 'minimum' => 0, 'description' => 'Maximum total area in square metres'],
                     'sort_by' => [
                         'type' => 'string',
-                        'enum' => ['recommended', 'liquidity'],
-                        'description' => 'Use liquidity for liquid properties, investment, or easy resale. Searches all published sale listings by recent market estimates, independently of urgent/VIP promotions. Keep this choice when refining that search.',
+                        'enum' => ['recommended', 'liquidity', 'area_asc'],
+                        'description' => 'Use area_asc for the smallest apartments, ordered by known total area before limiting. Use liquidity for liquid properties, investment, or easy resale across all published sale listings, independently of promotions. Keep this choice when refining that search.',
                     ],
-                    'limit' => ['type' => 'integer', 'minimum' => 1, 'maximum' => 6, 'default' => 6],
+                    'limit' => ['type' => 'integer', 'minimum' => 1, 'maximum' => 10, 'default' => 6],
                 ],
             ],
         ], [
@@ -171,6 +180,10 @@ class ChatService
 
             if (($call['name'] ?? '') === 'search_properties') {
                 $args  = json_decode($call['arguments'] ?? '{}', true) ?: [];
+                $args = app(RepairSearchIntent::class)->apply($args, [
+                    ...$history->where('role', 'user')->pluck('content')->filter()->all(),
+                    $userMessage,
+                ]);
 
                 // === NORMALIZE FILTERS FOR PropertyRepository ===
                 // price range
@@ -232,6 +245,7 @@ class ChatService
                         "Here are the search results in JSON format. ".
                         "Use them to answer the user concisely in the user's language. ".
                         "Use only the returned listings and preserve their order. ".
+                        "Repair condition, renovation permission, and area are separate database facts. Never infer them from photos or substitute listings that do not match. If results are empty, say no exact matches were found and offer to change a filter. ".
                         "For sort_by=liquidity, these are candidates from all published sale listings with a recent, sufficiently reliable market estimate, not a promise of resale. ".
                         "If liquidity results are empty, say no currently assessed candidates match the filters (rental estimates are unavailable); offer to adjust one filter. ".
                         "For other empty searches, politely ask a clarifying question.\n".
