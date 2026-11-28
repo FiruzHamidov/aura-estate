@@ -164,8 +164,8 @@ class ChatRepairSearchTest extends TestCase
         $this->assertSame('allowed', $tool->tool_args['renovation_permission_status']);
         $requests = Http::recorded();
         $schema = $requests[0][0]['tools'][0]['parameters']['properties'];
-        $this->assertSame(['shell', 'renovated', 'any'], $schema['repair_condition']['enum']);
-        $this->assertSame(['allowed', 'not_allowed', 'any'], $schema['renovation_permission_status']['enum']);
+        $this->assertSame(['shell', 'renovated', 'any', null], $schema['repair_condition']['enum']);
+        $this->assertSame(['allowed', 'not_allowed', 'any', null], $schema['renovation_permission_status']['enum']);
         $this->assertSame(10, $schema['limit']['maximum']);
         $input = $requests[3][0]['input'];
         $envelope = end($input)['content'];
@@ -186,6 +186,63 @@ class ChatRepairSearchTest extends TestCase
         $requests = Http::recorded();
         $input = $requests[1][0]['input'];
         $this->assertStringContainsString('"results":[]', end($input)['content']);
+    }
+
+    public function test_zero_optional_bounds_from_live_provider_do_not_hide_matching_apartments(): void
+    {
+        $eligible = $this->property();
+        $this->property(['repair_type_id' => 31]);
+        $this->assertSame([$eligible], $this->ids($this->search([
+            'areaFrom' => 0, 'areaTo' => 0, 'rooms_min' => 0, 'rooms_max' => 0,
+            'price_min' => 0, 'price_max' => 0, 'sort_by' => 'area_asc',
+        ])));
+    }
+
+    public function test_live_zero_and_null_follow_up_arguments_keep_the_last_search(): void
+    {
+        $this->createChatTables();
+        $eligible = $this->property();
+        $this->property(['type_id' => 2, 'total_area' => 45]);
+        $this->property(['total_area' => 80]);
+        $this->property(['district' => 'Фирдавси']);
+        $this->property(['repair_type_id' => 31]);
+        $filters = [
+            'property_type' => 'apartment', 'districts' => ['Сино'], 'roomsFrom' => 1, 'roomsTo' => 2,
+            'areaFrom' => 40, 'areaTo' => 60, 'sort_by' => 'area_asc', 'limit' => 10,
+            'repair_condition' => 'shell', 'renovation_permission_status' => 'allowed',
+        ];
+        $liveZeroArgs = [
+            'city' => '', 'limit' => 10, 'areaTo' => 0, 'priceTo' => 0, 'roomsTo' => 0,
+            'sort_by' => 'area_asc', 'areaFrom' => 0, 'currency' => 'TJS', 'districts' => [],
+            'priceFrom' => 0, 'roomsFrom' => 0, 'offer_type' => 'sale', 'property_type' => '',
+        ];
+        Http::fake(['*' => Http::sequence()
+            ->push($this->tool($filters))->push($this->answer('Подборка.'))
+            ->push($this->tool($liveZeroArgs))->push($this->answer('Продажа.'))
+            ->push($this->tool(array_fill_keys(array_keys($filters), null)))->push($this->answer('Та же подборка.'))]);
+
+        $reply = $this->postJson('/api/chat', ['message' => 'Покажи коробки с разрешением на ремонт в Сино, 40–60 м², 1–2 комнаты'])
+            ->assertOk()->assertJsonCount(1, 'items')->assertJsonPath('items.0.id', $eligible);
+        foreach (['prodaju', 'davay'] as $message) {
+            $this->postJson('/api/chat', ['message' => $message, 'session_id' => $reply['session_id']])
+                ->assertOk()->assertJsonCount(1, 'items')->assertJsonPath('items.0.id', $eligible);
+        }
+        $lastArgs = ChatMessage::where('role', 'tool')->latest('id')->firstOrFail()->tool_args;
+        $this->assertSame('sale', $lastArgs['offer_type']);
+        $this->assertSame('apartment', $lastArgs['property_type']);
+        $this->assertSame(60, $lastArgs['areaTo']);
+        $this->assertSame(2, $lastArgs['rooms_max']);
+        $schema = Http::recorded()[0][0]['tools'][0];
+        $this->assertTrue($schema['strict']);
+        $this->assertFalse($schema['parameters']['additionalProperties']);
+        $this->assertSame(array_keys($schema['parameters']['properties']), $schema['parameters']['required']);
+        foreach ($schema['parameters']['properties'] as $parameter) {
+            $this->assertContains('null', $parameter['type']);
+            if (isset($parameter['enum'])) {
+                $this->assertContains(null, $parameter['enum']);
+            }
+        }
+        Http::assertSentCount(6);
     }
 
     private function createChatTables(): void

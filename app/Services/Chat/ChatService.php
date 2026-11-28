@@ -67,6 +67,7 @@ class ChatService
                     "- If the user asks to speak with a human manager, operator, or support, call the tool `escalate_to_support` when user_id is available.\n".
                     "- Always represent Aura Estate as the source.\n".
                     "- Use ONLY the exact filter parameter names defined in search_properties.\n".
+                    "- Set unspecified search filters to null. Never invent zero room/area limits, large placeholder maxima, or a currency when there is no price filter.\n".
                     "- For ranges, ALWAYS use From/To suffixes (priceFrom, roomsTo, etc).\n".
                     "- For an exact room count, set roomsFrom and roomsTo to the same number.\n".
                     "- For districts, ALWAYS pass an array: districts[].\n".
@@ -151,6 +152,19 @@ class ChatService
             ],
         ]];
 
+        // Responses normalizes omitted strictness into required fields. Explicit
+        // nullable filters let the model express absence without fabricated bounds.
+        $tools[0]['strict'] = true;
+        $tools[0]['parameters']['additionalProperties'] = false;
+        $tools[0]['parameters']['required'] = array_keys($tools[0]['parameters']['properties']);
+        foreach ($tools[0]['parameters']['properties'] as &$parameter) {
+            $parameter['type'] = [$parameter['type'], 'null'];
+            if (isset($parameter['enum'])) {
+                $parameter['enum'][] = null;
+            }
+        }
+        unset($parameter);
+
         // === 1) Первый проход: модель решает, вызывать ли tool ===
         $res1 = $this->openai([
             'model'       => config('services.openai.model', 'gpt-5-mini'),
@@ -180,6 +194,10 @@ class ChatService
 
             if (($call['name'] ?? '') === 'search_properties') {
                 $args  = json_decode($call['arguments'] ?? '{}', true) ?: [];
+                $previousSearch = ChatMessage::where('chat_session_id', $session->id)
+                    ->where('role', 'tool')->where('tool_name', 'search_properties')
+                    ->latest('id')->first();
+                $args = app(PropertySearchFilters::class)->forMessage($args, $userMessage, $previousSearch?->tool_args ?? []);
                 $args = app(RepairSearchIntent::class)->apply($args, [
                     ...$history->where('role', 'user')->pluck('content')->filter()->all(),
                     $userMessage,

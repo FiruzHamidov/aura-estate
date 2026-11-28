@@ -153,7 +153,7 @@ class ChatLiquiditySearchTest extends TestCase
 
         $requests = Http::recorded();
         $schema = $requests[0][0]['tools'][0]['parameters']['properties'];
-        $this->assertSame(['recommended', 'liquidity', 'area_asc'], $schema['sort_by']['enum']);
+        $this->assertSame(['recommended', 'liquidity', 'area_asc', null], $schema['sort_by']['enum']);
         $this->assertArrayHasKey('city', $schema);
         $this->assertArrayNotHasKey('listing_type', $schema);
         $envelope = $requests[1][0]['input'][2]['content'];
