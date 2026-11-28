@@ -142,41 +142,50 @@ class PropertyTop50Test extends TestCase
             'status' => $status, 'start_time' => $at]);
     }
 
-    public function test_top50_shows_count_only_completed_events_once_and_filter_by_meeting_date(): void
+    public function test_top50_counts_all_showing_statuses_and_future_meetings_once(): void
     {
         $first = $this->listing();
         $second = $this->listing();
-        $zero = $this->listing();
+        $upcoming = $this->listing();
+        $this->listing(); // A property without bookings stays outside the ranking.
         foreach (['completed', 'completed', 'cancelled', 'pending', 'confirmed', 'not_held'] as $status) {
             $this->showing($first, $status);
         }
         $this->showing($second);
         $this->showing($second, 'completed', '2026-10-31 18:59:59');
-        $this->showing($zero, 'completed', '2026-11-27 12:00:00');
-        $this->showing($zero, 'completed', '2026-11-26 18:00:00');
-        $r = $this->getJson('/api/properties/top-50')->assertOk()->assertJsonCount(2, 'data')
-            ->assertJsonPath('data.0.property.id', $first)->assertJsonPath('data.0.metric_count', 2)
-            ->assertJsonPath('data.1.metric_count', 1)->assertJsonMissingPath('data.0.property.owner_phone');
+        $this->showing($upcoming, 'pending', '2026-11-27 12:00:00');
+        $this->showing($upcoming, 'confirmed', '2026-11-26 18:00:00');
+        $r = $this->getJson('/api/properties/top-50')->assertOk()->assertJsonCount(3, 'data')
+            ->assertJsonPath('data.0.property.id', $first)->assertJsonPath('data.0.metric_count', 6)
+            ->assertJsonPath('data.1.property.id', $upcoming)->assertJsonPath('data.1.metric_count', 2)
+            ->assertJsonPath('data.2.property.id', $second)->assertJsonPath('data.2.metric_count', 1)
+            ->assertJsonMissingPath('data.0.property.owner_phone');
         self::assertStringNotContainsString('private-owner', $r->getContent());
-        $this->getJson('/api/properties/top-50?period=all')->assertOk()->assertJsonPath('data.1.metric_count', 2);
-        $this->getJson('/api/properties/top-50?period=today')->assertOk()->assertJsonCount(0, 'data');
-        $this->getJson('/api/properties/top-50?period=custom&date_from=2026-11-26&date_to=2026-11-26')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/properties/top-50?period=all')->assertOk()
+            ->assertJsonPath('data.1.property.id', $second)->assertJsonPath('data.1.metric_count', 2)
+            ->assertJsonPath('data.2.property.id', $upcoming)->assertJsonPath('data.2.metric_count', 2);
+        $this->getJson('/api/properties/top-50?period=today')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.metric_count', 1);
+        $this->getJson('/api/properties/top-50?period=custom&date_from=2026-11-26&date_to=2026-11-26')->assertOk()->assertJsonCount(1, 'data')->assertJsonPath('data.0.metric_count', 1);
         $this->getJson('/api/properties/top-50?period=custom&date_from=2026-10-31&date_to=2026-10-31')->assertOk()->assertJsonPath('data.0.property.id', $second);
     }
 
-    public function test_completed_showings_use_utc_storage_with_dushanbe_period_boundaries(): void
+    public function test_showings_include_full_dushanbe_periods_and_unlimited_future_dates_for_all_time(): void
     {
         $this->travelTo(Carbon::parse('2026-11-26T00:30:00+05:00'));
         $id = $this->listing();
-        foreach (['2026-10-31 18:59:59', '2026-10-31 19:00:00', '2026-11-25 18:59:59',
-            '2026-11-25 19:00:00', '2026-11-25 19:30:00', '2026-11-25 19:30:01'] as $at) {
-            $this->showing($id, 'completed', $at);
+        foreach (['2026-10-31 18:59:59', '2026-10-31 19:00:00', '2026-11-22 18:59:59',
+            '2026-11-22 19:00:00', '2026-11-25 18:59:59', '2026-11-25 19:00:00',
+            '2026-11-26 18:59:59', '2026-11-26 19:00:00', '2026-11-29 18:59:59',
+            '2026-11-29 19:00:00', '2026-11-30 18:59:59', '2026-11-30 19:00:00'] as $at) {
+            $this->showing($id, 'pending', $at);
         }
-        $this->getJson('/api/properties/top-50?period=today')->assertOk()->assertJsonPath('data.0.metric_count', 2);
-        $this->getJson('/api/properties/top-50?period=week')->assertOk()->assertJsonPath('data.0.metric_count', 3);
-        $this->getJson('/api/properties/top-50?period=month')->assertOk()->assertJsonPath('data.0.metric_count', 4);
-        $this->getJson('/api/properties/top-50?period=all')->assertOk()->assertJsonPath('data.0.metric_count', 5);
+        $this->getJson('/api/properties/top-50?period=today')->assertOk()->assertJsonPath('data.0.metric_count', 2)->assertJsonPath('filters.date_to', '2026-11-26');
+        $this->getJson('/api/properties/top-50?period=week')->assertOk()->assertJsonPath('data.0.metric_count', 6)->assertJsonPath('filters.date_to', '2026-11-29');
+        $this->getJson('/api/properties/top-50?period=month')->assertOk()->assertJsonPath('data.0.metric_count', 10)->assertJsonPath('filters.date_to', '2026-11-30');
+        $this->getJson('/api/properties/top-50?period=all')->assertOk()->assertJsonPath('data.0.metric_count', 12)->assertJsonPath('filters.date_to', null);
         $this->getJson('/api/properties/top-50?period=custom&date_from=2026-10-31&date_to=2026-10-31')->assertOk()->assertJsonPath('data.0.metric_count', 1);
+        $this->getJson('/api/properties/top-50?period=custom&date_from=2026-12-01&date_to=2026-12-01')->assertOk()->assertJsonPath('data.0.metric_count', 1);
+        $this->assertSame(12, DB::table('bookings')->where('status', 'pending')->count());
     }
 
     public function test_top50_views_use_daily_values_for_period_and_lifetime_for_all_and_cap_at_50(): void
@@ -280,7 +289,8 @@ class PropertyTop50Test extends TestCase
 
     public function test_top50_validates_period_and_does_not_claim_missing_coverage_is_complete(): void
     {
-        foreach (['tab=wrong', 'period=custom', 'period=custom&date_from=2026-11-27&date_to=2026-11-28',
+        foreach (['tab=wrong', 'period=custom', 'tab=viewed&period=custom&date_from=2026-11-27&date_to=2026-11-28',
+            'tab=urgent&period=custom&date_from=2026-11-27&date_to=2026-11-28',
             'period=custom&date_from=2026-11-20&date_to=2026-11-01', 'period=custom&date_from=2020-01-01&date_to=2026-11-01'] as $params) {
             $this->getJson('/api/properties/top-50?'.$params)->assertUnprocessable();
         }

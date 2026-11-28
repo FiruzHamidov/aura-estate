@@ -42,6 +42,7 @@ class User extends Authenticatable
         'attendance_hidden_from_everyone' => 'boolean',
         'birthday' => 'date',
         'telegram_linked_at' => 'datetime',
+        'telegram_link_prompt_dismissed_at' => 'datetime',
         'deleted_at' => 'datetime',
         'deletion_requested_at' => 'datetime',
     ];

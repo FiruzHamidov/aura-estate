@@ -50,6 +50,8 @@ class TelegramAuthTest extends TestCase
             $table->timestamps();
         });
 
+        (require database_path('migrations/2026_11_28_140000_add_telegram_link_prompt_dismissal_to_users.php'))->up();
+
         Schema::create('personal_access_tokens', function (Blueprint $table) {
             $table->id();
             $table->morphs('tokenable');
@@ -75,6 +77,51 @@ class TelegramAuthTest extends TestCase
         config()->set('services.telegram.bot_username', 'AuraEstateTestBot');
         config()->set('services.telegram.webhook_secret', 'secret-123');
         config()->set('services.telegram.auth_ttl_seconds', 300);
+    }
+
+    public function test_guest_cannot_dismiss_the_telegram_prompt(): void
+    {
+        $this->postJson('/api/telegram/auth/dismiss-link-prompt')->assertUnauthorized();
+    }
+
+    public function test_dismissal_is_per_account_and_survives_a_new_login(): void
+    {
+        $role = Role::create(['name' => 'Agent', 'slug' => 'agent']);
+        $user = User::create(['name' => 'First', 'phone' => '992900000091', 'role_id' => $role->id]);
+        $other = User::create(['name' => 'Second', 'phone' => '992900000092', 'role_id' => $role->id]);
+        Sanctum::actingAs($user);
+
+        $response = $this->postJson('/api/telegram/auth/dismiss-link-prompt', [
+            'user_id' => $other->id,
+            'telegram_id' => '123456',
+        ])->assertOk();
+        $dismissedAt = $response->json('telegram_link_prompt_dismissed_at');
+        $this->assertNotNull($dismissedAt);
+        $this->assertNull($other->fresh()->telegram_link_prompt_dismissed_at);
+        $this->assertNull($user->fresh()->telegram_id);
+
+        // A new authenticated session reads the preference from the profile,
+        // without depending on browser storage or the previous access token.
+        Sanctum::actingAs($user->fresh());
+        $this->getJson('/api/user/profile')->assertOk()
+            ->assertJsonPath('telegram_link_prompt_dismissed_at', $dismissedAt);
+        $this->travel(1)->day();
+        $this->postJson('/api/telegram/auth/dismiss-link-prompt')->assertOk()
+            ->assertJsonPath('telegram_link_prompt_dismissed_at', $dismissedAt);
+        $this->travelBack();
+
+        Sanctum::actingAs($other->fresh());
+        $this->getJson('/api/user/profile')->assertOk()
+            ->assertJsonPath('telegram_link_prompt_dismissed_at', null);
+    }
+
+    public function test_dismissal_migration_can_be_rolled_back(): void
+    {
+        $migration = require database_path('migrations/2026_11_28_140000_add_telegram_link_prompt_dismissal_to_users.php');
+        $migration->down();
+        $this->assertFalse(Schema::hasColumn('users', 'telegram_link_prompt_dismissed_at'));
+        $migration->up();
+        $this->assertTrue(Schema::hasColumn('users', 'telegram_link_prompt_dismissed_at'));
     }
 
     public function test_widget_login_authorizes_linked_user_and_returns_sanctum_token(): void
@@ -246,7 +293,6 @@ class TelegramAuthTest extends TestCase
         $group['message']['chat'] = ['id' => '-1234', 'type' => 'group'];
         $this->postJson('/api/telegram/webhook', $group, ['X-Telegram-Bot-Api-Secret-Token' => 'secret-123'])->assertOk();
         $this->assertNull($user->fresh()->telegram_chat_id);
-
 
         $this->postJson(
             '/api/telegram/webhook',

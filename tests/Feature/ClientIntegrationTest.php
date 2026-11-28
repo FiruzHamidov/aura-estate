@@ -550,7 +550,7 @@ class ClientIntegrationTest extends TestCase
         $this->patchJson($url, ['version' => 1, 'status' => 'completed'])->assertOk();
     }
 
-    public function test_recorded_result_enters_top50_once_and_correction_or_reschedule_removes_it(): void
+    public function test_top50_counts_booking_once_through_result_changes_and_future_rescheduling(): void
     {
         [$agent, $coAgent, $id] = $this->bookingResultContext();
         (require database_path('migrations/2026_09_04_100000_add_property_moderation_workflow.php'))->up();
@@ -560,7 +560,7 @@ class ClientIntegrationTest extends TestCase
             'branch_id' => $agent->branch_id, 'branch_group_id' => $agent->branch_group_id]);
         $top = '/api/properties/top-50?tab=shown&period=month';
         $result = '/api/bookings/'.$id.'/result';
-        $this->getJson($top)->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson($top)->assertOk()->assertJsonPath('data.0.metric_count', 1);
         Sanctum::actingAs($coAgent);
         $this->patchJson($result, ['version' => 0, 'status' => 'completed'])->assertOk();
         // A co-agent's result counts once; the property catalog keeps its own visibility scope.
@@ -569,11 +569,16 @@ class ClientIntegrationTest extends TestCase
         $this->patchJson($result, ['version' => 1, 'status' => 'completed'])->assertOk()->assertJsonPath('result_version', 1);
         $this->getJson($top)->assertOk()->assertJsonPath('data.0.metric_count', 1);
         $this->patchJson($result, ['version' => 1, 'status' => 'not_held'])->assertOk();
-        $this->getJson($top)->assertOk()->assertJsonCount(0, 'data');
-        $this->patchJson($result, ['version' => 2, 'status' => 'completed'])->assertOk();
-        $this->patchJson('/api/bookings/'.$id.'/reschedule', ['version' => 3,
+        $this->getJson($top)->assertOk()->assertJsonPath('data.0.metric_count', 1);
+        $this->patchJson($result, ['version' => 2, 'status' => 'cancelled'])->assertOk();
+        $this->getJson($top)->assertOk()->assertJsonPath('data.0.metric_count', 1);
+        $this->patchJson($result, ['version' => 3, 'status' => 'completed'])->assertOk();
+        $this->patchJson('/api/bookings/'.$id.'/reschedule', ['version' => 4,
             'start_time' => '2026-11-21T10:00:00+05:00', 'end_time' => '2026-11-21T11:00:00+05:00'])->assertOk();
-        $this->getJson($top)->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson($top)->assertOk()->assertJsonPath('data.0.metric_count', 1);
+        $this->getJson('/api/properties/top-50?period=today')->assertOk()->assertJsonCount(0, 'data');
+        $this->getJson('/api/properties/top-50?period=custom&date_from=2026-11-21&date_to=2026-11-21')
+            ->assertOk()->assertJsonPath('data.0.metric_count', 1);
         $this->assertDatabaseCount('bookings', 1);
     }
 
