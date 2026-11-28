@@ -11,12 +11,12 @@ use Illuminate\Support\Facades\Schema;
 
 final class AgentDashboard
 {
-    public function __construct(private RatingSources $sources) {}
+    public function __construct(private ListingPerformance $listings, private RatingAccess $access) {}
 
     public function get(User $actor, string $month, string $kind): array
     {
         abort_unless($actor->hasPermission('kpi.reports.view'), 403);
-        $this->sources->sync();
+        $overview = $actor->hasPermission('agent_rating.scope.all') && ! $actor->usesAssignedGroupScope();
         $start = CarbonImmutable::parse($month.'-01', 'Asia/Dushanbe');
         $next = $start->addMonth();
         $now = CarbonImmutable::now('Asia/Dushanbe');
@@ -27,8 +27,8 @@ final class AgentDashboard
             $days[] = $day->format('Y-m-d');
         }
         $definitions = [
-            'revenue' => ['label' => 'Комиссионный вклад', 'unit' => 'TJS', 'method' => 'Подтверждённая комиссия компании минус коррекции, умноженная на долю агента. Дата закрытия сделки; курс сохранён в её финансовой версии.'],
-            'deals' => ['label' => $kind === 'rental' ? 'Арендные сделки' : ($kind === 'sale' ? 'Продажи' : 'Закрытые сделки'), 'unit' => 'count', 'method' => 'Уникальные подтверждённые договоры с положительной долей участия. Две стороны одного договора считаются один раз.'],
+            'revenue' => ['label' => 'Комиссии участников', 'unit' => 'TJS', 'method' => 'Комиссии агентов из списка участников в модерации проданных и сданных объявлений. Период определяется датой закрытия; USD переводится по сохранённому курсу объявления.'],
+            'deals' => ['label' => $kind === 'rental' ? 'Арендные сделки' : ($kind === 'sale' ? 'Продажи' : 'Закрытые сделки'), 'unit' => 'count', 'method' => 'Проданные и сданные объявления по дате закрытия. Каждый объект учитывается один раз независимо от числа участников и заполнения комиссии.'],
             'deposits' => ['label' => 'Объекты с задатком', 'unit' => 'count', 'method' => 'Объекты с датой получения задатка в периоде, где сотрудник указан получателем; исключены отменённые стадии. Один объект учитывается один раз.'],
             'shows' => ['label' => 'Проведённые показы', 'unit' => 'count', 'method' => 'Показы со статусом «Проведён», по дате начала; участие агентом или соагентом не дублирует один показ.'],
             'objects' => ['label' => 'Новые объекты', 'unit' => 'count', 'method' => 'Созданные за период неудалённые объекты, закреплённые за агентом. Это события создания, а не остаток объектов в продаже.'],
@@ -44,42 +44,38 @@ final class AgentDashboard
                 $metrics[$metric]['value'] += $value;
             }
         };
-        // Use one immutable set of confirmed financial revisions for both cards and charts.
-        DB::transaction(function () use ($actor, $month, $kind, $start, $next, $end, &$metrics, $add) {
-            DB::table('agent_rating_state')->where('key', 'facts')->lockForUpdate()->first();
-            $period = DB::table('agent_rating_periods')->where('month', $month)->latest('version')->first();
-            $sources = DB::table('agent_rating_sources')->where(fn ($q) => $q->whereNull('closed_at')->orWhere(fn ($q) => $q->where('closed_at', '>=', $start->utc())->where('closed_at', '<', $next->utc())))->whereIn('state', ['closed', 'needs_link'])->get();
-            $ids = $period ? json_decode($period->revision_ids, true) : $sources->pluck('approved_revision_id')->filter()->all();
-            $ownRevisionIds = [];
-            foreach (DB::table('agent_rating_revisions')->whereIn('id', $ids)->get() as $revision) {
-                $p = json_decode($revision->payload, true);
-                if ($kind !== 'all' && $p['kind'] !== $kind) {
-                    continue;
-                }
-                if (CarbonImmutable::parse($p['closed_at'], 'UTC')->greaterThan($end)) {
-                    continue;
-                }
-                $allocations = array_filter($p['participants'], fn ($a) => (int) $a['agent_id'] === (int) $actor->id);
-                if (! $allocations) {
-                    continue;
-                }
-                $ownRevisionIds[$revision->id] = true;
-                $date = CarbonImmutable::parse($p['closed_at'], 'UTC')->setTimezone('Asia/Dushanbe')->format('Y-m-d');
-                $add('revenue', $date, array_sum(array_column($allocations, 'credit_minor')));
-                if (array_sum(array_column($allocations, 'share_bps')) > 0) {
-                    $add('deals', $date);
-                }
+        foreach ($this->listings->forMonth($month) as $closing) {
+            if ($kind !== 'all' && $closing['kind'] !== $kind) {
+                continue;
             }
-            if (! $period && $sources->contains(fn ($s) => (! $s->approved_revision_id && (int) $s->user_id === (int) $actor->id && ($kind === 'all' || ($s->kind === $kind || $s->kind === 'unknown'))) ||
-                ($s->pending_revision_id && isset($ownRevisionIds[$s->approved_revision_id])))) {
+            $participants = array_filter($closing['participants'], fn ($p) => $p['agent_id'] &&
+                $this->access->matches($actor, $p, $overview ? 'all' : 'own'));
+            if (! $participants) {
+                continue;
+            }
+            if (! $closing['closed_at']) {
                 $metrics['revenue']['status'] = $metrics['deals']['status'] = 'partial';
+
+                continue;
             }
-        });
+            $date = CarbonImmutable::parse($closing['closed_at'], 'UTC')->setTimezone('Asia/Dushanbe')->format('Y-m-d');
+            $add('deals', $date);
+            foreach ($participants as $participant) {
+                if ($participant['credit_minor'] === null) {
+                    $metrics['revenue']['status'] = 'partial';
+                } else {
+                    $add('revenue', $date, $participant['credit_minor']);
+                }
+            }
+        }
         $storageTz = config('app.timezone', 'Asia/Dushanbe');
         $fromStorage = $start->setTimezone($storageTz)->toDateTimeString();
         $toStorage = $end->setTimezone($storageTz)->toDateTimeString();
         $dateOf = fn ($value) => CarbonImmutable::parse($value, $storageTz)->setTimezone('Asia/Dushanbe')->format('Y-m-d');
-        $properties = DB::table('properties')->where('agent_id', $actor->id);
+        $properties = DB::table('properties');
+        if (! $overview) {
+            $properties->whereRaw(app(\App\Services\SalesAttributionService::class)->listingAgentExpression().' = ?', [$actor->id]);
+        }
         if (Schema::hasColumn('properties', 'deleted_at')) {
             $properties->whereNull('deleted_at');
         }
@@ -105,7 +101,7 @@ final class AgentDashboard
             $metrics['contracts']['status'] = 'unavailable';
         }
         if (Schema::hasColumn('properties', 'deposit_received_at') && Schema::hasColumn('properties', 'deposit_user_id')) {
-            $deposits = DB::table('properties')->where('deposit_user_id', $actor->id)->whereIn('moderation_status', ['deposit', 'sold', 'rented']);
+            $deposits = DB::table('properties')->when(! $overview, fn ($q) => $q->where('deposit_user_id', $actor->id))->whereIn('moderation_status', ['deposit', 'sold', 'rented']);
             if (Schema::hasColumn('properties', 'deleted_at')) {
                 $deposits->whereNull('deleted_at');
             }
@@ -125,7 +121,7 @@ final class AgentDashboard
         }
         if (Schema::hasTable('bookings')) {
             $bookings = DB::table('bookings')->where('status', 'completed')->where('start_time', '>=', $fromStorage)->where('start_time', '<', $toStorage)
-                ->where(fn ($q) => $q->where('agent_id', $actor->id)->orWhere('co_agent_id', $actor->id));
+                ->when(! $overview, fn ($q) => $q->where(fn ($q) => $q->where('agent_id', $actor->id)->orWhere('co_agent_id', $actor->id)));
             if ($kind !== 'all') {
                 $bookings->whereIn('property_id', DB::table('properties')->where('offer_type', $kind === 'rental' ? 'rent' : 'sale')->select('id'));
             }
@@ -136,9 +132,9 @@ final class AgentDashboard
         } else {
             $metrics['shows']['status'] = 'unavailable';
         }
-        $plans = $actor->hasPermission('kpi.plans.user.view') ? app(KpiModuleService::class)->effectivePlanForUser($actor->id, Carbon::parse($month.'-01', 'Asia/Dushanbe'))['items'] : collect();
+        $plans = ! $overview && $actor->hasPermission('kpi.plans.user.view') ? app(KpiModuleService::class)->effectivePlanForUser($actor->id, Carbon::parse($month.'-01', 'Asia/Dushanbe'))['items'] : collect();
         $goals = [];
-        foreach (['deposits', 'shows', 'contracts'] as $key) {
+        foreach ($overview ? [] : ['deposits', 'shows', 'contracts'] as $key) {
             $plan = collect($plans)->first(fn ($p) => $p['metric_key'] === $key && ($p['plan_period'] ?? 'month') === 'month');
             $target = $plan ? (float) $plan['monthly_plan'] : null;
             $goals[] = ['key' => $key, 'label' => $metrics[$key]['label'], 'fact' => $metrics[$key]['status'] === 'unavailable' ? null : $metrics[$key]['value'], 'target' => $target,
@@ -152,6 +148,6 @@ final class AgentDashboard
         }
 
         return ['month' => $month, 'kind' => $kind, 'timezone' => 'Asia/Dushanbe', 'currency' => 'TJS', 'as_of' => $now->utc()->toIso8601String(),
-            'scope' => 'own', 'agent_id' => $actor->id, 'metrics' => array_values($metrics), 'goals' => $goals, 'can_view_rating' => $actor->hasPermission('agent_rating.view')];
+            'scope' => $overview ? 'all' : 'own', 'scope_label' => $overview ? 'Вся компания' : 'Ваши результаты', 'data_source' => 'listing_participants', 'agent_id' => $actor->id, 'metrics' => array_values($metrics), 'goals' => $goals, 'can_view_rating' => $actor->hasPermission('agent_rating.view')];
     }
 }
