@@ -145,7 +145,8 @@ class ChatRepairSearchTest extends TestCase
         $large = $this->property(['total_area' => 65]);
         $renovated = $this->property(['repair_type_id' => 31, 'total_area' => 25]);
         $this->property(['renovation_permission_status' => null, 'total_area' => 20]);
-        $args = ['property_type' => 'apartment', 'districts' => ['Сино'], 'offer_type' => 'sale', 'sort_by' => 'area_asc', 'limit' => 10];
+        $this->property(['type_id' => 2, 'total_area' => 10]);
+        $args = ['property_type' => null, 'districts' => ['Сино'], 'offer_type' => 'sale', 'sort_by' => 'area_asc', 'limit' => 10];
         Http::fake(['*' => Http::sequence()
             ->push($this->answer('Продажа или аренда?'))
             ->push($this->answer('Ищем в Сино.'))
@@ -162,6 +163,7 @@ class ChatRepairSearchTest extends TestCase
         $tool = ChatMessage::where('role', 'tool')->firstOrFail();
         $this->assertSame('shell', $tool->tool_args['repair_condition']);
         $this->assertSame('allowed', $tool->tool_args['renovation_permission_status']);
+        $this->assertSame('apartment', $tool->tool_args['property_type']);
         $requests = Http::recorded();
         $schema = $requests[0][0]['tools'][0]['parameters']['properties'];
         $this->assertSame(['shell', 'renovated', 'any', null], $schema['repair_condition']['enum']);
@@ -251,8 +253,10 @@ class ChatRepairSearchTest extends TestCase
         $apartment = $this->property(['total_area' => 42]);
         $this->property(['district' => 'Фирдавси', 'total_area' => 45]);
         $house = $this->property(['type_id' => 2, 'total_area' => 30]);
+        DB::table('property_types')->insert(['id' => 3, 'name' => 'Коммерческая', 'slug' => 'commercial']);
+        $this->property(['type_id' => 3, 'total_area' => 23]);
         $this->property(['repair_type_id' => 31, 'total_area' => 25]);
-        $filters = ['property_type' => 'apartment', 'limit' => 10, 'sort_by' => 'area_asc'];
+        $filters = ['property_type' => null, 'limit' => 10, 'sort_by' => 'area_asc'];
         $refinement = ['property_type' => null, 'districts' => ['Сино'], 'offer_type' => 'sale', 'limit' => 10, 'sort_by' => 'area_asc'];
         Http::fake(['*' => Http::sequence()
             ->push($this->tool($filters))->push($this->answer('Квартиры.'))
