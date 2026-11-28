@@ -12,8 +12,17 @@ class PropertyRepository
     public function search(array $args): array
     {
         // ---------- Нормализация ----------
-        $limit = max(1, min(6, (int) ($args['limit'] ?? 6)));
+        $limit = max(1, min(10, (int) ($args['limit'] ?? 6)));
         $liquiditySearch = ($args['sort_by'] ?? null) === 'liquidity';
+        $areaSearch = ($args['sort_by'] ?? null) === 'area_asc';
+        $repairCondition = $args['repair_condition'] ?? 'any';
+        $renovationPermission = $args['renovation_permission_status'] ?? 'any';
+        if (! in_array($repairCondition, ['shell', 'renovated', 'any'], true)
+            || ! in_array($renovationPermission, ['allowed', 'not_allowed', 'any'], true)) {
+            return [];
+        }
+        $strictSearch = $liquiditySearch || $areaSearch || $repairCondition !== 'any'
+            || $renovationPermission !== 'any' || isset($args['areaFrom']) || isset($args['areaTo']);
         $rooms = isset($args['rooms']) ? (int) $args['rooms'] : null;
         $roomsMin = isset($args['rooms_min']) ? (int) $args['rooms_min'] : null;
         $roomsMax = isset($args['rooms_max']) ? (int) $args['rooms_max'] : null;
@@ -26,10 +35,10 @@ class PropertyRepository
         $city = $this->normalizeCity($cityRaw);
 
         $typeInput = $args['property_type'] ?? $args['type_id'] ?? null;
-        [$typeId] = $this->resolveTypeId($typeInput);
+        $typeIds = $this->resolveTypeIds($typeInput);
 
-        // Never replace a requested liquid property type with an unrelated one.
-        if ($liquiditySearch && $typeInput && $typeId === null) {
+        // Strict selections must never substitute an unrelated property type.
+        if ($strictSearch && $typeInput && $typeIds === []) {
             return [];
         }
 
@@ -56,6 +65,51 @@ class PropertyRepository
                 'properties.created_at',
             ])
             ->addSelect(DB::raw("{$effectivePriceSql} as effective_price"));
+
+        $hasArea = Schema::hasColumn('properties', 'total_area');
+        if ($hasArea) {
+            $base->addSelect('properties.total_area');
+        }
+        if ($areaSearch || isset($args['areaFrom']) || isset($args['areaTo'])) {
+            if (! $hasArea) {
+                return [];
+            }
+            $base->where('properties.total_area', '>', 0);
+            foreach (['areaFrom' => '>=', 'areaTo' => '<='] as $key => $operator) {
+                if (isset($args[$key])) {
+                    if (! is_numeric($args[$key]) || $args[$key] < 0) {
+                        return [];
+                    }
+                    $base->where('properties.total_area', $operator, (float) $args[$key]);
+                }
+            }
+        }
+
+        $repairTypes = Schema::hasTable('repair_types') && Schema::hasColumn('properties', 'repair_type_id')
+            ? DB::table('repair_types')->pluck('name', 'id')->all()
+            : [];
+        $repairConditions = array_map(fn ($name) => $this->classifyRepairType($name), $repairTypes);
+        if ($repairTypes !== []) {
+            $base->addSelect('properties.repair_type_id');
+        }
+        if ($repairCondition !== 'any') {
+            $repairIds = array_keys(array_filter($repairConditions, fn ($condition) => $condition === $repairCondition));
+            if ($repairIds === []) {
+                return [];
+            }
+            $base->whereIn('properties.repair_type_id', $repairIds);
+        }
+
+        $hasPermission = Schema::hasColumn('properties', 'renovation_permission_status');
+        if ($hasPermission) {
+            $base->addSelect('properties.renovation_permission_status');
+        }
+        if ($renovationPermission !== 'any') {
+            if (! $hasPermission) {
+                return [];
+            }
+            $base->where('properties.renovation_permission_status', $renovationPermission);
+        }
 
         if ($liquiditySearch) {
             if (! Schema::hasColumns('properties', [
@@ -110,7 +164,7 @@ class PropertyRepository
         }
 
         // единый билдер с функцией накатывания фильтров
-        $applyFilters = function ($q, $opts) use ($cityColumn, $offerType, $typeId, $rooms, $roomsMin, $roomsMax, $city, $currency, $effectivePriceSql, $liquiditySearch) {
+        $applyFilters = function ($q, $opts) use ($cityColumn, $offerType, $typeIds, $rooms, $roomsMin, $roomsMax, $city, $currency, $effectivePriceSql, $liquiditySearch, $areaSearch) {
             if (! empty($opts['city']) && $city) {
                 // важно обернуть в одну группу, чтобы orWhere не ломал остальные условия
                 $q->where(function ($w) use ($cityColumn, $city) {
@@ -132,8 +186,8 @@ class PropertyRepository
                 $q->where('properties.offer_type', $offerType);
             }
 
-            if (! empty($opts['type']) && $typeId !== null) {
-                $q->where('properties.type_id', $typeId);
+            if (! empty($opts['type']) && $typeIds !== []) {
+                $q->whereIn('properties.type_id', $typeIds);
             }
 
             if (! empty($opts['rooms']) && $rooms !== null) {
@@ -167,6 +221,8 @@ class PropertyRepository
             if ($liquiditySearch) {
                 $q->orderByDesc('properties.liquidity_score')
                     ->orderByDesc('properties.liquidity_confidence');
+            } elseif ($areaSearch) {
+                $q->orderBy('properties.total_area');
             } elseif (Schema::hasTable('property_promotions')) {
                 $q->orderByRaw("CASE
                     WHEN EXISTS (SELECT 1 FROM property_promotions pp WHERE pp.property_id = properties.id AND pp.status = 'active' AND pp.starts_at <= CURRENT_TIMESTAMP AND pp.ends_at > CURRENT_TIMESTAMP AND pp.type = 'urgent') THEN 0
@@ -197,7 +253,7 @@ class PropertyRepository
         $rows = $q1->limit($limit)->get();
 
         // step 2: если пусто, убираем city
-        if (! $liquiditySearch && $rows->isEmpty() && $city) {
+        if (! $strictSearch && $rows->isEmpty() && $city) {
             $q2 = (clone $base);
             $applyFilters($q2, [
                 'city' => false,
@@ -212,7 +268,7 @@ class PropertyRepository
         }
 
         // step 3: если пусто, убираем ещё и type
-        if (! $liquiditySearch && $rows->isEmpty() && $typeId !== null) {
+        if (! $strictSearch && $rows->isEmpty() && $typeIds !== []) {
             $q3 = (clone $base);
             $applyFilters($q3, [
                 'city' => false,
@@ -227,7 +283,7 @@ class PropertyRepository
         }
 
         // step 4: если пусто, убираем ещё и rooms
-        if (! $liquiditySearch && $rows->isEmpty() && ($rooms !== null || $roomsMin !== null || $roomsMax !== null)) {
+        if (! $strictSearch && $rows->isEmpty() && ($rooms !== null || $roomsMin !== null || $roomsMax !== null)) {
             $q4 = (clone $base);
             $applyFilters($q4, [
                 'city' => false,
@@ -260,7 +316,7 @@ class PropertyRepository
         }
 
         // ---------- Mapping ----------
-        return $rows->map(function ($r) use ($photosByProperty, $liquiditySearch) {
+        return $rows->map(function ($r) use ($photosByProperty, $liquiditySearch, $repairTypes, $repairConditions) {
             $type = [
                 'id' => $r->type_id,
                 'name' => property_exists($r, 'type_name') ? $r->type_name : null,
@@ -280,7 +336,13 @@ class PropertyRepository
                 'city' => $city,
                 'district' => $r->district,
                 'rooms' => $r->rooms,
-                'area' => null,
+                'area' => isset($r->total_area) && (float) $r->total_area > 0 ? (float) $r->total_area : null,
+                'repair_type' => isset($repairTypes[$r->repair_type_id ?? null]) ? [
+                    'id' => $r->repair_type_id,
+                    'name' => $repairTypes[$r->repair_type_id],
+                ] : null,
+                'repair_condition' => $repairConditions[$r->repair_type_id ?? null] ?? null,
+                'renovation_permission_status' => $r->renovation_permission_status ?? null,
                 'url' => rtrim(config('app.front_url', 'https://aura.tj'), '/')."/apartment/{$r->id}",
 
                 // 👇 ГЛАВНОЕ
@@ -300,6 +362,41 @@ class PropertyRepository
                 ]] : []),
             ];
         })->all();
+    }
+
+    private function classifyRepairType(string $name): ?string
+    {
+        $name = str_replace('ё', 'е', mb_strtolower($name));
+        $name = trim(preg_replace('/[^\p{L}\p{N}]+/u', ' ', $name));
+        $shell = '(?:коробка|без ремонта|без отделки|черновая отделка|черновой ремонт|под самоотделку|shell|unfinished|korobka|bez remonta)';
+        if (preg_match('/^'.$shell.'(?: '.$shell.')*$/u', $name)) {
+            return 'shell';
+        }
+        if (preg_match('/^(?:с ремонтом|(?:новый|косметический|капитальный|дизайнерский|современный|хороший|евро) ?ремонт|евроремонт|renovated)$/u', $name)) {
+            return 'renovated';
+        }
+
+        return null;
+    }
+
+    private function resolveTypeIds($raw): array
+    {
+        // The live catalog can split apartments into new-buildings and resale.
+        $genericApartment = in_array(mb_strtolower(trim((string) $raw)), [
+            'квартира', 'квартиры', 'квартир', 'кв', 'kv', 'kvartira', 'kvartiry', 'kvartir', 'apt', 'flat', 'apartment', 'apartments',
+        ], true);
+        if ($genericApartment && Schema::hasTable('property_types')) {
+            return DB::table('property_types')->get()->filter(function ($type) {
+                return in_array(mb_strtolower($type->slug ?? ''), [
+                    'apartment', 'apartments', 'new-buildings', 'new_buildings', 'secondary', 'secondary-housing', 'resale',
+                ], true) || in_array(mb_strtolower($type->name ?? ''), [
+                    'квартира', 'квартиры', 'новостройки', 'новостройка', 'вторичка', 'вторичное жилье',
+                ], true);
+            })->pluck('id')->map(fn ($id) => (int) $id)->all();
+        }
+        [$id] = $this->resolveTypeId($raw);
+
+        return $id === null ? [] : [$id];
     }
 
     private function normalizeCity(?string $raw): ?string
