@@ -44,4 +44,26 @@ class PropertySearchFiltersTest extends TestCase
         ]));
         $this->assertSame(['offer_type' => 'sale'], (new PropertySearchFilters)->forMessage(['offer_type' => 'sale'], 'prodaju'));
     }
+
+    public function test_district_refinement_preserves_the_previous_property_type(): void
+    {
+        $this->assertSame(['districts' => ['Сино'], 'property_type' => 'apartment'], (new PropertySearchFilters)->forMessage([
+            'districts' => ['Сино'], 'property_type' => null,
+        ], 'Покажи эти коробки на продажу в районе Сино', ['property_type' => 'apartment']));
+    }
+
+    public static function changedTypeRequests(): array
+    {
+        return array_map(fn ($message) => [$message], [
+            'Новый поиск в Сино', 'Начнём заново', 'Теперь дома в Сино',
+            'Покажи земельные участки', 'Любую недвижимость в Сино', 'Любой тип',
+            'Теперь новостройки', 'Теперь вторичка', 'new search', 'show houses', 'Покажи квартиры',
+        ]);
+    }
+
+    #[DataProvider('changedTypeRequests')]
+    public function test_explicit_type_change_or_reset_does_not_restore_old_type(string $message): void
+    {
+        $this->assertSame([], (new PropertySearchFilters)->forMessage(['property_type' => null], $message, ['property_type' => 'apartment']));
+    }
 }

@@ -40,6 +40,13 @@ class PropertySearchFilters
             return $offer === null ? $previous : array_replace($previous, ['offer_type' => $offer]);
         }
 
+        // A district/price/repair refinement still refers to the same kind of
+        // property. The provider can leave this optional field null on that turn.
+        $changesType = preg_match('/\b(?:новый поиск|начнем заново|начнём заново|забудь|new search|novyi poisk|любой тип|все типы|любая недвижимость|любую недвижимость|тип неважен|тип не важен|any type|all types|квартир[а-я]*|kvartir[a-z]*|apartment[s]?|flat[s]?|дом[а-я]*|dom[a-z]*|house[s]?|дач[а-я]*|участ[а-я]*|земл[а-я]*|land|plot[s]?|коммерческ[а-я]*|офис[а-я]*|commercial|office[s]?|новостро[а-я]*|novostro[a-z]*|new.buildings|вторич[а-я]*|vtorich[a-z]*|resale)\b/u', $text);
+        if (! isset($args['property_type']) && isset($previous['property_type']) && ! $changesType) {
+            $args['property_type'] = $previous['property_type'];
+        }
+
         return $args;
     }
 }

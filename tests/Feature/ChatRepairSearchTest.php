@@ -245,6 +245,34 @@ class ChatRepairSearchTest extends TestCase
         Http::assertSentCount(6);
     }
 
+    public function test_live_district_refinement_does_not_add_houses_to_apartment_results(): void
+    {
+        $this->createChatTables();
+        $apartment = $this->property(['total_area' => 42]);
+        $this->property(['district' => 'Фирдавси', 'total_area' => 45]);
+        $house = $this->property(['type_id' => 2, 'total_area' => 30]);
+        $this->property(['repair_type_id' => 31, 'total_area' => 25]);
+        $filters = ['property_type' => 'apartment', 'limit' => 10, 'sort_by' => 'area_asc'];
+        $refinement = ['property_type' => null, 'districts' => ['Сино'], 'offer_type' => 'sale', 'limit' => 10, 'sort_by' => 'area_asc'];
+        Http::fake(['*' => Http::sequence()
+            ->push($this->tool($filters))->push($this->answer('Квартиры.'))
+            ->push($this->tool($refinement))->push($this->answer('Квартиры в Сино.'))
+            ->push($this->tool([]))->push($this->answer('Та же подборка.'))
+            ->push($this->tool(array_replace($refinement, ['property_type' => 'house'])))->push($this->answer('Дома.'))]);
+
+        $reply = $this->postJson('/api/chat', ['message' => 'podberi 10 samix malenkix kvartir korobok s razrisheniyami na remonta'])
+            ->assertOk()->assertJsonCount(2, 'items');
+        foreach (['Покажи эти коробки на продажу в районе Сино', 'davay'] as $message) {
+            $this->postJson('/api/chat', ['message' => $message, 'session_id' => $reply['session_id']])
+                ->assertOk()->assertJsonCount(1, 'items')->assertJsonPath('items.0.id', $apartment)
+                ->assertJsonPath('items.0.repair_condition', 'shell')
+                ->assertJsonPath('items.0.renovation_permission_status', 'allowed');
+        }
+        $this->assertSame('apartment', ChatMessage::where('role', 'tool')->latest('id')->firstOrFail()->tool_args['property_type']);
+        $this->postJson('/api/chat', ['message' => 'Теперь покажи дома в Сино', 'session_id' => $reply['session_id']])
+            ->assertOk()->assertJsonCount(1, 'items')->assertJsonPath('items.0.id', $house);
+    }
+
     private function createChatTables(): void
     {
         Schema::create('users', fn (Blueprint $table) => $table->id());
